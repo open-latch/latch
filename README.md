@@ -8,17 +8,23 @@ mechanics: a SQLite knowledge base, MCP tools for reading and writing it,
 session compaction, and a simple gate that can surface prior decisions or
 rejected paths before an agent repeats old work.
 
+## What is included
 
-## What is intentionally left out
-
-- Higher-level planning/reporting commands.
-- Extra editor or app connector work.
-- Polished onboarding flows.
-- Packaged releases.
-
-The point of this snapshot is to make the core idea inspectable: agents can use
-a small local KB to remember why decisions were made, what has already been
-ruled out, and what should be checked before changing code.
+- Local SQLite KB schema, migrations, node/edge storage, status handling, and
+  artifact coordinates.
+- Search and read primitives: `kb_search`, `kb_get`, `kb_recent`, and
+  `kb_verify`.
+- Write primitives: `kb_insert`, `kb_update`, `kb_append`, `kb_link`,
+  `kb_unlink`, and structured correction helpers.
+- Decision capture: `kb_capture_decision` plus structural decision/adversary
+  logs that avoid storing raw prompt text.
+- Session compaction for carrying useful session context into the KB.
+- A gate path, `kb_gate`, for checking a request against stored decisions,
+  rejected paths, constraints, and recent context.
+- Minimal Claude Code and Codex setup scripts, doctor scripts, and command
+  wrappers for `/kb-compact` and `/kb-gate`.
+- Tests around the core storage, search, compaction, gate, seed, and installer
+  paths.
 
 ## Quick Start
 
