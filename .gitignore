@@ -1,0 +1,57 @@
+# per-project KB content — ignore all per-project DBs and runtime state.
+# Users' KBs are their own data; the repo only ships code.
+projects/
+
+# write-side disable sentinels (per-installation state, not source of truth)
+DISABLE
+DISABLE_WRITE
+
+# install-time KB-dir pin (id=1556) — per-installation config holding an absolute
+# path, written by install_engine.py. Never committed; each install pins its own.
+kb_location.json
+
+# logs
+*.log
+
+# runtime artifacts (defense-in-depth in case anything escapes projects/)
+**/compactor.lock
+**/budget.json
+**/failed_compact/
+
+# DB files and dumps (data layer — never committed under any path)
+*.db
+*.db-shm
+*.db-wal
+*.db.bak.*
+*.dump.sql
+
+# local backup tree
+backups/
+
+# python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# environments
+.venv/
+venv/
+env/
+.env
+
+# vendored binaries (sqlite-vec). Carve out the ONNX MiniLM artifact + its
+# tokenizer/config sidecars — those are committed (Phase 5).
+vendor/*
+!vendor/model.onnx
+!vendor/tokenizer.json
+!vendor/tokenizer_config.json
+!vendor/special_tokens_map.json
+!vendor/config.json
+!vendor/vocab.txt
+
+# editor/OS
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

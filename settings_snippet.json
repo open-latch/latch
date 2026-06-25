@@ -1,0 +1,81 @@
+{
+  "_comment": "Data source for bin/install_engine.sh — NOT a paste target. The installer substitutes {{PYTHON_PATH}} and {{CLAUDE_KB_HOME}} and merges these blocks into ~/.claude/settings.json. NOTE: the MCP server is intentionally NOT here. Claude Code does NOT read MCP servers from settings.json (only from the `claude mcp` registry / a project .mcp.json); install_engine registers it with `claude mcp add --scope user` instead. settings.json IS read for hooks and permissions, which is why those live here. Fresh installs use the latch MCP name; claude-kb remains a supported legacy alias.",
+
+  "permissions": {
+    "_comment": "Server-level rules auto-approve every tool the latch MCP server exposes (current and future) — no per-tool prompts, nothing to keep in sync. The legacy claude-kb rule remains during the compatibility rename so existing registrations are not under-approved.",
+    "allow": [
+      "mcp__latch",
+      "mcp__claude-kb"
+    ]
+  },
+
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "{{PYTHON_PATH}} {{CLAUDE_KB_HOME}}/src/hooks/session_start.py"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "_comment": "Hook embeds via the MCP server's loopback listener, not in-process. If the daemon hasn't pre-warmed yet (first prompt of a brand-new session), embed_remote returns None and the hook skips retrieval cleanly rather than blocking on cold-load.",
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "{{PYTHON_PATH}} {{CLAUDE_KB_HOME}}/src/hooks/user_prompt_submit.py"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "{{PYTHON_PATH}} {{CLAUDE_KB_HOME}}/src/hooks/stop.py"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "{{PYTHON_PATH}} {{CLAUDE_KB_HOME}}/src/hooks/session_end.py"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "_comment": "Deterministic activity surface: parses kb_activity/findings from the KB tool result and emits the one-line summary on systemMessage (the user-visible channel; KB id=552), independent of whether the agent echoes it. Scoped to the latch MCP tools.",
+        "matcher": "mcp__latch__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "{{PYTHON_PATH}} {{CLAUDE_KB_HOME}}/src/hooks/post_tool_use.py"
+          }
+        ]
+      },
+      {
+        "_comment": "Legacy activity surface for existing claude-kb MCP registrations during the compatibility rename.",
+        "matcher": "mcp__claude-kb__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "{{PYTHON_PATH}} {{CLAUDE_KB_HOME}}/src/hooks/post_tool_use.py"
+          }
+        ]
+      }
+    ]
+  }
+}
