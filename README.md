@@ -1,6 +1,23 @@
-# latch
+<p align="center">
+  <img src="./docs/assets/latch-logo.svg" alt="latch" width="520">
+</p>
 
-**latch is a decision seatbelt for coding agents.**
+<p align="center">
+  <strong>A decision seatbelt for coding agents.</strong>
+</p>
+
+<p align="center">
+  Local-first &middot; reversible &middot; stops agents before they repeat paths you already ruled out.
+</p>
+
+<p align="center">
+  <a href="#guided-quickstart">Quickstart</a> &middot;
+  <a href="#the-first-proof">First proof</a> &middot;
+  <a href="#rejected-path-demo">Rejected-path demo</a> &middot;
+  <a href="#safety">Safety</a>
+</p>
+
+---
 
 **TL;DR:** install latch once, run the quickstart script from a project repo,
 choose Claude Code, Codex, or both, seed recent local sessions, then ask an
@@ -21,6 +38,16 @@ latch runs locally, uses one SQLite KB store, needs no cloud account, and
 targets macOS, Windows, and Linux with bash and PowerShell wrappers.
 
 ## The First Proof
+
+Seed recent sessions -> pick a rejected path -> ask an agent to violate it ->
+see a receipt before edits.
+
+Example: your project previously rejected Redis-backed background jobs for local
+work. Ask Claude Code or Codex to add Redis-backed email jobs. latch should cite
+the saved rejection, explain the rationale, and recommend the compliant path
+before files change.
+
+The detailed run:
 
 1. Run the guided quickstart from a real project repo.
 2. Choose Claude Code, Codex, or both.
@@ -223,6 +250,12 @@ summary into the KB.
 **Local-first storage.** latch stores project judgment locally in SQLite. It
 does not require a cloud account.
 
+**No latch cloud.** latch does not upload your KB to a latch service. Data
+leaves your machine only when you run a model-backed path that uses the Claude,
+Codex, or other backend you configured; those calls may send selected prompts,
+snippets, and evidence context to that backend. Local eval runners use
+throwaway KBs and do not read or write your live project DB.
+
 **Kill switch.** If latch misbehaves, stop its hooks without uninstalling:
 
 ```bash
@@ -244,6 +277,11 @@ bash bin/uninstall.sh
 latch's local evals ask the first-OSS question directly: can the agent surface
 binding project judgment, rejected paths, stale/reconciled status, the real why
 behind decisions, and visible gate receipts?
+
+Read the benchmark as a comparison against memory-like baselines, not as a
+generic scorecard. The useful question is whether `latch_full` keeps recovering
+current decision evidence when ordinary memory would miss stale rejected paths,
+reconciliation context, or the documented why.
 
 ```bash
 bash bin/latch_eval.sh
