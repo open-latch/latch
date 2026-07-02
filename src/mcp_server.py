@@ -28,6 +28,7 @@ import capture_streams  # noqa: E402
 import codex_session  # noqa: E402
 import db  # noqa: E402
 import embeddings  # noqa: E402
+import gate_report  # noqa: E402
 import heal  # noqa: E402
 import lockfile  # noqa: E402
 import paths  # noqa: E402
@@ -99,7 +100,7 @@ def _project_session_id() -> str | None:
 # ---------- MCP payload size guardrails ----------
 #
 # See docs/claude_kb/mcp_payload_guards.md. Tools that return node-shaped rows
-# (kb_search, kb_recent) compact `body` to `body_excerpt` + `body_chars` by
+# (latch_search, latch_recent) compact `body` to `body_excerpt` + `body_chars` by
 # default; pass `verbose=True` to opt back into full bodies. A boundary safety
 # net catches the pathological case where compact mode still exceeds the cap.
 COMPACT_LOG_FILE_NAME = "compact_excerpt.log"
@@ -116,7 +117,7 @@ def _log_compact(
     verbose_requested: bool, safety_net_triggered: bool,
     excerpt_strategy: str,
 ) -> None:
-    """Append one JSONL line per kb_search/kb_recent compact-mode call. Best-
+    """Append one JSONL line per latch_search/latch_recent compact-mode call. Best-
     effort: any error is swallowed so logging never breaks the tool path."""
     try:
         entry = {
@@ -181,7 +182,7 @@ def _compact_search_rows(rows: list[dict]) -> tuple[list[dict], str]:
 
 
 def _compact_recent_rows(rows: list[dict]) -> list[dict]:
-    """kb_recent has no query, so no FTS snippet — prefix excerpts only."""
+    """latch_recent has no query, so no FTS snippet — prefix excerpts only."""
     return [db.compact_row(r) for r in rows]
 
 
@@ -360,7 +361,8 @@ def _start_embed_listener(project_cwd: str) -> None:
     # C-extension imports, which jams Thread.start() process-wide.
 
 
-@mcp.tool()
+@mcp.tool(name="latch_search")
+@mcp.tool(name="kb_search")
 def kb_search(
     query: str,
     kind: str | None = None,
@@ -377,7 +379,7 @@ def kb_search(
             (FTS5 snippet of the matched span when available, prefix
             otherwise) and `body_chars` (true body length). If True, return
             full `body`. Compact mode keeps responses under the MCP tool-
-            result cap; drill into specific nodes via `kb_get(<id>)`.
+            result cap; drill into specific nodes via `latch_get(<id>)`.
 
     Returns: list of node dicts. Compact-mode rows include `id`, `kind`,
     `title`, `body_excerpt`, `body_chars`, `status`, `score`, `updated_at`,
@@ -391,7 +393,7 @@ def kb_search(
             db.bump_focus_for_nodes(conn, [r["id"] for r in results])
     activity = _kb_activity(
         action="read",
-        tool="kb_search",
+        tool="latch_search",
         summary=(
             f"Read {len(results)} KB search result(s)"
             + (f" for kind={kind}" if kind else "")
@@ -406,7 +408,7 @@ def kb_search(
     compact, strategy = _compact_search_rows(results)
     compact, triggered = _apply_safety_net(compact)
     _log_compact(
-        tool="kb_search", row_count=len(compact),
+        tool="latch_search", row_count=len(compact),
         total_bytes=len(json.dumps(compact, default=str).encode("utf-8")),
         verbose_requested=False, safety_net_triggered=triggered,
         excerpt_strategy=strategy,
@@ -414,7 +416,8 @@ def kb_search(
     return _stamp_list_activity(compact, activity)
 
 
-@mcp.tool()
+@mcp.tool(name="latch_get")
+@mcp.tool(name="kb_get")
 def kb_get(node_id: int, include_neighbors: bool = True) -> dict:
     """Fetch a single node, optionally with its 1-hop neighbors. Bumps ref_count.
 
@@ -442,7 +445,7 @@ def kb_get(node_id: int, include_neighbors: bool = True) -> dict:
         db.bump_focus_for_nodes(conn, [node_id])
         node["kb_activity"] = _kb_activity(
             action="read",
-            tool="kb_get",
+            tool="latch_get",
             summary=f"Read KB {node['kind']} node id={node_id}: {node['title']}.",
             nodes=[_activity_node(node)],
             hints=_activity_hints(node),
@@ -450,7 +453,8 @@ def kb_get(node_id: int, include_neighbors: bool = True) -> dict:
         return node
 
 
-@mcp.tool()
+@mcp.tool(name="latch_recent")
+@mcp.tool(name="kb_recent")
 def kb_recent(
     session_id: str | None = None,
     kind: str | None = None,
@@ -469,7 +473,7 @@ def kb_recent(
     excerpt — kb_recent has no query, so no FTS snippet is available) +
     `body_chars`. Pass `verbose=True` for full `body`. Compact mode keeps the
     response under the MCP tool-result cap; drill into specific nodes via
-    `kb_get(<id>)`.
+    `latch_get(<id>)`.
     """
     with _conn() as conn:
         rows = db.recent_nodes(
@@ -478,7 +482,7 @@ def kb_recent(
         )
     activity = _kb_activity(
         action="read",
-        tool="kb_recent",
+        tool="latch_recent",
         summary=f"Read {len(rows)} recent KB node(s).",
         nodes=_activity_nodes(rows),
     )
@@ -489,7 +493,7 @@ def kb_recent(
     compact = _compact_recent_rows(rows)
     compact, triggered = _apply_safety_net(compact)
     _log_compact(
-        tool="kb_recent", row_count=len(compact),
+        tool="latch_recent", row_count=len(compact),
         total_bytes=len(json.dumps(compact, default=str).encode("utf-8")),
         verbose_requested=False, safety_net_triggered=triggered,
         excerpt_strategy="prefix",
@@ -497,7 +501,8 @@ def kb_recent(
     return _stamp_list_activity(compact, activity)
 
 
-@mcp.tool()
+@mcp.tool(name="latch_project_direction")
+@mcp.tool(name="kb_project_direction")
 def kb_project_direction(
     limit: int = 3,
     member_limit: int = 20,
@@ -521,7 +526,7 @@ def kb_project_direction(
         )
     report["kb_activity"] = _kb_activity(
         action="read",
-        tool="kb_project_direction",
+        tool="latch_project_direction",
         summary=report["summary"],
         nodes=[
             {
@@ -536,7 +541,51 @@ def kb_project_direction(
     return report
 
 
-@mcp.tool()
+@mcp.tool(name="latch_gate_report")
+@mcp.tool(name="kb_gate_report")
+def kb_gate_report(
+    days: int = 14,
+    start: str | None = None,
+    end: str | None = None,
+    limit: int = 10,
+) -> dict:
+    """Read-only report over recent gate activity.
+
+    Summarizes existing structural logs (`gate`, `adversary`, `decision`, and
+    `gate_outcome`) plus current KB node metadata. It does not run a new gate,
+    read raw prompt text, read node bodies, or write new KB rows.
+    """
+    start_date = gate_report._parse_date(start) if start else None
+    end_date = gate_report._parse_date(end) if end else None
+    with _conn() as conn:
+        report = gate_report.assemble_gate_report(
+            conn,
+            project_path=PROJECT_CWD,
+            start=start_date,
+            end=end_date,
+            days=days,
+            limit=limit,
+        )
+    report["kb_activity"] = _kb_activity(
+        action="read",
+        tool="latch_gate_report",
+        summary=report["summary"],
+        nodes=[
+            {
+                "id": row["id"],
+                "kind": row["kind"],
+                "title": row["title"],
+                "status": row["status"],
+            }
+            for row in report.get("top_evidence_nodes", [])[:5]
+            if row.get("status") != "missing"
+        ],
+    )
+    return report
+
+
+@mcp.tool(name="latch_insert")
+@mcp.tool(name="kb_insert")
 def kb_insert(
     kind: str,
     title: str,
@@ -554,7 +603,7 @@ def kb_insert(
     Default status is 'staging'; promote to 'canonical' on review.
 
     `workstream_id` (optional) tags the new node as belonging to a workstream
-    (kind='workstream' node). Used by step 9 focus auto-bump and kb_gate
+    (kind='workstream' node). Used by step 9 focus auto-bump and latch_gate
     traversal seeding. Pass the id of the relevant workstream when known;
     otherwise leave NULL — orphan nodes are tolerated.
 
@@ -584,13 +633,13 @@ def kb_insert(
     a plan-shaped node (kind in {progress, decision, workstream}) via
     `implements` / `advances` / `depends_on`. When non-empty, the agent MUST
     reflect the new ship state in each listed `linked_id`'s body: prefer
-    `kb_append` (delta-only — no full-body resend/re-embed) for workstream/
-    progress nodes, and `kb_update` for a decision/plan node — see the
+    `latch_append` (delta-only — no full-body resend/re-embed) for workstream/
+    progress nodes, and `latch_update` for a decision/plan node — see the
     "KB write hygiene" mandate. Empty list means no nudge applies.
 
     Also returns `orphan_hint`: a list of `{referenced_id, body_excerpt}`
     entries for `id=X` mentions in the body that lack an active edge to/from
-    the new node. When non-empty, `kb_link` each (or drop the stale mention)
+    the new node. When non-empty, `latch_link` each (or drop the stale mention)
     before moving on — see "Body-id mentions must be edges". (id=1149 Part 2.)
     Kind-scoped to spec kinds (idea/open_question/decision) per id=1194 §1/§2,
     so index/summary kinds (workstream/progress/fact/entity) no longer over-fire.
@@ -624,7 +673,7 @@ def kb_insert(
                 result["artifacts"] = captured
             result["kb_activity"] = _kb_activity(
                 action="write",
-                tool="kb_insert",
+                tool="latch_insert",
                 summary=f"Tracked KB {kind} node id={new_id}: {title}.",
                 nodes=[_activity_node({
                     "id": new_id, "kind": kind, "title": title, "status": status,
@@ -634,7 +683,8 @@ def kb_insert(
         return result
 
 
-@mcp.tool()
+@mcp.tool(name="latch_update")
+@mcp.tool(name="kb_update")
 def kb_update(
     node_id: int,
     title: str | None = None,
@@ -645,16 +695,16 @@ def kb_update(
 
     Also returns `orphan_hint`: a list of `{referenced_id, body_excerpt}`
     entries for `id=X` mentions in the effective body that lack an active edge
-    to/from this node. When non-empty, `kb_link` each (or drop the stale
+    to/from this node. When non-empty, `latch_link` each (or drop the stale
     mention) before moving on — see "KB write hygiene" / "Body-id mentions
     must be edges". Empty list means every mention is edged. (id=1149 Part 2.)
 
     Also returns `claim_change_hint`: non-None when an in-place body edit looks
     like a CLAIM change on a canonical fact/decision (material embedding shift,
     old body not preserved). Policy id=1174 routes claim changes through
-    `kb_correct` so the transition stays auditable; this surfaces the nudge at
+    `latch_correct` so the transition stays auditable; this surfaces the nudge at
     write time (spec id=1175). It is a NUDGE, not a block — the write proceeds;
-    the agent/human decides whether to redo it via `kb_correct_plan`. None when
+    the agent/human decides whether to redo it via `latch_correct_plan`. None when
     the edit is a non-claim edit (banner/typo/status promotion) or a non-
     fact/decision / non-canonical node.
     """
@@ -707,7 +757,7 @@ def kb_update(
         "claim_change_hint": claim_change_hint,
         "kb_activity": _kb_activity(
             action="write",
-            tool="kb_update",
+            tool="latch_update",
             summary=f"Updated KB {old_kind} node id={node_id}: {title or node['title']}.",
             nodes=[_activity_node({
                 "id": node_id,
@@ -727,7 +777,7 @@ _APPENDABLE_KINDS = {"workstream", "progress"}
 
 
 def _kb_append_impl(conn, node_id: int, text: str, *, reembed: bool, date: str) -> dict:
-    """Core of kb_append, decoupled from the MCP/lock/clock plumbing so it is
+    """Core of latch_append, decoupled from the MCP/lock/clock plumbing so it is
     unit-testable against a temp-DB connection. Appends `text` to the node's
     rolling region (top of body, newest-first, capped) without re-sending or
     (by default) re-embedding the body. Returns orphan_hint via the canonical
@@ -741,9 +791,9 @@ def _kb_append_impl(conn, node_id: int, text: str, *, reembed: bool, date: str) 
         return {
             "ok": False,
             "error": (
-                f"kb_append is for living-summary kinds {sorted(_APPENDABLE_KINDS)}; "
-                f"node {node_id} is '{node['kind']}'. Use kb_update for a non-claim "
-                f"state edit, or kb_correct for a claim change (id=1174)."
+                f"latch_append is for living-summary kinds {sorted(_APPENDABLE_KINDS)}; "
+                f"node {node_id} is '{node['kind']}'. Use latch_update for a non-claim "
+                f"state edit, or latch_correct_plan/apply for a claim change (id=1174)."
             ),
         }
     new_body = rolling.apply(node["body"] or "", text, date=date)
@@ -759,7 +809,7 @@ def _kb_append_impl(conn, node_id: int, text: str, *, reembed: bool, date: str) 
         "orphan_hint": orphan_hint,
         "kb_activity": _kb_activity(
             action="write",
-            tool="kb_append",
+            tool="latch_append",
             summary=(
                 f"Appended latest KB state to {node['kind']} node "
                 f"id={node_id}: {node['title']}."
@@ -770,20 +820,22 @@ def _kb_append_impl(conn, node_id: int, text: str, *, reembed: bool, date: str) 
     }
 
 
-@mcp.tool()
+@mcp.tool(name="latch_append")
+@mcp.tool(name="kb_append")
 def kb_append(node_id: int, text: str, reembed: bool = False) -> dict:
     """Append `text` as the newest entry in a node's rolling "Latest" region
     (top of body, newest-first, capped at 3) WITHOUT re-sending or re-embedding
     the existing body. The cheap way to freshen a workstream/plan "where are we"
     surface — send only the delta line, not the whole body.
 
-    Use this instead of kb_update to satisfy the plan-freshness mandate (id=824):
-    a full kb_update of a large workstream body costs ~5-10K tokens (fetch +
-    resend + regenerate, measured in id=1509); kb_append costs only the delta.
+    Use this instead of latch_update to satisfy the plan-freshness mandate (id=824):
+    a full latch_update of a large workstream body costs ~5-10K tokens (fetch +
+    resend + regenerate, measured in id=1509); latch_append costs only the delta.
 
     Scoped to living-summary kinds (workstream/progress). For claim-bearing
-    fact/decision nodes use kb_update (non-claim edits) or kb_correct (claim
-    changes, id=1174) — append is for STATE, not claim evolution.
+    fact/decision nodes use latch_update (non-claim edits) or
+    latch_correct_plan/apply (claim changes, id=1174) — append is for STATE,
+    not claim evolution.
 
     `reembed=False` by default: the base-body embedding is the node's semantic
     anchor and a "Latest:" touch shouldn't churn it (id=1320). Pass reembed=True
@@ -801,7 +853,8 @@ def kb_append(node_id: int, text: str, reembed: bool = False) -> dict:
         return _kb_append_impl(conn, node_id, text, reembed=reembed, date=date)
 
 
-@mcp.tool()
+@mcp.tool(name="latch_link")
+@mcp.tool(name="kb_link")
 def kb_link(src: int, dst: int, relation: str) -> dict:
     """Add a typed edge between two nodes (idempotent). Re-linking a previously
     tombstoned edge re-activates it in place — the edge row is audit-stable.
@@ -810,8 +863,8 @@ def kb_link(src: int, dst: int, relation: str) -> dict:
     and this edge is a `related_to` to a spec node (idea/open_question/
     decision) — a likely mis-typed ship edge that should be implements/
     advances/depends_on so plan-freshness can track the spec body. The agent
-    should re-link with the dependency relation (kb_unlink the related_to,
-    kb_link the right one). Empty list otherwise. (id=1194 §4.)
+    should re-link with the dependency relation (latch_unlink the related_to,
+    latch_link the right one). Empty list otherwise. (id=1194 §4.)
     """
     busy = _wait_for_compaction_or_busy()
     if busy is not None:
@@ -829,20 +882,21 @@ def kb_link(src: int, dst: int, relation: str) -> dict:
     return {"ok": True, "ship_edge_hint": ship_edge_hint}
 
 
-@mcp.tool()
+@mcp.tool(name="latch_unlink")
+@mcp.tool(name="kb_unlink")
 def kb_unlink(src: int, dst: int, relation: str) -> dict:
     """Tombstone an edge — soft-delete that mirrors the node-stale idiom.
 
     The edge row persists for audit, but every edge-walking read site
-    (`kb_get` neighbors, reconciliation_banner, gate traversal,
+    (`latch_get` neighbors, reconciliation_banner, gate traversal,
     plan_freshness_hint, UserPromptSubmit graph hop) filters it out. Use when
     a body refactor invalidates an existing edge so the body and edge
     structure stay in sync.
 
     Idempotent — calling on a missing or already-tombstoned edge is a no-op.
-    Relation is canonicalized before lookup (same map `kb_link` uses), so
-    `kb_unlink(a, b, "relates_to")` hits the canonical `related_to` row.
-    Re-linking the same triple via `kb_link` reactivates the tombstoned row.
+    Relation is canonicalized before lookup (same map `latch_link` uses), so
+    `latch_unlink(a, b, "relates_to")` hits the canonical `related_to` row.
+    Re-linking the same triple via `latch_link` reactivates the tombstoned row.
 
     Returns `{"ok": True, "tombstoned": 0|1}` — `tombstoned=1` if an active
     edge was flipped, `0` if no-op.
@@ -873,7 +927,8 @@ def _gate_status(verdict: dict) -> str:
             "proceed on KB-first context and note the gate was unavailable.")
 
 
-@mcp.tool()
+@mcp.tool(name="latch_gate")
+@mcp.tool(name="kb_gate")
 def kb_gate(request: str, max_chains: int = 5, verbose: bool = False) -> dict:
     """Gate judgment on a coding/build/implement/refactor request.
 
@@ -919,13 +974,13 @@ def kb_gate(request: str, max_chains: int = 5, verbose: bool = False) -> dict:
         "findings": {                         # user-visible Latch gate block to display before implementation
           "label": "Latch gate findings",
           "must_display_to_user": true,
-          "source": "kb_gate",
+          "source": "latch_gate",
           "recommendation": <same as verdict.recommendation>,
           "summary": <same as verdict.summary>,
           "evidence_nodes": [{"id","kind","title","status"}, ...],
           "receipt": {
-            "summary": "Latch ran kb_gate ...; cited node status carries current authority.",
-            "source": "kb_gate",
+            "summary": "Latch ran the gate ...; cited node status carries current authority.",
+            "source": "latch_gate",
             "used": {"decision_chain": <int>, "evidence_nodes": <int>, ...},
             "authority": <how to read current authority/status + rationale basis>
           },
@@ -945,7 +1000,7 @@ def kb_gate(request: str, max_chains: int = 5, verbose: bool = False) -> dict:
     excerpts (for debugging / direct chain inspection). The default elides
     `chains` because traversal at hop=2 over many seeds can produce 60–90k
     char payloads that exceed the MCP tool-result cap. The agent should
-    drill into specific nodes via `kb_get(<id>)` instead.
+    drill into specific nodes via `latch_get(<id>)` instead.
 
     Budget-gated: counts toward the daily LLM cap that the compactor and
     nightly heal share. Verdict is None with `skipped=True` when the cap
@@ -979,7 +1034,8 @@ def kb_gate(request: str, max_chains: int = 5, verbose: bool = False) -> dict:
     }
 
 
-@mcp.tool()
+@mcp.tool(name="latch_capture_decision")
+@mcp.tool(name="kb_capture_decision")
 def kb_capture_decision(
     title: str,
     body: str,
@@ -994,7 +1050,7 @@ def kb_capture_decision(
     workstream_id: int | None = None,
     session_id: str | None = None,
 ) -> dict:
-    """Capture a decision the user made in response to a kb_gate verdict.
+    """Capture a decision the user made in response to a latch_gate verdict.
 
     The Type-1 (explicit/confirmed) leg of the decision-capture pipeline
     (KB id=1279 / id=1350 / scope id=1784). Call this AFTER the user acts on a
@@ -1027,9 +1083,9 @@ def kb_capture_decision(
         cited_node_ids: gate evidence node ids to link (`related_to`) from the
             new decision — the KB context the decision was made against.
         was_confirmed: whether the user confirmed the node's wording (Type-1).
-        status / links / workstream_id / session_id: as `kb_insert`.
+        status / links / workstream_id / session_id: as `latch_insert`.
 
-    Returns the `kb_insert`-shaped result plus `decision_logged` (bool) and the
+    Returns the `latch_insert`-shaped result plus `decision_logged` (bool) and the
     echoed `human_action`. Validates the three closed-set labels first and
     returns `{ok: False, error: ...}` on a bad label WITHOUT writing anything.
     """
@@ -1090,7 +1146,7 @@ def kb_capture_decision(
     if new_id is not None:
         result["kb_activity"] = _kb_activity(
             action="write",
-            tool="kb_capture_decision",
+            tool="latch_capture_decision",
             summary=f"Captured user-ratified KB decision id={new_id}: {title}.",
             nodes=[_activity_node({
                 "id": new_id, "kind": "decision", "title": title, "status": status,
@@ -1100,11 +1156,12 @@ def kb_capture_decision(
     return result
 
 
-@mcp.tool()
+@mcp.tool(name="latch_verify")
+@mcp.tool(name="kb_verify")
 def kb_verify(node_id: int) -> dict:
     """Deterministic, no-LLM authority check on a single KB node.
 
-    The lightweight tier of the two-tier validation model (kb_gate is the
+    The lightweight tier of the two-tier validation model (latch_gate is the
     heavyweight tier). Returns one of:
 
       OK         — node is current and unconstrained; safe to cite.
@@ -1125,7 +1182,8 @@ def kb_verify(node_id: int) -> dict:
         return verify.verify(conn, node_id)
 
 
-@mcp.tool()
+@mcp.tool(name="latch_correct_plan")
+@mcp.tool(name="kb_correct_plan")
 def kb_correct_plan(bad_node_id: int, max_hops: int = 2) -> dict:
     """Phase 1 of a structured KB correction — READ-ONLY, no mutation.
 
@@ -1141,14 +1199,15 @@ def kb_correct_plan(bad_node_id: int, max_hops: int = 2) -> dict:
         guidance (you make the final call).
 
     Then surface the plan to the user, decide `mode` and the `reconcile_ids`
-    subset, and call `kb_correct_apply` ONLY after the user confirms. Mutation
+    subset, and call `latch_correct_apply` ONLY after the user confirms. Mutation
     is never auto-fired — a misclassification must not cascade stale-marks.
     """
     with _conn() as conn:
         return verify.correct_plan(conn, bad_node_id, max_hops=max_hops)
 
 
-@mcp.tool()
+@mcp.tool(name="latch_correct_apply")
+@mcp.tool(name="kb_correct_apply")
 def kb_correct_apply(
     bad_node_id: int,
     mode: str,
@@ -1164,7 +1223,7 @@ def kb_correct_apply(
 ) -> dict:
     """Phase 2 — apply a HUMAN-CONFIRMED correction atomically.
 
-    Only call after `kb_correct_plan` and explicit user confirmation.
+    Only call after `latch_correct_plan` and explicit user confirmation.
 
     `mode`:
       * "supersede" — the bad node is wholly wrong/hallucinated. Inserts the
@@ -1186,7 +1245,7 @@ def kb_correct_apply(
     Emits one structural `correction.log` row (a human-labeled "the KB was
     wrong" RL reward signal) and returns `corrected_node_id` + an
     `orphan_hint` for the corrected body. Honor the orphan_hint as with
-    kb_insert / kb_update.
+    latch_insert / latch_update.
     """
     busy = _wait_for_compaction_or_busy()
     if busy is not None:
@@ -1206,7 +1265,8 @@ def kb_correct_apply(
         return result
 
 
-@mcp.tool()
+@mcp.tool(name="latch_priority_add")
+@mcp.tool(name="kb_priority_add")
 def kb_priority_add(
     text: str,
     note: str | None = None,
@@ -1216,7 +1276,7 @@ def kb_priority_add(
     """Add a standing priority.
 
     Overall priorities (workstream_id omitted) are 'top of mind' directives
-    latch weighs on EVERY kb_gate and surfaces in the SessionStart brief,
+    latch weighs on EVERY latch_gate and surfaces in the SessionStart brief,
     regardless of whether a given prompt is about them (e.g. security review,
     cross-platform installability). Workstream priorities
     (workstream_id=<workstream node id>) are additive guidance weighed only
@@ -1238,7 +1298,7 @@ def kb_priority_add(
     Capped at MAX_ACTIVE active priorities per scope (default 5 overall and 5
     per workstream, override via CLAUDE_KB_PRIORITY_CAP): returns an error with
     the current set if that scope's cap is reached — retire one first via
-    kb_priority_retire. Priorities are project/workstream scoped (not per-user)
+    latch_priority_retire. Priorities are project/workstream scoped (not per-user)
     and never participate in retrieval or traversal.
     """
     with _conn() as conn:
@@ -1247,7 +1307,8 @@ def kb_priority_add(
         )
 
 
-@mcp.tool()
+@mcp.tool(name="latch_priority_list")
+@mcp.tool(name="kb_priority_list")
 def kb_priority_list(
     include_retired: bool = False, workstream_id: int | None = None,
 ) -> list[dict]:
@@ -1283,7 +1344,8 @@ def kb_priority_list(
     ]
 
 
-@mcp.tool()
+@mcp.tool(name="latch_priority_reorder")
+@mcp.tool(name="kb_priority_reorder")
 def kb_priority_reorder(node_id: int, new_rank: int | None = None) -> dict:
     """Re-rank an active priority. Pass `new_rank` (1 = top) to **lock** it at
     that absolute slot; pass null to **unlock** it back to floating (recency-
@@ -1297,7 +1359,8 @@ def kb_priority_reorder(node_id: int, new_rank: int | None = None) -> dict:
         return priorities.reorder_priority(conn, node_id, new_rank)
 
 
-@mcp.tool()
+@mcp.tool(name="latch_priority_retire")
+@mcp.tool(name="kb_priority_retire")
 def kb_priority_retire(node_id: int) -> dict:
     """Retire (soft-delete) a priority so it stops being injected into gates and
     the brief, moving it to the graveyard with the date it was retired
@@ -1310,7 +1373,8 @@ def kb_priority_retire(node_id: int) -> dict:
 # EXPERIMENTAL — mission-control / verification profiles (kb_profile_* verbs).
 # NOT recommended for use; planned to be unshipped to a separate branch later
 # (observed unhelpful on pmeyer's workspace, 2026-06-10). See KB decision id=1550.
-@mcp.tool()
+@mcp.tool(name="latch_profile_list")
+@mcp.tool(name="kb_profile_list")
 def kb_profile_list(include_retired: bool = False) -> list[dict]:
     """List verification profiles — the per-user gate-intensity presets (the
     knob from trust-and-go up to mission-control). Each row:
@@ -1323,7 +1387,8 @@ def kb_profile_list(include_retired: bool = False) -> list[dict]:
         return profiles.list_profiles(conn, include_retired=include_retired)
 
 
-@mcp.tool()
+@mcp.tool(name="latch_profile_active")
+@mcp.tool(name="kb_profile_active")
 def kb_profile_active(actor: str | None = None) -> dict:
     """Show the verification profile currently active for `actor` (defaults to
     the resolved OS user — the SAME identity the gate and the UserPromptSubmit
@@ -1333,7 +1398,8 @@ def kb_profile_active(actor: str | None = None) -> dict:
         return profiles.resolve_active_profile(conn, actor)
 
 
-@mcp.tool()
+@mcp.tool(name="latch_profile_bind")
+@mcp.tool(name="kb_profile_bind")
 def kb_profile_bind(
     actor: str | None = None, name: str | None = None, node_id: int | None = None,
 ) -> dict:
@@ -1348,7 +1414,8 @@ def kb_profile_bind(
         return profiles.bind_actor(conn, actor, name=name, node_id=node_id)
 
 
-@mcp.tool()
+@mcp.tool(name="latch_embed")
+@mcp.tool(name="kb_embed")
 def kb_embed(text: str) -> list[float]:
     """Embed `text` via the in-process model. Mainly here for parity with the
     TCP embed listener — agents should rarely need to call this directly."""

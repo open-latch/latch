@@ -41,7 +41,7 @@ first-run mission.
 
 ## Supported Now
 
-- **Claude Code:** MCP tools, hooks, slash commands, `/kb-compact`, and the
+- **Claude Code:** MCP tools, hooks, slash commands, `/latch-compact`, and the
   managed `CLAUDE.md` behavior contract.
 - **Codex:** the same KB and MCP tools with Codex-specific `AGENTS.md`,
   SessionStart, Codex backend defaults, and a manual compaction wrapper.
@@ -124,7 +124,7 @@ Codex-specific wiring. The installer adds the `latch` MCP server to Codex
 `config.toml`, installs the latch contract into `AGENTS.md`, and adds a
 Codex `SessionStart` hook that surfaces the KB brief. It also sets
 `LATCH_MODEL_BACKEND=codex` and `LATCH_GATE_BACKEND=codex`, so model-backed
-`kb_gate`, heal, and tree calls use `codex exec` instead of quietly shelling out
+`latch_gate`, heal, and tree calls use `codex exec` instead of quietly shelling out
 to Claude.
 
 Existing Codex configs that still use the old `claude-kb` server key are
@@ -189,7 +189,7 @@ Keep the demo narrow. Use the strongest 1-3 rejected-path or governance-rule
 examples from the seed report, then choose one to test.
 
 1. Apply the seed evidence you approve.
-2. Run the printed `/kb-gate` or `bin/run_kb_gate.sh` catch-demo command, or ask
+2. Run the printed `/latch-gate` or `bin/run_latch_gate.sh` catch-demo command, or ask
    Claude Code/Codex to implement the rejected approach.
 3. Expect a foreground **Latch gate** receipt: latch ran the gate, cited the
    saved decision/rationale/source/status, explained the conflict, and
@@ -204,13 +204,15 @@ everything" the default.
 ## Using It Day To Day
 
 You mostly do not operate latch. Once wired, the agent reads the KB before
-answering, captures durable decisions as they happen, and runs `kb_gate` before
+answering, captures durable decisions as they happen, and runs `latch_gate` before
 coding-shaped changes. When latch affects an answer, the agent should show a
 short foreground receipt naming what it read or which gate fired.
+To audit recent gate activity without writing anything, run `/latch-gate-report`
+or `bin/latch_gate_report.sh`.
 
 At natural stopping points, capture the session:
 
-- Claude Code: run `/kb-compact`.
+- Claude Code: run `/latch-compact`.
 - Codex: run `/path/to/latch/bin/run_codex_compact_now.sh`.
 
 Compaction is user-initiated because it spends a model call and writes a durable
@@ -259,7 +261,7 @@ Version 2.0. See [LICENSE](./LICENSE) for the full license text and
 Third-party attribution notices for vendored assets are in [NOTICE](./NOTICE).
 
 This public repo is the local single-player decision-seatbelt core: install,
-doctor, seed/report, local KB, `kb_gate`, receipts, evals, and Claude Code /
+doctor, seed/report, local KB, `latch_gate`, receipts, evals, and Claude Code /
 Codex wiring. It is intended to be inspectable, forkable, and useful without a
 cloud account.
 

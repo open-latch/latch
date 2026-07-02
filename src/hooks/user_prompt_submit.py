@@ -74,7 +74,7 @@ CORRECTION_SIGNAL = re.compile(
 # Deterministic standing-guideline scan (no LLM, sub-millisecond). When a prompt
 # reads like a sweeping/standing directive ("always …", "from now on …"), we
 # prepend a nudge offering to capture it as an overall or workstream priority
-# (kb_priority_add) so the gate weighs it on future in-scope builds. Same
+# (latch_priority_add) so the gate weighs it on future in-scope builds. Same
 # cheap-regex-backstop pattern as CORRECTION_SIGNAL; the offer is the agent's,
 # capture is user-confirmed.
 GUIDELINE_SIGNAL = re.compile(
@@ -95,7 +95,9 @@ def main() -> int:
 
     correction_signal = bool(CORRECTION_SIGNAL.search(prompt))
     guideline_signal = (
-        bool(GUIDELINE_SIGNAL.search(prompt)) and "kb_priority" not in prompt.lower()
+        bool(GUIDELINE_SIGNAL.search(prompt))
+        and "kb_priority" not in prompt.lower()
+        and "latch_priority" not in prompt.lower()
     )
     mc_directive = _mission_control_directive(cwd, prompt)
     # Slice 3-B: surface the advisory cite-correction nudge queued by last turn's
@@ -356,7 +358,7 @@ def _format_injection(items: list[dict]) -> str:
         lines.append(f"- ({kind}, id={r['id']}, sim={sim:.2f}) {title}")
     lines.append(
         "\n**These are teasers, not an answer.** Actively query the KB "
-        "(`kb_search` / `kb_get` / `kb_recent`) before responding — every "
+        "(`latch_search` / `latch_get` / `latch_recent`) before responding — every "
         "prompt, no exception. Auto-injection samples relevance; it doesn't "
         "substitute for reading the node."
     )
@@ -371,7 +373,7 @@ def _format_no_hits() -> str:
         "## KB hits — none auto-retrieved (sim below floor)\n\n"
         "**Auto-retrieval found nothing above SIM_FLOOR.** That doesn't mean "
         "the KB has nothing — it means similarity scoring missed. Actively "
-        "query the KB (`kb_search` / `kb_get` / `kb_recent`) before "
+        "query latch (`latch_search` / `latch_get` / `latch_recent`) before "
         "responding — every prompt, no exception."
     )
 
@@ -383,10 +385,10 @@ def _format_correction_nudge() -> str:
         "outdated / hallucinated. If so, do NOT freeform-edit node bodies — "
         "follow the structured correction so the decision-change history is "
         "preserved:\n"
-        "1. `kb_verify(<id>)` to confirm the suspect node is STALE / RECONCILED / OK.\n"
-        "2. `kb_correct_plan(<bad_id>)` for the blast radius + supersede/reconcile recommendation.\n"
+        "1. `latch_verify(<id>)` to confirm the suspect node is STALE / RECONCILED / OK.\n"
+        "2. `latch_correct_plan(<bad_id>)` for the blast radius + supersede/reconcile recommendation.\n"
         "3. Surface the plan and get explicit user confirmation.\n"
-        "4. `kb_correct_apply(...)` — mutation is human-confirmed, never auto-fired.\n\n"
+        "4. `latch_correct_apply(...)` — mutation is human-confirmed, never auto-fired.\n\n"
         "If this was not a KB correction, ignore this notice."
     )
 
@@ -396,10 +398,10 @@ def _format_guideline_nudge() -> str:
         "## Standing-guideline signal (deterministic — not a classifier)\n\n"
         "This prompt reads like a directive meant to shape future work, not just "
         "the current task. If that's the user's intent, **offer** to capture it "
-        "as an overall **priority** (`kb_priority_add`) or, when it clearly "
+        "as an overall **priority** (`latch_priority_add`) or, when it clearly "
         "belongs only to the active workstream, a workstream **priority** "
-        "(`kb_priority_add(..., workstream_id=<id>)`) so latch weighs it in "
-        "future in-scope `kb_gate` calls. Capture only with the user's go-ahead; "
+        "(`latch_priority_add(..., workstream_id=<id>)`) so latch weighs it in "
+        "future in-scope `latch_gate` calls. Capture only with the user's go-ahead; "
         "skip if it's task-local."
     )
 

@@ -579,7 +579,7 @@ def test_seed_report_groups_candidates_into_demo_sections():
             f"rendered report should include a visible latch receipt: {out}")
     _assert("Why this mattered:" in out and "future gates can cite" in out,
             f"receipt should explain why the report matters: {out}")
-    _assert("Next proof:" in out and "kb_gate challenge the strongest rejected path" in out,
+    _assert("Next proof:" in out and "latch_gate challenge the strongest rejected path" in out,
             f"receipt should point to the rejected-path proof loop: {out}")
     _assert("Seed report:" in out and "## Decisions and rejected paths" in out,
             f"rendered report should lead with decisions/rejected paths: {out}")
@@ -597,7 +597,7 @@ def test_seed_report_groups_candidates_into_demo_sections():
             f"rendered report should not expose numeric confidence scores: {out}")
     _assert("strongest-first" in out,
             f"rendered report should explain score-free ranking: {out}")
-    _assert("Try the catch demo:" in out and "/kb-gate" in out and "run_kb_gate.sh" in out,
+    _assert("Try the catch demo:" in out and "/latch-gate" in out and "run_latch_gate.sh" in out,
             f"rendered report should include a rejected-path catch demo: {out}")
     _assert("After you apply this seed" in out,
             f"catch demo should not imply preview-only candidates are already in the KB: {out}")
@@ -629,11 +629,11 @@ def test_seed_report_groups_candidates_into_demo_sections():
             f"json catch demo should make apply boundary explicit: {payload}")
     _assert("We decided not to use Redis" in payload["catch_demo"]["request"],
             f"json catch demo should prefer the clean rejected-path candidate: {payload}")
-    _assert("/kb-gate" in payload["catch_demo"]["slash_command"],
+    _assert("/latch-gate" in payload["catch_demo"]["slash_command"],
             f"json catch demo should include slash command: {payload}")
-    _assert("run_kb_gate.sh" in payload["catch_demo"]["shell_command"],
+    _assert("run_latch_gate.sh" in payload["catch_demo"]["shell_command"],
             f"json catch demo should include shell fallback: {payload}")
-    _assert(str(seed.KB_HOME / "bin" / "run_kb_gate.sh") in payload["catch_demo"]["shell_command"],
+    _assert(str(seed.KB_HOME / "bin" / "run_latch_gate.sh") in payload["catch_demo"]["shell_command"],
             f"shell catch demo should use the installed latch wrapper path: {payload}")
     quoted_payload = seed.catch_demo_payload(seed.SeedCandidate(
         kind="decision",
@@ -651,6 +651,68 @@ def test_seed_report_groups_candidates_into_demo_sections():
     _assert("internal score" in payload.get("ranking", ""),
             f"json report should explain score-free ranking: {payload}")
     print("PASS seed_report_groups_candidates_into_demo_sections")
+
+
+def test_seed_report_agent_mistake_can_drive_first_value_catch_demo():
+    args = seed.parse_args([
+        "--lookback-days", "14",
+        "--llm", "no",
+        "--allow-internal-no-llm",
+        "--source", "both",
+        "--project", os.getcwd(),
+    ])
+    candidates = [
+        seed.SeedCandidate(
+            kind="fact",
+            title="Agent rewired the cache after the local-only decision",
+            body=(
+                "The prior agent changed the cache provider after the user said "
+                "to keep caching in-process for the local demo."
+            ),
+            confidence=0.91,
+            signals=["llm_seed", "possible_agent_mistake"],
+            source_ids=["codex:agent-mistake"],
+            source_paths=["/tmp/agent-mistake.jsonl"],
+            llm_used=True,
+        ),
+        seed.SeedCandidate(
+            kind="preference",
+            title="Keep local demo caching in-process",
+            body="Excerpt:\n> Keep local demo caching in-process.",
+            confidence=0.88,
+            signals=["llm_seed", "preference"],
+            source_ids=["claude:direction"],
+            source_paths=["/tmp/direction.jsonl"],
+            llm_used=True,
+        ),
+    ]
+
+    demo = seed.catch_demo_candidate(candidates)
+    _assert(demo is not None, "agent-mistake-only seed report should have a catch demo")
+    _assert(demo.title.startswith("Agent rewired"),
+            f"catch demo should use the high-confidence agent mistake: {demo}")
+
+    out = seed.render_text(args=args, sources=[], candidates=candidates, llm_estimate=0)
+    _assert("## Agent alignment check" in out and "Agent behavior:" in out,
+            f"seed report should surface the prior agent mistake: {out}")
+    _assert("prior agent mistake" in out,
+            f"receipt/catch demo should name the agent-mistake proof target: {out}")
+    _assert("Implement the approach involved in this prior agent mistake" in out,
+            f"catch demo should generate a plausible wrong-action gate prompt: {out}")
+    _assert("before files change" in out,
+            f"catch demo should preserve pre-edit proof language: {out}")
+
+    payload = json.loads(seed.render_json(args=args, sources=[], candidates=candidates, llm_estimate=0))
+    _assert(payload["receipt"]["used"]["sections"]["agent_alignment_check"] == 1,
+            f"receipt should count the agent-alignment proof moment: {payload}")
+    _assert(payload["catch_demo"]["candidate"]["title"].startswith("Agent rewired"),
+            f"json catch demo should point at the agent mistake: {payload}")
+    _assert("prior agent mistake" in payload["catch_demo"]["request"],
+            f"json catch demo request should name the mistake class: {payload}")
+    _assert("prior agent-mistake evidence" in payload["catch_demo"]["expected_outcome"],
+            f"json expected outcome should cite agent-mistake evidence: {payload}")
+
+    print("PASS seed_report_agent_mistake_can_drive_first_value_catch_demo")
 
 
 def test_user_signal_lines_ignore_injected_context_fragments():
@@ -774,7 +836,7 @@ def test_apply_success_message_surfaces_post_write_proof():
             f"apply success should keep the write receipt: {out}")
     _assert("Latch proof ready:" in out and "The seed is now in the KB" in out,
             f"apply success should name the post-write proof state: {out}")
-    _assert("/kb-gate" in out and "run_kb_gate.sh" in out,
+    _assert("/latch-gate" in out and "run_latch_gate.sh" in out,
             f"apply success should repeat both catch-demo commands: {out}")
     _assert("before files change" in out and "Expected:" in out,
             f"apply success should explain the proof outcome: {out}")
@@ -810,6 +872,7 @@ if __name__ == "__main__":
     test_llm_candidate_quality_filter_keeps_durable_signals()
     test_agent_mistake_candidates_require_high_confidence_and_agent_blame()
     test_seed_report_groups_candidates_into_demo_sections()
+    test_seed_report_agent_mistake_can_drive_first_value_catch_demo()
     test_user_signal_lines_ignore_injected_context_fragments()
     test_render_text_explains_immediate_value()
     test_render_text_names_apply_boundary()

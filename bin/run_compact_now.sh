@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Wrapper for /kb-compact slash command.
+# Wrapper for /latch-compact slash command.
 # Compacts the INVOKING session: resolves the session id from the first
 # positional arg, else ${CLAUDE_CODE_SESSION_ID} (set by Claude Code on the
 # Bash tool subprocess), and selects that session's transcript explicitly.
@@ -9,11 +9,11 @@
 #
 # Usage: run_compact_now.sh [session_id]
 #
-# Allow in user-scope ~/.claude/settings.json so /kb-compact runs unattended:
+# Allow in user-scope ~/.claude/settings.json so /latch-compact runs unattended:
 #   "Bash(bash ${LATCH_HOME}/bin/run_compact_now.sh)"
 # Existing settings that use ${CLAUDE_KB_HOME} still work as the legacy alias.
 #
-# Manual /kb-compact is a rolling compact (no --final), session_summary stays
+# Manual /latch-compact is a rolling compact (no --final), session_summary stays
 # in `staging` status. See src/compactor.py.
 
 set -euo pipefail
@@ -29,19 +29,19 @@ if [ -n "${SESSION_ID}" ]; then
   # Session ids are UUIDs, unique across projects — glob by id, not mtime.
   TRANSCRIPT=$(ls -t "${PROJECTS_DIR}"/*/"${SESSION_ID}.jsonl" 2>/dev/null | head -1 || true)
   if [ -z "${TRANSCRIPT}" ]; then
-    echo "kb-compact: no transcript found for session ${SESSION_ID} under ${PROJECTS_DIR}" >&2
+    echo "latch-compact: no transcript found for session ${SESSION_ID} under ${PROJECTS_DIR}" >&2
     exit 1
   fi
 else
   TRANSCRIPT=$(ls -t "${PROJECTS_DIR}"/*/*.jsonl 2>/dev/null | head -1 || true)
   if [ -z "${TRANSCRIPT}" ]; then
-    echo "kb-compact: no session transcripts found under ${PROJECTS_DIR}" >&2
+    echo "latch-compact: no session transcripts found under ${PROJECTS_DIR}" >&2
     exit 1
   fi
   SESSION_ID=$(basename "${TRANSCRIPT}" .jsonl)
-  echo "kb-compact: WARNING — no session id given (arg or CLAUDE_CODE_SESSION_ID);" >&2
-  echo "kb-compact: falling back to newest-mtime transcript (session ${SESSION_ID})." >&2
-  echo "kb-compact: if another Claude session is running, this may compact the WRONG session." >&2
+  echo "latch-compact: WARNING — no session id given (arg or CLAUDE_CODE_SESSION_ID);" >&2
+  echo "latch-compact: falling back to newest-mtime transcript (session ${SESSION_ID})." >&2
+  echo "latch-compact: if another Claude session is running, this may compact the WRONG session." >&2
 fi
 # pwd -W gives Windows-style path on Git Bash (compactor expects this);
 # falls back to plain pwd on POSIX shells where -W is unsupported.
@@ -66,7 +66,7 @@ elif command -v python3 >/dev/null 2>&1; then
 elif command -v python >/dev/null 2>&1; then
   PY="python"
 else
-  echo "kb-compact: no Python found (set LATCH_PYTHON (legacy: CLAUDE_KB_PYTHON) to your interpreter)." >&2
+  echo "latch-compact: no Python found (set LATCH_PYTHON (legacy: CLAUDE_KB_PYTHON) to your interpreter)." >&2
   exit 2
 fi
 

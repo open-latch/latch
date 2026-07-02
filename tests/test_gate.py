@@ -546,8 +546,8 @@ def test_gate_findings_surface_cited_evidence_for_proceed():
     _assert(out["must_display_to_user"] is True, out)
     _assert(out["recommendation"] == "PROCEED", out)
     _assert(out["gate_status"] == "OK", out)
-    _assert(out["source"] == "kb_gate", out)
-    _assert("Latch ran kb_gate" in out["receipt"]["summary"], out)
+    _assert(out["source"] == "latch_gate", out)
+    _assert("Latch ran the gate" in out["receipt"]["summary"], out)
     _assert("current authority" in out["receipt"]["summary"], out)
     _assert(out["receipt"]["used"]["evidence_nodes"] == 2, out)
     _assert(out["receipt"]["used"]["decision_chain"] == 1, out)
@@ -557,6 +557,53 @@ def test_gate_findings_surface_cited_evidence_for_proceed():
     _assert(out["evidence_nodes"][0]["title"] == "Current path", out)
     _assert(out["load_bearing_claims"][0]["evidence_ref"] == 10, out)
     print("PASS gate_findings_surface_cited_evidence_for_proceed")
+
+
+def test_gate_findings_surface_agent_mistake_redirect():
+    verdict = {
+        "recommendation": "MODIFY",
+        "summary": "Prior agent mistake conflicts with the local-only cache decision.",
+        "decision_chain": [12],
+        "abandoned_paths": [13],
+        "active_constraints": [12],
+        "current_direction": [12],
+        "risk_if_proceed": "The agent would repeat a prior cache mistake.",
+        "better_next_action": "Keep the cache in-process for the local demo.",
+        "evidence_nodes": [12, 13],
+        "load_bearing_claims": [
+            {
+                "claim": "local demo caching should stay in-process",
+                "evidence_type": "kb_node",
+                "evidence_ref": 12,
+                "gap_type": None,
+            },
+        ],
+        "uncovered_claims": [],
+    }
+    evidence = [
+        {
+            "id": 12,
+            "kind": "decision",
+            "title": "Keep local demo caching in-process",
+            "status": "canonical",
+        },
+        {
+            "id": 13,
+            "kind": "fact",
+            "title": "Agent rewired cache after the decision",
+            "status": "canonical",
+        },
+    ]
+
+    out = gate.format_gate_findings(verdict, evidence, gate_status="OK")
+
+    _assert(out["label"] == "Latch gate findings", out)
+    _assert(out["recommendation"] == "MODIFY", out)
+    _assert("Latch ran the gate" in out["receipt"]["summary"], out)
+    _assert("current authority" in out["receipt"]["summary"], out)
+    _assert(out["evidence_nodes"][0]["status"] == "canonical", out)
+    _assert(out["better_next_action"].startswith("Keep the cache"), out)
+    print("PASS gate_findings_surface_agent_mistake_redirect")
 
 
 def test_evidence_node_ids_is_unique_and_sorted():
@@ -775,6 +822,7 @@ if __name__ == "__main__":
     test_evidence_includes_stale_targets()
     test_output_schema_top_level_shape()
     test_gate_findings_surface_cited_evidence_for_proceed()
+    test_gate_findings_surface_agent_mistake_redirect()
     test_evidence_node_ids_is_unique_and_sorted()
     test_body_excerpt_truncates_long_bodies()
     test_body_excerpt_handles_none_body()

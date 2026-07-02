@@ -2,7 +2,7 @@
 
 Two independent counters, both per-project, both reset at UTC rollover:
 
-  * `nonheal` (default 100/day) — covers compactor, kb_gate, tree
+  * `nonheal` (default 100/day) — covers compactor, latch_gate, tree
     summarization, and on-insert heal arbitration (insert_with_heal).
     "Generous" cap so normal coding-shaped work isn't gated; the cap exists
     so a runaway fan-out is still bounded.
@@ -13,7 +13,7 @@ Two independent counters, both per-project, both reset at UTC rollover:
     new installs don't surprise users with background LLM spend.
 
 Single `budget.json` per project: `{date, count_nonheal, count_heal,
-approved_dates}`. Lazy UTC date rollover. `/kb-budget-approve` resets BOTH
+approved_dates}`. Lazy UTC date rollover. `/latch-budget-approve` resets BOTH
 counters to 0 and adds today to `approved_dates` (idempotent, one switch).
 
 Legacy migration: pre-split state had `{date, count, approved_dates}`. On
@@ -240,7 +240,7 @@ def brief_line(
     if nh_at or h_at:
         return (
             f"Budget: {body} used today — auto-compact is paused. "
-            f"Run `/kb-budget-approve` to unlock the rest of today."
+            f"Run `/latch-budget-approve` to unlock the rest of today."
         )
     return f"Budget: {body} used today."
 

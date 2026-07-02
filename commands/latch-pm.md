@@ -14,11 +14,11 @@ A project snapshot is **fallback / secondary** (§7), used only when there's no 
 decision to seed yet. Don't lead with it and don't present it as the payoff.
 
 Everything is **confirm-gated** — propose, never auto-write. Use existing MCP tools
-only (`kb_recent`, `kb_priority_list`, `kb_search`, `kb_insert`, `kb_priority_add`,
-`kb_link`).
+only (`latch_recent`, `latch_priority_list`, `latch_search`, `latch_insert`,
+`latch_priority_add`, `latch_link`).
 
 ## 1. Read what latch already knows
-`kb_recent` and `kb_priority_list` (and `kb_search` for existing decisions /
+`latch_recent` and `latch_priority_list` (and `latch_search` for existing decisions /
 ruled-outs if the recent list is thin). Don't re-ask what's already captured.
 
 ## 2. Say what you're doing — one line
@@ -62,8 +62,8 @@ Proposed latch decision
 Accept / edit / skip?
 ```
 
-Write with `kb_insert(kind="decision", status="staging")` only on accept/edit;
-`kb_link` it to a workstream if one is known. Skip = no write. (Staging is the
+Write with `latch_insert(kind="decision", status="staging")` only on accept/edit;
+`latch_link` it to a workstream if one is known. Skip = no write. (Staging is the
 conservative default and is still retrievable by the real gate later; promotion to
 a foundational/priority tier stays a separate, user-confirmed step.)
 
@@ -75,7 +75,7 @@ cross-session version:
 > effect, open a new session and ask there:** a fresh agent with none of this
 > conversation in its context will still find the decision and stop itself."
 
-When they ask for the rejected path, run `kb_search`, find the stored decision, and
+When they ask for the rejected path, run `latch_search`, find the stored decision, and
 **redirect with the reason**:
 
 ```text
@@ -88,7 +88,7 @@ Override that decision, or hold the line and go with Postgres?
 
 Then offer the real engine as an optional follow:
 > "That was a fast keyword match so you'd see it instantly. Want to watch latch's
-> *actual* production gate fire on it? Run `/kb-gate \"add a Redis queue for
+> *actual* production gate fire on it? Run `/latch-gate \"add a Redis queue for
 > background jobs\"` — a slower LLM check (~1–2 min) that searches the KB and
 > returns a **Latch gate** verdict with the cited decision, rationale, source,
 > and current authority."
@@ -104,11 +104,11 @@ from real value:
 
 If the user instead ran the trip-wire from a **fresh session** (per §6), they just
 saw the real thing — say so plainly; the "you told me 90 seconds ago" caveat no
-longer applies (the fast-keyword-vs-full-gate note still does — offer `/kb-gate`).
+longer applies (the fast-keyword-vs-full-gate note still does — offer `/latch-gate`).
 
 Never overclaim that this same-session command *is* the production gate. In normal
 use the catch happens when the `UserPromptSubmit` hook surfaces the decision to a
-regular agent, or when that agent runs `kb_gate` — a different trigger, same outcome.
+regular agent, or when that agent runs `latch_gate` — a different trigger, same outcome.
 
 ## 8. Fallback — no good ruled-out decision yet
 Don't fake a trip-wire on weak fuel:
@@ -119,11 +119,11 @@ Don't fake a trip-wire on weak fuel:
 Then optionally capture a light brief, confirm-gating each item: current goal →
 `kind=workstream`; constraints / ruled-outs → `kind=decision`; unknowns →
 `kind=open_question`; working-style → `kind=preference`; "how I want you to work"
-standing directives → **offer** `kb_priority_add`. Frame this as *setup*, not the wow.
+standing directives → **offer** `latch_priority_add`. Frame this as *setup*, not the wow.
 
 ## 9. Close
 Briefly play back what was captured. Note `/latch-pm` is re-runnable whenever a
-decision is made or reversed. Optionally offer `/kb-compact` to summarize the
+decision is made or reversed. Optionally offer `/latch-compact` to summarize the
 conversation itself into the KB.
 
 ## Guardrails

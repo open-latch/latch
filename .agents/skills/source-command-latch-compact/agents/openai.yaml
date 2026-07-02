@@ -1,0 +1,4 @@
+interface:
+  display_name: "Latch Compact"
+  short_description: "Compact the current Codex session into latch"
+  default_prompt: "Run latch compact for this Codex session."

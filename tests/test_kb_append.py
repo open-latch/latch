@@ -118,7 +118,8 @@ def test_append_rejects_claim_bearing_kinds():
                               embedding=embeddings.to_blob(embeddings.embed("a claim")))
         res = mcp_server._kb_append_impl(conn, fact, "x", reembed=False, date="2026-06-10")
         _assert(res.get("ok") is False, f"fact must be rejected: {res}")
-        _assert("kb_correct" in res.get("error", ""), f"error should point to kb_correct: {res}")
+        _assert("latch_correct" in res.get("error", ""),
+                f"error should point to latch_correct: {res}")
         node = db.get_node(conn, fact)
         _assert(node["body"] == "a claim", "rejected append must not mutate the body")
         print("PASS test_append_rejects_claim_bearing_kinds")

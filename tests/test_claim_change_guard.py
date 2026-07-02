@@ -78,7 +78,7 @@ def test_hint_fires_on_claim_reversal_canonical_fact():
     )
     _assert(hint is not None, "claim reversal on canonical fact must fire")
     _assert(hint["node_id"] == 42, hint)
-    _assert(hint["suggestion"] == "kb_correct_plan", hint)
+    _assert(hint["suggestion"] == "latch_correct_plan", hint)
     _assert(hint["cosine"] < verify.CLAIM_CHANGE_COSINE_THRESHOLD, hint)
     print("PASS hint_fires_on_claim_reversal_canonical_fact")
 

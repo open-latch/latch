@@ -41,13 +41,66 @@ fi
 
 mkdir -p "$DEST_DIR"
 
-count=0
+installed=0
+updated=0
+removed=0
+skipped=0
 for f in "$SRC_DIR"/*.md; do
   [ -e "$f" ] || continue
   name="$(basename "$f")"
   sed "s|<KB_HOME>|$KB_HOME|g" "$f" > "$DEST_DIR/$name"
   echo "installed $name"
-  count=$((count + 1))
+  installed=$((installed + 1))
 done
 
-echo "Done — $count command(s) installed to $DEST_DIR (KB_HOME=$KB_HOME)"
+is_latch_command() {
+  local file="$1"
+  [ -f "$file" ] || return 1
+  grep -Fq "<KB_HOME>" "$file" && return 0
+  grep -Fq "$KB_HOME" "$file" && return 0
+  grep -Eq '/bin/(run_kb_gate|run_latch_gate|latch_gate_report|run_compact_now|run_latch_compact_now|run_kb_focus)\.sh|/bin/latch_direction\.sh|/src/(budget|maintenance)\.py' "$file"
+}
+
+update_legacy_alias() {
+  local legacy="$1"
+  local primary="$2"
+  local legacy_path="$DEST_DIR/$legacy"
+  local primary_path="$SRC_DIR/$primary"
+  [ -f "$legacy_path" ] || return 0
+  [ -f "$primary_path" ] || return 0
+  if ! is_latch_command "$legacy_path"; then
+    echo "skipped legacy alias $legacy (looks user-owned)"
+    skipped=$((skipped + 1))
+    return 0
+  fi
+  if [ "$legacy" = "kb-gate.md" ]; then
+    sed "s|<KB_HOME>|$KB_HOME|g; s|/bin/run_latch_gate\\.sh|/bin/run_kb_gate.sh|g" "$primary_path" > "$legacy_path"
+  else
+    sed "s|<KB_HOME>|$KB_HOME|g" "$primary_path" > "$legacy_path"
+  fi
+  echo "updated legacy alias $legacy -> $primary"
+  updated=$((updated + 1))
+}
+
+update_legacy_alias "kb-budget-approve.md" "latch-budget-approve.md"
+update_legacy_alias "kb-compact.md" "latch-compact.md"
+update_legacy_alias "kb-decay.md" "latch-decay.md"
+update_legacy_alias "kb-gate.md" "latch-gate.md"
+update_legacy_alias "kb-gate-report.md" "latch-gate-report.md"
+update_legacy_alias "kb-heal.md" "latch-heal.md"
+update_legacy_alias "kb-tree.md" "latch-tree.md"
+
+for stale in kb-focus.md kb-project-direction.md; do
+  stale_path="$DEST_DIR/$stale"
+  [ -f "$stale_path" ] || continue
+  if ! is_latch_command "$stale_path"; then
+    echo "skipped stale legacy command $stale (looks user-owned)"
+    skipped=$((skipped + 1))
+    continue
+  fi
+  rm -f "$stale_path"
+  echo "removed stale legacy command $stale"
+  removed=$((removed + 1))
+done
+
+echo "Done — installed $installed command(s), updated $updated legacy alias(es), removed $removed stale command(s), skipped $skipped user-owned file(s) in $DEST_DIR (KB_HOME=$KB_HOME)"

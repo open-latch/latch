@@ -154,11 +154,11 @@ def compute_claim_change_hint(
         "kind": kind,
         "cosine": round(cos, 4),
         "threshold": CLAIM_CHANGE_COSINE_THRESHOLD,
-        "suggestion": "kb_correct_plan",
+        "suggestion": "latch_correct_plan",
         "note": (
             f"This looks like a claim change on a canonical {kind} (id={node_id}, "
             f"cosine={round(cos, 4)}). If you're changing what this node asserts, "
-            f"prefer kb_correct_plan({node_id}) so the transition is auditable "
+            f"prefer latch_correct_plan({node_id}) so the transition is auditable "
             f"(policy id=1174). If this is a non-claim edit (banner/typo/cross-ref), "
             f"ignore."
         ),

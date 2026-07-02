@@ -1,6 +1,6 @@
-"""CLI backing the /kb-gate slash command.
+"""CLI backing the /latch-gate slash command.
 
-Usage (called by `bin/run_kb_gate.sh`):
+Usage (called by `bin/run_latch_gate.sh`; legacy: `bin/run_kb_gate.sh`):
 
     python kb_gate_cli.py <project_cwd> <request...>
 

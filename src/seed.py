@@ -590,6 +590,8 @@ def should_skip_user_candidate(text: str) -> bool:
         "id=",
         "kb_get(",
         "kb_search(",
+        "latch_get(",
+        "latch_search(",
         "toolsearch(",
         "auto-injected",
         "standing directives ",
@@ -611,6 +613,7 @@ def should_skip_user_candidate(text: str) -> bool:
         "workstream_id",
         "mcp__",
         "kb_gate",
+        "latch_gate",
         "injected context",
     )):
         return True
@@ -1072,27 +1075,48 @@ def seen_terms(candidates: list[SeedCandidate]) -> list[set[str]]:
     return [candidate_terms(cand) for cand in candidates]
 
 
+def high_confidence_agent_mistake_candidate(candidate: SeedCandidate) -> bool:
+    return (
+        high_confidence_agent_mistake(candidate.signals)
+        and candidate.confidence >= AGENT_MISTAKE_MIN_CONFIDENCE
+    )
+
+
 def catch_demo_candidate(candidates: list[SeedCandidate]) -> SeedCandidate | None:
-    """The strongest rejected-path candidate for the first-wow gate demo."""
+    """The strongest candidate for the first-wow gate demo.
+
+    Clean rejected paths stay first because they make the gate loop easiest to
+    inspect. If no clean rejected path exists, a high-confidence prior agent
+    mistake can carry the same proof loop without adding a second demo surface.
+    """
     rejected = [
         cand for cand in candidates
         if "rejected_path" in normalized_signals(cand.signals)
     ]
-    if not rejected:
-        return None
     clean_rejections = [
         cand for cand in rejected
         if not high_confidence_agent_mistake(cand.signals)
     ]
-    demo_pool = clean_rejections or rejected
+    agent_mistakes = [
+        cand for cand in candidates
+        if high_confidence_agent_mistake_candidate(cand)
+    ]
+    demo_pool = clean_rejections or agent_mistakes or rejected
+    if not demo_pool:
+        return None
     return sorted(demo_pool, key=lambda c: c.confidence, reverse=True)[0]
 
 
 def catch_demo_request(candidate: SeedCandidate) -> str:
-    """A safe request that should make kb_gate retrieve the seeded rejection."""
+    """A safe request that should make latch_gate retrieve the seeded evidence."""
     evidence = candidate_evidence_line(candidate)
     if evidence.startswith("receipt:"):
         evidence = candidate.title
+    if high_confidence_agent_mistake_candidate(candidate):
+        return clip(
+            f"Implement the approach involved in this prior agent mistake: {evidence}",
+            220,
+        )
     return clip(f"Revive this rejected path: {evidence}", 220)
 
 
@@ -1102,16 +1126,21 @@ def slash_command_quote(value: str) -> str:
 
 def catch_demo_payload(candidate: SeedCandidate) -> dict[str, Any]:
     request = catch_demo_request(candidate)
-    gate_script = KB_HOME / "bin" / "run_kb_gate.sh"
+    gate_script = KB_HOME / "bin" / "run_latch_gate.sh"
+    proof_target = (
+        "prior agent-mistake evidence"
+        if high_confidence_agent_mistake_candidate(candidate)
+        else "seeded rejected path"
+    )
     return {
         "candidate": public_candidate_dict(candidate),
         "request": request,
-        "slash_command": f"/kb-gate {slash_command_quote(request)}",
+        "slash_command": f"/latch-gate {slash_command_quote(request)}",
         "shell_command": "bash " + shlex.quote(str(gate_script)) + " " + shlex.quote(request),
         "requires_apply": True,
         "expected_outcome": (
-            "After you apply the seed, Latch should cite this seeded rejected "
-            "path and ask whether to hold the line or override it."
+            f"After you apply the seed, Latch should cite this {proof_target} "
+            "and ask whether to hold the line, redirect, or override it."
         ),
     }
 
@@ -1135,10 +1164,12 @@ def seed_report_receipt(
     demo = catch_demo_candidate(candidates)
     next_proof = (
         "After applying this seed, run the catch-demo command below to watch "
-        "kb_gate challenge the strongest rejected path before files change."
+        "latch_gate challenge the strongest rejected path or prior agent mistake "
+        "before files change."
         if demo else
-        "Review/apply the useful candidates first; a rejected-path catch demo "
-        "appears when the report contains a clean rejected path."
+        "Review/apply the useful candidates first; a catch demo appears when "
+        "the report contains a clean rejected path or high-confidence prior "
+        "agent mistake."
     )
     summary = (
         f"Latch built this first-wow report from {source_total} selected local "
@@ -1195,7 +1226,8 @@ def apply_success_message(inserted: list[int], candidates: list[SeedCandidate]) 
             "",
             "Latch proof ready:",
             "The seed is now in the KB. Run the catch demo to watch latch "
-            "challenge the strongest rejected path before files change:",
+            "challenge the strongest rejected path or prior agent mistake "
+            "before files change:",
             f"- Claude Code: {payload['slash_command']}",
             f"- Shell: {payload['shell_command']}",
             f"Expected: {payload['expected_outcome']}",
@@ -1203,8 +1235,9 @@ def apply_success_message(inserted: list[int], candidates: list[SeedCandidate]) 
     else:
         lines.extend([
             "",
-            "Latch proof note: no clean rejected path was applied in this seed "
-            "run, so there is no catch-demo command yet.",
+            "Latch proof note: no clean rejected path or high-confidence prior "
+            "agent mistake was applied in this seed run, so there is no "
+            "catch-demo command yet.",
         ])
     return "\n".join(lines)
 
@@ -1309,7 +1342,7 @@ def render_text(
             "",
             "Try the catch demo:",
             "After you apply this seed, run one of these to watch latch challenge "
-            "the strongest rejected path from the report:",
+            "the strongest rejected path or prior agent mistake from the report:",
             f"- Claude Code: {payload['slash_command']}",
             f"- Shell: {payload['shell_command']}",
             f"Expected: {payload['expected_outcome']}",

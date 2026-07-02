@@ -81,7 +81,7 @@ def _setup(source_names, dest_bodies=None):
 
 
 def test_commands_missing_warns():
-    dest, restore = _setup(["kb-compact.md", "kb-gate.md"], dest_bodies={})
+    dest, restore = _setup(["latch-compact.md", "latch-gate.md"], dest_bodies={})
     try:
         _name, level, detail = doctor.check_commands_installed()
         _assert(level == doctor.WARN, f"missing commands should WARN, got {level}: {detail}")
@@ -96,8 +96,8 @@ def test_commands_missing_warns():
 
 def test_commands_present_ok():
     _dest, restore = _setup(
-        ["kb-compact.md", "kb-gate.md"],
-        dest_bodies={"kb-compact.md": "resolved /home body\n", "kb-gate.md": "resolved\n"})
+        ["latch-compact.md", "latch-gate.md"],
+        dest_bodies={"latch-compact.md": "resolved /home body\n", "latch-gate.md": "resolved\n"})
     try:
         _name, level, detail = doctor.check_commands_installed()
         _assert(level == doctor.OK, f"present+resolved should be OK, got {level}: {detail}")
@@ -108,8 +108,8 @@ def test_commands_present_ok():
 
 def test_commands_unresolved_placeholder_warns():
     _dest, restore = _setup(
-        ["kb-compact.md"],
-        dest_bodies={"kb-compact.md": "still <KB_HOME> here\n"})
+        ["latch-compact.md"],
+        dest_bodies={"latch-compact.md": "still <KB_HOME> here\n"})
     try:
         _name, level, detail = doctor.check_commands_installed()
         _assert(level == doctor.WARN, f"unresolved placeholder should WARN, got {level}")
@@ -117,6 +117,23 @@ def test_commands_unresolved_placeholder_warns():
         _assert("source=" in detail and "dest=" in detail,
                 f"detail should include source/dest context: {detail}")
         print("PASS commands_unresolved_placeholder_warns")
+    finally:
+        restore()
+
+
+def test_commands_stale_legacy_warns():
+    _dest, restore = _setup(
+        ["latch-gate.md"],
+        dest_bodies={
+            "latch-gate.md": "resolved /home body\n",
+            "kb-focus.md": "bash /tmp/latch/bin/run_kb_focus.sh list\n",
+        })
+    try:
+        _name, level, detail = doctor.check_commands_installed()
+        _assert(level == doctor.WARN, f"stale legacy command should WARN, got {level}: {detail}")
+        _assert("stale legacy" in detail and "kb-focus.md" in detail,
+                f"detail should name stale command: {detail}")
+        print("PASS commands_stale_legacy_warns")
     finally:
         restore()
 
@@ -264,6 +281,7 @@ if __name__ == "__main__":
     test_commands_missing_warns()
     test_commands_present_ok()
     test_commands_unresolved_placeholder_warns()
+    test_commands_stale_legacy_warns()
     test_pin_via_file_ok()
     test_pin_via_env_ok()
     test_pin_via_latch_env_ok()

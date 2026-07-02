@@ -21,7 +21,7 @@ python "<KB_HOME>/src/maintenance.py" "$(pwd)"
 ```
 
 Report back the `decayed_rows` count, `promoted_count`, and the list of
-`promoted_ids` (with titles via `kb_get` if the user wants to see what got
+`promoted_ids` (with titles via `latch_get` if the user wants to see what got
 promoted).
 
 If anything fails, check `<KB_HOME>/maintenance.log`.

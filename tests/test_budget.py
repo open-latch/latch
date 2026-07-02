@@ -291,7 +291,7 @@ def test_brief_line_at_cap_shows_approve_hint():
         for _ in range(100):
             budget.record_invocation(tmp, category="nonheal")
         line = budget.brief_line(tmp)
-        _assert(line is not None and "/kb-budget-approve" in line,
+        _assert(line is not None and "/latch-budget-approve" in line,
                 f"expected unlock hint: {line!r}")
         _assert("100/100 non-heal" in line, f"expected at-cap count: {line!r}")
         print("PASS brief_line_at_cap_shows_approve_hint")
@@ -307,7 +307,7 @@ def test_brief_line_at_cap_heal_only_shows_approve_hint():
         for _ in range(50):
             budget.record_invocation(tmp, category="heal")
         line = budget.brief_line(tmp, heal_cap=50)
-        _assert(line is not None and "/kb-budget-approve" in line,
+        _assert(line is not None and "/latch-budget-approve" in line,
                 f"expected unlock hint when heal alone is at cap: {line!r}")
         _assert("50/50 heal" in line, f"expected at-cap heal count: {line!r}")
         print("PASS brief_line_at_cap_heal_only_shows_approve_hint")

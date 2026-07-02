@@ -5,7 +5,7 @@ the slow-clock hygiene pass that keeps the ref_count signal meaningful and
 lets earned knowledge graduate from staging to canonical.
 
 Entry point: `run_weekly_maintenance(project_path)`. Invoked manually via the
-`/kb-decay` slash command; future step will put this on a schedule.
+`/latch-decay` slash command; future step will put this on a schedule.
 """
 from __future__ import annotations
 

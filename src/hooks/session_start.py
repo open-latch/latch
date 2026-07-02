@@ -38,7 +38,7 @@ _GETTING_STARTED_BLOCK = (
     "resumes with full context instead of starting cold.\n\n"
     "- **It fills automatically as we work** — I capture decisions and durable "
     "findings into the KB without you having to ask.\n"
-    "- **At the end of a working session, ask me to `/kb-compact`** — it "
+    "- **At the end of a working session, ask me to `/latch-compact`** — it "
     "summarizes the session into the KB so the reasoning isn't lost (this is "
     "latch's command — *not* Claude Code's built-in `/compact`, which only trims "
     "the conversation and saves nothing to the KB). Budget-gated and quick.\n"
@@ -74,7 +74,7 @@ def main() -> int:
     # auto-reconciliation was the primary amplifier in the 2026-04-23 fan-out
     # incident — every new summarizer session triggered by the compactor would
     # re-enter here and spawn compactions for every orphan, recursively.
-    # Orphans are now surfaced in the briefing only; run /kb-compact to process.
+    # Orphans are now surfaced in the briefing only; run /latch-compact to process.
     orphan_count = len(orphans)
 
     try:
@@ -250,7 +250,7 @@ def _build_briefing(
     if orphan_count:
         parts.append(
             f"_{orphan_count} prior session(s) have unreviewed transcripts. "
-            f"Run `/kb-compact` to summarize them on demand._\n"
+            f"Run `/latch-compact` to summarize them on demand._\n"
         )
     if budget_line:
         parts.append(f"_{budget_line}_\n")
@@ -258,7 +258,7 @@ def _build_briefing(
         parts.append(
             f"_⚠ {n_drift} body-edge/state drift item(s) flagged by the last "
             f"nightly sweep — run `bash bin/run_kb_drift.sh` (or read the latest "
-            f"`drift-*.log`) to review and `kb_link`/fix._\n"
+            f"`drift-*.log`) to review and `latch_link`/fix._\n"
         )
     if claude_md_synced:
         parts.append(
@@ -308,11 +308,11 @@ def _build_briefing(
         s = latest_progress[0]
         parts.append(
             f"\n_Latest session note: (id={s['id']}, {s['updated_at']}{_by(s)}) "
-            f"**{s['title']}** — `kb_get({s['id']})` for body._\n"
+            f"**{s['title']}** — `latch_get({s['id']})` for body._\n"
         )
 
     parts.append(
-        "\n_Use `kb_search` / `kb_get` / `kb_recent` MCP tools to drill in. "
+        "\n_Use `latch_search` / `latch_get` / `latch_recent` MCP tools to drill in. "
         "Workstream bodies are intentionally terse; search before acting._\n"
     )
     return "\n".join(parts)

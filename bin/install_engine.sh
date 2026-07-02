@@ -8,7 +8,7 @@
 #   2. merges the SessionStart/UserPromptSubmit/Stop/SessionEnd hooks into
 #      ~/.claude/settings.json;
 #   3. adds server-level `mcp__latch` and legacy `mcp__claude-kb` permission
-#      rules so every kb_* tool is auto-approved (no per-tool prompts).
+#      rules so every latch_* tool is auto-approved (no per-tool prompts).
 # Also removes dead latch-owned mcpServers blocks left by older installs.
 #
 # All logic lives in src/install_engine.py (stdlib-only; shared by this CLI and
