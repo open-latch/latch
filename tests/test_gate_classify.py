@@ -305,6 +305,19 @@ def test_classify_skipped_when_budget_cap_hit():
     print("PASS classify_skipped_when_budget_cap_hit")
 
 
+def test_error_findings_keep_displayable_summary():
+    verdict = gate._classifier_error("budget cap hit")
+    findings = gate.format_gate_findings(verdict, [], gate_status="SKIPPED")
+    _assert(findings["must_display_to_user"] is True, findings)
+    _assert(findings["recommendation"] is None, findings)
+    _assert("budget cap hit" in findings["summary"], findings)
+
+    legacy_empty = {**verdict, "summary": ""}
+    legacy_findings = gate.format_gate_findings(legacy_empty, [])
+    _assert("budget cap hit" in legacy_findings["summary"], legacy_findings)
+    print("PASS error_findings_keep_displayable_summary")
+
+
 # ---------- run_gate (4c wiring) ----------
 
 def test_run_gate_with_use_llm_false_assembles_chain_and_skips_classify():
@@ -758,6 +771,7 @@ if __name__ == "__main__":
     test_classify_skipped_when_use_llm_false()
     test_classify_skipped_when_in_compact_env()
     test_classify_skipped_when_budget_cap_hit()
+    test_error_findings_keep_displayable_summary()
     test_run_gate_with_use_llm_false_assembles_chain_and_skips_classify()
     test_run_gate_hydrates_cited_evidence_when_verdict_returns()
     test_run_gate_appends_jsonl_log_line()

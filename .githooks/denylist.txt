@@ -1,0 +1,27 @@
+# latch denylist (scoped post-cutover, Phase 4.a)
+# One regex per line. Blank lines and # comments ignored.
+# Used by: .githooks/pre-commit (block commit on hit in staged diff).
+#
+# Post-cutover scope: only block patterns that would constitute a real
+# leak going forward on latch. Original project-specific terms are gone
+# from history (filter-repo --replace-text) so blocking re-introduction
+# of those is low-value friction. See KB id=1053 for the analysis.
+
+\$CLAUDE_KB_HOME
+C:/Systems/claude_kb
+C:\\Systems\\claude_kb
+nicomey
+nmeyer
+/Users/nicomey
+/Users/nico
+paid
+billing
+moneti[sz](e|ation|ing)
+commercialization
+team[-/ ]shared
+shared layer
+team graph
+shared graph
+team product
+Meta
+quant

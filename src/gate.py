@@ -69,6 +69,7 @@ import db
 import log_utils
 import paths
 import priorities
+import profiles
 import search
 
 
@@ -146,14 +147,15 @@ GATE_STALE_BUDGET = _env_int("CLAUDE_KB_GATE_STALE_BUDGET", 3, minimum=0)
 # (kb_correct) passes related_to_max_hop=None to keep the full neighbourhood.
 GATE_RELATED_TO_MAX_HOP = _env_int("CLAUDE_KB_GATE_RELATED_TO_MAX_HOP", 1)
 
-# Personal-layer kinds that must never seed the gate similarity chain. Priorities
-# are surfaced through dedicated channels instead via the ACTIVE PROJECT
-# PRIORITIES block (priorities.render_for_gate) and the SessionStart brief.
-# They carry no embedding, but the FTS trigger still indexes them, so without
-# this filter an unembedded priority could surface as a keyword seed and pollute
-# the decision chain.
+# Personal-layer kinds that must never seed the gate similarity chain. They are
+# surfaced through dedicated channels instead — priorities via the ACTIVE
+# PROJECT PRIORITIES block (priorities.render_for_gate) + the SessionStart
+# brief. Priorities carry no embedding, but the FTS trigger still indexes them,
+# so without this filter an unembedded priority could surface as a keyword seed
+# and pollute the decision chain. Verification profiles (profiles.PROFILE_KIND)
+# are excluded for the same reason — surface-only per-user config, not evidence.
 EXCLUDED_SEED_KINDS: frozenset[str] = frozenset(
-    {priorities.PRIORITY_KIND, "profile"}
+    {priorities.PRIORITY_KIND, profiles.PROFILE_KIND}
 )
 
 # Per-invocation JSONL telemetry. One line per run_gate() call. Mirrors
@@ -560,13 +562,11 @@ DEFAULT_REMEDY = "flag_to_user"
 # is advisory/side-note v1 (id=529): it never auto-flips the verdict — the
 # delta + objection ride along in verdict["adversary"] for the agent to surface.
 #
-# Default ON (deliberate product stance, 2026-06-04 — the adversary is core
-# latch value per the product vision, id=1345). nmeyer chose this after the
-# tradeoff was flagged: it overrides the conservative-default-OFF posture
-# (P1/P2, id=1328/id=1329 + the heal-cap precedent), accepting the per-gate
-# cost as a product decision. NOTE: the actual per-gate token/latency delta is
-# still UNMEASURED — open question id=1355. Opt OUT with CLAUDE_KB_ADVERSARY=0
-# (mcpServers.env is inherited here — this runs in the MCP process, not a hook).
+# Default ON. This overrides the conservative-default-OFF posture because the
+# adversarial layer is part of the gate's value: it looks for a stronger
+# counter-node on permissive verdicts. NOTE: the actual per-gate token/latency
+# delta is still unmeasured. Opt out with CLAUDE_KB_ADVERSARY=0
+# (mcpServers.env is inherited here; this runs in the MCP process, not a hook).
 # 120s (was 60s): the adversary is a second model call on a comparable prompt, so
 # under the same startup overhead 60s timed out on most PROCEED gates and silently
 # dropped the default-ON adversarial layer (id=1365). Correctness over speed —
@@ -972,9 +972,10 @@ def _is_intish(x) -> bool:
 
 
 def _classifier_error(reason: str) -> dict:
+    reason = str(reason or "unknown gate error").strip().rstrip(".")
     return {
         "recommendation": None,
-        "summary": "",
+        "summary": f"Gate did not produce a recommendation: {reason}.",
         "decision_chain": [],
         "abandoned_paths": [],
         "active_constraints": [],
@@ -1223,11 +1224,60 @@ Output a single JSON object, nothing else. No markdown fences. No commentary.
 """
 
 
-# Adversary system prompt by mode. This snapshot keeps the default counter-node
-# reviewer only: it attacks mis-weighted KB evidence without requiring extra
-# per-user verification profile state.
+# EXPERIMENTAL — mission-control / verification profiles. NOT recommended for use;
+# planned to be unshipped to a separate branch later (observed unhelpful on
+# pmeyer's workspace, 2026-06-10). See KB decision id=1550. Don't rely on / extend.
+# (The default counter-node adversary below is unaffected and stays in service.)
+ADVERSARY_SYSTEM_ASSUMPTION_HUNTER = """You are the adversarial reviewer for a project knowledge-base gate, in ASSUMPTION-HUNTER mode.
+
+The classifier has proposed PROCEED on a request from a user who CANNOT verify
+the agent's claims themselves — they rely on the agent to ground every assertion.
+Your job is NOT to agree. Given the same chain assembly and proposed verdict, do
+two things:
+
+1. HUNT THE UNVERIFIED ASSUMPTION. Find the single load-bearing thing the plan
+   TREATS AS TRUE without having verified it — above all a claim about what a
+   config, parameter, flag, or code path CURRENTLY does, asserted from memory or
+   from the KB rather than from reading the source. State that assumption as the
+   objection and name the EXACT artifact that would settle it (e.g. "read
+   config.toml model_tag", "grep EnableBidAskClamp in Skew20CurveFitter.cs").
+   This is the failure class where a fluent guess substitutes for a checked fact.
+   CITE-OR-PROCEED (hard rule): you may FLIP the verdict only if you can cite a
+   specific node id in the chain that already contradicts or settles the
+   assumption — set counter_node_id to it. If the assumption simply has not been
+   checked (no node settles it), set counter_node_id=null and
+   verdict_delta="none": the verdict stands, but your objection still names the
+   assumption and the artifact that would verify it. Never invent a node id.
+
+2. SURFACE GENUINE FORKS. List only the decisions that are genuinely the USER'S
+   call — their domain expertise or preference, or stakeful / hard to reverse.
+   NOT every ambiguity: if a sensible default exists and the choice is inside the
+   agent's competence, do not ask. An empty list is the correct, common answer.
+
+Output a single JSON object, nothing else. No markdown fences. No commentary.
+
+{
+  "objection": "<the unverified assumption + what would settle it, or empty>",
+  "counter_node_id": <node_id> | null,
+  "verdict_delta": "none" | "MODIFY" | "DO_NOT_PROCEED",
+  "design_decision_questions": [
+    {"question": "<the fork>",
+     "stake": "<why this is the user's call>",
+     "options_hint": ["<option a>", "<option b>"]}
+  ]
+}
+"""
+
+
+# Adversary system prompt by mode. Profile-selected (KB id=1420 / id=1428):
+# 'counter_node' is the shipped default (attack MIS-WEIGHTED KB evidence);
+# 'assumption_hunter' (mission-control profiles) attacks UNVERIFIED assumptions —
+# the PBE-111 failure class. Same output contract, so _normalize_adversary /
+# parse_adversary_output are unchanged. Unknown/missing mode → counter_node, so
+# the default path stays byte-identical for unbound / trust-and-go actors.
 ADVERSARY_SYSTEMS = {
     "counter_node": ADVERSARY_SYSTEM,
+    "assumption_hunter": ADVERSARY_SYSTEM_ASSUMPTION_HUNTER,
 }
 
 
@@ -1458,12 +1508,20 @@ def format_gate_findings(
     see latch's recommendation, cited KB nodes, and any unresolved gaps.
     """
     receipt_summary = _gate_receipt_summary(verdict, evidence)
+    summary = str(verdict.get("summary") or "").strip()
+    if not summary:
+        error = str(verdict.get("error") or "").strip().rstrip(".")
+        summary = (
+            f"Gate did not produce a recommendation: {error}."
+            if error else
+            "Gate did not produce a recommendation."
+        )
     out = {
         "label": "Latch gate findings",
         "must_display_to_user": True,
         "source": "kb_gate",
         "recommendation": verdict.get("recommendation"),
-        "summary": str(verdict.get("summary") or "").strip(),
+        "summary": summary,
         "risk_if_proceed": str(verdict.get("risk_if_proceed") or "").strip(),
         "better_next_action": str(verdict.get("better_next_action") or "").strip(),
         "decision_chain": list(verdict.get("decision_chain") or []),
@@ -1596,7 +1654,10 @@ def run_gate(
     # the user decides. Its own latency lands in adversary.log; the classifier
     # path's elapsed_ms (gate.log) above is unaffected.
     if use_llm and _should_fire_adversary(verdict):
-        adv_mode = "counter_node"
+        # Profile-selected adversary mode (KB id=1420): counter-node by default
+        # (byte-identical to the shipped path), assumption-hunter for
+        # mission-control profiles. Lightweight binding lookup, no writes.
+        adv_mode = profiles.active_adversary_mode(conn)
         adv_t0 = time.perf_counter()
         adv = adversary_classify(
             chain_assembly, verdict,

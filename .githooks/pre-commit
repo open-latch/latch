@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# Block commits containing denylisted project-term references.
+# Override (use sparingly, with discipline): git commit --no-verify
+set -euo pipefail
+
+DENY_FILE="$(git rev-parse --show-toplevel)/.githooks/denylist.txt"
+ROOT="$(git rev-parse --show-toplevel)"
+
+if [ -x "${ROOT}/.venv/bin/python" ]; then
+    PY="${ROOT}/.venv/bin/python"
+elif command -v python3 >/dev/null 2>&1; then
+    PY="python3"
+elif command -v python >/dev/null 2>&1; then
+    PY="python"
+else
+    echo "x pre-commit: no Python found for public release hygiene check." >&2
+    exit 2
+fi
+
+"${PY}" "${ROOT}/src/public_release_check.py" --repo "${ROOT}"
+
+if [ ! -f "$DENY_FILE" ]; then
+    exit 0    # no denylist == nothing to enforce
+fi
+
+# Build the alternation regex from non-comment lines.
+PATTERNS="$(grep -v -E '^[[:space:]]*(#|$)' "$DENY_FILE" | paste -sd'|' -)"
+if [ -z "$PATTERNS" ]; then
+    exit 0
+fi
+
+# Inspect only the staged diff (cached). Skip binary files automatically
+# via git's text-detection. Use -P (PCRE) for proper alternation handling.
+HITS="$(git diff --cached --no-ext-diff -U0 -- \
+        ':!.githooks/denylist.txt' \
+        ':!src/public_release_check.py' \
+        ':!tests/test_public_release_check.py' \
+        | grep -nE "^\+.*($PATTERNS)" || true)"
+
+if [ -n "$HITS" ]; then
+    echo "x pre-commit: staged changes contain denylisted terms." >&2
+    echo "$HITS" | sed 's/^/    /' >&2
+    echo "" >&2
+    echo "  Override (only with explicit reason): git commit --no-verify" >&2
+    exit 1
+fi
+
+exit 0

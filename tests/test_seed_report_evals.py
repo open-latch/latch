@@ -24,7 +24,7 @@ def test_seed_report_eval_passes_default_bundle():
     _assert(summary["source_counts"]["codex"] == 1, summary)
     check_ids = {row["id"] for row in result["checks"] if row["passed"]}
     for required in {
-        "workstream_handoff",
+        "internal_workstream_handoff",
         "next_step_followup",
         "redis_rejected_path",
         "agent_revived_rejected_path",
@@ -34,7 +34,8 @@ def test_seed_report_eval_passes_default_bundle():
     report = seed_report_evals.render_markdown(result)
     _assert("Seed Report Eval" in report, report)
     _assert("ongoing_workstream" in report, report)
-    _assert("ongoing workstreams" in report, report)
+    _assert("continuity notes" in report, report)
+    _assert("ongoing workstreams" not in report, report)
     _assert("agent alignment check" in report, report)
     print("PASS seed_report_eval_passes_default_bundle")
 

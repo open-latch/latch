@@ -3,7 +3,7 @@
   Verify latch's Codex preview wiring.
 
 .DESCRIPTION
-  Checks Codex config.toml, AGENTS.md, the MCP command target, and Codex compact
+  Checks Codex config.toml, AGENTS.md, the MCP launch target, and Codex compact
   transcript resolution. This is the Codex counterpart to latch_doctor.ps1; it
   does not inspect or mutate Claude Code settings.
 #>

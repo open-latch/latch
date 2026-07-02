@@ -38,7 +38,7 @@ class ReportCheck:
 
 
 SECTION_LABELS = {
-    "ongoing_workstreams": "ongoing workstreams",
+    "continuity_notes": "continuity notes",
     "where_left_off": "next steps / open questions",
     "decisions_and_rejected_paths": "decisions / rejected paths",
     "patterns_and_preferences": "patterns / preferences",
@@ -47,9 +47,9 @@ SECTION_LABELS = {
 
 DEFAULT_CHECKS = (
     ReportCheck(
-        id="workstream_handoff",
+        id="internal_workstream_handoff",
         kind="ongoing_workstream",
-        section="ongoing_workstreams",
+        section="continuity_notes",
         phrases=("launch workstream handoff",),
         signal="ongoing_workstream",
     ),
@@ -130,8 +130,8 @@ def run_seed_report_eval() -> dict[str, Any]:
             "thesis": (
                 "Seed-report evals grade whether latch's install-time seed "
                 "surface finds durable project state with evidence before "
-                "first compact: ongoing workstreams, next steps, decisions and "
-                "rejected paths, preferences, direction/priorities, and "
+                "first compact: continuity notes, next steps, decisions and "
+                "rejected paths, preferences, direction signals, and "
                 "high-confidence agent-alignment findings."
             ),
             "summary": {

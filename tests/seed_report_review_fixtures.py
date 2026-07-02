@@ -139,7 +139,7 @@ def render_review_text(payload: dict) -> str:
         str(payload.get("intro") or seed.SEED_INTRO),
         "",
         "Seeding reads selected local Claude and/or Codex chats for this project and "
-        "proposes ongoing workstreams, decisions, preferences, and rejected paths "
+        "proposes decisions, rejected paths, preferences, and concrete follow-ups "
         "that latch can judge against before the first new compacted session.",
         "",
         f"Project: {payload.get('project')}",
@@ -260,10 +260,10 @@ def write_fixture_transcripts(*, project: Path, claude_home: Path, codex_home: P
         mtime=now + 40,
         user_messages=[
             "We decided not to use Redis for local state.",
-            "Actually, new requirement: use Redis for the local cache. This overrides the earlier local-only decision.",
+            "Actually, new requirement: use Redis for shared team cache. This overrides the earlier local-only decision.",
         ],
         assistant_messages=[
-            "I added Redis for the local cache based on the new requirement.",
+            "I added Redis for the shared team cache based on the new requirement.",
         ],
         title="Negative: user explicitly changed their mind",
         expected="No agent mistake. Later user approval should cancel the apparent contradiction.",

@@ -42,9 +42,9 @@ _GETTING_STARTED_BLOCK = (
     "summarizes the session into the KB so the reasoning isn't lost (this is "
     "latch's command — *not* Claude Code's built-in `/compact`, which only trims "
     "the conversation and saves nothing to the KB). Budget-gated and quick.\n"
-    "- **New project? Seed one decision** — capture one approach you've already "
-    "ruled out and why, then ask for it later and latch can surface the prior "
-    "decision before the agent repeats old work.\n"
+    "- **New project? Run `/latch-pm`** — tell me one approach you've already "
+    "ruled out and why, then try asking for it again and watch latch catch the "
+    "contradiction. Optional; re-runnable any time.\n"
     "- This note disappears once your KB has a little history.\n"
 )
 

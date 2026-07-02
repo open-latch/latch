@@ -42,9 +42,10 @@ import log_utils
 
 ADVERSARY_STREAM = "adversary"
 DECISION_STREAM = "decision"
-# Reserved structural stream for deterministic detection experiments. It stays
-# structural-only: counts + a closed-set action + a transcript join hash, never
-# prompt or answer text.
+# One row per mission-control assistant turn scanned by the Stop-hook cite
+# detector (Slice 3-B, KB id=1436). Structural-only: counts + a closed-set
+# action + a transcript join hash, never the claim text. Feeds the precision
+# measurement the advisory-posture decision deferred to data (id=1395 / id=1197).
 DETECTION_STREAM = "detection"
 
 # Closed-set discriminators. Kept LOCAL (not imported from gate.py) to avoid
@@ -61,11 +62,14 @@ DECISION_PROVENANCES = ("adversary_fork", "gate_question", "inline_capture")
 # verdict (proceeded against a MODIFY/DO_NOT_PROCEED, or rejected a PROCEED).
 # "override" is the highest-signal row. Structural-only: a closed-set label.
 HUMAN_ACTIONS = ("approve", "modify", "reject", "override")
-# Which adversary discipline produced the row. This snapshot keeps the default
-# counter-node reviewer only.
-ADVERSARY_MODES = ("counter_node",)
-# What a deterministic detector did this turn: "none" = scanned, nothing
-# flagged; "nudge_queued" = a follow-up nudge was queued.
+# Which adversary discipline produced the row — the profile-selected mode
+# (KB id=1420 / id=1428). Tagged on every adversary.log row so the
+# counter-node-vs-assumption-hunter comparison has differential data from day
+# one (the open question of which mode wins is decided by measurement later).
+ADVERSARY_MODES = ("counter_node", "assumption_hunter")
+# What the Stop-hook cite detector did this turn: "none" = scanned, nothing
+# flagged; "nudge_queued" = an uncited code-class claim was found and the
+# advisory next-turn nudge was queued for the UserPromptSubmit hook.
 DETECTION_ACTIONS = ("none", "nudge_queued")
 
 
@@ -132,9 +136,10 @@ def emit_detection_event(
 ) -> None:
     """Emit one ``detection.log`` row (point-in-time, at the Stop-hook scan).
 
-    Structural-only; never raises. Each scanned turn emits a row (including the
-    all-clear ``n_flagged=0`` case) so both numerator and denominator are on
-    record for later precision checks.
+    Structural-only; never raises. Only the Stop hook calls this, and only for
+    a mission-control-bound actor — every scanned turn emits a row (including
+    the all-clear ``n_flagged=0`` case) so both numerator and denominator are on
+    record for the precision measurement (id=1197 pattern).
 
     Args:
         n_claims: windows containing a current-value/code/config claim.

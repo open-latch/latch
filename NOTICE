@@ -1,0 +1,19 @@
+latch
+Copyright (c) 2026 Nicolaus Meyer
+
+This distribution includes third-party model and tokenizer artifacts under
+vendor/ that correspond to sentence-transformers/all-MiniLM-L6-v2:
+
+- vendor/model.onnx (from upstream onnx/model.onnx)
+- vendor/config.json
+- vendor/tokenizer.json
+- vendor/tokenizer_config.json
+- vendor/special_tokens_map.json
+- vendor/vocab.txt
+
+Source: https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2
+Upstream revision checked for this notice:
+1110a243fdf4706b3f48f1d95db1a4f5529b4d41
+License: Apache License 2.0 (SPDX: Apache-2.0)
+
+This NOTICE file is for attribution only and does not modify LICENSE.

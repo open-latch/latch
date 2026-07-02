@@ -41,7 +41,7 @@ Project-wide by default — NOT user-filtered (unlike todos). The CEO's directiv
 applies to every dev. Workstream-scoped rows apply to every dev working inside
 that workstream. `created_by` is still stamped for audit.
 
-Injected at two already-paid-for surfaces (no per-prompt LLM cost):
+Injected at two existing surfaces (no per-prompt LLM cost):
   * kb_gate classifier prompt — the primary surface (gate.py).
   * SessionStart brief — a "Top of mind" section (hooks/session_start.py).
 

@@ -163,8 +163,72 @@ def test_invoke_summarizer_parses_codex_result():
     print("PASS invoke_summarizer_parses_codex_result")
 
 
+def test_repair_prompt_is_self_contained_for_isolated_backend():
+    old_invoke_once = compactor._invoke_summarizer_once
+    calls: list[str] = []
+    try:
+        def fake_invoke_once(user_msg: str, *, backend: str = "claude", timeout_s=None):
+            calls.append(user_msg)
+            if len(calls) == 1:
+                return "Summary title: Install cleanup\nSummary body: Removed stale command surfaces.", None
+            _assert("Produce ONE JSON object" in user_msg, user_msg[:500])
+            _assert('"session_summary"' in user_msg, user_msg[:500])
+            _assert("--- ORIGINAL TRANSCRIPT EXCERPT ---" in user_msg, user_msg[:500])
+            _assert("Removed stale command surfaces" in user_msg, user_msg[-1000:])
+            return COMPACTION_JSON, None
+
+        compactor._invoke_summarizer_once = fake_invoke_once
+        payload = {
+            "prior_summary": "",
+            "related_kb_nodes": [{"id": 1, "kind": "workstream", "title": "Launch"}],
+            "transcript": "[user] remove stale profile command surfaces",
+            "project_path": "/repo",
+            "session_id": "sid",
+        }
+        parsed = compactor._invoke_summarizer(payload, backend="codex")
+        _assert(parsed is not None, "expected repair to parse")
+        _assert(parsed["session_summary"]["title"] == "Codex compact", parsed)
+        _assert(len(calls) == 2, f"expected first attempt + repair, got {len(calls)}")
+    finally:
+        compactor._invoke_summarizer_once = old_invoke_once
+    print("PASS repair_prompt_is_self_contained_for_isolated_backend")
+
+
+def test_invoke_summarizer_repairs_parsed_empty_result():
+    old_invoke_once = compactor._invoke_summarizer_once
+    calls: list[str] = []
+    try:
+        def fake_invoke_once(user_msg: str, *, backend: str = "claude", timeout_s=None):
+            calls.append(user_msg)
+            if len(calls) == 1:
+                return (
+                    '{"session_summary":{"title":"Empty","body":""},'
+                    '"extracted_nodes":[],"links":[]}'
+                ), None
+            _assert("parsed JSON had no summary body" in user_msg, user_msg[:1000])
+            return COMPACTION_JSON, None
+
+        compactor._invoke_summarizer_once = fake_invoke_once
+        payload = {
+            "prior_summary": "prior",
+            "related_kb_nodes": [],
+            "transcript": "[user] did meaningful work",
+            "project_path": "/repo",
+            "session_id": "sid",
+        }
+        parsed = compactor._invoke_summarizer(payload, backend="codex")
+        _assert(parsed is not None, "expected parsed repair result")
+        _assert(parsed["session_summary"]["body"] == "Summary body", parsed)
+        _assert(len(calls) == 2, f"expected empty parsed result to trigger repair: {len(calls)}")
+    finally:
+        compactor._invoke_summarizer_once = old_invoke_once
+    print("PASS invoke_summarizer_repairs_parsed_empty_result")
+
+
 if __name__ == "__main__":
     test_invoke_claude_once_disallows_action_tools()
     test_invoke_codex_once_uses_isolated_exec_shape()
     test_invoke_summarizer_parses_codex_result()
+    test_repair_prompt_is_self_contained_for_isolated_backend()
+    test_invoke_summarizer_repairs_parsed_empty_result()
     print("\nAll compactor_backends tests pass.")

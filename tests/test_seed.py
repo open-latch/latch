@@ -559,8 +559,10 @@ def test_seed_report_groups_candidates_into_demo_sections():
 
     report = seed.build_seed_report(candidates)
     by_key = {section.key: section for section in report}
-    _assert(by_key["ongoing_workstreams"].items[0].title.startswith("Launch workstream"),
-            f"workstream should land in ongoing workstreams section: {report}")
+    _assert(report[0].key == "decisions_and_rejected_paths",
+            f"decisions/rejected paths should lead the install-time report: {report}")
+    _assert(by_key["continuity_notes"].items[0].title.startswith("Launch workstream"),
+            f"workstream should be preserved internally but displayed as continuity: {report}")
     _assert(by_key["decisions_and_rejected_paths"].items[0].title.startswith("Use SQLite"),
             f"decision should land in decisions section: {report}")
     _assert(by_key["patterns_and_preferences"].items[0].title.startswith("Preview writes"),
@@ -573,14 +575,16 @@ def test_seed_report_groups_candidates_into_demo_sections():
             f"alignment direction should synthesize from source-backed candidates: {report}")
 
     out = seed.render_text(args=args, sources=[], candidates=candidates, llm_estimate=0)
-    _assert("Latch receipt:" in out and "proof receipt for the local KB" in out,
+    _assert("Latch receipt:" in out and "proof receipt, not a dashboard" in out,
             f"rendered report should include a visible latch receipt: {out}")
-    _assert("Why this mattered:" in out and "future search and gate checks" in out,
+    _assert("Why this mattered:" in out and "future gates can cite" in out,
             f"receipt should explain why the report matters: {out}")
     _assert("Next proof:" in out and "kb_gate challenge the strongest rejected path" in out,
             f"receipt should point to the rejected-path proof loop: {out}")
-    _assert("Seed report:" in out and "## Ongoing workstreams" in out,
-            f"rendered report should have ongoing workstream section: {out}")
+    _assert("Seed report:" in out and "## Decisions and rejected paths" in out,
+            f"rendered report should lead with decisions/rejected paths: {out}")
+    _assert("## Continuity notes" in out and "Ongoing workstreams" not in out,
+            f"rendered report should not foreground workstreams: {out}")
     _assert("## Where you left off" in out,
             f"rendered report should have visible sections: {out}")
     _assert("## Agent alignment check" in out and "Direction and priorities:" in out,
@@ -601,7 +605,7 @@ def test_seed_report_groups_candidates_into_demo_sections():
             f"catch demo should derive a concrete rejected-path request: {out}")
 
     payload = json.loads(seed.render_json(args=args, sources=[], candidates=candidates, llm_estimate=0))
-    _assert("report" in payload and payload["report"][0]["key"] == "ongoing_workstreams",
+    _assert("report" in payload and payload["report"][0]["key"] == "decisions_and_rejected_paths",
             f"json report should be structured: {payload}")
     _assert(payload["receipt"]["label"] == "Latch seed receipt",
             f"json report should include a seed receipt: {payload}")
@@ -609,8 +613,8 @@ def test_seed_report_groups_candidates_into_demo_sections():
             f"receipt should be displayable: {payload}")
     _assert(payload["receipt"]["used"]["sections"]["decisions_and_rejected_paths"] == 1,
             f"receipt should count rejected-path decisions: {payload}")
-    _assert(payload["receipt"]["used"]["sections"]["ongoing_workstreams"] == 1,
-            f"receipt should count ongoing workstreams: {payload}")
+    _assert(payload["receipt"]["used"]["sections"]["continuity_notes"] == 1,
+            f"receipt should count continuity notes: {payload}")
     _assert(payload["receipt"]["used"]["sections"]["agent_alignment_check"] == 1,
             f"receipt should count agent-alignment findings: {payload}")
     alignment = next(
@@ -668,8 +672,8 @@ def test_user_signal_lines_ignore_injected_context_fragments():
         "[user] - Be specific. Prefer concrete facts over generalities.",
         "[user] We are going to pr recent changes; what should we test to avoid regressions?",
         "[user] After you finish, please commit and investigate why the gate failed.",
-        "[user] and like the value actually holds in repeated local sessions?",
-        "[user] Agents need a record of what was already decided, rejected, or needs care.",
+        "[user] and like the value actually holds at scale for larger projects?",
+        "[user] Agents need generic memory for what the team already decided, rejected, or needs to be careful about.",
     ])
     lines = seed.user_signal_lines(text)
     joined = "\n".join(lines)

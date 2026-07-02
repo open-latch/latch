@@ -1,7 +1,7 @@
 """Tee-only wrapper for the latch MCP server.
 
 Claude Code spawns the MCP server over stdio and silently swallows its stderr,
-so pre-warm exceptions / import failures / FastMCP server-start messages never reach
+so pre-warm exceptions / import failures / FastMCP startup messages never reach
 disk. This wrapper preserves stdin/stdout (MCP protocol passes through
 unchanged) but mirrors the child's stderr to a per-machine log file so failures
 leave a fingerprint.

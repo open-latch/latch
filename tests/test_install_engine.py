@@ -24,6 +24,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import install_engine as ie  # noqa: E402
 
+ROOT = Path(__file__).resolve().parent.parent
+
 
 def _assert(cond, msg):
     if not cond:
@@ -299,6 +301,17 @@ def test_commands_status_missing_then_present_then_unresolved():
         restore()
 
 
+def test_default_commands_hide_workstream_control_surfaces():
+    command_names = {path.name for path in (ROOT / "commands").glob("*.md")}
+    _assert("kb-focus.md" not in command_names,
+            f"workstream focus should not be a default slash command: {command_names}")
+    _assert("kb-project-direction.md" not in command_names,
+            f"project direction should not be a default slash command: {command_names}")
+    _assert("kb-gate.md" in command_names and "kb-compact.md" in command_names,
+            f"core commands should still be installed: {command_names}")
+    print("PASS default_commands_hide_workstream_control_surfaces")
+
+
 def test_resolve_python_override_and_env():
     # explicit override that exists -> absolute resolved path
     _assert(ie.resolve_python(sys.executable) == str(Path(sys.executable).resolve()),
@@ -444,13 +457,15 @@ def test_apply_preflight_blocks_without_claude_cli():
     print("PASS apply_preflight_blocks_without_claude_cli")
 
 
-def test_restart_next_step_message_names_claude_code():
+def test_restart_next_step_message_names_vscode_and_claude_code():
     msg = ie.restart_next_step_message()
+    _assert("Restart VS Code" in msg,
+            "restart message should help VS Code users know what to restart")
     _assert("Claude Code" in msg,
-            "restart message should name Claude Code")
+            "restart message should still cover non-VS Code Claude Code users")
     _assert("MCP roster" in msg and "kb_* tools" in msg,
             "restart message should explain why restart matters")
-    print("PASS restart_next_step_message_names_claude_code")
+    print("PASS restart_next_step_message_names_vscode_and_claude_code")
 
 
 def test_posttooluse_hook_wired_with_matcher_and_preserves_others():
@@ -505,11 +520,12 @@ if __name__ == "__main__":
     test_install_commands_copies_and_substitutes()
     test_install_commands_dry_run_writes_nothing()
     test_commands_status_missing_then_present_then_unresolved()
+    test_default_commands_hide_workstream_control_surfaces()
     test_resolve_python_override_and_env()
     test_seed_next_step_message_names_immediate_value_and_preview()
     test_seed_command_args_use_llm_apply_and_project()
     test_offer_seed_after_install_noninteractive_does_not_run()
     test_no_seed_prompt_prints_seed_handoff_unless_suppressed()
     test_apply_preflight_blocks_without_claude_cli()
-    test_restart_next_step_message_names_claude_code()
+    test_restart_next_step_message_names_vscode_and_claude_code()
     print("\nAll install_engine tests pass.")

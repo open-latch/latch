@@ -47,7 +47,7 @@ SIGNAL_PATTERNS: list[tuple[str, str, str, float]] = [
     ("decision", "decision", r"\b(we decided|i decided|the decision is|let'?s use|use .* instead)\b", 0.68),
     ("preference", "preference", r"\b(always|never|prefer|from now on|as a rule|i like|i hate)\b", 0.66),
     ("correction", "fact", r"\b(that'?s wrong|not what i meant|still broken|still wrong|doesn'?t work|failed because|failure|root cause)\b", 0.58),
-    ("ongoing_workstream", "workstream", r"\b(workstream|project lane|roadmap lane|ongoing lane|active lane)\b", 0.60),
+    ("ongoing_workstream", "workstream", r"\b(workstream|project lane|ongoing lane|active lane)\b", 0.60),
     ("open_question", "open_question", r"\b(we need to decide|open question|not sure yet|circle back)\b", 0.55),
 ]
 
@@ -107,19 +107,14 @@ RETROACTIVE_AGENT_MISTAKE_PATTERNS = (
 )
 REPORT_SECTION_DEFS = (
     (
-        "ongoing_workstreams",
-        "Ongoing workstreams",
-        "Candidate active lanes that may deserve explicit workstream anchors.",
+        "decisions_and_rejected_paths",
+        "Decisions and rejected paths",
+        "Project judgment latch can enforce before future code is written.",
     ),
     (
         "where_left_off",
         "Where you left off",
         "Recent durable outcomes, follow-ups, and state hints worth picking back up.",
-    ),
-    (
-        "decisions_and_rejected_paths",
-        "Decisions and rejected paths",
-        "Project judgment latch can enforce before future code is written.",
     ),
     (
         "patterns_and_preferences",
@@ -130,6 +125,11 @@ REPORT_SECTION_DEFS = (
         "agent_alignment_check",
         "Agent alignment check",
         "High-level direction latch inferred, then strict checks for agent behavior that appears to violate it.",
+    ),
+    (
+        "continuity_notes",
+        "Continuity notes",
+        "Long-running threads captured only when strongly supported by prior sessions.",
     ),
 )
 
@@ -402,7 +402,8 @@ def source_matches_project(path: Path, text: str, project_path: str) -> bool:
 
 def _encoded_claude_project_path(project: str) -> str:
     # Claude Code stores project transcript dirs as slash-replaced path keys
-    # such as -Users-nicomey-repos-latch. Keep this permissive across OSes.
+    # such as a slash-replaced absolute project path. Keep this permissive
+    # across OSes.
     return project.replace("\\", "-").replace("/", "-").replace(":", "")
 
 
@@ -653,7 +654,7 @@ def candidate_title(signal: str, excerpt: str) -> str:
         "decision": "Seeded decision",
         "preference": "Seeded preference",
         "correction": "Seeded correction signal",
-        "ongoing_workstream": "Suggested workstream",
+        "ongoing_workstream": "Seeded continuity note",
         "open_question": "Seeded open question",
     }
     cleaned = WHITESPACE_RE.sub(" ", excerpt).strip()
@@ -677,9 +678,9 @@ def candidate_body(
         "staging evidence until reviewed/promoted.\n\n"
         f"Mode: {mode}\n"
         f"Signals: {', '.join(sorted(set(signals)))}\n\n"
-        "Why this helps: it gives latch initial workstream anchors, decisions, "
-        "preferences, and rejected paths to judge against before a fresh project "
-        "has accumulated new compacted sessions.\n\n"
+        "Why this helps: it gives latch initial decisions, preferences, rejected "
+        "paths, and continuity notes to judge against before a fresh project has "
+        "accumulated new compacted sessions.\n\n"
         "Source evidence:\n"
         f"{sources}\n\n"
         "Excerpt:\n"
@@ -973,7 +974,7 @@ def build_seed_report(candidates: list[SeedCandidate]) -> list[SeedReportSection
 def report_section_key(candidate: SeedCandidate) -> str:
     signals = normalized_signals(candidate.signals)
     if "ongoing_workstream" in signals or candidate.kind == "workstream":
-        return "ongoing_workstreams"
+        return "continuity_notes"
     if signals & AGENT_MISTAKE_SIGNALS and candidate.confidence >= AGENT_MISTAKE_MIN_CONFIDENCE:
         return "agent_alignment_check"
     if "rejected_path" in signals or candidate.kind == "decision":
@@ -1126,7 +1127,7 @@ def seed_report_receipt(
     source_total = len(sources)
     source_label = "source" if source_total == 1 else "sources"
     decisions = section_counts.get("decisions_and_rejected_paths", 0)
-    workstreams = section_counts.get("ongoing_workstreams", 0)
+    continuity = section_counts.get("continuity_notes", 0)
     left_off = section_counts.get("where_left_off", 0)
     preferences = section_counts.get("patterns_and_preferences", 0)
     mistakes = section_counts.get("agent_alignment_check", 0)
@@ -1141,16 +1142,15 @@ def seed_report_receipt(
     )
     summary = (
         f"Latch built this first-wow report from {source_total} selected local "
-        f"{source_label}; it is a proof receipt for the local KB."
+        f"{source_label}; it is a proof receipt, not a dashboard."
     )
     why = (
         "It surfaced "
-        f"{workstreams} ongoing-workstream suggestion(s), {decisions} "
-        f"decision/rejected-path item(s), {left_off} where-left-off item(s), "
-        f"{preferences} pattern/preference item(s), {direction_items} "
-        f"direction/priority inference(s), and {mistakes} strictly filtered "
-        "agent-alignment finding(s) that future search and gate checks can cite "
-        "before code changes."
+        f"{decisions} decision/rejected-path item(s), {left_off} where-left-off "
+        f"item(s), {preferences} pattern/preference item(s), {continuity} "
+        f"continuity note(s), {direction_items} direction item(s), and "
+        f"{mistakes} strictly filtered agent-alignment finding(s) that future "
+        "gates can cite before code changes."
     )
     return {
         "label": "Latch seed receipt",
@@ -1234,7 +1234,7 @@ def render_text(
         SEED_INTRO,
         "",
         "Seeding reads selected local Claude and/or Codex chats for this project and "
-        "proposes ongoing workstreams, decisions, preferences, and rejected paths "
+        "proposes decisions, rejected paths, preferences, and concrete follow-ups "
         "that latch can judge against before the first new compacted session.",
         "",
         f"Project: {Path(args.project).resolve()}",
@@ -1414,8 +1414,6 @@ def apply_candidates(candidates: list[SeedCandidate], *, project_path: str) -> l
                 artifacts=[{"repo": project_path}],
             )
             inserted.append(int(result["id"]))
-            if cand.kind == "workstream":
-                db.set_focus(conn, int(result["id"]))
     finally:
         conn.close()
     return inserted

@@ -177,7 +177,7 @@ def test_closed_set_constants():
             {"approve", "modify", "reject", "override"},
             "HUMAN_ACTIONS drift")
     _assert(set(capture_streams.ADVERSARY_MODES) ==
-            {"counter_node"},
+            {"counter_node", "assumption_hunter"},
             "ADVERSARY_MODES drift")
     # Must mirror gate.CLASSIFIER_LABELS (kept local to avoid importing gate).
     _assert(capture_streams.VERDICT_LABELS ==

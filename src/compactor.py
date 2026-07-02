@@ -37,6 +37,8 @@ CLAUDE_COMPACTOR_DISALLOWED_TOOLS = "Bash,Edit,Write,NotebookEdit"
 # parent has no console. 0 on POSIX (no-op). See heal.py for the full rationale.
 CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 MAX_TRANSCRIPT_CHARS = 120_000  # truncate from the head; prefer recent turns
+REPAIR_RAW_OUTPUT_CHARS = 20_000
+REPAIR_TRANSCRIPT_CHARS = 40_000
 SUPPORTED_SUMMARIZER_BACKENDS = {"claude", "codex"}
 
 COMPACT_PROMPT = """You are summarizing a coding-agent session for a per-project knowledge base.
@@ -78,7 +80,7 @@ Kind semantics (pick the best fit; when in doubt, `fact`):
 - preference: a user-stated way to work (style, tool, convention).
 - open_question: something unresolved that needs later attention.
 - idea: a hypothetical/future item — something the user has floated but not
-  committed to. Parked roadmap items, experimental directions, "maybe someday"
+  committed to. Parked future items, experimental directions, "maybe someday"
   thoughts. Ideas are surfaced to future sessions so they are not lost.
 
 Workstream guidance:
@@ -377,17 +379,16 @@ def _invoke_summarizer(payload: dict, *, backend: str = "claude") -> dict | None
         return None
 
     obj, parse_err = _parse_json_envelope(stdout)
-    if obj is not None:
+    if obj is not None and _has_compaction_content(obj):
         return obj
+    if obj is not None:
+        parse_err = "parsed JSON had no summary body, extracted nodes, or links"
 
     _log(f"compactor first-attempt parse failed ({parse_err}); attempting repair")
-    repair_msg = (
-        "The previous output failed JSON parsing with this error:\n"
-        + parse_err
-        + "\n\nHere is the raw output you produced:\n\n"
-        + stdout[:20000]
-        + "\n\nReturn ONLY a single valid JSON object matching the schema from the "
-        + "original request. No markdown fences, no prose, no commentary."
+    repair_msg = _repair_prompt(
+        payload=payload,
+        parse_err=parse_err,
+        raw_output=stdout,
     )
     stdout2, err2 = _invoke_summarizer_once(repair_msg, backend=backend)
     if stdout2 is None:
@@ -397,8 +398,13 @@ def _invoke_summarizer(payload: dict, *, backend: str = "claude") -> dict | None
         return None
 
     obj2, parse_err2 = _parse_json_envelope(stdout2)
-    if obj2 is not None:
+    if obj2 is not None and _has_compaction_content(obj2):
         _log("compactor repair succeeded")
+        return obj2
+    if obj2 is not None:
+        _log("compactor repair parsed JSON but result was empty")
+        _save_failed_compact(payload, stdout, stdout2,
+                             reason=f"first:{parse_err};repair_empty")
         return obj2
 
     _log(f"compactor repair parse also failed: {parse_err2}")
@@ -406,6 +412,55 @@ def _invoke_summarizer(payload: dict, *, backend: str = "claude") -> dict | None
                          reason=f"first:{parse_err};repair:{parse_err2}")
     return None
 
+
+def _repair_prompt(*, payload: dict, parse_err: str, raw_output: str) -> str:
+    """Build a self-contained repair prompt.
+
+    Repair calls are separate `claude -p` / `codex exec` processes with no
+    session memory, so references to "the original request" are not enough.
+    Include the schema and a bounded slice of the original context so the
+    repair model can either convert useful prose output into JSON or regenerate
+    a valid compact when the first output was structurally empty.
+    """
+    transcript = payload.get("transcript") or ""
+    if len(transcript) > REPAIR_TRANSCRIPT_CHARS:
+        transcript = (
+            "...[earlier transcript omitted for repair]...\n\n"
+            + transcript[-REPAIR_TRANSCRIPT_CHARS:]
+        )
+    return (
+        COMPACT_PROMPT
+        + "\n\nThe previous output failed compaction validation with this error:\n"
+        + parse_err
+        + "\n\nHere is the raw output produced by the previous attempt:\n\n"
+        + (raw_output or "")[:REPAIR_RAW_OUTPUT_CHARS]
+        + "\n\n--- ORIGINAL PRIOR SUMMARY ---\n"
+        + (payload.get("prior_summary") or "(none)")
+        + "\n\n--- ORIGINAL RELATED KB NODES ---\n"
+        + json.dumps(payload.get("related_kb_nodes") or [], indent=2)
+        + "\n\n--- ORIGINAL TRANSCRIPT EXCERPT ---\n"
+        + transcript
+        + "\n\nReturn ONLY a single valid JSON object matching the schema above. "
+        + "No markdown fences, no prose, no commentary."
+    )
+
+
+def _has_compaction_content(obj: dict) -> bool:
+    summary = obj.get("session_summary") or {}
+    if isinstance(summary, dict) and (summary.get("body") or "").strip():
+        return True
+    for node in obj.get("extracted_nodes", []) or []:
+        if isinstance(node, dict) and (node.get("body") or "").strip():
+            return True
+    for link in obj.get("links", []) or []:
+        if (
+            isinstance(link, dict)
+            and link.get("src_title")
+            and link.get("dst_id") is not None
+            and link.get("relation")
+        ):
+            return True
+    return False
 
 def _invoke_summarizer_once(
     user_msg: str,

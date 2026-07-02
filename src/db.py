@@ -254,6 +254,66 @@ def _migrate_priorities_order(conn: sqlite3.Connection) -> None:
             (r["id"], retired_at),
         )
     conn.commit()
+    _migrate_profiles(conn)
+
+
+# EXPERIMENTAL — mission-control / verification profiles. NOT recommended for use;
+# planned to be unshipped to a separate branch later (observed unhelpful on
+# pmeyer's workspace, 2026-06-10). See KB decision id=1550. Don't rely on / extend.
+def _migrate_profiles(conn: sqlite3.Connection) -> None:
+    """Side tables for verification profiles (see profiles.py).
+
+    `profile_config` carries the typed gate-behaviour parameters keyed by the
+    profile node id — NOT crammed into the free-text node body (the
+    "don't merge into priority rows" line, id=1406). `profile_binding` maps a
+    resolved actor (db._ACTOR — CLAUDE_KB_USER/USERNAME/USER, id=1405) to the
+    profile node currently active for that user.
+
+    Idempotent — CREATE TABLE IF NOT EXISTS only; no backfill. The built-in
+    presets (trust-and-go / mission-control) are materialised lazily as profile
+    nodes by profiles.ensure_presets, not seeded here (migrations stay
+    schema-only)."""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS profile_config (
+            profile_node_id      INTEGER PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
+            gate_surface         TEXT NOT NULL,
+            verdict_posture      TEXT NOT NULL,
+            claim_backing_policy TEXT NOT NULL,
+            adversary            TEXT NOT NULL,
+            user_authority       TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS profile_binding (
+            actor           TEXT    PRIMARY KEY,
+            profile_node_id INTEGER NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+            bound_at        TEXT    NOT NULL
+        )
+        """
+    )
+    conn.commit()
+    _migrate_cite_nudge(conn)
+
+
+def _migrate_cite_nudge(conn: sqlite3.Connection) -> None:
+    """Per-session pending cite-nudge marker for mission control's Slice 3-B
+    (KB id=1436). The Stop-hook cite detector sets a small count when it flags
+    an uncited current-value/code claim; the next UserPromptSubmit reads+resets
+    it and surfaces the advisory correction directive.
+
+    Lives as a column on the `sessions` row, not a side table: it is transient
+    per-session state (set then consumed within a session), not auditable
+    history — the audit trail is detection.log. Idempotent: PRAGMA-checks
+    before ALTER (CREATE TABLE IF NOT EXISTS can't guard a column add)."""
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(sessions)").fetchall()}
+    if "pending_cite_nudge" not in cols:
+        conn.execute(
+            "ALTER TABLE sessions ADD COLUMN pending_cite_nudge INTEGER NOT NULL DEFAULT 0"
+        )
+    conn.commit()
     _migrate_artifacts(conn)
 
 
@@ -794,6 +854,35 @@ def increment_turn(conn: sqlite3.Connection, session_id: str) -> int:
     return row["turn_count"] if row else 0
 
 
+def set_pending_cite_nudge(conn: sqlite3.Connection, session_id: str, count: int) -> None:
+    """Set the session's pending cite-nudge count (Stop-hook 3-B detector).
+    No-op if the session row doesn't exist yet (the Stop hook upserts it first)."""
+    conn.execute(
+        "UPDATE sessions SET pending_cite_nudge = ? WHERE id = ?",
+        (int(count), session_id),
+    )
+    conn.commit()
+
+
+def take_pending_cite_nudge(conn: sqlite3.Connection, session_id: str) -> int:
+    """Read AND reset the pending cite-nudge marker (consumed by the next
+    UserPromptSubmit). Returns the count (0 when absent / no session row).
+    Only writes when there was something to clear, so the common unbound /
+    no-flag case stays read-only."""
+    row = conn.execute(
+        "SELECT pending_cite_nudge FROM sessions WHERE id = ?", (session_id,),
+    ).fetchone()
+    if row is None:
+        return 0
+    count = row["pending_cite_nudge"] or 0
+    if count:
+        conn.execute(
+            "UPDATE sessions SET pending_cite_nudge = 0 WHERE id = ?", (session_id,),
+        )
+        conn.commit()
+    return int(count)
+
+
 def mark_compacted(conn: sqlite3.Connection, session_id: str, turn: int, summary_node_id: int | None = None) -> None:
     if summary_node_id is not None:
         conn.execute(
@@ -993,7 +1082,7 @@ FOCUS_CAP = 3
 FOCUS_DECAY_PER_HOUR = 0.95
 # Default activity bump (kb_get / kb_insert / kb_update / search-survives).
 FOCUS_DEFAULT_DELTA = 1.0
-# Larger boost when the user explicitly sets focus via /kb-focus.
+# Larger boost when an advanced/internal caller explicitly sets focus.
 FOCUS_USER_BOOST = 5.0
 
 
@@ -1098,7 +1187,7 @@ def bump_focus_for_nodes(
 def set_focus(
     conn: sqlite3.Connection, workstream_id: int, *, set_by: str = "user",
 ) -> None:
-    """Explicit user set via /kb-focus <id>. Heavy boost so it lands at top."""
+    """Explicit focus set. Heavy boost so it lands at top."""
     bump_focus(conn, workstream_id, delta=FOCUS_USER_BOOST, set_by=set_by)
 
 
@@ -1142,7 +1231,7 @@ def prune_focus(
     plus all pinned rows; delete the rest. Returns rows deleted.
 
     NOT called on every bump (that starves freshly-bumped workstreams). Call
-    explicitly from maintenance jobs, /kb-focus prune, or when the table grows
+    explicitly from maintenance jobs, focus prune, or when the table grows
     large. Decay alone usually handles natural fade — pruning is for callers
     who want a tight bound on table size."""
     rows = conn.execute(

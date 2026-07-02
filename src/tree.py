@@ -12,7 +12,7 @@ summaries rather than being absorbed into them.
 
 Retrieval is unchanged: summaries appear in the same FTS+vector pool as
 leaves (RAPTOR's "collapsed tree" — flat search over all non-stale nodes).
-This gives two-hop-free retrieval and is competitive with tree traversal on
+This gives two-hop-free retrieval and is comparable to tree traversal on
 the literature's benchmarks.
 
 Rebuild model: before each run, existing depth>0 nodes are marked `stale`

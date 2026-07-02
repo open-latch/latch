@@ -1,0 +1,14 @@
+Latch Licensing
+===============
+
+Copyright (c) 2026 Nicolaus Meyer
+
+The source code in this repository is licensed under the Apache License,
+Version 2.0. See LICENSE for the full license text.
+
+The Apache License, Version 2.0 applies to the source code in this public
+repository. It does not grant rights to the latch name, logos, or brand
+identifiers; see TRADEMARK.md for brand-use guidance.
+
+Third-party attribution notices for vendored model and tokenizer artifacts are
+in NOTICE.

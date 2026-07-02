@@ -1,0 +1,4 @@
+interface:
+  display_name: "Project Direction"
+  short_description: "Show latch project direction"
+  default_prompt: "Show latch project direction for this repo."

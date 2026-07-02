@@ -55,16 +55,17 @@ and after and asserted unchanged.
 ## Assertions (19 checks)
 
 - **Install** is additive: registers `latch`, merges latch hooks, adds
-  `mcp__latch` plus legacy `mcp__claude-kb` permissions, installs the 7 commands
-  — while preserving unrelated theme / perms / hooks already present.
+  `mcp__latch` plus legacy `mcp__claude-kb` permissions, installs latch's
+  slash commands — while preserving unrelated theme / perms / hooks already
+  present.
 - **Kill switch**: full disable sets `DISABLE` and makes `is_disabled()` true
   (and `is_write_disabled()`, which it implies); `--write-only` sets
   `DISABLE_WRITE` with reads still live; enable/`--all` clear them; nothing
   leaks into the real repo.
 - **Uninstall** is a complete inverse: removes latch-owned MCP registrations,
   hooks, permissions, a seeded *stale* `mcp__claude-kb__kb_get` per-tool perm,
-  and all 7 commands; preserves unrelated config and a user-owned command;
-  `--check` exits 0.
+  and latch's slash commands; preserves unrelated config and a user-owned
+  command; `--check` exits 0.
 - **Real state** untouched across the whole run.
 
 ## Run

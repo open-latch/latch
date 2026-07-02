@@ -6,7 +6,7 @@ Run a compaction pass for the current Claude Code session against the
 per-project knowledge base under `<KB_HOME>`.
 
 The compaction runs in a separate `claude -p` subprocess that takes its
-own context — it does NOT consume tokens from this session. We start it
+own context — it does NOT consume tokens from this session. We launch it
 in the background so the main session stays interactive while compaction
 runs.
 
@@ -21,7 +21,7 @@ Steps:
    session's newer transcript is never picked. An explicit session id can
    be passed as the first positional arg to compact a different session.
 
-2. Start the compactor with the Bash tool **in the background** so the
+2. Launch the compactor with the Bash tool **in the background** so the
    main session is not blocked while compaction runs (a full compact can
    take 30–90s):
 

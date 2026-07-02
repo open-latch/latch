@@ -36,6 +36,7 @@ from _common import hook_field, log, project_cwd, read_hook_input, session_id
 import db
 import embeddings
 import log_utils
+import profiles
 import search
 from paths import is_disabled, is_in_compact, project_dir
 
@@ -96,7 +97,18 @@ def main() -> int:
     guideline_signal = (
         bool(GUIDELINE_SIGNAL.search(prompt)) and "kb_priority" not in prompt.lower()
     )
+    mc_directive = _mission_control_directive(cwd, prompt)
+    # Slice 3-B: surface the advisory cite-correction nudge queued by last turn's
+    # Stop-hook detector (mission-control actors only; marker is 0 for everyone
+    # else). Consumed (read + reset) here regardless of the current prompt — it
+    # is about the PRIOR turn, so it fires even on short prompts like "ok thanks".
+    cite_count = _take_cite_nudge(cwd, sid) if sid else 0
+    cite_directive = (
+        profiles.render_cite_correction_directive(cite_count) if cite_count else ""
+    )
+
     log_entry: dict = {
+        "mission_control": bool(mc_directive),
         "ts": _now(),
         "sid": sid,
         "prompt_hash": _phash(prompt),
@@ -104,6 +116,7 @@ def main() -> int:
         "cwd": cwd,
         "correction_signal": correction_signal,
         "guideline_signal": guideline_signal,
+        "cite_nudge": cite_count,
     }
 
     # Cheap early-outs that need no DB or model. The correction nudge is
@@ -112,14 +125,14 @@ def main() -> int:
     if not sid:
         log_entry["skip"] = "no_session_id"
         _write_log(cwd, log_entry)
-        nudge = _extra_nudges(correction_signal, guideline_signal)
+        nudge = _extra_nudges(correction_signal, guideline_signal, mc_directive, cite_directive)
         if nudge:
             _print_context(nudge)
         return 0
     if not prompt or len(prompt.split()) < MIN_PROMPT_WORDS:
         log_entry["skip"] = "prompt_too_short"
         _write_log(cwd, log_entry)
-        nudge = _extra_nudges(correction_signal, guideline_signal)
+        nudge = _extra_nudges(correction_signal, guideline_signal, mc_directive, cite_directive)
         if nudge:
             _print_context(nudge)
         return 0
@@ -144,7 +157,10 @@ def main() -> int:
     _write_log(cwd, log_entry)
 
     context = _format_injection(injected) if injected else _format_no_hits()
-    nudge = _extra_nudges(correction_signal, guideline_signal)
+    # Include mc_directive + cite_directive on the main path too — previously
+    # dropped here, so the mission-control standing contract only surfaced on the
+    # short-prompt / no-session early-outs. Both are '' for non-mission-control.
+    nudge = _extra_nudges(correction_signal, guideline_signal, mc_directive, cite_directive)
     if nudge:
         context = nudge + "\n\n" + context
     _print_context(context)
@@ -388,9 +404,55 @@ def _format_guideline_nudge() -> str:
     )
 
 
-def _extra_nudges(correction_signal: bool, guideline_signal: bool) -> str:
-    """Concatenate deterministic prompt-signal nudges."""
+# EXPERIMENTAL — mission-control / verification profiles. NOT recommended for use;
+# planned to be unshipped to a separate branch later (observed unhelpful on
+# pmeyer's workspace, 2026-06-10). See KB decision id=1550. Don't rely on / extend.
+def _mission_control_directive(cwd: str, prompt: str) -> str:
+    """Standing mission-control verification contract, injected when the resolved
+    actor is bound to a profile with gate_surface='all_moves'. Tailored to the
+    deterministic move-type of `prompt`; empty for everyone else (unbound actors
+    / trust-and-go). Fail-open: any error -> '' so the hook never breaks the
+    user's prompt. The Tier-2 enforcement surface for 'blocking by contract' —
+    latch has no interceptor (KB id=1398)."""
+    try:
+        conn = db.connect(cwd)
+        try:
+            return profiles.mission_control_directive(conn, prompt)
+        finally:
+            conn.close()
+    except Exception as e:
+        log(f"mission_control_directive error: {e}")
+        return ""
+
+
+def _take_cite_nudge(cwd: str, sid: str) -> int:
+    """Read + reset the pending cite-nudge marker for this session (Slice 3-B).
+    Fail-open: any error -> 0 so the hook never breaks the user's prompt. Cheap:
+    a single indexed read, and a write only when a nudge was actually queued."""
+    try:
+        conn = db.connect(cwd)
+        try:
+            return db.take_pending_cite_nudge(conn, sid)
+        finally:
+            conn.close()
+    except Exception as e:
+        log(f"take_pending_cite_nudge error: {e}")
+        return 0
+
+
+def _extra_nudges(
+    correction_signal: bool, guideline_signal: bool,
+    mc_directive: str = "", cite_directive: str = "",
+) -> str:
+    """Concatenate deterministic prompt-signal nudges. The mission-control
+    directive leads (it is the standing verification contract), then the
+    cite-presence correction (a verification follow-up on the prior turn), then
+    correction, then standing-guideline. Empty string when none fire."""
     parts = []
+    if mc_directive:
+        parts.append(mc_directive)
+    if cite_directive:
+        parts.append(cite_directive)
     if correction_signal:
         parts.append(_format_correction_nudge())
     if guideline_signal:

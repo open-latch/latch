@@ -80,7 +80,7 @@ def test_canonicalize_repo_collapses_equivalents():
 
 def test_canonicalize_repo_posix_passthrough():
     _assert(
-        artifacts.canonicalize_repo("/Users/nico/repo/") == "/Users/nico/repo",
+        artifacts.canonicalize_repo("/Users/example/repo/") == "/Users/example/repo",
         "posix path mangled",
     )
     _assert(

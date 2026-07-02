@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Codex preview wiring verifier. Checks Codex config.toml, AGENTS.md, the MCP
-# command target, and Codex compact transcript resolution.
+# launch target, and Codex compact transcript resolution.
 
 set -euo pipefail
 

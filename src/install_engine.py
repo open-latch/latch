@@ -255,8 +255,9 @@ def apply_preflight_errors(claude: str | None) -> list[str]:
 
 def restart_next_step_message() -> str:
     return (
-        "Done. Restart Claude Code so the MCP roster reloads; then the kb_* "
-        "tools load automatically with no per-tool prompts."
+        "Done. Restart VS Code (or Claude Code, if you run it outside VS Code) "
+        "so the MCP roster reloads; then the kb_* tools load automatically with "
+        "no per-tool prompts."
     )
 
 

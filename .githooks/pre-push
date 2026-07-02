@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Block pushes when the tracked tree contains public-release hygiene leaks.
+set -euo pipefail
+
+ROOT="$(git rev-parse --show-toplevel)"
+
+if [ -x "${ROOT}/.venv/bin/python" ]; then
+    PY="${ROOT}/.venv/bin/python"
+elif command -v python3 >/dev/null 2>&1; then
+    PY="python3"
+elif command -v python >/dev/null 2>&1; then
+    PY="python"
+else
+    echo "x pre-push: no Python found for public release hygiene check." >&2
+    exit 2
+fi
+
+"${PY}" "${ROOT}/src/public_release_check.py" --repo "${ROOT}"

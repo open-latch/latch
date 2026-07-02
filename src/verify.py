@@ -25,7 +25,7 @@ Mutation is HUMAN-CONFIRMED, never auto-fired: detection is automatic (the
 agent-inline classifier + the deterministic keyword-nudge in the
 UserPromptSubmit hook), but ``correct_apply`` only runs on explicit user
 confirmation. A misclassification must not be able to cascade stale-marks
-across the graph on its own (nmeyer 2026-05-29, spec id=1151).
+across the graph on its own (spec id=1151).
 
 The supersede-vs-reconcile fork is the load-bearing distinction (KB id=864 /
 id=271):

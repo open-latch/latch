@@ -31,7 +31,9 @@ import embeddings  # noqa: E402
 import heal  # noqa: E402
 import lockfile  # noqa: E402
 import paths  # noqa: E402
+import project_direction  # noqa: E402
 import priorities  # noqa: E402
+import profiles  # noqa: E402
 import rolling  # noqa: E402
 import gate  # noqa: E402
 import search  # noqa: E402
@@ -493,6 +495,45 @@ def kb_recent(
         excerpt_strategy="prefix",
     )
     return _stamp_list_activity(compact, activity)
+
+
+@mcp.tool()
+def kb_project_direction(
+    limit: int = 3,
+    member_limit: int = 20,
+    unanchored_limit: int = 5,
+) -> dict:
+    """Read-only project-direction report.
+
+    Assembles the current workstream spine from existing KB primitives:
+    active/recent workstreams, governing decisions with derived authority tiers,
+    backlog/open items, constraints, recent progress, artifact coordinates,
+    recent unanchored evidence, and a next action. This is intentionally a
+    report layer over the current nodes/edges/focus/artifact tables, not a broad
+    storage or retrieval rebuild.
+    """
+    with _conn() as conn:
+        report = project_direction.assemble_project_direction(
+            conn,
+            limit=limit,
+            member_limit=member_limit,
+            unanchored_limit=unanchored_limit,
+        )
+    report["kb_activity"] = _kb_activity(
+        action="read",
+        tool="kb_project_direction",
+        summary=report["summary"],
+        nodes=[
+            {
+                "id": row["id"],
+                "kind": "workstream",
+                "title": row["title"],
+                "status": row["status"],
+            }
+            for row in report.get("workstreams", [])[:5]
+        ],
+    )
+    return report
 
 
 @mcp.tool()
@@ -1264,6 +1305,47 @@ def kb_priority_retire(node_id: int) -> dict:
     hard-deleted. Remaining active priorities renumber to close the gap."""
     with _conn() as conn:
         return priorities.retire_priority(conn, node_id)
+
+
+# EXPERIMENTAL — mission-control / verification profiles (kb_profile_* verbs).
+# NOT recommended for use; planned to be unshipped to a separate branch later
+# (observed unhelpful on pmeyer's workspace, 2026-06-10). See KB decision id=1550.
+@mcp.tool()
+def kb_profile_list(include_retired: bool = False) -> list[dict]:
+    """List verification profiles — the per-user gate-intensity presets (the
+    knob from trust-and-go up to mission-control). Each row:
+    {id, name, description, status, config}. The built-in presets are
+    materialised on first call. `config` holds the closed-set parameters
+    gate_surface / verdict_posture / claim_backing_policy / adversary /
+    user_authority. Profiles never participate in retrieval or traversal."""
+    with _conn() as conn:
+        profiles.ensure_presets(conn)
+        return profiles.list_profiles(conn, include_retired=include_retired)
+
+
+@mcp.tool()
+def kb_profile_active(actor: str | None = None) -> dict:
+    """Show the verification profile currently active for `actor` (defaults to
+    the resolved OS user — the SAME identity the gate and the UserPromptSubmit
+    hook observe). Returns {actor, bound, profile_id, name, config}; falls back
+    to the default (trust-and-go) preset when the user has no explicit binding."""
+    with _conn() as conn:
+        return profiles.resolve_active_profile(conn, actor)
+
+
+@mcp.tool()
+def kb_profile_bind(
+    actor: str | None = None, name: str | None = None, node_id: int | None = None,
+) -> dict:
+    """Bind a user to a verification profile, by preset name (e.g.
+    'mission-control', 'trust-and-go') or explicit profile `node_id`. `actor` is
+    the user-identity string (matches CLAUDE_KB_USER / USERNAME); omit it to bind
+    the CURRENT OS user (so `/mission-control` escalates whoever runs it). One binding per
+    user; re-binding replaces it. This is a per-user config mutation — confirm
+    the user wants it before calling (do not bind anyone to mission-control
+    silently)."""
+    with _conn() as conn:
+        return profiles.bind_actor(conn, actor, name=name, node_id=node_id)
 
 
 @mcp.tool()

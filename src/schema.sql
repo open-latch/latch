@@ -102,7 +102,7 @@ CREATE INDEX IF NOT EXISTS idx_session_retrievals_last_turn ON session_retrieval
 -- Step 9: held-object focus pointers. Activity-bumped + decay-weighted.
 -- Top-K rows by score = "current active workstreams". Read by SessionStart
 -- brief and kb_gate traversal seeding. Cap (3) is enforced in code,
--- not schema, so manual /kb-focus pin operations can transiently exceed it.
+-- not schema, so manual focus pin operations can transiently exceed it.
 CREATE TABLE IF NOT EXISTS focus (
     workstream_id INTEGER PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
     rank          INTEGER NOT NULL,
