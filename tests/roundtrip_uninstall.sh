@@ -92,7 +92,7 @@ chk("PreToolUse" in hooks,"unrelated PreToolUse hook preserved")
 for ev in ("UserPromptSubmit","Stop","SessionEnd"): chk(ev in hooks,"latch hook event "+ev+" added")
 PY
 case "$(mcp_args "$CFG/.claude.json" latch)" in *"$SBX"*) ok "sandbox latch MCP registered -> sandbox repo";; *) bad "sandbox latch MCP missing/wrong";; esac
-ls "$CFG/commands"/kb-*.md >/dev/null 2>&1 && ok "latch commands installed in sandbox" || bad "latch commands not installed"
+ls "$CFG/commands"/latch-*.md >/dev/null 2>&1 && ok "latch commands installed in sandbox" || bad "latch commands not installed"
 [ "$(mcp_fingerprint "$REAL_DOTCLAUDE")" = "$real_mcp_before" ] && ok "REAL registry unchanged by install (no leak)" || bad "REAL registry changed by install"
 
 # --- KILL SWITCH (all under sandbox KB_HOME) ------------------------------
@@ -134,7 +134,11 @@ chk("PreToolUse" in hooks,"unrelated PreToolUse hook preserved")
 for ev in ("UserPromptSubmit","Stop","SessionEnd"): chk(ev not in hooks,"latch hook event "+ev+" removed")
 PY
 [ "$(mcp_present "$CFG/.claude.json" latch)" = "False" ] && [ "$(mcp_present "$CFG/.claude.json" claude-kb)" = "False" ] && ok "sandbox MCP deregistered" || bad "sandbox MCP still present"
-ls "$CFG/commands"/kb-*.md >/dev/null 2>&1 && bad "latch commands NOT removed" || ok "latch commands removed"
+if ls "$CFG/commands"/latch-*.md >/dev/null 2>&1 || ls "$CFG/commands"/kb-*.md >/dev/null 2>&1; then
+  bad "latch commands NOT removed"
+else
+  ok "latch commands removed"
+fi
 [ -f "$CFG/commands/mycustom.md" ] && ok "user command PRESERVED (not clobbered)" || bad "user command removed!"
 
 # --- REAL STATE UNTOUCHED -------------------------------------------------

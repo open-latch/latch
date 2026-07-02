@@ -26,6 +26,12 @@ def test_render_contract_targets_agents_md():
     _assert("CLAUDE.md" not in out, "Codex contract should not mention CLAUDE.md")
     _assert("install_agents_md" in out, "contract should mention AGENTS installer")
     _assert("/opt/latch/README.md" in out, "KB_HOME placeholder should be resolved")
+    _assert('ToolSearch(query="mcp__latch latch_search latch_get latch_recent latch_gate")' in out,
+            "contract should prefer latch-named MCP tools")
+    _assert("select:mcp__latch__kb_search" not in out,
+            "contract should not use brittle exact-select legacy discovery")
+    _assert("/latch-compact" in out and "/kb-compact" not in out,
+            "contract should prefer latch compact command")
     print("PASS render_contract_targets_agents_md")
 
 

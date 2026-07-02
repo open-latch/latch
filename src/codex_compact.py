@@ -242,7 +242,7 @@ def main(argv: list[str] | None = None) -> int:
         session_id = codex_transcript.resolve_session_id(args.session_id)
         transcript = codex_transcript.find_transcript(session_id)
     except codex_transcript.CodexTranscriptError as e:
-        print(f"codex-kb-compact: {e}", file=sys.stderr)
+        print(f"codex-latch-compact: {e}", file=sys.stderr)
         return 1
 
     project = args.project or str(Path.cwd())

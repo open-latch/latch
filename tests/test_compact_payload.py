@@ -219,7 +219,7 @@ def test_compact_recent_rows_uses_prefix_only():
 def test_kb_activity_contract_is_foreground_safe():
     activity = mcp_server._kb_activity(
         action="write",
-        tool="kb_insert",
+        tool="latch_insert",
         summary="Tracked KB decision node id=12: Use Redis.",
         nodes=[{"id": 12, "kind": "decision", "title": "Use Redis"}],
         hints=["plan_freshness_hint"],
@@ -248,7 +248,7 @@ def test_kb_get_returns_activity_hint():
         activity = result.get("kb_activity")
         _assert(activity, f"kb_get should return kb_activity: {result}")
         _assert(activity["action"] == "read", activity)
-        _assert(activity["tool"] == "kb_get", activity)
+        _assert(activity["tool"] == "latch_get", activity)
         _assert(activity["nodes"][0]["id"] == nid, activity)
         print("PASS kb_get_returns_activity_hint")
     finally:
@@ -299,7 +299,7 @@ def test_log_compact_writes_jsonl_with_documented_schema():
         mcp_server.PROJECT_CWD = tmp
         try:
             mcp_server._log_compact(
-                tool="kb_search", row_count=3, total_bytes=1234,
+                tool="latch_search", row_count=3, total_bytes=1234,
                 verbose_requested=False, safety_net_triggered=False,
                 excerpt_strategy="snippet",
             )
@@ -317,7 +317,7 @@ def test_log_compact_writes_jsonl_with_documented_schema():
         for field in ("ts", "project", "tool", "row_count", "total_bytes",
                       "verbose_requested", "safety_net_triggered", "excerpt_strategy"):
             _assert(field in entry, f"log entry missing field {field!r}: {entry}")
-        _assert(entry["tool"] == "kb_search", f"tool mismatch: {entry['tool']}")
+        _assert(entry["tool"] == "latch_search", f"tool mismatch: {entry['tool']}")
         _assert(entry["row_count"] == 3, f"row_count mismatch: {entry['row_count']}")
         _assert(entry["excerpt_strategy"] == "snippet",
                 f"strategy mismatch: {entry['excerpt_strategy']}")
@@ -351,7 +351,7 @@ def test_kb_search_compact_default_returns_excerpts():
         _assert("body_excerpt" in r, "compact mode must include body_excerpt")
         _assert("body_chars" in r, "compact mode must include body_chars")
         _assert(r["body_chars"] == len(body), "body_chars must equal full body length")
-        _assert(r["kb_activity"]["tool"] == "kb_search",
+        _assert(r["kb_activity"]["tool"] == "latch_search",
                 f"first search row should carry kb_activity: {r}")
         _assert(r["kb_activity"]["must_display_to_user"] is True,
                 f"search activity should be foreground: {r['kb_activity']}")
@@ -378,7 +378,7 @@ def test_kb_search_verbose_returns_full_body():
         r = results[0]
         _assert("body" in r, "verbose mode must include full body")
         _assert(r["body"] == body, "verbose body must equal seeded body")
-        _assert(r["kb_activity"]["tool"] == "kb_search",
+        _assert(r["kb_activity"]["tool"] == "latch_search",
                 f"verbose search row should carry kb_activity: {r}")
         _assert("_fts_snippet" not in r,
                 "_fts_snippet implementation detail should be stripped even in verbose")
@@ -407,7 +407,7 @@ def test_kb_recent_compact_default_returns_excerpts():
         _assert("body_excerpt" in r, "compact mode must include body_excerpt")
         _assert(r["body_chars"] == 4000, "body_chars must reflect true length")
         _assert(r["body_excerpt"].endswith("…"), "long body excerpt should be ellipsized")
-        _assert(r["kb_activity"]["tool"] == "kb_recent",
+        _assert(r["kb_activity"]["tool"] == "latch_recent",
                 f"first recent row should carry kb_activity: {r}")
         print("PASS kb_recent_compact_default_returns_excerpts")
     finally:
@@ -430,7 +430,7 @@ def test_kb_recent_verbose_returns_full_body():
             mcp_server.PROJECT_CWD = original_cwd
         r = results[0]
         _assert(r["body"] == body, "verbose body must equal seeded body")
-        _assert(r["kb_activity"]["tool"] == "kb_recent",
+        _assert(r["kb_activity"]["tool"] == "latch_recent",
                 f"verbose recent row should carry kb_activity: {r}")
         print("PASS kb_recent_verbose_returns_full_body")
     finally:

@@ -140,7 +140,7 @@ for ev in ("UserPromptSubmit","Stop","SessionEnd"): chk(ev in hooks,"latch hook 
   # -like never matches on Windows. (The .sh compares POSIX paths, which align.)
   $sbxFwd = $Sbx -replace '\\','/'
   if (((McpArgs $RegFile 'latch') -replace '\\','/') -like "*$sbxFwd*") { Ok "sandbox latch MCP registered -> sandbox repo" } else { Bad "sandbox latch MCP missing/wrong" }
-  if (Get-ChildItem (Join-Path $Cfg 'commands') -Filter 'kb-*.md' -EA SilentlyContinue) { Ok "latch commands installed in sandbox" } else { Bad "latch commands not installed" }
+  if (Get-ChildItem (Join-Path $Cfg 'commands') -Filter 'latch-*.md' -EA SilentlyContinue) { Ok "latch commands installed in sandbox" } else { Bad "latch commands not installed" }
   if ((McpFingerprint $RealDotClaude) -eq $realMcpBefore) { Ok "REAL registry unchanged by install (no leak)" } else { Bad "REAL registry changed by install" }
 
   # --- KILL SWITCH (all under sandbox KB_HOME) -----------------------------
@@ -184,7 +184,9 @@ for ev in ("UserPromptSubmit","Stop","SessionEnd"): chk(ev not in hooks,"latch h
   if ($r2 -match 'FAIL:') { $script:FAIL++ } else { $script:PASS++ }
 
   if (-not (McpPresent $RegFile 'latch') -and -not (McpPresent $RegFile 'claude-kb')) { Ok "sandbox MCP deregistered" } else { Bad "sandbox MCP still present" }
-  if (Get-ChildItem (Join-Path $Cfg 'commands') -Filter 'kb-*.md' -EA SilentlyContinue) { Bad "latch commands NOT removed" } else { Ok "latch commands removed" }
+  $leftLatchCommands = Get-ChildItem (Join-Path $Cfg 'commands') -Filter 'latch-*.md' -EA SilentlyContinue
+  $leftLegacyCommands = Get-ChildItem (Join-Path $Cfg 'commands') -Filter 'kb-*.md' -EA SilentlyContinue
+  if ($leftLatchCommands -or $leftLegacyCommands) { Bad "latch commands NOT removed" } else { Ok "latch commands removed" }
   if (Test-Path (Join-Path $Cfg 'commands\mycustom.md')) { Ok "user command PRESERVED (not clobbered)" } else { Bad "user command removed!" }
 
   Write-Host "`n### REAL state verification"

@@ -24,11 +24,11 @@ silent dead tools* into clear, actionable diagnoses:
      server was never registered with the ``claude mcp`` registry (e.g. an old
      install that only wrote ``mcpServers`` into settings.json, which Claude
      Code does not read). Hooks still fire, so the install looks half-alive
-     while the kb_* tools silently never connect. ``check_mcp_wiring`` catches
+     while the latch tools silently never connect. ``check_mcp_wiring`` catches
      this; remedy is ``bash bin/install_engine.sh``.
 
   4. Slash commands not installed — the engine is wired but commands/*.md were
-     never copied into ~/.claude/commands/, so /kb-compact et al. error
+     never copied into ~/.claude/commands/, so /latch-compact et al. error
      'Unknown skill'. ``check_commands_installed`` catches this; remedy is the
      same ``bash bin/install_engine.sh`` (which now installs them).
 
@@ -252,7 +252,7 @@ def check_mcp_wiring() -> tuple[str, str, str]:
 
     This is the WIRING check, distinct from the environment checks above. The
     env can be perfectly healthy (deps import, sqlite-vec loads, embedder runs)
-    while the kb_* tools are completely dead — because Claude Code reads MCP
+    while the latch tools are completely dead — because Claude Code reads MCP
     servers ONLY from the `claude mcp` registry (~/.claude.json via
     `claude mcp add`) or a project .mcp.json, NOT from `mcpServers` in
     settings.json. A settings.json-only install leaves hooks firing (so it
@@ -285,8 +285,9 @@ def check_mcp_wiring() -> tuple[str, str, str]:
             if "connected" in low and "not connected" not in low and "failed" not in low:
                 connected.append(server)
     if not registered:
-        return name, WARN, ("latch is NOT registered with Claude Code — the kb_* tools "
-                            "will never connect even though this environment is healthy. "
+        return name, WARN, ("latch is NOT registered with Claude Code — the "
+                            "latch_* tools will never connect even though this "
+                            "environment is healthy. "
                             "Fix: bash bin/install_engine.sh")
     if connected:
         primary = install_engine.SERVER_NAME
@@ -309,7 +310,7 @@ def check_commands_installed() -> tuple[str, str, str]:
 
     install_engine (and the standalone install_commands.{sh,ps1}) copy
     commands/*.md into ~/.claude/commands/ with the <KB_HOME> placeholder
-    resolved. If that step was skipped, /kb-compact et al. error 'Unknown skill'
+    resolved. If that step was skipped, /latch-compact et al. error 'Unknown skill'
     even though the engine + MCP are wired — the gap that bit the 2026-06-07 Mac
     install (id=1468 #1).
 
@@ -337,7 +338,7 @@ def check_commands_installed() -> tuple[str, str, str]:
     if missing:
         head = ", ".join(missing[:3]) + ("..." if len(missing) > 3 else "")
         return name, WARN, (f"{len(missing)}/{len(expected)} not in {dest} (e.g. {head}) - "
-                            "/kb-compact will error 'Unknown skill'. "
+                            "/latch-compact will error 'Unknown skill'. "
                             f"{context}. Fix: bash bin/install_engine.sh")
     unresolved = []
     for n in expected:
@@ -346,10 +347,61 @@ def check_commands_installed() -> tuple[str, str, str]:
                 unresolved.append(n)
         except OSError:
             pass
+    legacy_aliases = {
+        "kb-budget-approve.md": "latch-budget-approve.md",
+        "kb-compact.md": "latch-compact.md",
+        "kb-decay.md": "latch-decay.md",
+        "kb-gate.md": "latch-gate.md",
+        "kb-gate-report.md": "latch-gate-report.md",
+        "kb-heal.md": "latch-heal.md",
+        "kb-tree.md": "latch-tree.md",
+    }
+    stale_legacy = ("kb-focus.md", "kb-project-direction.md")
+    markers = (
+        "/bin/run_kb_gate.sh",
+        "/bin/run_latch_gate.sh",
+        "/bin/latch_gate_report.sh",
+        "/bin/run_compact_now.sh",
+        "/bin/run_latch_compact_now.sh",
+        "/bin/run_kb_focus.sh",
+        "/bin/latch_direction.sh",
+        "/src/budget.py",
+        "/src/maintenance.py",
+    )
+
+    def is_latch_command_body(body: str) -> bool:
+        normalized = body.replace("\\", "/")
+        kb_home = str(SRC_DIR.parent).replace("\\", "/")
+        return (
+            "<KB_HOME>" in body
+            or kb_home in normalized
+            or any(marker in normalized for marker in markers)
+        )
+
+    for n in legacy_aliases:
+        path = dest / n
+        if not path.is_file():
+            continue
+        body = path.read_text(encoding="utf-8")
+        if is_latch_command_body(body) and "<KB_HOME>" in body:
+            unresolved.append(n)
     if unresolved:
         head = ", ".join(unresolved[:3]) + ("..." if len(unresolved) > 3 else "")
         return name, WARN, (f"{len(unresolved)} command(s) still contain a literal <KB_HOME> "
                             f"placeholder (e.g. {head}) - {context}. "
+                            "Re-run bash bin/install_engine.sh")
+    stale = []
+    for n in stale_legacy:
+        path = dest / n
+        if not path.is_file():
+            continue
+        body = path.read_text(encoding="utf-8")
+        if is_latch_command_body(body):
+            stale.append(n)
+    if stale:
+        head = ", ".join(stale[:3]) + ("..." if len(stale) > 3 else "")
+        return name, WARN, (f"stale legacy latch command(s) still installed "
+                            f"(e.g. {head}) - {context}. "
                             "Re-run bash bin/install_engine.sh")
     return name, OK, f"{len(expected)} command(s) in {dest} ({context})"
 

@@ -1,5 +1,5 @@
 ---
-description: Manually trigger a KB compaction for the current session
+description: Manually trigger a latch compaction for the current session
 ---
 
 Run a compaction pass for the current Claude Code session against the
@@ -35,12 +35,12 @@ Steps:
 
    Return control to the user immediately with the background shell id.
    Do not poll — the harness will notify you when the subprocess exits.
-   Omit `--final` — manual `/kb-compact` is a rolling compact, not a
+   Omit `--final` — manual `/latch-compact` is a rolling compact, not a
    session end. The session_summary node stays in `staging` status.
 
 3. While the compactor is running, the project lock at
    `<KB_HOME>/projects/<sanitized-cwd>/compactor.lock` is held. Any
-   `kb_insert` / `kb_update` / `kb_link` / `kb_unlink` calls made by the
+   `latch_insert` / `latch_update` / `latch_link` / `latch_unlink` calls made by the
    main session will block for up to 60s waiting for the compactor to
    finish, then return `{"ok": false, "reason": "compaction_in_progress",
    "retry_after_s": 10}` if it still hasn't finished. This is the

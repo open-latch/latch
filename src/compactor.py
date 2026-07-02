@@ -1,7 +1,7 @@
 """Compaction: summarize a session transcript into KB nodes via a model backend.
 
 Called by hooks (Stop / SessionEnd / SessionStart-reconcile) and by the
-/kb-compact slash command. Produces one session_summary node per session
+/latch-compact slash command. Produces one session_summary node per session
 (UPSERTed) plus extracted facts/decisions/entities (stacked).
 """
 from __future__ import annotations
@@ -221,7 +221,7 @@ def run_compaction(
         if not allowed:
             _log(f"budget cap hit for {project_path}: "
                  f"{state['count_nonheal']}/day non-heal — "
-                 f"run /kb-budget-approve to unlock")
+                 f"run /latch-budget-approve to unlock")
             return {
                 "ok": False,
                 "reason": "budget_cap",

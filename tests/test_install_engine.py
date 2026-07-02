@@ -256,13 +256,14 @@ def _tmp_commands_env(kb_home: str, command_bodies: dict):
 def test_install_commands_copies_and_substitutes():
     _src, dest, restore = _tmp_commands_env(
         "/opt/latch",
-        {"kb-compact.md": "run <KB_HOME>/bin/run_compact_now.sh\n",
-         "kb-gate.md": "see <KB_HOME>/src\n"})
+        {"latch-compact.md": "run <KB_HOME>/bin/run_compact_now.sh\n",
+         "latch-gate.md": "see <KB_HOME>/src\n"})
     try:
         level, changes = ie.install_commands(dry_run=False)
         _assert(level == "OK", f"expected OK, got {level}")
-        _assert((dest / "kb-compact.md").exists(), "kb-compact.md should be installed")
-        body = (dest / "kb-compact.md").read_text(encoding="utf-8")
+        _assert((dest / "latch-compact.md").exists(), "latch-compact.md should be installed")
+        _assert(not (dest / "kb-compact.md").exists(), "fresh install should not create legacy alias")
+        body = (dest / "latch-compact.md").read_text(encoding="utf-8")
         _assert("<KB_HOME>" not in body, "placeholder must be resolved")
         _assert("/opt/latch/bin/run_compact_now.sh" in body, f"KB_HOME not substituted: {body!r}")
         _assert(len(changes) == 2, f"expected 2 installs, got {changes}")
@@ -272,7 +273,7 @@ def test_install_commands_copies_and_substitutes():
 
 
 def test_install_commands_dry_run_writes_nothing():
-    _src, dest, restore = _tmp_commands_env("/opt/latch", {"kb-compact.md": "x <KB_HOME>\n"})
+    _src, dest, restore = _tmp_commands_env("/opt/latch", {"latch-compact.md": "x <KB_HOME>\n"})
     try:
         level, changes = ie.install_commands(dry_run=True)
         _assert(level == "OK", f"expected OK, got {level}")
@@ -285,7 +286,7 @@ def test_install_commands_dry_run_writes_nothing():
 
 def test_commands_status_missing_then_present_then_unresolved():
     _src, dest, restore = _tmp_commands_env(
-        "/opt/latch", {"kb-compact.md": "x <KB_HOME>\n", "kb-gate.md": "y <KB_HOME>\n"})
+        "/opt/latch", {"latch-compact.md": "x <KB_HOME>\n", "latch-gate.md": "y <KB_HOME>\n"})
     try:
         ok, label = ie.commands_status()
         _assert(not ok, f"missing commands should fail --check: {label}")
@@ -293,10 +294,101 @@ def test_commands_status_missing_then_present_then_unresolved():
         ok, label = ie.commands_status()
         _assert(ok, f"after install, --check should pass: {label}")
         # plant an unresolved placeholder -> fail
-        (dest / "kb-gate.md").write_text("still <KB_HOME> here\n", encoding="utf-8")
+        (dest / "latch-gate.md").write_text("still <KB_HOME> here\n", encoding="utf-8")
         ok, label = ie.commands_status()
         _assert(not ok and "placeholder" in label, f"unresolved placeholder should fail: {label}")
         print("PASS commands_status_missing_then_present_then_unresolved")
+    finally:
+        restore()
+
+
+def test_install_commands_updates_existing_legacy_aliases():
+    _src, dest, restore = _tmp_commands_env(
+        "/new/latch", {
+            "latch-gate.md": "bash <KB_HOME>/bin/run_latch_gate.sh\n",
+            "latch-gate-report.md": "bash <KB_HOME>/bin/latch_gate_report.sh\n",
+            "latch-compact.md": "bash <KB_HOME>/bin/run_compact_now.sh\n",
+        })
+    try:
+        dest.mkdir()
+        (dest / "kb-gate.md").write_text(
+            "bash /old/latch/bin/run_kb_gate.sh\n", encoding="utf-8")
+        (dest / "kb-compact.md").write_text(
+            "bash /old/latch/bin/run_compact_now.sh\n", encoding="utf-8")
+        (dest / "kb-gate-report.md").write_text(
+            "bash /old/latch/bin/latch_gate_report.sh\n", encoding="utf-8")
+        level, changes = ie.install_commands(dry_run=False)
+        _assert(level == "OK", f"expected OK, got {level}")
+        gate_body = (dest / "kb-gate.md").read_text(encoding="utf-8")
+        compact_body = (dest / "kb-compact.md").read_text(encoding="utf-8")
+        report_body = (dest / "kb-gate-report.md").read_text(encoding="utf-8")
+        _assert("/new/latch/bin/run_kb_gate.sh" in gate_body,
+                f"legacy gate alias should keep legacy wrapper path: {gate_body!r}")
+        _assert("/new/latch/bin/run_latch_gate.sh" not in gate_body,
+                f"legacy gate alias must not require new wrapper permission: {gate_body!r}")
+        _assert("/new/latch/bin/run_compact_now.sh" in compact_body,
+                f"non-gate legacy alias should still refresh to primary body: {compact_body!r}")
+        _assert("/new/latch/bin/latch_gate_report.sh" in report_body,
+                f"newer legacy report alias should refresh to primary body: {report_body!r}")
+        _assert(any("updated legacy alias kb-gate.md" in c for c in changes), changes)
+        _assert(any("updated legacy alias kb-gate-report.md" in c for c in changes), changes)
+        print("PASS install_commands_updates_existing_legacy_aliases")
+    finally:
+        restore()
+
+
+def test_install_commands_preserves_user_owned_legacy_aliases():
+    _src, dest, restore = _tmp_commands_env(
+        "/new/latch", {"latch-gate.md": "bash <KB_HOME>/bin/run_latch_gate.sh\n"})
+    try:
+        dest.mkdir()
+        custom = "do something unrelated\n"
+        (dest / "kb-gate.md").write_text(custom, encoding="utf-8")
+        (dest / "kb-project-direction.md").write_text(custom, encoding="utf-8")
+        level, changes = ie.install_commands(dry_run=False)
+        _assert(level == "OK", f"expected OK, got {level}")
+        _assert((dest / "kb-gate.md").read_text(encoding="utf-8") == custom,
+                "user-owned legacy alias must not be overwritten")
+        _assert((dest / "kb-project-direction.md").read_text(encoding="utf-8") == custom,
+                "user-owned stale legacy command must not be pruned")
+        _assert(any("skipped legacy alias kb-gate.md" in c for c in changes), changes)
+        _assert(any("skipped stale legacy command kb-project-direction.md" in c
+                    for c in changes), changes)
+        print("PASS install_commands_preserves_user_owned_legacy_aliases")
+    finally:
+        restore()
+
+
+def test_install_commands_prunes_stale_latch_owned_commands():
+    _src, dest, restore = _tmp_commands_env(
+        "/opt/latch", {"latch-gate.md": "bash <KB_HOME>/bin/run_latch_gate.sh\n"})
+    try:
+        dest.mkdir()
+        (dest / "kb-focus.md").write_text(
+            "bash /opt/latch/bin/run_kb_focus.sh list\n", encoding="utf-8")
+        level, changes = ie.install_commands(dry_run=False)
+        _assert(level == "OK", f"expected OK, got {level}")
+        _assert(not (dest / "kb-focus.md").exists(),
+                "stale latch-owned kb-focus command should be pruned")
+        _assert(any("removed stale legacy command kb-focus.md" in c for c in changes), changes)
+        ok, label = ie.commands_status()
+        _assert(ok, f"status should pass after stale command prune: {label}")
+        print("PASS install_commands_prunes_stale_latch_owned_commands")
+    finally:
+        restore()
+
+
+def test_commands_status_flags_stale_latch_owned_commands():
+    _src, dest, restore = _tmp_commands_env(
+        "/opt/latch", {"latch-gate.md": "bash <KB_HOME>/bin/run_latch_gate.sh\n"})
+    try:
+        ie.install_commands(dry_run=False)
+        (dest / "kb-project-direction.md").write_text(
+            "bash /opt/latch/bin/latch_direction.sh\n", encoding="utf-8")
+        ok, label = ie.commands_status()
+        _assert(not ok and "stale legacy" in label,
+                f"status should flag stale latch-owned commands: {label}")
+        print("PASS commands_status_flags_stale_latch_owned_commands")
     finally:
         restore()
 
@@ -307,9 +399,32 @@ def test_default_commands_hide_workstream_control_surfaces():
             f"workstream focus should not be a default slash command: {command_names}")
     _assert("kb-project-direction.md" not in command_names,
             f"project direction should not be a default slash command: {command_names}")
-    _assert("kb-gate.md" in command_names and "kb-compact.md" in command_names,
+    _assert(
+            "latch-gate.md" in command_names
+            and "latch-gate-report.md" in command_names
+            and "latch-compact.md" in command_names,
             f"core commands should still be installed: {command_names}")
+    _assert(
+            "kb-gate.md" not in command_names
+            and "kb-gate-report.md" not in command_names
+            and "kb-compact.md" not in command_names,
+            f"legacy aliases should not be fresh/default command sources: {command_names}")
     print("PASS default_commands_hide_workstream_control_surfaces")
+
+
+def test_command_change_summary_separates_migration_actions():
+    summary = ie._command_change_summary([
+        "installed latch-gate.md",
+        "installed latch-compact.md",
+        "updated legacy alias kb-gate.md -> latch-gate.md",
+        "removed stale legacy command kb-focus.md",
+        "skipped legacy alias kb-tree.md (looks user-owned)",
+    ])
+    _assert("2 installed" in summary, summary)
+    _assert("1 legacy alias(es) updated" in summary, summary)
+    _assert("1 stale command(s) removed" in summary, summary)
+    _assert("1 user-owned file(s) skipped" in summary, summary)
+    print("PASS command_change_summary_separates_migration_actions")
 
 
 def test_resolve_python_override_and_env():
@@ -463,7 +578,7 @@ def test_restart_next_step_message_names_vscode_and_claude_code():
             "restart message should help VS Code users know what to restart")
     _assert("Claude Code" in msg,
             "restart message should still cover non-VS Code Claude Code users")
-    _assert("MCP roster" in msg and "kb_* tools" in msg,
+    _assert("MCP roster" in msg and "latch_* tools" in msg,
             "restart message should explain why restart matters")
     print("PASS restart_next_step_message_names_vscode_and_claude_code")
 
@@ -520,7 +635,12 @@ if __name__ == "__main__":
     test_install_commands_copies_and_substitutes()
     test_install_commands_dry_run_writes_nothing()
     test_commands_status_missing_then_present_then_unresolved()
+    test_install_commands_updates_existing_legacy_aliases()
+    test_install_commands_preserves_user_owned_legacy_aliases()
+    test_install_commands_prunes_stale_latch_owned_commands()
+    test_commands_status_flags_stale_latch_owned_commands()
     test_default_commands_hide_workstream_control_surfaces()
+    test_command_change_summary_separates_migration_actions()
     test_resolve_python_override_and_env()
     test_seed_next_step_message_names_immediate_value_and_preview()
     test_seed_command_args_use_llm_apply_and_project()

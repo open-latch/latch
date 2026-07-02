@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Wrapper for manual Codex KB compaction.
+# Wrapper for manual Codex latch compaction.
 # Resolves the Codex session from the first arg or $CODEX_THREAD_ID, then lets
 # src/codex_compact.py find and validate the matching ~/.codex rollout JSONL.
 # This path is fail-closed: it never falls back to ~/.claude/projects.
@@ -24,7 +24,7 @@ elif command -v python3 >/dev/null 2>&1; then
 elif command -v python >/dev/null 2>&1; then
   PY="python"
 else
-  echo "codex-kb-compact: no Python found (set LATCH_PYTHON (legacy: CLAUDE_KB_PYTHON) to your interpreter)." >&2
+  echo "codex-latch-compact: no Python found (set LATCH_PYTHON (legacy: CLAUDE_KB_PYTHON) to your interpreter)." >&2
   exit 2
 fi
 

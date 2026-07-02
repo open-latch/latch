@@ -1,10 +1,10 @@
 ---
-description: Unlock the rest of today for unlimited KB LLM invocations in this project
+description: Unlock the rest of today for unlimited latch LLM invocations in this project
 ---
 
 The KB auto-tooling has two daily caps as a backstop against runaway hook loops:
 
-- **100 non-heal calls/day** — compactor, kb_gate, tree summarization,
+- **100 non-heal calls/day** — compactor, latch_gate, tree summarization,
   on-insert heal arbitration.
 - **50 heal calls/day** — nightly heal LLM arbitration only.
 

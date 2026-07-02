@@ -371,7 +371,7 @@ def render_mission_control_context(
             "confirm or kill it.",
         "investigation": "This is an **investigation**. State what you will actually "
             "read or run to ground it, not what you expect to find.",
-        "implementation": "**Implementation move** — run `kb_gate` and resolve any "
+        "implementation": "**Implementation move** — run `latch_gate` and resolve any "
             "uncovered current-value/code claims via `code_trace` before writing.",
     }.get(move_type)
     if tail:

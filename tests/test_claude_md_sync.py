@@ -30,6 +30,12 @@ def test_render_substitutes_placeholder():
     out = cms.render_contract(kb_home="/some/where")
     _assert("{{KB_HOME}}" not in out, "placeholder must be substituted")
     _assert(out.strip() != "", "rendered contract must be non-empty")
+    _assert('ToolSearch(query="mcp__latch latch_search latch_get latch_recent latch_gate")' in out,
+            "contract should prefer latch-named MCP tools")
+    _assert("select:mcp__latch__kb_search" not in out,
+            "contract should not use brittle exact-select legacy discovery")
+    _assert("/latch-compact" in out and "/kb-compact" not in out,
+            "contract should prefer latch compact command")
     print("PASS render_substitutes_placeholder")
 
 

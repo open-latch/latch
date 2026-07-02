@@ -57,14 +57,14 @@ def test_gate_findings_appends_latch_receipt():
         "label": "Latch gate findings",
         "recommendation": "DO_NOT_PROCEED",
         "summary": "This revives a rejected path.",
-        "why_it_matters": "Latch ran kb_gate on this request using cited KB nodes.",
+        "why_it_matters": "Latch ran the gate on this request using cited KB nodes.",
     }
     tr = json.dumps({"result": {"findings": findings}})
     msg = ptu.surface_message({"tool_response": tr})
     _assert(
         msg == (
             "Latch gate findings [DO_NOT_PROCEED]: This revives a rejected path. "
-            "— Latch ran kb_gate on this request using cited KB nodes."
+            "— Latch ran the gate on this request using cited KB nodes."
         ),
         f"gate receipt should be appended, got {msg!r}",
     )

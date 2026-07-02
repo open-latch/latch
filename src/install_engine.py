@@ -3,7 +3,7 @@
 
 This is the *engine* half of latch's install (the behavior half is
 ``install_claude_md.py``). It also folds in the slash-command install (step 4
-below) so a single run wires the kb_* tools, hooks, permission AND the /kb-*
+below) so a single run wires the latch tools, hooks, permission AND the /latch-*
 commands — ``install_commands.{sh,ps1}`` remain for commands-only re-installs.
 It does the things that previously lived as a manual README copy-paste
 playbook and were the #1 source of install friction:
@@ -13,23 +13,23 @@ playbook and were the #1 source of install friction:
      ``~/.claude/settings.json`` — it only reads them from the ``claude mcp``
      registry (``~/.claude.json``, written by ``claude mcp add``) or a project
      ``.mcp.json``. Hooks *are* read from settings.json, so a settings.json-only
-     install looks half-alive (the SessionStart brief fires) while the kb_*
-     tools never connect. We register with ``claude mcp add --scope user`` so
-     the tools load in every project.
+     install looks half-alive (the SessionStart brief fires) while the
+     latch-named tools never connect. We register with
+     ``claude mcp add --scope user`` so the tools load in every project.
 
   2. **Merge the hooks** (SessionStart / UserPromptSubmit / Stop / SessionEnd)
      into ``~/.claude/settings.json`` — this half genuinely belongs there.
 
   3. **Pre-approve the tools with ONE permission rule** — ``mcp__latch``
      (the bare server prefix) auto-approves every tool the server exposes,
-     current and future, so the user is never prompted to accept kb_get /
-     kb_insert / ... individually. This replaces the stale hand-pasted list of
+     current and future, so the user is never prompted to accept latch_get /
+     latch_insert / ... individually. This replaces the stale hand-pasted list of
      individual ``mcp__claude-kb__kb_*`` entries. Existing ``claude-kb``
      registrations remain supported as a legacy alias during the rename.
 
   4. **Install the slash commands.** Copy ``commands/*.md`` into
      ``~/.claude/commands/`` (resolving the ``<KB_HOME>`` placeholder) so
-     ``/kb-compact`` & friends are discoverable. This used to be a separate
+     ``/latch-compact`` & friends are discoverable. This used to be a separate
      manual step; skipping it left a "looks-done" install where the commands
      silently errored ``Unknown skill`` (id=1468 #1).
 
@@ -96,6 +96,30 @@ SNIPPET_PATH = KB_HOME / "settings_snippet.json"
 COMMANDS_SRC = KB_HOME / "commands"
 COMMANDS_DEST = Path(os.environ.get("CLAUDE_COMMANDS_DIR") or (Path.home() / ".claude" / "commands"))
 COMMAND_PLACEHOLDER = "<KB_HOME>"
+LEGACY_COMMAND_ALIASES = {
+    "kb-budget-approve.md": "latch-budget-approve.md",
+    "kb-compact.md": "latch-compact.md",
+    "kb-decay.md": "latch-decay.md",
+    "kb-gate.md": "latch-gate.md",
+    "kb-gate-report.md": "latch-gate-report.md",
+    "kb-heal.md": "latch-heal.md",
+    "kb-tree.md": "latch-tree.md",
+}
+STALE_LEGACY_COMMANDS = (
+    "kb-focus.md",
+    "kb-project-direction.md",
+)
+LATCH_COMMAND_MARKERS = (
+    "/bin/run_kb_gate.sh",
+    "/bin/run_latch_gate.sh",
+    "/bin/latch_gate_report.sh",
+    "/bin/run_compact_now.sh",
+    "/bin/run_latch_compact_now.sh",
+    "/bin/run_kb_focus.sh",
+    "/bin/latch_direction.sh",
+    "/src/budget.py",
+    "/src/maintenance.py",
+)
 
 # Install-time KB-dir pin (KB id=1556): the single fixed KB directory, written to
 # kb_location.json so paths._resolve_pinned_dir() never selects the DB from cwd.
@@ -256,8 +280,8 @@ def apply_preflight_errors(claude: str | None) -> list[str]:
 def restart_next_step_message() -> str:
     return (
         "Done. Restart VS Code (or Claude Code, if you run it outside VS Code) "
-        "so the MCP roster reloads; then the kb_* tools load automatically with "
-        "no per-tool prompts."
+        "so the MCP roster reloads; then the latch_* tools load automatically "
+        "with no per-tool prompts. Legacy kb_* aliases remain available."
     )
 
 
@@ -477,6 +501,52 @@ def write_settings(settings: dict) -> None:
 # --------------------------------------------------------------------------- #
 # Slash-command install (commands/*.md -> ~/.claude/commands, <KB_HOME> resolved)
 # --------------------------------------------------------------------------- #
+def _resolved_kb_home() -> str:
+    return str(KB_HOME).replace("\\", "/")
+
+
+def _read_text(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+
+
+def _is_latch_command_body(body: str) -> bool:
+    normalized = body.replace("\\", "/")
+    return (
+        COMMAND_PLACEHOLDER in body
+        or _resolved_kb_home() in normalized
+        or any(marker in normalized for marker in LATCH_COMMAND_MARKERS)
+    )
+
+
+def _write_command(src: Path, dest: Path) -> None:
+    dest.write_text(_command_content(src), encoding="utf-8")
+
+
+def _command_content(src: Path) -> str:
+    return src.read_text(encoding="utf-8").replace(COMMAND_PLACEHOLDER, _resolved_kb_home())
+
+
+def _legacy_alias_content(legacy_name: str, primary: Path) -> str:
+    content = _command_content(primary)
+    if legacy_name == "kb-gate.md":
+        content = content.replace("/bin/run_latch_gate.sh", "/bin/run_kb_gate.sh")
+    return content
+
+
+def _command_change_summary(changes: list[str]) -> str:
+    installed = sum(1 for c in changes if c.startswith("installed "))
+    updated = sum(1 for c in changes if c.startswith("updated legacy alias "))
+    removed = sum(1 for c in changes if c.startswith("removed stale legacy command "))
+    skipped = sum(1 for c in changes if c.startswith("skipped "))
+    return (
+        f"{installed} installed, {updated} legacy alias(es) updated, "
+        f"{removed} stale command(s) removed, {skipped} user-owned file(s) skipped"
+    )
+
+
 def install_commands(dry_run: bool) -> tuple[str, list[str]]:
     """Copy latch's slash commands into Claude Code's commands dir.
 
@@ -485,7 +555,7 @@ def install_commands(dry_run: bool) -> tuple[str, list[str]]:
     folder. So the source must be copied there, with the ``<KB_HOME>``
     placeholder resolved to this clone's path. Mirrors
     ``bin/install_commands.{sh,ps1}`` (kept for commands-only re-installs) so the
-    one engine install also wires the commands — without this step ``/kb-compact``
+    one engine install also wires the commands — without this step ``/latch-compact``
     et al. error ``Unknown skill`` even though the engine + MCP are fully wired
     (the gap that bit the 2026-06-07 Mac install, id=1468 #1). Overwrite-always,
     matching the shell installers. Honors ``CLAUDE_COMMANDS_DIR`` via
@@ -499,7 +569,6 @@ def install_commands(dry_run: bool) -> tuple[str, list[str]]:
     md_files = sorted(COMMANDS_SRC.glob("*.md"))
     if not md_files:
         return "WARN", [f"no command files in {COMMANDS_SRC} — skipped"]
-    kb_home_str = str(KB_HOME).replace("\\", "/")
     if not dry_run:
         COMMANDS_DEST.mkdir(parents=True, exist_ok=True)
     changes: list[str] = []
@@ -507,9 +576,35 @@ def install_commands(dry_run: bool) -> tuple[str, list[str]]:
         if dry_run:
             changes.append(f"would install {f.name}")
             continue
-        content = f.read_text(encoding="utf-8").replace(COMMAND_PLACEHOLDER, kb_home_str)
-        (COMMANDS_DEST / f.name).write_text(content, encoding="utf-8")
+        _write_command(f, COMMANDS_DEST / f.name)
         changes.append(f"installed {f.name}")
+    for legacy_name, primary_name in LEGACY_COMMAND_ALIASES.items():
+        legacy = COMMANDS_DEST / legacy_name
+        primary = COMMANDS_SRC / primary_name
+        if not legacy.exists() or not primary.exists():
+            continue
+        body = _read_text(legacy)
+        if not _is_latch_command_body(body):
+            changes.append(f"skipped legacy alias {legacy_name} (looks user-owned)")
+            continue
+        if dry_run:
+            changes.append(f"would update legacy alias {legacy_name} -> {primary_name}")
+            continue
+        legacy.write_text(_legacy_alias_content(legacy_name, primary), encoding="utf-8")
+        changes.append(f"updated legacy alias {legacy_name} -> {primary_name}")
+    for stale_name in STALE_LEGACY_COMMANDS:
+        stale = COMMANDS_DEST / stale_name
+        if not stale.exists():
+            continue
+        body = _read_text(stale)
+        if not _is_latch_command_body(body):
+            changes.append(f"skipped stale legacy command {stale_name} (looks user-owned)")
+            continue
+        if dry_run:
+            changes.append(f"would remove stale legacy command {stale_name}")
+            continue
+        stale.unlink()
+        changes.append(f"removed stale legacy command {stale_name}")
     return "OK", changes
 
 
@@ -528,10 +623,25 @@ def commands_status() -> tuple[bool, str]:
                        f"{COMMANDS_DEST} (e.g. {head})")
     unresolved = [n for n in expected
                   if COMMAND_PLACEHOLDER in (COMMANDS_DEST / n).read_text(encoding="utf-8")]
+    unresolved.extend(
+        n for n in LEGACY_COMMAND_ALIASES
+        if (COMMANDS_DEST / n).is_file()
+        and _is_latch_command_body(_read_text(COMMANDS_DEST / n))
+        and COMMAND_PLACEHOLDER in _read_text(COMMANDS_DEST / n)
+    )
     if unresolved:
         head = ", ".join(unresolved[:3]) + ("..." if len(unresolved) > 3 else "")
         return False, (f"slash commands: {len(unresolved)} still contain a literal "
                        f"{COMMAND_PLACEHOLDER} placeholder (e.g. {head})")
+    stale = [
+        n for n in STALE_LEGACY_COMMANDS
+        if (COMMANDS_DEST / n).is_file()
+        and _is_latch_command_body(_read_text(COMMANDS_DEST / n))
+    ]
+    if stale:
+        head = ", ".join(stale[:3]) + ("..." if len(stale) > 3 else "")
+        return False, (f"slash commands: stale legacy latch command(s) still installed "
+                       f"in {COMMANDS_DEST} (e.g. {head}); re-run install to prune")
     return True, f"slash commands: {len(expected)} installed in {COMMANDS_DEST}"
 
 
@@ -688,8 +798,8 @@ def main(argv: list[str] | None = None) -> int:
             for c in cmd_changes:
                 print(f"           - {c}")
         else:
-            print(f"  [OK  ] slash commands installed -> {COMMANDS_DEST} "
-                  f"({len(cmd_changes)} command(s))")
+            print(f"  [OK  ] slash commands updated -> {COMMANDS_DEST} "
+                  f"({_command_change_summary(cmd_changes)})")
     else:
         print(f"  [WARN] {cmd_changes[0]}")
 

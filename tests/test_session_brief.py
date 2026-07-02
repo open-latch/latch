@@ -71,7 +71,7 @@ def test_brief_getting_started_for_new_kb():
         brief = session_start._build_briefing(tmp)
         _assert("Getting started with latch" in brief,
                 f"getting-started block missing for new KB: {brief!r}")
-        _assert("/kb-compact" in brief,
+        _assert("/latch-compact" in brief,
                 f"compact pointer missing from getting-started: {brief!r}")
         _assert("/latch-pm" in brief,
                 f"PM-interview offer missing from getting-started: {brief!r}")
@@ -164,7 +164,7 @@ def test_brief_surfaces_orphan_count():
         conn.close()
         brief = session_start._build_briefing(tmp, orphan_count=3)
         _assert("3 prior session" in brief, f"orphan count missing: {brief!r}")
-        _assert("/kb-compact" in brief, f"compact hint missing: {brief!r}")
+        _assert("/latch-compact" in brief, f"compact hint missing: {brief!r}")
         print("PASS brief_surfaces_orphan_count")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -184,7 +184,7 @@ def test_brief_surfaces_latest_progress_pointer_only():
         _assert("Latest session note" in brief,
                 f"latest-note pointer missing: {brief!r}")
         _assert("shipped step 6" in brief, f"summary title missing: {brief!r}")
-        _assert("kb_get(" in brief,
+        _assert("latch_get(" in brief,
                 f"drill-in hint missing: {brief!r}")
         # Full body must NOT appear — the whole point of the redesign.
         _assert("Budget cap wired" not in brief,

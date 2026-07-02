@@ -25,7 +25,7 @@ What it removes (mirrors the three install steps + the slash-command copy):
      pruned, populated ones are left alone.
 
   3. **Slash commands** — removes ``~/.claude/commands/<name>.md`` for each
-     command latch shipped (basenames from this repo's ``commands/``). Guarded:
+     command latch shipped, including legacy ``/kb-*`` aliases. Guarded:
      a dest file is only removed if it still points at this KB_HOME, so a
      user's same-named custom command is never clobbered. Honors
      ``CLAUDE_COMMANDS_DIR`` like ``install_commands.sh``.
@@ -83,6 +83,8 @@ ALL_PERMISSION_RULES = ie.ALL_PERMISSION_RULES
 PER_TOOL_PREFIXES = tuple(rule + "__" for rule in ALL_PERMISSION_RULES)
 MANAGED_EVENTS = ie.MANAGED_EVENTS
 COMMANDS_SRC = KB_HOME / "commands"
+LEGACY_COMMAND_ALIASES = ie.LEGACY_COMMAND_ALIASES
+STALE_LEGACY_COMMANDS = ie.STALE_LEGACY_COMMANDS
 
 
 # --------------------------------------------------------------------------- #
@@ -204,27 +206,41 @@ def _commands_dest() -> Path:
     return Path(override) if override else Path.home() / ".claude" / "commands"
 
 
+def _resolved_source_command_body(name: str) -> str | None:
+    src = COMMANDS_SRC / name
+    if not src.is_file() and name in LEGACY_COMMAND_ALIASES:
+        src = COMMANDS_SRC / LEGACY_COMMAND_ALIASES[name]
+    if not src.is_file():
+        return None
+    try:
+        return src.read_text(encoding="utf-8").replace(
+            ie.COMMAND_PLACEHOLDER, ie._resolved_kb_home()
+        )
+    except OSError:
+        return None
+
+
 def remove_commands(dry_run: bool) -> list[str]:
     """Remove latch's installed slash commands; skip anything user-modified."""
     changes: list[str] = []
     dest = _commands_dest()
-    kb_home_token = str(KB_HOME).replace("\\", "/")
     if not COMMANDS_SRC.is_dir():
         return changes
-    for src in sorted(COMMANDS_SRC.glob("*.md")):
-        installed = dest / src.name
+    names = {src.name for src in COMMANDS_SRC.glob("*.md")}
+    names.update(LEGACY_COMMAND_ALIASES)
+    names.update(STALE_LEGACY_COMMANDS)
+    for name in sorted(names):
+        installed = dest / name
         if not installed.is_file():
             continue
         # Guard: install_commands.sh substitutes <KB_HOME> -> this repo path, so
-        # a latch-installed copy contains it. If it doesn't, the file is a
-        # user's own same-named command — leave it alone.
-        try:
-            body = installed.read_text(encoding="utf-8")
-        except Exception:
-            body = ""
-        if kb_home_token not in body.replace("\\", "/"):
-            changes.append(f"skipped {installed.name} (no {kb_home_token} ref — "
-                           "looks user-owned, not latch-installed)")
+        # a latch-installed wrapper contains it or one of latch's wrapper paths.
+        # Pure instruction commands (for example latch-pm.md) may contain no path,
+        # so an exact match against the resolved source body is also latch-owned.
+        body = ie._read_text(installed)
+        source_body = _resolved_source_command_body(name)
+        if body != source_body and not ie._is_latch_command_body(body):
+            changes.append(f"skipped {installed.name} (looks user-owned, not latch-installed)")
             continue
         if dry_run:
             changes.append(f"would remove command {installed}")

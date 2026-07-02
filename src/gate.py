@@ -1488,7 +1488,7 @@ def _gate_receipt_summary(verdict: dict, evidence: list[dict]) -> str:
 
     basis = ", ".join(counts) if counts else "the assembled KB context"
     return (
-        "Latch ran kb_gate on this request and used "
+        "Latch ran the gate on this request and used "
         f"{basis} to produce the verdict; cited node status carries current "
         "authority."
     )
@@ -1519,7 +1519,7 @@ def format_gate_findings(
     out = {
         "label": "Latch gate findings",
         "must_display_to_user": True,
-        "source": "kb_gate",
+        "source": "latch_gate",
         "recommendation": verdict.get("recommendation"),
         "summary": summary,
         "risk_if_proceed": str(verdict.get("risk_if_proceed") or "").strip(),
@@ -1541,7 +1541,7 @@ def format_gate_findings(
         "uncovered_claims": list(verdict.get("uncovered_claims") or []),
         "receipt": {
             "summary": receipt_summary,
-            "source": "kb_gate",
+            "source": "latch_gate",
             "used": {
                 "decision_chain": len(verdict.get("decision_chain") or []),
                 "abandoned_paths": len(verdict.get("abandoned_paths") or []),
@@ -1560,7 +1560,7 @@ def format_gate_findings(
         "why_it_matters": receipt_summary,
         "display_guidance": (
             "Show this as an explicit Latch gate block before acting: say Latch "
-            "ran kb_gate on the request, then show verdict, summary/rationale, "
+            "ran the gate on the request, then show verdict, summary/rationale, "
             "cited KB evidence nodes with status/current authority, source/basis, "
             "next action when present, and uncovered claims/gaps when present."
         ),
@@ -1594,8 +1594,8 @@ def run_gate(
 ) -> dict:
     """End-to-end gate: assemble chain, classify, return combined result.
 
-    The MCP `kb_gate` tool and the `/kb-gate` slash command both
-    delegate here. Output:
+    The MCP `latch_gate` tool and `/latch-gate` slash command delegate here;
+    `kb_gate` and `/kb-gate` remain legacy aliases. Output:
 
         {
             "request":   <str>,
@@ -1606,8 +1606,8 @@ def run_gate(
         }
 
     `findings` is the side-note surface agents should show in chat. `evidence`
-    stays as the raw compact cited-node list; the agent can `kb_get(<id>)` for
-    full bodies.
+    stays as the raw compact cited-node list; the agent can `latch_get(<id>)`
+    for full bodies.
     """
     t0 = time.perf_counter()
     chain_assembly = assemble_gate(
@@ -1699,7 +1699,7 @@ def _log_invocation(
     logging never breaks the verdict path.
 
     `session_id` is the load-bearing correlation key for the Gap A+D
-    correlator (KB id=1098). When run via the MCP `kb_gate` tool,
+    correlator (KB id=1098). When run via the MCP `latch_gate` tool,
     mcp_server passes `PROJECT_SESSION_ID` (captured from
     `CLAUDE_CODE_SESSION_ID` at module load).
     """

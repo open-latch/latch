@@ -273,7 +273,7 @@ def add_priority(
             "scope": "overall" if workstream_id is None else "workstream",
             "workstream_id": workstream_id,
             "active": [{"id": p["id"], "text": p["title"]} for p in active],
-            "hint": "retire one in this scope first: kb_priority_retire(node_id)",
+            "hint": "retire one in this scope first: latch_priority_retire(node_id)",
         }
 
     locked_rank = None
@@ -291,7 +291,7 @@ def add_priority(
                 "active": _active_summary(conn, workstream_id=workstream_id),
                 "hint": (
                     f"rank {locked_rank} is locked by id={clash}; pick another "
-                    "rank, move/unlock it first via kb_priority_reorder, or "
+                    "rank, move/unlock it first via latch_priority_reorder, or "
                     "retire it — ask the user which."
                 ),
             }
@@ -461,7 +461,7 @@ def reorder_priority(
             "active": _active_summary(conn, workstream_id=workstream_id),
             "hint": (
                 f"rank {r} is locked by id={clash}; unlock/move it first via "
-                "kb_priority_reorder, or pick another rank — ask the user which."
+                "latch_priority_reorder, or pick another rank — ask the user which."
             ),
         }
     conn.execute(
@@ -552,10 +552,10 @@ def render_for_brief(priorities: list[dict]) -> list[str]:
         pin = " (pinned)" if p.get("locked") else ""
         out.append(f"{i}.{pin} {p['title']}  (id={p['id']})")
     out.append(
-        "\n_Overall standing directives — weighed in every `kb_gate`; "
+        "\n_Overall standing directives — weighed in every `latch_gate`; "
         "workstream priorities appear under active workstreams. "
-        "Manage with `kb_priority_add` / `kb_priority_reorder` / "
-        "`kb_priority_retire`._"
+        "Manage with `latch_priority_add` / `latch_priority_reorder` / "
+        "`latch_priority_retire`._"
     )
     return out
 
