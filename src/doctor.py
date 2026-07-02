@@ -356,7 +356,12 @@ def check_commands_installed() -> tuple[str, str, str]:
         "kb-heal.md": "latch-heal.md",
         "kb-tree.md": "latch-tree.md",
     }
-    stale_legacy = ("kb-focus.md", "kb-project-direction.md")
+    stale_legacy = (
+        "kb-focus.md",
+        "kb-project-direction.md",
+        "mission-control.md",
+        "trust-and-go.md",
+    )
     markers = (
         "/bin/run_kb_gate.sh",
         "/bin/run_latch_gate.sh",
@@ -367,6 +372,10 @@ def check_commands_installed() -> tuple[str, str, str]:
         "/bin/latch_direction.sh",
         "/src/budget.py",
         "/src/maintenance.py",
+        "kb_profile_active",
+        "kb_profile_bind",
+        "mission-control verification profile",
+        "trust-and-go verification profile",
     )
 
     def is_latch_command_body(body: str) -> bool:

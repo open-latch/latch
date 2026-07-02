@@ -108,6 +108,8 @@ LEGACY_COMMAND_ALIASES = {
 STALE_LEGACY_COMMANDS = (
     "kb-focus.md",
     "kb-project-direction.md",
+    "mission-control.md",
+    "trust-and-go.md",
 )
 LATCH_COMMAND_MARKERS = (
     "/bin/run_kb_gate.sh",
@@ -119,6 +121,10 @@ LATCH_COMMAND_MARKERS = (
     "/bin/latch_direction.sh",
     "/src/budget.py",
     "/src/maintenance.py",
+    "kb_profile_active",
+    "kb_profile_bind",
+    "mission-control verification profile",
+    "trust-and-go verification profile",
 )
 
 # Install-time KB-dir pin (KB id=1556): the single fixed KB directory, written to

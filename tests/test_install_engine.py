@@ -366,11 +366,19 @@ def test_install_commands_prunes_stale_latch_owned_commands():
         dest.mkdir()
         (dest / "kb-focus.md").write_text(
             "bash /opt/latch/bin/run_kb_focus.sh list\n", encoding="utf-8")
+        (dest / "mission-control.md").write_text(
+            "Call kb_profile_active, then kb_profile_bind. "
+            "Escalates the current user into mission-control verification profile.\n",
+            encoding="utf-8")
         level, changes = ie.install_commands(dry_run=False)
         _assert(level == "OK", f"expected OK, got {level}")
         _assert(not (dest / "kb-focus.md").exists(),
                 "stale latch-owned kb-focus command should be pruned")
+        _assert(not (dest / "mission-control.md").exists(),
+                "quarantined mission-control command should be pruned")
         _assert(any("removed stale legacy command kb-focus.md" in c for c in changes), changes)
+        _assert(any("removed stale legacy command mission-control.md" in c
+                    for c in changes), changes)
         ok, label = ie.commands_status()
         _assert(ok, f"status should pass after stale command prune: {label}")
         print("PASS install_commands_prunes_stale_latch_owned_commands")
@@ -385,6 +393,10 @@ def test_commands_status_flags_stale_latch_owned_commands():
         ie.install_commands(dry_run=False)
         (dest / "kb-project-direction.md").write_text(
             "bash /opt/latch/bin/latch_direction.sh\n", encoding="utf-8")
+        (dest / "trust-and-go.md").write_text(
+            "Return this user to the default trust-and-go verification profile "
+            "with kb_profile_active and kb_profile_bind.\n",
+            encoding="utf-8")
         ok, label = ie.commands_status()
         _assert(not ok and "stale legacy" in label,
                 f"status should flag stale latch-owned commands: {label}")
@@ -399,6 +411,10 @@ def test_default_commands_hide_workstream_control_surfaces():
             f"workstream focus should not be a default slash command: {command_names}")
     _assert("kb-project-direction.md" not in command_names,
             f"project direction should not be a default slash command: {command_names}")
+    _assert("mission-control.md" not in command_names,
+            f"mission control should not be a default slash command: {command_names}")
+    _assert("trust-and-go.md" not in command_names,
+            f"trust-and-go should not be a default slash command: {command_names}")
     _assert(
             "latch-gate.md" in command_names
             and "latch-gate-report.md" in command_names

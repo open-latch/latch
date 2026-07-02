@@ -127,11 +127,16 @@ def test_commands_stale_legacy_warns():
         dest_bodies={
             "latch-gate.md": "resolved /home body\n",
             "kb-focus.md": "bash /tmp/latch/bin/run_kb_focus.sh list\n",
+            "mission-control.md": (
+                "Call kb_profile_active, then kb_profile_bind. "
+                "Escalates the current user into mission-control verification profile.\n"
+            ),
         })
     try:
         _name, level, detail = doctor.check_commands_installed()
         _assert(level == doctor.WARN, f"stale legacy command should WARN, got {level}: {detail}")
-        _assert("stale legacy" in detail and "kb-focus.md" in detail,
+        _assert("stale legacy" in detail and "kb-focus.md" in detail
+                and "mission-control.md" in detail,
                 f"detail should name stale command: {detail}")
         print("PASS commands_stale_legacy_warns")
     finally:

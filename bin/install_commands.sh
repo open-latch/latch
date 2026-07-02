@@ -58,7 +58,7 @@ is_latch_command() {
   [ -f "$file" ] || return 1
   grep -Fq "<KB_HOME>" "$file" && return 0
   grep -Fq "$KB_HOME" "$file" && return 0
-  grep -Eq '/bin/(run_kb_gate|run_latch_gate|latch_gate_report|run_compact_now|run_latch_compact_now|run_kb_focus)\.sh|/bin/latch_direction\.sh|/src/(budget|maintenance)\.py' "$file"
+  grep -Eq '/bin/(run_kb_gate|run_latch_gate|latch_gate_report|run_compact_now|run_latch_compact_now|run_kb_focus)\.sh|/bin/latch_direction\.sh|/src/(budget|maintenance)\.py|kb_profile_(active|bind)|mission-control verification profile|trust-and-go verification profile' "$file"
 }
 
 update_legacy_alias() {
@@ -90,7 +90,7 @@ update_legacy_alias "kb-gate-report.md" "latch-gate-report.md"
 update_legacy_alias "kb-heal.md" "latch-heal.md"
 update_legacy_alias "kb-tree.md" "latch-tree.md"
 
-for stale in kb-focus.md kb-project-direction.md; do
+for stale in kb-focus.md kb-project-direction.md mission-control.md trust-and-go.md; do
   stale_path="$DEST_DIR/$stale"
   [ -f "$stale_path" ] || continue
   if ! is_latch_command "$stale_path"; then
