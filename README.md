@@ -1,6 +1,23 @@
-# latch
+<p align="center">
+  <img src="./docs/assets/latch-logo.svg" alt="latch" width="520">
+</p>
 
-**latch is a decision seatbelt for coding agents.**
+<p align="center">
+  <strong>A decision seatbelt for coding agents.</strong>
+</p>
+
+<p align="center">
+  Local-first &middot; reversible &middot; stops agents before they repeat paths you already ruled out.
+</p>
+
+<p align="center">
+  <a href="#guided-quickstart">Quickstart</a> &middot;
+  <a href="#the-first-proof">First proof</a> &middot;
+  <a href="#rejected-path-demo">Rejected-path demo</a> &middot;
+  <a href="#safety">Safety</a>
+</p>
+
+---
 
 **TL;DR:** install latch once, run the quickstart script from a project repo,
 choose Claude Code, Codex, or both, seed recent local sessions, then ask an
