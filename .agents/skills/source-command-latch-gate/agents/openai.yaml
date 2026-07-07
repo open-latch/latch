@@ -1,0 +1,4 @@
+interface:
+  display_name: "Latch Gate"
+  short_description: "Run latch gate on a request"
+  default_prompt: "Run latch gate on this request."

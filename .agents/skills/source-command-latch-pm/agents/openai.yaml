@@ -1,0 +1,4 @@
+interface:
+  display_name: "Latch PM"
+  short_description: "Seed a ruled-out decision and test the catch"
+  default_prompt: "Run the latch PM decision-continuity workflow."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Latch Tree"
+  short_description: "Rebuild the latch KB tree"
+  default_prompt: "Run latch tree for this project."
