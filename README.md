@@ -47,6 +47,26 @@ work. Ask Claude Code or Codex to add Redis-backed email jobs. latch should cite
 the saved rejection, explain the rationale, and recommend the compliant path
 before files change.
 
+No useful history yet? Run the no-history fixture and watch latch catch a
+plausible agent mistake in a throwaway repo:
+
+```bash
+/path/to/latch/bin/latch_demo_no_history.sh
+```
+
+The fixture captures one tiny project rule, then asks for the wrong thing: a
+Redis-backed background job queue. A live receipt should include this shape:
+
+```text
+Latch gate receipt:
+Latch ran latch_gate on the fixture request.
+Recommendation: MODIFY or DO_NOT_PROCEED
+Summary: the request conflicts with the saved "no background job queue" decision.
+Risk if proceed: adding Redis and a worker repeats the rejected queue path.
+Cited evidence:
+- id=1 decision status=canonical: No background job queue for the no-history demo app
+```
+
 The detailed run:
 
 1. Run the guided quickstart from a real project repo.
@@ -225,8 +245,17 @@ examples from the seed report, then choose one to test.
 
 If the first pass does not find a strong example, go wider on purpose:
 increase `--last-sessions N`, switch sources, or use the no-history mission in
-[docs/first_run_mission.md](./docs/first_run_mission.md). Do not make "scan
-everything" the default.
+[docs/first_run_mission.md](./docs/first_run_mission.md):
+
+```bash
+/path/to/latch/bin/latch_demo_no_history.sh
+# Windows: C:\path\to\latch\bin\latch_demo_no_history.ps1
+```
+
+Use `--backend codex` when running the fixture from a plain shell after a
+Codex-only install.
+
+Do not make "scan everything" the default.
 
 ## Using It Day To Day
 

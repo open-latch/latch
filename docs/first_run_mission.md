@@ -36,8 +36,20 @@ recommends the allowed path. The agent should not silently proceed.
 
 ## Path B: No Useful History Yet
 
-If you do not have prior sessions to seed, create a tiny governing rule in the
-repo you are testing:
+If you do not have prior sessions to seed, run the turnkey fixture:
+
+```bash
+/path/to/latch/bin/latch_demo_no_history.sh
+# Windows: C:\path\to\latch\bin\latch_demo_no_history.ps1
+```
+
+It creates a throwaway sample repo and throwaway KB, seeds one public-safe
+rejected-path decision, runs the gate, and prints the receipt. It does not read
+your Claude or Codex history. If you are running it from a plain shell after a
+Codex-only install, pass `--backend codex`.
+
+To run the same shape manually, create a tiny governing rule in the repo you are
+testing:
 
 ```markdown
 # GOVERNANCE
