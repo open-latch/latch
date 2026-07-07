@@ -1,0 +1,49 @@
+---
+name: source-command-latch-gate-report
+description: Show a read-only report over recent latch gate activity. Use when the user invokes $source-command-latch-gate-report, latch-gate-report, /latch-gate-report, or wants the Codex equivalent of Claude Code's /latch-gate-report command.
+---
+
+# source-command-latch-gate-report
+
+Use this skill when the user asks for a read-only report over recent latch gate
+activity in Codex.
+
+## Command Template
+
+Resolve the active latch checkout, then explicitly translate any user-supplied
+date or limit filters into shell arguments. Codex does not populate Claude
+slash-command argument placeholders.
+
+```bash
+latch_home="${LATCH_HOME:-}"
+if [ -z "$latch_home" ] && [ -n "${CLAUDE_KB_HOME:-}" ]; then
+  latch_home="$CLAUDE_KB_HOME"
+fi
+if [ -z "$latch_home" ]; then
+  search_dir="$PWD"
+  while [ "$search_dir" != "/" ]; do
+    if [ -f "$search_dir/AGENTS.md" ]; then
+      latch_home="$(sed -n 's|.*Follow `\([^`]*\)/README\.md` per-user setup.*|\1|p' "$search_dir/AGENTS.md" | head -n 1)"
+      [ -n "$latch_home" ] && break
+    fi
+    search_dir="$(dirname "$search_dir")"
+  done
+fi
+if [ -z "$latch_home" ]; then
+  candidate="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+  if [ -f "$candidate/src/mcp_server.py" ] && [ -d "$candidate/commands" ]; then
+    latch_home="$candidate"
+  fi
+fi
+if [ -z "$latch_home" ] || [ ! -f "$latch_home/src/mcp_server.py" ]; then
+  echo "Could not find latch checkout; set LATCH_HOME to your latch install." >&2
+  exit 1
+fi
+filters=()
+# Example: filters=(--days 30 --limit 5)
+bash "$latch_home/bin/latch_gate_report.sh" "${filters[@]}"
+```
+
+Show the report as-is. The report summarizes structural logs only; it does not
+run a new gate and does not write decisions. If the user asks for a cited node
+body, fetch that node separately with the relevant latch KB read tool.

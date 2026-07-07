@@ -1,0 +1,4 @@
+interface:
+  display_name: "Latch Gate Report"
+  short_description: "Report recent latch gate activity"
+  default_prompt: "Show the recent latch gate report."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Latch Budget Approve"
+  short_description: "Approve today's latch LLM budget"
+  default_prompt: "Run latch budget approve for this project."

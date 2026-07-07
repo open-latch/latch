@@ -1,0 +1,4 @@
+interface:
+  display_name: "Latch Decay"
+  short_description: "Run latch weekly decay maintenance"
+  default_prompt: "Run latch decay for this project."

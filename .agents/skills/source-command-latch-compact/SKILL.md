@@ -38,11 +38,27 @@ Steps:
 
    ```bash
    latch_home="${LATCH_HOME:-}"
+   if [ -z "$latch_home" ] && [ -n "${CLAUDE_KB_HOME:-}" ]; then
+     latch_home="$CLAUDE_KB_HOME"
+   fi
    if [ -z "$latch_home" ]; then
-     latch_home="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+     search_dir="$PWD"
+     while [ "$search_dir" != "/" ]; do
+       if [ -f "$search_dir/AGENTS.md" ]; then
+         latch_home="$(sed -n 's|.*Follow `\([^`]*\)/README\.md` per-user setup.*|\1|p' "$search_dir/AGENTS.md" | head -n 1)"
+         [ -n "$latch_home" ] && break
+       fi
+       search_dir="$(dirname "$search_dir")"
+     done
+   fi
+   if [ -z "$latch_home" ]; then
+     candidate="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+     if [ -f "$candidate/src/mcp_server.py" ] && [ -d "$candidate/commands" ]; then
+       latch_home="$candidate"
+     fi
    fi
    if [ ! -x "$latch_home/bin/run_codex_compact_now.sh" ]; then
-     echo "Could not find bin/run_codex_compact_now.sh; set LATCH_HOME to your latch checkout." >&2
+     echo "Could not find latch checkout; set LATCH_HOME to your latch install." >&2
      exit 1
    fi
    bash "$latch_home/bin/run_codex_compact_now.sh" --background --wait

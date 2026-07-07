@@ -1,0 +1,4 @@
+interface:
+  display_name: "Latch Heal"
+  short_description: "Run latch nightly heal"
+  default_prompt: "Run latch heal for this project."
