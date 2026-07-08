@@ -29,16 +29,9 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-import numpy as np
-
 from _common import hook_field, log, project_cwd, read_hook_input, session_id
 
-import db
-import embeddings
-import log_utils
-import profiles
-import search
-from paths import is_disabled, is_in_compact, project_dir
+from paths import UNLATCHED_MESSAGE, is_disabled, is_in_compact, is_unlatched_mode, project_dir
 
 
 TOP_K = 5
@@ -56,6 +49,34 @@ DEPTH_KEYWORDS = re.compile(
 )
 HARD_BUDGET_MS = 250
 LOG_STREAM = "retrieve"
+
+np = None
+db = None
+embeddings = None
+log_utils = None
+profiles = None
+search = None
+_RUNTIME_LOADED = False
+
+
+def _load_runtime() -> None:
+    global np, db, embeddings, log_utils, profiles, search, _RUNTIME_LOADED
+    if _RUNTIME_LOADED:
+        return
+    import numpy as _np
+    import db as _db
+    import embeddings as _embeddings
+    import log_utils as _log_utils
+    import profiles as _profiles
+    import search as _search
+
+    np = _np
+    db = _db
+    embeddings = _embeddings
+    log_utils = _log_utils
+    profiles = _profiles
+    search = _search
+    _RUNTIME_LOADED = True
 
 # Deterministic correction-signal scan (no LLM, sub-millisecond). When a
 # prompt looks like the user is flagging stored KB info as wrong/stale, we
@@ -86,8 +107,12 @@ GUIDELINE_SIGNAL = re.compile(
 
 
 def main() -> int:
+    if is_unlatched_mode():
+        _print_context(UNLATCHED_MESSAGE)
+        return 0
     if is_disabled() or is_in_compact():
         return 0
+    _load_runtime()
     payload = read_hook_input()
     sid = session_id(payload)
     cwd = project_cwd(payload)
@@ -180,6 +205,7 @@ def _print_context(context: str) -> None:
 
 
 def _retrieve_and_inject(cwd: str, sid: str, prompt: str, log_entry: dict) -> list[dict]:
+    _load_runtime()
     conn = db.connect(cwd)
     try:
         # Determine current turn — sessions row may not yet exist if the Stop
@@ -242,6 +268,7 @@ def _vector_path(
     conn, sid: str, turn: int, active_set: set[int], qvec, log_entry: dict,
     scope_repo: str | None = None,
 ) -> list[dict]:
+    _load_runtime()
     raw = search.vector_search(conn, qvec=qvec, limit=TOP_K * 3, scope_repo=scope_repo)
     log_entry["raw_hits"] = [(r["id"], round(r["score"], 3), r["kind"]) for r in raw[:10]]
     candidates = [
@@ -281,6 +308,7 @@ def _graph_path(
 
     Re-rank active-set members by similarity to qvec, then pull edges from the
     top one. Yields nodes the agent has likely been about to ask about next."""
+    _load_runtime()
     if not active_set:
         log_entry["graph_skip"] = "empty_active"
         return []
@@ -416,6 +444,7 @@ def _mission_control_directive(cwd: str, prompt: str) -> str:
     / trust-and-go). Fail-open: any error -> '' so the hook never breaks the
     user's prompt. The Tier-2 enforcement surface for 'blocking by contract' —
     latch has no interceptor (KB id=1398)."""
+    _load_runtime()
     try:
         conn = db.connect(cwd)
         try:
@@ -431,6 +460,7 @@ def _take_cite_nudge(cwd: str, sid: str) -> int:
     """Read + reset the pending cite-nudge marker for this session (Slice 3-B).
     Fail-open: any error -> 0 so the hook never breaks the user's prompt. Cheap:
     a single indexed read, and a write only when a nudge was actually queued."""
+    _load_runtime()
     try:
         conn = db.connect(cwd)
         try:
@@ -478,6 +508,7 @@ def _write_log(cwd: str, entry: dict) -> None:
     explicit kwarg. Both keys end up in the row — readers should prefer
     `session_id` going forward.
     """
+    _load_runtime()
     try:
         log_utils.emit_event(
             LOG_STREAM, entry,

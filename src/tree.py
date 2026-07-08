@@ -391,6 +391,12 @@ def build_tree(
     if linkage not in ("average", "single"):
         raise ValueError(
             f"build_tree: unknown linkage {linkage!r}; expected 'average' or 'single'")
+    if paths.is_unlatched_mode():
+        return {
+            "ok": False,
+            "reason": "unlatched",
+            "message": paths.UNLATCHED_MESSAGE,
+        }
     if paths.is_disabled():
         return {"ok": False, "reason": "disabled"}
 

@@ -51,10 +51,12 @@ bash "$latch_home/bin/run_latch_gate.sh" "$request"
 ```
 
 After the command returns, show an explicit **Latch gate** block. Prefer the
-returned `findings` object when present. Lead with provenance, then include the
-recommendation, summary/rationale, receipt or source basis, cited evidence
-nodes with status/current authority, any better next action, and uncovered
-claims.
+returned `findings` object when present. If the result says latch is UNLATCHED,
+report that latch gate was skipped, do not claim KB evidence was read, and tell
+the user to run `/unlatch` to re-latch. Otherwise, lead with provenance, then
+include the recommendation, summary/rationale, receipt or source basis, cited
+evidence nodes with status/current authority, any better next action, and
+uncovered claims.
 
 Do not treat the gate as an auto-redirect. Surface `MODIFY`,
 `DO_NOT_PROCEED`, or `NEEDS_HUMAN_JUDGMENT` clearly and let the user decide

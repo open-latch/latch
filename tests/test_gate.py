@@ -559,6 +559,22 @@ def test_gate_findings_surface_cited_evidence_for_proceed():
     print("PASS gate_findings_surface_cited_evidence_for_proceed")
 
 
+def test_gate_findings_unlatched_receipt_does_not_claim_kb_evidence():
+    verdict = gate.unlatched_verdict()
+
+    out = gate.format_gate_findings(verdict, [], gate_status="SKIPPED")
+
+    _assert(out["recommendation"] is None, out)
+    _assert(out["gate_status"] == "SKIPPED", out)
+    _assert("Latch gate was skipped" in out["receipt"]["summary"], out)
+    _assert("UNLATCHED" in out["receipt"]["summary"], out)
+    _assert("No KB evidence was read" in out["receipt"]["authority"], out)
+    _assert("assembled KB context" not in out["receipt"]["summary"], out)
+    _assert(out["receipt"]["used"]["evidence_nodes"] == 0, out)
+    _assert(out["why_it_matters"] == out["receipt"]["summary"], out)
+    print("PASS gate_findings_unlatched_receipt_does_not_claim_kb_evidence")
+
+
 def test_gate_findings_surface_agent_mistake_redirect():
     verdict = {
         "recommendation": "MODIFY",
@@ -822,6 +838,7 @@ if __name__ == "__main__":
     test_evidence_includes_stale_targets()
     test_output_schema_top_level_shape()
     test_gate_findings_surface_cited_evidence_for_proceed()
+    test_gate_findings_unlatched_receipt_does_not_claim_kb_evidence()
     test_gate_findings_surface_agent_mistake_redirect()
     test_evidence_node_ids_is_unique_and_sorted()
     test_body_excerpt_truncates_long_bodies()

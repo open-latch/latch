@@ -7,7 +7,17 @@ KB_HOME="${LATCH_HOME:-${CLAUDE_KB_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/..
 
 echo "latch status (KB_HOME=${KB_HOME})"
 
-if [ -n "${LATCH_DISABLE:-}" ]; then
+if [ -n "${LATCH_UNLATCHED:-}" ]; then
+  echo "  [UNLATCHED] \$LATCH_UNLATCHED is set - latch influence is OFF for vanilla-agent mode."
+  echo "             disabled: session briefs, prompt KB injection, compaction, self-heal, maintenance."
+  echo "             still true: KB files stay local/unchanged; latch remains installed; control commands/MCP registration remain."
+  echo "             resume: unset LATCH_UNLATCHED, then run /unlatch"
+elif [ -e "${KB_HOME}/UNLATCHED" ]; then
+  echo "  [UNLATCHED] ${KB_HOME}/UNLATCHED exists - latch influence is OFF for vanilla-agent mode."
+  echo "             disabled: session briefs, prompt KB injection, compaction, self-heal, maintenance."
+  echo "             still true: KB files stay local/unchanged; latch remains installed; control commands/MCP registration remain."
+  echo "             resume: run /unlatch"
+elif [ -n "${LATCH_DISABLE:-}" ]; then
   echo "  [DISABLED] \$LATCH_DISABLE is set in this environment — all hooks + compactor no-op."
 elif [ -n "${CLAUDE_KB_DISABLE:-}" ]; then
   echo "  [DISABLED] legacy \$CLAUDE_KB_DISABLE is set in this environment — all hooks + compactor no-op."
@@ -15,7 +25,7 @@ elif [ -e "${KB_HOME}/DISABLE" ]; then
   echo "  [DISABLED] ${KB_HOME}/DISABLE exists — all hooks + compactor no-op."
   echo "             resume: bash bin/latch_enable.sh"
 else
-  echo "  [ENABLED ] no DISABLE sentinel / env var — hooks active."
+  echo "  [ENABLED ] no UNLATCHED/DISABLE sentinel or env var - hooks active."
 fi
 
 if [ -n "${LATCH_DISABLE_WRITE:-}" ]; then

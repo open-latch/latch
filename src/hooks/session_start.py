@@ -18,7 +18,7 @@ from _common import log, project_cwd, read_hook_input, session_id, transcript_pa
 import budget
 import db
 import priorities
-from paths import is_disabled, is_in_compact
+from paths import KB_ROOT, is_disabled, is_in_compact, is_unlatched_mode
 
 
 MAX_WORKSTREAMS = 5
@@ -50,7 +50,15 @@ _GETTING_STARTED_BLOCK = (
 
 
 def main() -> int:
-    if is_disabled() or is_in_compact():
+    if is_in_compact():
+        return 0
+    if is_unlatched_mode():
+        _emit_session_start_context(
+            _build_unlatched_brief(),
+            system_message=_build_unlatched_system_message(),
+        )
+        return 0
+    if is_disabled():
         return 0
     payload = read_hook_input()
     cwd = project_cwd(payload)
@@ -111,18 +119,55 @@ def main() -> int:
             log(f"session_start record_retrievals failed: {e}")
 
     if briefing:
-        # Hook stdout becomes additionalContext for the session.
-        # JSON form is the spec; if Claude Code ignores the envelope it falls
-        # back to treating stdout as plain text — both yield a usable brief.
-        out = {
-            "hookSpecificOutput": {
-                "hookEventName": "SessionStart",
-                "additionalContext": briefing,
-            }
-        }
-        print(json.dumps(out))
+        _emit_session_start_context(briefing)
 
     return 0
+
+
+def _emit_session_start_context(context: str, system_message: str | None = None) -> None:
+    """Emit a SessionStart additionalContext envelope."""
+    # Hook stdout becomes additionalContext for the session. JSON form is the
+    # spec; if Claude Code ignores the envelope it falls back to treating stdout
+    # as plain text — both yield a usable brief.
+    out = {
+        "hookSpecificOutput": {
+            "hookEventName": "SessionStart",
+            "additionalContext": context,
+        }
+    }
+    if system_message:
+        out["systemMessage"] = system_message
+    print(json.dumps(out))
+
+
+def _build_unlatched_system_message() -> str:
+    return (
+        "LATCH UNLATCHED MODE ACTIVE: Latch is OFF for this latch install. "
+        "This is the agent without latch's project judgment layer. KB brief, prompt injection, gate "
+        "guidance, compaction, self-heal, maintenance, and automatic latch "
+        "writes are disabled until the user runs /unlatch and confirms latch. "
+        "If LATCH_UNLATCHED is set, unset it too."
+    )
+
+
+def _build_unlatched_brief() -> str:
+    """Static receipt for Unlatched mode; no KB reads, ranking, or model calls."""
+    return "\n".join([
+        "# latch is unlatched",
+        "",
+        "Latch is currently UNLATCHED.",
+        "This is the agent without latch's project judgment layer.",
+        "Scope: this latch install stays unlatched until you re-latch, even if you change repos.",
+        "",
+        "- Disabled: SessionStart KB brief, UserPromptSubmit KB injection, gate "
+        "guidance, Stop/SessionEnd compaction, self-heal, maintenance, and "
+        "automatic latch writes for this latch install.",
+        "- Still true: your KB is local and unchanged, latch remains installed, "
+        "/unlatch remains available, MCP registration remains present, and "
+        "non-latch tools/hooks are unaffected.",
+        "- Run `/unlatch` to re-latch. If `LATCH_UNLATCHED` is set, unset it too.",
+        f"- Latch home: `{KB_ROOT}`.",
+    ])
 
 
 def _auto_sync_claude_md(cwd: str) -> str | None:

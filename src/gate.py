@@ -989,6 +989,15 @@ def _classifier_error(reason: str) -> dict:
     }
 
 
+def unlatched_verdict() -> dict:
+    return {
+        **_classifier_error(paths.UNLATCHED_MESSAGE),
+        "reason": "unlatched",
+        "message": paths.UNLATCHED_MESSAGE,
+        "skipped": True,
+    }
+
+
 def _classifier_backend(name: str | None = None, *, default: str = "claude") -> str:
     """Resolve the gate model backend.
 
@@ -1149,6 +1158,8 @@ def classify_gate(
     `error` string. Callers should treat None as "no judgment available"
     rather than a fourth label.
     """
+    if paths.is_unlatched_mode():
+        return unlatched_verdict()
     if paths.is_disabled() or paths.is_in_compact():
         return {**_classifier_error("disabled/in-compact"), "skipped": True}
     if not use_llm:
@@ -1421,6 +1432,13 @@ def adversary_classify(
     verdict. Same skip/budget/subprocess shape as classify_gate; returns an
     `_adversary_error` (objection="", verdict_delta="none") on any skip/error
     so the caller can attach it uniformly."""
+    if paths.is_unlatched_mode():
+        return {
+            **_adversary_error(paths.UNLATCHED_MESSAGE),
+            "reason": "unlatched",
+            "message": paths.UNLATCHED_MESSAGE,
+            "skipped": True,
+        }
     if paths.is_disabled() or paths.is_in_compact():
         return {**_adversary_error("disabled/in-compact"), "skipped": True}
     if not use_llm:
@@ -1470,6 +1488,11 @@ def _counted(n: int, singular: str, plural: str | None = None) -> str:
 
 def _gate_receipt_summary(verdict: dict, evidence: list[dict]) -> str:
     """Short user-facing provenance line for a gate result."""
+    if verdict.get("reason") == "unlatched":
+        return (
+            "Latch gate was skipped because Latch is currently UNLATCHED. "
+            "Run /unlatch to re-latch. If LATCH_UNLATCHED is set, unset it too."
+        )
     counts = []
     if evidence:
         counts.append(_counted(len(evidence), "cited KB node"))
@@ -1516,6 +1539,27 @@ def format_gate_findings(
             if error else
             "Gate did not produce a recommendation."
         )
+    authority = (
+        "No KB evidence was read while latch was unlatched."
+        if verdict.get("reason") == "unlatched"
+        else (
+            "Use evidence_nodes[].status as the visible current-authority "
+            "surface; decision_chain, abandoned_paths, current_direction, "
+            "and load_bearing_claims explain the rationale and source basis."
+        )
+    )
+    display_guidance = (
+        "Show this as an explicit Latch gate block before acting: say Latch gate "
+        "was skipped because latch is currently UNLATCHED, show the unlatched "
+        "message, and tell the user to run /unlatch to re-latch."
+        if verdict.get("reason") == "unlatched"
+        else (
+            "Show this as an explicit Latch gate block before acting: say Latch "
+            "ran the gate on the request, then show verdict, summary/rationale, "
+            "cited KB evidence nodes with status/current authority, source/basis, "
+            "next action when present, and uncovered claims/gaps when present."
+        )
+    )
     out = {
         "label": "Latch gate findings",
         "must_display_to_user": True,
@@ -1551,19 +1595,10 @@ def format_gate_findings(
                 "load_bearing_claims": len(verdict.get("load_bearing_claims") or []),
                 "uncovered_claims": len(verdict.get("uncovered_claims") or []),
             },
-            "authority": (
-                "Use evidence_nodes[].status as the visible current-authority "
-                "surface; decision_chain, abandoned_paths, current_direction, "
-                "and load_bearing_claims explain the rationale and source basis."
-            ),
+            "authority": authority,
         },
         "why_it_matters": receipt_summary,
-        "display_guidance": (
-            "Show this as an explicit Latch gate block before acting: say Latch "
-            "ran the gate on the request, then show verdict, summary/rationale, "
-            "cited KB evidence nodes with status/current authority, source/basis, "
-            "next action when present, and uncovered claims/gaps when present."
-        ),
+        "display_guidance": display_guidance,
     }
     if gate_status is not None:
         out["gate_status"] = gate_status
@@ -1609,6 +1644,21 @@ def run_gate(
     stays as the raw compact cited-node list; the agent can `latch_get(<id>)`
     for full bodies.
     """
+    if paths.is_unlatched_mode():
+        verdict = unlatched_verdict()
+        return {
+            "request": request,
+            "verdict": verdict,
+            "findings": format_gate_findings(verdict, []),
+            "chains": {
+                "query": request,
+                "seeds": [],
+                "chains": [],
+                "evidence_node_ids": [],
+                "priorities": [],
+            },
+            "evidence": [],
+        }
     t0 = time.perf_counter()
     chain_assembly = assemble_gate(
         conn, request,

@@ -43,6 +43,14 @@ PROJECTS_ROOT = KB_ROOT / "projects"
 SCHEMA_PATH = KB_ROOT / "src" / "schema.sql"
 DISABLE_FILE = KB_ROOT / "DISABLE"
 DISABLE_WRITE_FILE = KB_ROOT / "DISABLE_WRITE"
+UNLATCHED_FILE = KB_ROOT / "UNLATCHED"
+UNLATCHED_STATE_FILE = KB_ROOT / "UNLATCH_STATE.json"
+UNLATCHED_MESSAGE = (
+    "Latch is currently UNLATCHED.\n"
+    "Latch guidance, gate/search/compact/maintenance, and automatic writes are off "
+    "for this latch install.\n"
+    "Run /unlatch to re-latch. If LATCH_UNLATCHED is set, unset it too."
+)
 
 # Install-time pin file: a small JSON {"kb_dir": "<absolute path>"} written by
 # install_engine.py. The single source of truth for "which KB" on a configured
@@ -85,10 +93,25 @@ def _resolve_pinned_dir() -> Path | None:
     return None
 
 
+def is_unlatched_mode() -> bool:
+    """User-facing vanilla-agent escape hatch.
+
+    Unlatched mode is implemented as a thin layer over the full kill switch:
+    automatic latch influence is off, while the UNLATCHED sentinel gives hooks and
+    status commands enough metadata to show an explicit receipt instead of going
+    silently dark.
+    """
+    if os.environ.get("LATCH_UNLATCHED"):
+        return True
+    return UNLATCHED_FILE.exists()
+
+
 def is_disabled() -> bool:
-    """Kill-switch: hooks and compactor no-op if the DISABLE file exists or
+    """Kill-switch: hooks and compactor no-op if DISABLE/UNLATCHED exists or
     the LATCH_DISABLE / CLAUDE_KB_DISABLE env var is set. Recoverable in one
-    command: `touch ${LATCH_HOME}/DISABLE` to stop, `rm` it to resume."""
+    command: `bash bin/latch_enable.sh` or `/unlatch`."""
+    if is_unlatched_mode():
+        return True
     if os.environ.get("LATCH_DISABLE") or os.environ.get("CLAUDE_KB_DISABLE"):
         return True
     return DISABLE_FILE.exists()

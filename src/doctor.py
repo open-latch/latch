@@ -357,6 +357,7 @@ def check_commands_installed() -> tuple[str, str, str]:
         "kb-tree.md": "latch-tree.md",
     }
     stale_legacy = (
+        "latch-baseline.md",
         "kb-focus.md",
         "kb-project-direction.md",
         "mission-control.md",
@@ -365,6 +366,8 @@ def check_commands_installed() -> tuple[str, str, str]:
     markers = (
         "/bin/run_kb_gate.sh",
         "/bin/run_latch_gate.sh",
+        "/bin/latch_baseline.sh",
+        "/bin/unlatch.sh",
         "/bin/latch_gate_report.sh",
         "/bin/run_compact_now.sh",
         "/bin/run_latch_compact_now.sh",

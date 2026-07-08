@@ -1182,6 +1182,12 @@ def nightly_heal(
     Idempotent: re-running immediately after should do ~nothing because edges
     from the first run short-circuit the sweep on subsequent collisions.
     """
+    if paths.is_unlatched_mode():
+        return {
+            "ok": False,
+            "reason": "unlatched",
+            "message": paths.UNLATCHED_MESSAGE,
+        }
     if paths.is_disabled():
         return {"ok": False, "reason": "disabled"}
 

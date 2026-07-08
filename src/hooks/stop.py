@@ -19,19 +19,41 @@ from _common import (
     spawn_compactor_detached, transcript_path,
 )
 
-import capture_streams
-import cite_detector
-import db
-import profiles
-from paths import is_in_compact, is_write_disabled
+from paths import UNLATCHED_MESSAGE, is_in_compact, is_unlatched_mode, is_write_disabled
 
 COMPACT_EVERY_N_TURNS = 5
+
+capture_streams = None
+cite_detector = None
+db = None
+profiles = None
+_RUNTIME_LOADED = False
+
+
+def _load_runtime() -> None:
+    global capture_streams, cite_detector, db, profiles, _RUNTIME_LOADED
+    if _RUNTIME_LOADED:
+        return
+    import capture_streams as _capture_streams
+    import cite_detector as _cite_detector
+    import db as _db
+    import profiles as _profiles
+
+    capture_streams = _capture_streams
+    cite_detector = _cite_detector
+    db = _db
+    profiles = _profiles
+    _RUNTIME_LOADED = True
 
 
 def main() -> int:
     # is_write_disabled() implies is_disabled(); covers both kill-switches.
+    if is_unlatched_mode():
+        _print_unlatched_context("Stop")
+        return 0
     if is_write_disabled() or is_in_compact():
         return 0
+    _load_runtime()
     payload = read_hook_input()
     sid = session_id(payload)
     if not sid:
@@ -77,6 +99,7 @@ def _cite_presence_check(sid: str, cwd: str, tpath: str | None) -> None:
     KB id=1436). On a hit: emit a structural detection.log row and stash a
     pending cite-nudge for the next UserPromptSubmit to surface (advisory
     posture — no forced re-turn)."""
+    _load_runtime()
     conn = db.connect(cwd)
     try:
         if not profiles.claim_backing_requires_code_trace(conn):
@@ -171,6 +194,15 @@ def _extract_text(content) -> str:
                 parts.append(block)
         return "\n".join(parts)
     return ""
+
+
+def _print_unlatched_context(event: str) -> None:
+    print(json.dumps({
+        "hookSpecificOutput": {
+            "hookEventName": event,
+            "additionalContext": UNLATCHED_MESSAGE,
+        }
+    }))
 
 
 if __name__ == "__main__":

@@ -16,14 +16,75 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-import db
-import gate
+import paths
 
 
 def _emit(obj: dict) -> int:
     sys.stdout.write(json.dumps(obj))
     sys.stdout.write("\n")
     return 0
+
+
+def _unlatched_verdict() -> dict:
+    message = paths.UNLATCHED_MESSAGE
+    reason = message.strip().rstrip(".")
+    return {
+        "recommendation": None,
+        "summary": f"Gate did not produce a recommendation: {reason}.",
+        "decision_chain": [],
+        "abandoned_paths": [],
+        "active_constraints": [],
+        "current_direction": [],
+        "risk_if_proceed": "",
+        "better_next_action": "",
+        "evidence_nodes": [],
+        "load_bearing_claims": [],
+        "uncovered_claims": [],
+        "error": reason,
+        "reason": "unlatched",
+        "message": message,
+        "skipped": True,
+    }
+
+
+def _unlatched_findings(verdict: dict) -> dict:
+    return {
+        "label": "Latch gate findings",
+        "must_display_to_user": True,
+        "source": "latch_gate",
+        "recommendation": None,
+        "summary": verdict["summary"],
+        "risk_if_proceed": "",
+        "better_next_action": "",
+        "decision_chain": [],
+        "abandoned_paths": [],
+        "active_constraints": [],
+        "current_direction": [],
+        "evidence_nodes": [],
+        "load_bearing_claims": [],
+        "uncovered_claims": [],
+        "receipt": {
+            "summary": (
+                "Latch gate was skipped because Latch is currently UNLATCHED. "
+                "Run /unlatch to re-latch. If LATCH_UNLATCHED is set, unset it too."
+            ),
+            "source": "latch_gate",
+            "used": {
+                "decision_chain": 0,
+                "abandoned_paths": 0,
+                "active_constraints": 0,
+                "current_direction": 0,
+                "evidence_nodes": 0,
+                "load_bearing_claims": 0,
+                "uncovered_claims": 0,
+            },
+            "authority": "No KB evidence was read while latch was unlatched.",
+        },
+        "why_it_matters": (
+            "Latch gate was skipped because Latch is currently UNLATCHED. "
+            "Run /unlatch to re-latch. If LATCH_UNLATCHED is set, unset it too."
+        ),
+    }
 
 
 def main(argv: list[str]) -> int:
@@ -37,6 +98,25 @@ def main(argv: list[str]) -> int:
     request = " ".join(argv[2:]).strip()
     if not request:
         return _emit({"ok": False, "error": "empty request"})
+    if paths.is_unlatched_mode():
+        verdict = _unlatched_verdict()
+        return _emit({
+            "ok": False,
+            "request": request,
+            "reason": "unlatched",
+            "message": paths.UNLATCHED_MESSAGE,
+            "verdict": verdict,
+            "findings": _unlatched_findings(verdict),
+            "evidence": [],
+            "chain_summary": {
+                "seed_count": 0,
+                "seed_ids": [],
+                "reachable_ids": [],
+            },
+        })
+
+    import db
+    import gate
 
     conn = db.connect(cwd)
     try:

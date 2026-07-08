@@ -1,0 +1,4 @@
+interface:
+  display_name: "Unlatch"
+  short_description: "Confirm latch/unlatch mode"
+  default_prompt: "Show current latch/unlatch state and ask for confirmation before changing it."

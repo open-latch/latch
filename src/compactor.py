@@ -195,6 +195,13 @@ def run_compaction(
     summarizer_backend: str | None = None,
 ) -> dict:
     """Run one compaction pass. Returns a small status dict."""
+    if paths.is_unlatched_mode():
+        return {
+            "ok": False,
+            "reason": "unlatched",
+            "message": paths.UNLATCHED_MESSAGE,
+            "session_id": session_id,
+        }
     if paths.is_disabled():
         return {"ok": False, "reason": "disabled", "session_id": session_id}
     if paths.is_in_compact():
