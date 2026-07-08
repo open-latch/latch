@@ -44,6 +44,12 @@ def run_weekly_maintenance(project_path: str | None = None) -> dict:
     """Apply decay + promotion to a project's KB. Safe to call ad-hoc; both ops
     are idempotent in the sense that running them twice in the same week just
     continues the decay curve and re-promotes nothing."""
+    if paths.is_unlatched_mode():
+        return {
+            "ok": False,
+            "reason": "unlatched",
+            "message": paths.UNLATCHED_MESSAGE,
+        }
     if paths.is_disabled():
         return {"ok": False, "reason": "disabled"}
     conn = db.connect(project_path)
@@ -103,6 +109,12 @@ def run_weekly_maintenance(project_path: str | None = None) -> dict:
 def run_nightly_heal(project_path: str | None = None, *, use_llm: bool = True) -> dict:
     """Nightly sweep: integrity + 0.70+ similarity contradiction pass with
     three-pass arbitration. LLM calls (when invoked) consume the daily budget."""
+    if paths.is_unlatched_mode():
+        return {
+            "ok": False,
+            "reason": "unlatched",
+            "message": paths.UNLATCHED_MESSAGE,
+        }
     if paths.is_disabled():
         return {"ok": False, "reason": "disabled"}
     conn = db.connect(project_path)
@@ -117,6 +129,12 @@ def run_nightly_heal(project_path: str | None = None, *, use_llm: bool = True) -
 def run_tree_rebuild(project_path: str | None = None, *, use_llm: bool = True) -> dict:
     """Full hierarchical rebuild — clusters leaves, promotes landmarks, builds
     one level of summary nodes. LLM calls (one per cluster) consume the budget."""
+    if paths.is_unlatched_mode():
+        return {
+            "ok": False,
+            "reason": "unlatched",
+            "message": paths.UNLATCHED_MESSAGE,
+        }
     if paths.is_disabled():
         return {"ok": False, "reason": "disabled"}
     conn = db.connect(project_path)

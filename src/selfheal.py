@@ -122,6 +122,8 @@ def maybe_trigger(project_path: str | None) -> None:
     """Cheap, never-raises. Spawn a detached maintenance pass iff something is
     due. Called once from mcp_server.py __main__ before mcp.run()."""
     try:
+        if paths.is_unlatched_mode():
+            return
         if paths.is_disabled():
             return
         # Reentrancy: do not trigger from inside a maintenance/compaction child
@@ -181,6 +183,12 @@ def run_selfheal(project_path: str | None) -> dict:
     """The maintenance pass. Single-flight via the shared compactor lock;
     each op runs only when its cadence is due. Backup always runs first when
     any mutating op will run, so heal/weekly never mutate without a snapshot."""
+    if paths.is_unlatched_mode():
+        return {
+            "ok": False,
+            "reason": "unlatched",
+            "message": paths.UNLATCHED_MESSAGE,
+        }
     if paths.is_disabled():
         return {"ok": False, "reason": "disabled"}
 

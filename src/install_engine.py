@@ -106,6 +106,7 @@ LEGACY_COMMAND_ALIASES = {
     "kb-tree.md": "latch-tree.md",
 }
 STALE_LEGACY_COMMANDS = (
+    "latch-baseline.md",
     "kb-focus.md",
     "kb-project-direction.md",
     "mission-control.md",
@@ -114,6 +115,8 @@ STALE_LEGACY_COMMANDS = (
 LATCH_COMMAND_MARKERS = (
     "/bin/run_kb_gate.sh",
     "/bin/run_latch_gate.sh",
+    "/bin/latch_baseline.sh",
+    "/bin/unlatch.sh",
     "/bin/latch_gate_report.sh",
     "/bin/run_compact_now.sh",
     "/bin/run_latch_compact_now.sh",

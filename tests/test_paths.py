@@ -94,12 +94,17 @@ def test_is_write_disabled_via_env_var():
     # of whether the DISABLE_WRITE file exists on this machine.
     file_existed = paths.DISABLE_WRITE_FILE.exists()
     backup = paths.DISABLE_WRITE_FILE.read_text(encoding="utf-8") if file_existed else None
+    unlatched_existed = paths.UNLATCHED_FILE.exists()
+    unlatched_backup = paths.UNLATCHED_FILE.read_text(encoding="utf-8") if unlatched_existed else None
     if file_existed:
         paths.DISABLE_WRITE_FILE.unlink()
+    if unlatched_existed:
+        paths.UNLATCHED_FILE.unlink()
     saved = os.environ.pop("CLAUDE_KB_DISABLE_WRITE", None)
     saved_latch = os.environ.pop("LATCH_DISABLE_WRITE", None)
     saved_global = os.environ.pop("CLAUDE_KB_DISABLE", None)
     saved_latch_global = os.environ.pop("LATCH_DISABLE", None)
+    saved_unlatched = os.environ.pop("LATCH_UNLATCHED", None)
     try:
         _assert(paths.is_write_disabled() is False,
                 "no flag set → write hooks should be live")
@@ -134,9 +139,66 @@ def test_is_write_disabled_via_env_var():
             os.environ["CLAUDE_KB_DISABLE"] = saved_global
         if saved_latch_global is not None:
             os.environ["LATCH_DISABLE"] = saved_latch_global
+        if saved_unlatched is not None:
+            os.environ["LATCH_UNLATCHED"] = saved_unlatched
         if file_existed and backup is not None:
             paths.DISABLE_WRITE_FILE.write_text(backup, encoding="utf-8")
+        if unlatched_existed and unlatched_backup is not None:
+            paths.UNLATCHED_FILE.write_text(unlatched_backup, encoding="utf-8")
     print("PASS is_write_disabled_via_env_var")
+
+
+def test_unlatched_mode_disables_full_latch():
+    unlatched_existed = paths.UNLATCHED_FILE.exists()
+    disable_existed = paths.DISABLE_FILE.exists()
+    unlatched_backup = paths.UNLATCHED_FILE.read_text(encoding="utf-8") if unlatched_existed else None
+    disable_backup = paths.DISABLE_FILE.read_text(encoding="utf-8") if disable_existed else None
+    saved_unlatched = os.environ.pop("LATCH_UNLATCHED", None)
+    saved_disable = os.environ.pop("LATCH_DISABLE", None)
+    saved_legacy_disable = os.environ.pop("CLAUDE_KB_DISABLE", None)
+    try:
+        if unlatched_existed:
+            paths.UNLATCHED_FILE.unlink()
+        if disable_existed:
+            paths.DISABLE_FILE.unlink()
+        _assert(paths.is_unlatched_mode() is False,
+                "unlatched mode should be off with no env var or sentinel")
+        _assert(paths.is_disabled() is False,
+                "latched and no DISABLE should leave hooks enabled")
+
+        os.environ["LATCH_UNLATCHED"] = "1"
+        _assert(paths.is_unlatched_mode() is True,
+                "LATCH_UNLATCHED should mark Unlatched mode active")
+        _assert(paths.is_disabled() is True,
+                "Unlatched mode must fully disable latch influence")
+        _assert(paths.is_write_disabled() is True,
+                "Unlatched mode should imply write-disabled")
+        del os.environ["LATCH_UNLATCHED"]
+
+        paths.UNLATCHED_FILE.write_text("test unlatched\n", encoding="utf-8")
+        _assert(paths.is_unlatched_mode() is True,
+                "UNLATCHED sentinel should mark Unlatched mode active")
+        _assert(paths.is_disabled() is True,
+                "UNLATCHED sentinel should fully disable latch influence")
+    finally:
+        os.environ.pop("LATCH_UNLATCHED", None)
+        os.environ.pop("LATCH_DISABLE", None)
+        os.environ.pop("CLAUDE_KB_DISABLE", None)
+        if saved_unlatched is not None:
+            os.environ["LATCH_UNLATCHED"] = saved_unlatched
+        if saved_disable is not None:
+            os.environ["LATCH_DISABLE"] = saved_disable
+        if saved_legacy_disable is not None:
+            os.environ["CLAUDE_KB_DISABLE"] = saved_legacy_disable
+        if paths.UNLATCHED_FILE.exists():
+            paths.UNLATCHED_FILE.unlink()
+        if paths.DISABLE_FILE.exists():
+            paths.DISABLE_FILE.unlink()
+        if unlatched_existed and unlatched_backup is not None:
+            paths.UNLATCHED_FILE.write_text(unlatched_backup, encoding="utf-8")
+        if disable_existed and disable_backup is not None:
+            paths.DISABLE_FILE.write_text(disable_backup, encoding="utf-8")
+    print("PASS unlatched_mode_disables_full_latch")
 
 
 def test_latch_kb_dir_precedes_legacy_env_pin():
@@ -169,5 +231,6 @@ if __name__ == "__main__":
     test_sanitize_cwd_mingw_does_not_double_prefix()
     test_sanitize_cwd_idempotent_on_project_dir()
     test_is_write_disabled_via_env_var()
+    test_unlatched_mode_disables_full_latch()
     test_latch_kb_dir_precedes_legacy_env_pin()
     print("\nAll paths tests pass.")

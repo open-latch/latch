@@ -49,7 +49,7 @@ function Test-LatchCommand($Path) {
     $normalized = $body -replace '\\', '/'
     if ($body.Contains('<KB_HOME>')) { return $true }
     if ($normalized.Contains($KbHome)) { return $true }
-    return ($normalized -match '/bin/(run_kb_gate|run_latch_gate|latch_gate_report|run_compact_now|run_latch_compact_now|run_kb_focus)\.sh|/bin/latch_direction\.sh|/src/(budget|maintenance)\.py|kb_profile_(active|bind)|mission-control verification profile|trust-and-go verification profile')
+    return ($normalized -match '/bin/(run_kb_gate|run_latch_gate|latch_baseline|unlatch|latch_gate_report|run_compact_now|run_latch_compact_now|run_kb_focus)\.sh|/bin/latch_direction\.sh|/src/(budget|maintenance)\.py|kb_profile_(active|bind)|mission-control verification profile|trust-and-go verification profile')
 }
 
 function Update-LegacyAlias($Legacy, $Primary) {
@@ -79,7 +79,7 @@ Update-LegacyAlias "kb-gate-report.md" "latch-gate-report.md"
 Update-LegacyAlias "kb-heal.md" "latch-heal.md"
 Update-LegacyAlias "kb-tree.md" "latch-tree.md"
 
-foreach ($stale in @("kb-focus.md", "kb-project-direction.md", "mission-control.md", "trust-and-go.md")) {
+foreach ($stale in @("latch-baseline.md", "kb-focus.md", "kb-project-direction.md", "mission-control.md", "trust-and-go.md")) {
     $stalePath = Join-Path $DestDir $stale
     if (-not (Test-Path $stalePath)) { continue }
     if (-not (Test-LatchCommand $stalePath)) {

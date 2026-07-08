@@ -9,7 +9,6 @@ spawn transcript compaction or write Codex session markers.
 """
 from __future__ import annotations
 
-import json
 import os
 import sys
 from pathlib import Path
@@ -24,8 +23,13 @@ from _common import hook_field, log, read_hook_input, transcript_path  # noqa: E
 
 import budget  # noqa: E402
 import db  # noqa: E402
-from paths import is_disabled, is_in_compact  # noqa: E402
-from session_start import _build_briefing  # noqa: E402
+from paths import is_disabled, is_in_compact, is_unlatched_mode  # noqa: E402
+from session_start import (  # noqa: E402
+    _build_briefing,
+    _build_unlatched_brief,
+    _build_unlatched_system_message,
+    _emit_session_start_context,
+)
 
 
 def vscode_project_cwd(payload: dict) -> str:
@@ -45,7 +49,15 @@ def vscode_session_id(payload: dict) -> str | None:
 
 
 def main() -> int:
-    if is_disabled() or is_in_compact():
+    if is_in_compact():
+        return 0
+    if is_unlatched_mode():
+        _emit_session_start_context(
+            _build_unlatched_brief(),
+            system_message=_build_unlatched_system_message(),
+        )
+        return 0
+    if is_disabled():
         return 0
 
     payload = read_hook_input()
@@ -100,12 +112,7 @@ def main() -> int:
             log(f"vscode_session_start record_retrievals failed: {e}")
 
     if briefing:
-        print(json.dumps({
-            "hookSpecificOutput": {
-                "hookEventName": "SessionStart",
-                "additionalContext": briefing,
-            }
-        }))
+        _emit_session_start_context(briefing)
 
     return 0
 

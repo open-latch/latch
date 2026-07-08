@@ -244,6 +244,15 @@ def _conn():
     return db.connect(PROJECT_CWD)
 
 
+def _unlatched_response(tool: str) -> dict:
+    return {
+        "ok": False,
+        "reason": "unlatched",
+        "message": paths.UNLATCHED_MESSAGE,
+        "tool": tool,
+    }
+
+
 def _wait_for_compaction_or_busy() -> dict | None:
     """Block MCP write tools while an in-flight compaction holds the project
     lock. Returns None on success (proceed with the write). Returns a
@@ -368,7 +377,7 @@ def kb_search(
     kind: str | None = None,
     limit: int = 10,
     verbose: bool = False,
-) -> list[dict]:
+) -> dict | list[dict]:
     """Hybrid search (FTS keyword + semantic) over the project KB.
 
     Args:
@@ -387,6 +396,8 @@ def kb_search(
     `kb_activity` with a foreground summary agents must show. Full bodies are
     still on disk — `body_chars > len(body_excerpt)` signals truncation.
     """
+    if paths.is_unlatched_mode():
+        return _unlatched_response("latch_search")
     with _conn() as conn:
         results = search.hybrid_search(conn, query, kind=kind, limit=limit, scope_repo=PROJECT_CWD)
         if results:
@@ -433,6 +444,8 @@ def kb_get(node_id: int, include_neighbors: bool = True) -> dict:
     surfaced via `reconciliation_banner` remains canonical and factually true
     in its own scope — only the framing has been constrained or updated.
     """
+    if paths.is_unlatched_mode():
+        return _unlatched_response("latch_get")
     with _conn() as conn:
         node = db.get_node(conn, node_id)
         if not node:
@@ -462,7 +475,7 @@ def kb_recent(
     created_by: str | None = None,
     limit: int = 20,
     verbose: bool = False,
-) -> list[dict]:
+) -> dict | list[dict]:
     """Most recently updated nodes, optionally filtered.
 
     Pass `created_by="alice"` (or any user identifier) to see what a specific
@@ -475,6 +488,8 @@ def kb_recent(
     response under the MCP tool-result cap; drill into specific nodes via
     `latch_get(<id>)`.
     """
+    if paths.is_unlatched_mode():
+        return _unlatched_response("latch_recent")
     with _conn() as conn:
         rows = db.recent_nodes(
             conn, session_id=session_id, kind=kind, status=status,
@@ -517,6 +532,8 @@ def kb_project_direction(
     report layer over the current nodes/edges/focus/artifact tables, not a broad
     storage or retrieval rebuild.
     """
+    if paths.is_unlatched_mode():
+        return _unlatched_response("latch_project_direction")
     with _conn() as conn:
         report = project_direction.assemble_project_direction(
             conn,
@@ -555,6 +572,8 @@ def kb_gate_report(
     `gate_outcome`) plus current KB node metadata. It does not run a new gate,
     read raw prompt text, read node bodies, or write new KB rows.
     """
+    if paths.is_unlatched_mode():
+        return _unlatched_response("latch_gate_report")
     start_date = gate_report._parse_date(start) if start else None
     end_date = gate_report._parse_date(end) if end else None
     with _conn() as conn:
@@ -649,6 +668,8 @@ def kb_insert(
     likely mis-typed ship edge that should be implements/advances/depends_on so
     plan-freshness can track the spec's body freshness. (id=1194 §4.)
     """
+    if paths.is_unlatched_mode():
+        return _unlatched_response("latch_insert")
     busy = _wait_for_compaction_or_busy()
     if busy is not None:
         return busy
@@ -708,6 +729,8 @@ def kb_update(
     the edit is a non-claim edit (banner/typo/status promotion) or a non-
     fact/decision / non-canonical node.
     """
+    if paths.is_unlatched_mode():
+        return _unlatched_response("latch_update")
     busy = _wait_for_compaction_or_busy()
     if busy is not None:
         return busy
@@ -845,6 +868,8 @@ def kb_append(node_id: int, text: str, reembed: bool = False) -> dict:
     kind-scoped helper; it is empty for living-summary kinds by design (id=1194),
     so the filter is NOT bypassed.
     """
+    if paths.is_unlatched_mode():
+        return _unlatched_response("latch_append")
     busy = _wait_for_compaction_or_busy()
     if busy is not None:
         return busy
@@ -866,6 +891,8 @@ def kb_link(src: int, dst: int, relation: str) -> dict:
     should re-link with the dependency relation (latch_unlink the related_to,
     latch_link the right one). Empty list otherwise. (id=1194 §4.)
     """
+    if paths.is_unlatched_mode():
+        return _unlatched_response("latch_link")
     busy = _wait_for_compaction_or_busy()
     if busy is not None:
         return busy
@@ -901,6 +928,8 @@ def kb_unlink(src: int, dst: int, relation: str) -> dict:
     Returns `{"ok": True, "tombstoned": 0|1}` — `tombstoned=1` if an active
     edge was flipped, `0` if no-op.
     """
+    if paths.is_unlatched_mode():
+        return _unlatched_response("latch_unlink")
     busy = _wait_for_compaction_or_busy()
     if busy is not None:
         return busy
@@ -915,6 +944,11 @@ def _gate_status(verdict: dict) -> str:
     recommendation came back; otherwise it names why none did and what to do."""
     if verdict.get("recommendation") is not None:
         return "OK"
+    if verdict.get("reason") == "unlatched":
+        return (
+            "SKIPPED - Latch is currently UNLATCHED. Run /unlatch to re-latch. "
+            "If LATCH_UNLATCHED is set, unset it too."
+        )
     if verdict.get("timed_out"):
         return ("DEGRADED — classifier timed out; no gate judgment this call. "
                 "Proceed on KB-first context and tell the user the gate was "
@@ -1007,6 +1041,23 @@ def kb_gate(request: str, max_chains: int = 5, verbose: bool = False) -> dict:
     is hit, the kill switch is on, or the call is inside a compactor's
     own session (reentrancy guard).
     """
+    if paths.is_unlatched_mode():
+        verdict = gate.unlatched_verdict()
+        gate_status = _gate_status(verdict)
+        return {
+            "request": request,
+            "gate_status": gate_status,
+            "verdict": verdict,
+            "findings": gate.format_gate_findings(
+                verdict, [], gate_status=gate_status,
+            ),
+            "evidence": [],
+            "chain_summary": {
+                "seed_count": 0,
+                "seed_ids": [],
+                "reachable_ids": [],
+            },
+        }
     with _conn() as conn:
         full = gate.run_gate(
             conn, request, project_path=PROJECT_CWD, max_chains=max_chains,
@@ -1089,6 +1140,8 @@ def kb_capture_decision(
     echoed `human_action`. Validates the three closed-set labels first and
     returns `{ok: False, error: ...}` on a bad label WITHOUT writing anything.
     """
+    if paths.is_unlatched_mode():
+        return _unlatched_response("latch_capture_decision")
     # Validate closed-set labels up front — a bad label must not write a half row.
     if human_action not in capture_streams.HUMAN_ACTIONS:
         return {"ok": False,
@@ -1178,6 +1231,8 @@ def kb_verify(node_id: int) -> dict:
     relying on it — e.g. when a cited node looks suspect, or before a
     correction.
     """
+    if paths.is_unlatched_mode():
+        return _unlatched_response("latch_verify")
     with _conn() as conn:
         return verify.verify(conn, node_id)
 
@@ -1202,6 +1257,8 @@ def kb_correct_plan(bad_node_id: int, max_hops: int = 2) -> dict:
     subset, and call `latch_correct_apply` ONLY after the user confirms. Mutation
     is never auto-fired — a misclassification must not cascade stale-marks.
     """
+    if paths.is_unlatched_mode():
+        return _unlatched_response("latch_correct_plan")
     with _conn() as conn:
         return verify.correct_plan(conn, bad_node_id, max_hops=max_hops)
 
@@ -1247,6 +1304,8 @@ def kb_correct_apply(
     `orphan_hint` for the corrected body. Honor the orphan_hint as with
     latch_insert / latch_update.
     """
+    if paths.is_unlatched_mode():
+        return _unlatched_response("latch_correct_apply")
     busy = _wait_for_compaction_or_busy()
     if busy is not None:
         return busy
@@ -1301,6 +1360,8 @@ def kb_priority_add(
     latch_priority_retire. Priorities are project/workstream scoped (not per-user)
     and never participate in retrieval or traversal.
     """
+    if paths.is_unlatched_mode():
+        return _unlatched_response("latch_priority_add")
     with _conn() as conn:
         return priorities.add_priority(
             conn, text, note=note, rank=rank, workstream_id=workstream_id,
@@ -1311,7 +1372,7 @@ def kb_priority_add(
 @mcp.tool(name="kb_priority_list")
 def kb_priority_list(
     include_retired: bool = False, workstream_id: int | None = None,
-) -> list[dict]:
+) -> dict | list[dict]:
     """List active priorities in effective P1..PN order for one scope.
 
     Omit workstream_id to list overall priorities. Pass a workstream node id to
@@ -1321,6 +1382,8 @@ def kb_priority_list(
     include_retired=True for the audit/graveyard view — the active set followed
     by retired priorities, most-recently-graveyarded first, each carrying its
     `retired_at` date."""
+    if paths.is_unlatched_mode():
+        return _unlatched_response("latch_priority_list")
     with _conn() as conn:
         rows = priorities.list_priorities(
             conn, include_retired=include_retired, workstream_id=workstream_id,
@@ -1355,6 +1418,8 @@ def kb_priority_reorder(node_id: int, new_rank: int | None = None) -> dict:
     by a floating priority is fine (it reflows); locking onto a slot held by
     another locked priority returns a `{conflict: ...}` — surface it and ask the
     user which one should move."""
+    if paths.is_unlatched_mode():
+        return _unlatched_response("latch_priority_reorder")
     with _conn() as conn:
         return priorities.reorder_priority(conn, node_id, new_rank)
 
@@ -1366,6 +1431,8 @@ def kb_priority_retire(node_id: int) -> dict:
     the brief, moving it to the graveyard with the date it was retired
     (`retired_at`). Reversible — the node persists as 'stale' for audit; never
     hard-deleted. Remaining active priorities renumber to close the gap."""
+    if paths.is_unlatched_mode():
+        return _unlatched_response("latch_priority_retire")
     with _conn() as conn:
         return priorities.retire_priority(conn, node_id)
 
@@ -1375,13 +1442,15 @@ def kb_priority_retire(node_id: int) -> dict:
 # (observed unhelpful on pmeyer's workspace, 2026-06-10). See KB decision id=1550.
 @mcp.tool(name="latch_profile_list")
 @mcp.tool(name="kb_profile_list")
-def kb_profile_list(include_retired: bool = False) -> list[dict]:
+def kb_profile_list(include_retired: bool = False) -> dict | list[dict]:
     """List verification profiles — the per-user gate-intensity presets (the
     knob from trust-and-go up to mission-control). Each row:
     {id, name, description, status, config}. The built-in presets are
     materialised on first call. `config` holds the closed-set parameters
     gate_surface / verdict_posture / claim_backing_policy / adversary /
     user_authority. Profiles never participate in retrieval or traversal."""
+    if paths.is_unlatched_mode():
+        return _unlatched_response("latch_profile_list")
     with _conn() as conn:
         profiles.ensure_presets(conn)
         return profiles.list_profiles(conn, include_retired=include_retired)
@@ -1394,6 +1463,8 @@ def kb_profile_active(actor: str | None = None) -> dict:
     the resolved OS user — the SAME identity the gate and the UserPromptSubmit
     hook observe). Returns {actor, bound, profile_id, name, config}; falls back
     to the default (trust-and-go) preset when the user has no explicit binding."""
+    if paths.is_unlatched_mode():
+        return _unlatched_response("latch_profile_active")
     with _conn() as conn:
         return profiles.resolve_active_profile(conn, actor)
 
@@ -1410,29 +1481,34 @@ def kb_profile_bind(
     user; re-binding replaces it. This is a per-user config mutation — confirm
     the user wants it before calling (do not bind anyone to mission-control
     silently)."""
+    if paths.is_unlatched_mode():
+        return _unlatched_response("latch_profile_bind")
     with _conn() as conn:
         return profiles.bind_actor(conn, actor, name=name, node_id=node_id)
 
 
 @mcp.tool(name="latch_embed")
 @mcp.tool(name="kb_embed")
-def kb_embed(text: str) -> list[float]:
+def kb_embed(text: str) -> dict | list[float]:
     """Embed `text` via the in-process model. Mainly here for parity with the
     TCP embed listener — agents should rarely need to call this directly."""
+    if paths.is_unlatched_mode():
+        return _unlatched_response("latch_embed")
     return embeddings.embed(text).tolist()
 
 
 if __name__ == "__main__":
-    _start_embed_listener(PROJECT_CWD)
-    # Synchronous warm-up: load the embedder on the main thread before
-    # FastMCP's asyncio loop starts. Must happen here, not in a daemon
-    # thread — see _start_embed_listener for the deadlock rationale.
-    try:
-        embeddings.embed("latch embed pre-warm")
-    except Exception as e:
-        sys.stderr.write(f"[latch] embed pre-warm failed: {e}\n")
-    # Self-triggering maintenance: replaces the external OS scheduler. Cheap
-    # cadence check + detached background spawn if due; never blocks startup.
-    # See selfheal.py / KB id=1173.
-    selfheal.maybe_trigger(PROJECT_CWD)
+    if not paths.is_unlatched_mode():
+        _start_embed_listener(PROJECT_CWD)
+        # Synchronous warm-up: load the embedder on the main thread before
+        # FastMCP's asyncio loop starts. Must happen here, not in a daemon
+        # thread — see _start_embed_listener for the deadlock rationale.
+        try:
+            embeddings.embed("latch embed pre-warm")
+        except Exception as e:
+            sys.stderr.write(f"[latch] embed pre-warm failed: {e}\n")
+        # Self-triggering maintenance: replaces the external OS scheduler. Cheap
+        # cadence check + detached background spawn if due; never blocks startup.
+        # See selfheal.py / KB id=1173.
+        selfheal.maybe_trigger(PROJECT_CWD)
     mcp.run()

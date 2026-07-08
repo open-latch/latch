@@ -18,11 +18,17 @@ def test_codex_source_commands_match_claude_latch_commands():
         path.stem
         for path in (ROOT / "commands").glob("latch-*.md")
     }
+    unlatch_command = ROOT / "commands" / "unlatch.md"
+    if unlatch_command.exists():
+        claude_commands.add("unlatch")
     codex_skills = {
         path.parent.name[len(prefix):]
         for path in (ROOT / ".agents" / "skills").glob("source-command-latch-*/SKILL.md")
         if path.parent.name.startswith(prefix)
     }
+    unlatch_skill = ROOT / ".agents" / "skills" / "source-command-unlatch" / "SKILL.md"
+    if unlatch_skill.exists():
+        codex_skills.add("unlatch")
 
     assert codex_skills == claude_commands
 
@@ -51,7 +57,9 @@ def test_repo_does_not_ship_legacy_kb_source_commands():
 def test_codex_source_commands_do_not_use_claude_argument_placeholder():
     offenders = [
         path
-        for path in (ROOT / ".agents" / "skills").glob("source-command-latch-*/SKILL.md")
+        for path in list((ROOT / ".agents" / "skills").glob("source-command-latch-*/SKILL.md"))
+        + [ROOT / ".agents" / "skills" / "source-command-unlatch" / "SKILL.md"]
+        if path.exists()
         if "$ARGUMENTS" in path.read_text(encoding="utf-8")
     ]
     assert offenders == []
@@ -105,6 +113,7 @@ def test_shell_backed_codex_skills_do_not_treat_project_root_as_latch_home():
         "latch-gate-report",
         "latch-heal",
         "latch-tree",
+        "unlatch",
     }
 
     for command in shell_backed_commands:

@@ -6,6 +6,9 @@ the right conditions.
 """
 from __future__ import annotations
 
+import contextlib
+import io
+import json
 import shutil
 import sys
 import tempfile
@@ -324,6 +327,40 @@ def test_brief_resync_notice_makes_empty_brief_nonempty():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_unlatched_brief_is_static_escape_hatch_receipt():
+    brief = session_start._build_unlatched_brief()
+    _assert("latch is unlatched" in brief, brief)
+    _assert("Latch is currently UNLATCHED" in brief, brief)
+    _assert("without latch's project judgment layer" in brief, brief)
+    _assert("this latch install stays unlatched" in brief, brief)
+    _assert("KB injection" in brief, brief)
+    _assert("KB is local and unchanged" in brief, brief)
+    _assert("Run `/unlatch` to re-latch" in brief, brief)
+    _assert("If `LATCH_UNLATCHED` is set, unset it too" in brief, brief)
+    _assert("latch_get(" not in brief,
+            "unlatched receipt must not include KB drill-in guidance")
+    print("PASS unlatched_brief_is_static_escape_hatch_receipt")
+
+
+def test_unlatched_emit_includes_user_visible_system_message():
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        session_start._emit_session_start_context(
+            session_start._build_unlatched_brief(),
+            system_message=session_start._build_unlatched_system_message(),
+        )
+    out = json.loads(buf.getvalue())
+    _assert("systemMessage" in out, out)
+    _assert("LATCH UNLATCHED MODE ACTIVE" in out["systemMessage"], out)
+    _assert("Latch is OFF for this latch install" in out["systemMessage"], out)
+    _assert("If LATCH_UNLATCHED is set, unset it too" in out["systemMessage"], out)
+    _assert(
+        out["hookSpecificOutput"]["additionalContext"].startswith("# latch is unlatched"),
+        out,
+    )
+    print("PASS unlatched_emit_includes_user_visible_system_message")
+
+
 if __name__ == "__main__":
     test_brief_empty_when_nothing_to_surface()
     test_brief_getting_started_for_new_kb()
@@ -339,4 +376,6 @@ if __name__ == "__main__":
     test_brief_section_order_workstreams_before_questions_before_ideas()
     test_brief_surfaces_claude_md_resync_notice()
     test_brief_resync_notice_makes_empty_brief_nonempty()
+    test_unlatched_brief_is_static_escape_hatch_receipt()
+    test_unlatched_emit_includes_user_visible_system_message()
     print("\nAll session-brief tests pass.")
