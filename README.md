@@ -310,8 +310,7 @@ Unlatched mode is install-level: if you change repos before re-latching, latch
 is still off and should say so loudly. It also masks latch's managed
 `CLAUDE.md` / `AGENTS.md` regions in the current project/ancestor files while it
 is off, then restores them when turned back on, so native instruction loading
-does not keep carrying latch's contract in the repo where you unlatched. New
-sessions get a visible "Latch is off" banner, not just hidden model context. If
+does not keep carrying latch's contract in the repo where you unlatched. If
 any latch hook or command is called while unlatched, it should report that latch
 is currently UNLATCHED and tell the user to run `/unlatch` to re-latch. If
 `LATCH_UNLATCHED` is set, unset it too. Unlatched mode does not clone the
