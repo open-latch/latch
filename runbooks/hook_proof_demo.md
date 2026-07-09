@@ -25,24 +25,28 @@ bash bin/latch_status.sh
 bash bin/latch_doctor.sh --skip-embed
 ```
 
-For a live gate proof, `latch_status.sh` must report `[ENABLED ]`. If it says
+For the proof path, `latch_status.sh` must report `[ENABLED ]`. If it says
 `[DISABLED]`, use an enabled checkout or re-enable with `bash bin/latch_enable.sh`.
-If it says `[UNLATCHED]`, run `/unlatch` and confirm re-latching. A disabled or
-unlatched install can still verify offline fixture retrieval, but it cannot
-produce the live MODIFY/DO_NOT_PROCEED proof.
+If it says `[UNLATCHED]`, run `/unlatch` and confirm re-latching before
+continuing.
 
 ## 3-minute cold-start path
 
 Use this when the user has no useful Claude/Codex history yet. It uses a
 throwaway repo and throwaway KB, and does not read personal transcripts.
 
-Offline verification:
+Offline fixture smoke test:
 
 ```bash
 bash bin/latch_demo_no_history.sh --no-llm --keep --work-dir /tmp/latch-no-history-proof
 ```
 
-Expected offline receipt shape:
+The `--no-llm` command verifies fixture creation, seed insertion, and
+gate-context retrieval without calling a classifier. It is not the live proof.
+The live proof is the backend run that returns `MODIFY`, `DO_NOT_PROCEED`, or
+`NEEDS_HUMAN_JUDGMENT` for the violating request.
+
+Expected smoke-test receipt shape:
 
 ```text
 Latch no-history demo
@@ -57,8 +61,8 @@ Request: Implement email sending by adding a Redis-backed background job queue.
 Latch gate receipt:
 Latch ran latch_gate on the fixture request.
 Recommendation: SKIPPED
-Summary: Gate did not produce a recommendation: <skip reason>.
-Gate note: <skip reason>
+Summary: Gate did not produce a recommendation: use_llm=False.
+Gate note: use_llm=False
 Cited evidence: classifier skipped or errored, but gate assembly retrieved the seeded decision id=<n>.
 
 Expected proof:
@@ -66,11 +70,6 @@ A live classifier should return MODIFY or DO_NOT_PROCEED, cite the seeded govern
 Offline mode: --no-llm skipped classifier judgment by design.
 Kept fixture at: <tmp>
 ```
-
-On an enabled install, `<skip reason>` should be `use_llm=False`. If this
-offline check is run from a disabled checkout, `<skip reason>` may instead be
-`disabled/in-compact`; that still proves fixture seeding and gate-context
-retrieval, not a live classifier verdict.
 
 Live cold proof:
 
@@ -259,7 +258,7 @@ bash bin/latch_demo_no_history.sh --no-llm --keep --work-dir /tmp/latch-no-histo
 The first pytest command verifies the no-history fixture, wrapper interpreter
 resolution, seed receipt, and generated catch-demo payload. The gate pytest
 command verifies gate assembly and receipt formatting. The no-history command
-prints the local offline proof receipt.
+prints the local fixture smoke-test receipt.
 
 ## Recommended next step
 
