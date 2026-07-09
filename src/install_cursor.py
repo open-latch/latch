@@ -69,6 +69,7 @@ def render_cursor_server(
     model_backend: str | None = None,
 ) -> dict[str, Any]:
     return {
+        "type": "stdio",
         "command": _forward_slash(python_path),
         "args": [_forward_slash(server_py)],
         "env": _adapter_env(model_backend),

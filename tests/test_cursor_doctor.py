@@ -1,10 +1,13 @@
 """Unit tests for the Cursor preview doctor."""
 from __future__ import annotations
 
+import io
+import json
 import os
 import shutil
 import sys
 import tempfile
+from contextlib import redirect_stdout
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
@@ -43,6 +46,37 @@ def test_check_cursor_config_ok_and_missing():
     finally:
         shutil.rmtree(d, ignore_errors=True)
     print("PASS check_cursor_config_ok_and_missing")
+
+
+def test_json_mode_reports_malformed_cursor_config():
+    d = _tmp()
+    try:
+        config = d / ".cursor" / "mcp.json"
+        config.parent.mkdir(parents=True)
+        config.write_text("{bad json", encoding="utf-8")
+        server = d / "mcp_server.py"
+        server.write_text("# ok\n", encoding="utf-8")
+        agents = d / "AGENTS.md"
+        agents_md_sync.sync(agents, create=True)
+
+        out = io.StringIO()
+        with redirect_stdout(out):
+            rc = cd.main([
+                "--json",
+                "--skip-cli",
+                "--python", sys.executable,
+                "--mcp-json", str(config),
+                "--agents-md", str(agents),
+            ])
+        payload = json.loads(out.getvalue())
+        config_check = payload["checks"][0]
+        _assert(rc == 1, rc)
+        _assert(payload["ok"] is False, payload)
+        _assert(config_check["level"] == cd.FAIL, config_check)
+        _assert("not valid JSON" in config_check["detail"], config_check)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+    print("PASS json_mode_reports_malformed_cursor_config")
 
 
 def test_check_agents_md_status():
@@ -145,6 +179,7 @@ def test_run_all_static_and_cli_checks():
 
 if __name__ == "__main__":
     test_check_cursor_config_ok_and_missing()
+    test_json_mode_reports_malformed_cursor_config()
     test_check_agents_md_status()
     test_check_mcp_launch_target()
     test_check_cursor_cli_mcp_warns_when_missing()

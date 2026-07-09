@@ -41,12 +41,16 @@ def check_cursor_config(
     *,
     model_backend: str | None = None,
 ) -> Check:
-    ok, detail = install_cursor.mcp_status(
-        config_path,
-        python_path,
-        server_py,
-        model_backend=model_backend,
-    )
+    try:
+        ok, detail = install_cursor.mcp_status(
+            config_path,
+            python_path,
+            server_py,
+            model_backend=model_backend,
+        )
+    except SystemExit as e:
+        detail = str(e.code) if e.code is not None else "invalid Cursor MCP config"
+        return Check("Cursor .cursor/mcp.json MCP server", FAIL, detail)
     return Check("Cursor .cursor/mcp.json MCP server", OK if ok else FAIL, detail)
 
 

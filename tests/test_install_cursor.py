@@ -21,6 +21,7 @@ def _assert(cond, msg):
 
 def test_render_cursor_server_uses_cursor_mcp_shape():
     server = ic.render_cursor_server("/PY", "/repo/src/mcp_server.py", model_backend="codex")
+    _assert(server["type"] == "stdio", server)
     _assert(server["command"] == "/PY", server)
     _assert(server["args"] == ["/repo/src/mcp_server.py"], server)
     _assert(server["env"]["LATCH_ADAPTER"] == "cursor", server)
@@ -28,8 +29,8 @@ def test_render_cursor_server_uses_cursor_mcp_shape():
     _assert(server["env"]["LATCH_GATE_BACKEND"] == "codex", server)
 
     default = ic.render_cursor_server("/PY", "/repo/src/mcp_server.py")
+    _assert(default["type"] == "stdio", default)
     _assert(default["env"] == {"LATCH_ADAPTER": "cursor"}, default)
-    _assert("type" not in default, "Cursor mcpServers stdio config is command/args/env shaped")
     print("PASS render_cursor_server_uses_cursor_mcp_shape")
 
 
