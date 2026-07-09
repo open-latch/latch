@@ -35,6 +35,22 @@ def test_render_contract_targets_agents_md():
     print("PASS render_contract_targets_agents_md")
 
 
+def test_first_wiring_notice_can_target_cursor():
+    codex = ams.first_wiring_notice("AGENTS.md")
+    _assert("into Codex for this project" in codex, codex)
+    _assert("Codex/AGENTS.md wording" in codex, codex)
+
+    cursor = ams.first_wiring_notice(
+        "AGENTS.md",
+        surface_name="Cursor",
+        wording_label="shared AGENTS.md",
+    )
+    _assert("into Cursor for this project" in cursor, cursor)
+    _assert("shared AGENTS.md wording" in cursor, cursor)
+    _assert("Codex" not in cursor, cursor)
+    print("PASS first_wiring_notice_can_target_cursor")
+
+
 def test_append_preserves_outside_content():
     d = _tmp()
     try:
@@ -117,6 +133,7 @@ def test_main_noninteractive_without_yes_aborts():
 
 if __name__ == "__main__":
     test_render_contract_targets_agents_md()
+    test_first_wiring_notice_can_target_cursor()
     test_append_preserves_outside_content()
     test_create_false_never_auto_wires()
     test_sync_migrates_legacy_agents_marker()

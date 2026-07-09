@@ -92,16 +92,29 @@ latch wants to add a short managed snippet to:
     {target}
 
   - What: a small, clearly delimited block (the "LATCH AGENTS SNIPPET"
-    region) that wires latch's KB workflow into Codex for this project.
+    region) that wires latch's KB workflow into {surface_name} for this project.
     Nothing else in the file is touched.
   - Source of truth: the block is rendered from claude_md_snippet.md in the
-    latch repo with Codex/AGENTS.md wording. From now on latch only ever
+    latch repo with {wording_label} wording. From now on latch only ever
     rewrites THAT delimited region, and only when it drifts from the repo copy.
   - Safety: any existing AGENTS.md is backed up to <file>.latchbak first.
 
 This is the only time latch touches a not-yet-wired AGENTS.md, so it asks
 first rather than editing the file without your knowledge.
 ------------------------------------------------------------------------"""
+
+
+def first_wiring_notice(
+    target: Path | str,
+    *,
+    surface_name: str = "Codex",
+    wording_label: str | None = None,
+) -> str:
+    return _FIRST_WIRING_NOTICE.format(
+        target=target,
+        surface_name=surface_name,
+        wording_label=wording_label or f"{surface_name}/AGENTS.md",
+    )
 
 
 def _stdin_is_tty() -> bool:
@@ -125,6 +138,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="strip latch's managed AGENTS.md region from the target")
     ap.add_argument("--yes", "-y", action="store_true",
                     help="skip the first-wiring confirmation prompt")
+    ap.add_argument("--surface-name", default="Codex", help=argparse.SUPPRESS)
+    ap.add_argument("--wording-label", help=argparse.SUPPRESS)
     args = ap.parse_args(argv)
     target = Path(args.target)
 
@@ -147,7 +162,11 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if evaluate(target) in (ABSENT, MISSING):
-        print(_FIRST_WIRING_NOTICE.format(target=target))
+        print(first_wiring_notice(
+            target,
+            surface_name=args.surface_name,
+            wording_label=args.wording_label,
+        ))
         if not args.yes:
             if not _stdin_is_tty():
                 print(f"non-interactive shell: re-run with --yes to confirm, or "

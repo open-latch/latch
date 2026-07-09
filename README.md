@@ -92,6 +92,9 @@ first-run mission.
   managed `CLAUDE.md` behavior contract.
 - **Codex:** the same KB and MCP tools with Codex-specific `AGENTS.md`,
   SessionStart, Codex backend defaults, and a manual compaction wrapper.
+- **Cursor preview:** project-scoped MCP wiring through `.cursor/mcp.json` plus
+  the shared `AGENTS.md` contract. Native Cursor-backed gate calls, hooks, and
+  plugin/skill packaging are deferred until a design-partner proof needs them.
 - **Claude Code + Codex together:** one shared local latch KB, so decisions and
   rejected paths captured through either agent can gate both.
 
@@ -193,6 +196,32 @@ you want Codex to use latch:
 
 Restart Codex or start a new Codex thread after install so `config.toml`,
 `hooks.json`, and `AGENTS.md` reload.
+
+### Cursor Preview
+
+Cursor uses the same local latch MCP server and `AGENTS.md` behavior contract.
+The preview installer writes project-scoped `.cursor/mcp.json`, so it is safe to
+try from one repo without touching Claude Code or Codex config.
+
+If you want model-backed `latch_gate`, heal, or tree calls from this Cursor
+adapter, point it at an existing backend with `--model-backend codex` or
+`--model-backend claude`. A native Cursor CLI backend is intentionally deferred
+until a design-partner install proves it is needed.
+
+```bash
+# From the project repo where Cursor should follow latch.
+/path/to/latch/bin/install_cursor.sh --yes --model-backend codex
+# Windows: C:\path\to\latch\bin\install_cursor.ps1 --yes --model-backend codex
+
+# Verify any time.
+/path/to/latch/bin/install_cursor.sh --check --model-backend codex
+/path/to/latch/bin/latch_cursor_doctor.sh --model-backend codex
+```
+
+Restart Cursor or run `agent mcp list` after install so Cursor reloads the MCP
+server. The Cursor doctor treats the live `agent mcp` probe as advisory: missing
+or unavailable Cursor CLI shows as a warning, while config, launch-target, and
+`AGENTS.md` drift are failures.
 
 ### Both Agents
 
