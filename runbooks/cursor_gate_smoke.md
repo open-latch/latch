@@ -1,15 +1,17 @@
 # Cursor gate smoke proof
 
-Use this runbook to prove the narrow Cursor preview path: Cursor can see latch
-through MCP, is activated by a project rule, and shows a `latch_gate` receipt
-before coding-shaped edits. This is not a native Cursor backend, hook, slash
-command, or compaction proof.
+Use this runbook to prove the Cursor adapter path: Cursor can see latch through
+MCP, is activated by a project rule, has project-local latch command prompts,
+and shows a `latch_gate` receipt before coding-shaped edits. This is not a
+native Cursor backend, hook, transcript-discovery, or native compaction proof.
 
 ## Success criteria
 
 - `.cursor/mcp.json` registers the project `latch` MCP server.
 - `.cursor/rules/latch.mdc` exists and tells Cursor to run `latch_gate` before
   implementation-shaped edits.
+- `.cursor/commands/` contains latch-owned command prompts for supported manual
+  workflows, excluding native Cursor compaction.
 - `AGENTS.md` carries the full shared latch contract.
 - `latch_cursor_doctor.sh` passes static checks.
 - If Cursor's `agent` CLI is available, the doctor confirms critical tools:
@@ -34,6 +36,7 @@ Expected files in the target project:
 ```text
 .cursor/mcp.json
 .cursor/rules/latch.mdc
+.cursor/commands/latch-gate.md
 AGENTS.md
 ```
 
@@ -48,6 +51,10 @@ If `agent` is unavailable, the doctor reports a warning for the live CLI probe.
 That warning does not invalidate the static install proof. If `agent` is
 available and `latch_gate` is missing from `list-tools`, the install is not
 ready.
+
+Project-local command prompts should be visible from Cursor's `/` command menu
+after reload. They are reusable prompts that call MCP tools or shell wrappers;
+they are not Cursor hooks and they do not install native Cursor compaction.
 
 ## Seed a proof target
 
@@ -116,16 +123,37 @@ diff -u /tmp/latch-cursor-before.txt /tmp/latch-cursor-after.txt
 
 The diff should be empty until after the gate receipt appears.
 
+## Uninstall smoke
+
+Preview removal without touching unrelated Cursor config:
+
+```bash
+/path/to/latch/bin/uninstall.sh --dry-run --cursor-project "$PWD"
+```
+
+Apply removal only when you mean to remove latch from this Cursor project:
+
+```bash
+/path/to/latch/bin/uninstall.sh --yes --cursor-project "$PWD"
+/path/to/latch/bin/uninstall.sh --check --cursor-project "$PWD"
+```
+
+The uninstall path removes latch-owned Cursor MCP entries, the clean managed
+Cursor rule, latch-owned Cursor command prompts, and the managed `AGENTS.md`
+region. It preserves unrelated `.cursor/mcp.json` servers/settings and
+unrelated `.cursor/commands` files.
+
 ## Boundaries
 
-Cursor preview is MCP plus Cursor Rules plus `AGENTS.md`.
+Cursor adapter is MCP plus Cursor Rules plus project-local Cursor commands plus
+`AGENTS.md`.
 
 It deliberately does not install:
 
 - native Cursor model-backed gate calls
 - hooks or pre-edit enforcement
-- slash commands
-- Cursor compaction
+- Cursor transcript discovery
+- native Cursor compaction
 - plugins or skills packaging
 
 If the design-partner proof needs any of those, scope a follow-up PR from the

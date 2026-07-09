@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Cursor preview wiring verifier. Checks .cursor/mcp.json, AGENTS.md, the MCP
-# launch target, and optionally Cursor CLI MCP visibility.
+# Cursor adapter wiring verifier. Checks .cursor/mcp.json, AGENTS.md,
+# .cursor/rules, .cursor/commands, the MCP launch target, and optionally Cursor
+# CLI MCP visibility.
 
 set -euo pipefail
 

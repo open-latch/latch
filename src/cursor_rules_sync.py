@@ -55,9 +55,9 @@ def sync(target: Path, kb_home: str | None = None, *, create: bool = True) -> st
         target.with_name(target.name + ".latchbak").write_text(
             target.read_text(encoding="utf-8"), encoding="utf-8"
         )
-        target.write_text(content, encoding="utf-8", newline="\n")
+        target.write_text(content, encoding="utf-8")
         return "synced"
-    target.write_text(content, encoding="utf-8", newline="\n")
+    target.write_text(content, encoding="utf-8")
     return "created"
 
 

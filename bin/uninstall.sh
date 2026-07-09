@@ -13,6 +13,9 @@
 #   --check               verify removal only; exit 1 if any latch wiring remains
 #   --claude-md PATH      also strip latch's managed region from this CLAUDE.md
 #                         (repeatable)
+#   --cursor-project PATH also remove latch-owned Cursor wiring from this project
+#                         (.cursor/mcp.json, .cursor/rules, .cursor/commands,
+#                         AGENTS.md; repeatable)
 #   --purge               also delete projects/ data + DISABLE kill-switch files
 #   --yes / -y            skip the confirmation prompt
 #

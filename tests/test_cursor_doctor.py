@@ -65,6 +65,7 @@ def test_json_mode_reports_malformed_cursor_config():
             rc = cd.main([
                 "--json",
                 "--skip-cli",
+                "--skip-commands",
                 "--python", sys.executable,
                 "--mcp-json", str(config),
                 "--agents-md", str(agents),
@@ -108,6 +109,21 @@ def test_check_cursor_rule_status():
     finally:
         shutil.rmtree(d, ignore_errors=True)
     print("PASS check_cursor_rule_status")
+
+
+def test_check_cursor_commands_status():
+    d = _tmp()
+    try:
+        commands = d / ".cursor" / "commands"
+        ic.sync_cursor_commands(commands)
+        ok = cd.check_cursor_commands(commands)
+        _assert(ok.level == cd.OK, ok)
+        (commands / "latch-gate.md").write_text("custom\n", encoding="utf-8")
+        bad = cd.check_cursor_commands(commands)
+        _assert(bad.level == cd.FAIL and "drifted" in bad.detail, bad)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+    print("PASS check_cursor_commands_status")
 
 
 def test_check_mcp_launch_target():
@@ -195,6 +211,8 @@ def test_run_all_static_and_cli_checks():
         agents = d / "AGENTS.md"
         agents_md_sync.sync(agents, create=True)
         cursor_rules_sync.sync(rule)
+        commands = d / ".cursor" / "commands"
+        ic.sync_cursor_commands(commands)
         agent = _fake_exe(
             d / "agent",
             "printf '%s\\n' 'latch_search latch_get latch_recent latch_gate'\n",
@@ -204,12 +222,13 @@ def test_run_all_static_and_cli_checks():
             config_path=config,
             agents_path=agents,
             rules_path=rule,
+            commands_dir=commands,
             python_path=sys.executable,
             server_py=str(server),
             agent_bin=str(agent),
             cli_timeout_s=1,
         )
-        _assert([c.level for c in checks] == [cd.OK, cd.OK, cd.OK, cd.OK, cd.OK], checks)
+        _assert([c.level for c in checks] == [cd.OK, cd.OK, cd.OK, cd.OK, cd.OK, cd.OK], checks)
     finally:
         shutil.rmtree(d, ignore_errors=True)
     print("PASS run_all_static_and_cli_checks")
@@ -220,6 +239,7 @@ if __name__ == "__main__":
     test_json_mode_reports_malformed_cursor_config()
     test_check_agents_md_status()
     test_check_cursor_rule_status()
+    test_check_cursor_commands_status()
     test_check_mcp_launch_target()
     test_check_cursor_cli_mcp_warns_when_missing()
     test_check_cursor_cli_mcp_ok_and_failure()

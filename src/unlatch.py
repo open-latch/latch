@@ -66,7 +66,7 @@ def _prepend_override(path: Path) -> bool:
     if _has_override(content):
         return False
     path.write_text(_override_block() + "\n" + _norm(content).lstrip("\n"),
-                    encoding="utf-8", newline="\n")
+                    encoding="utf-8")
     return True
 
 
@@ -77,7 +77,7 @@ def _write_without_override(path: Path) -> bool:
     new, changed = _strip_override(content)
     if changed:
         path.write_text((new.rstrip("\n") + "\n") if new else "",
-                        encoding="utf-8", newline="\n")
+                        encoding="utf-8")
     return changed
 
 
@@ -132,7 +132,7 @@ def _restore_managed_block(path: Path, record: dict, sync) -> str:
             new += "\n\n" + remainder.rstrip("\n")
 
     path.with_name(path.name + ".latchbak").write_text(content, encoding="utf-8")
-    path.write_text(new.rstrip("\n") + "\n", encoding="utf-8", newline="\n")
+    path.write_text(new.rstrip("\n") + "\n", encoding="utf-8")
     return "restored-position"
 
 

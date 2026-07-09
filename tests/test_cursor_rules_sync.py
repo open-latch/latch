@@ -29,8 +29,8 @@ def test_render_rule_has_cursor_frontmatter_and_gate_contract():
             "rule should require foreground gate findings")
     _assert("/opt/latch/bin/install_cursor.sh --yes" in out,
             "KB_HOME placeholder should resolve")
-    _assert("slash commands" in out and "native Cursor model backend" in out,
-            "rule should state Cursor preview boundaries")
+    _assert(".cursor/commands" in out and "native Cursor model backend" in out,
+            "rule should state Cursor adapter boundaries")
     print("PASS render_rule_has_cursor_frontmatter_and_gate_contract")
 
 

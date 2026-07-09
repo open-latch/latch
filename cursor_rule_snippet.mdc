@@ -26,6 +26,7 @@ Use the project `latch` MCP server as the decision-continuity layer:
 
 Treat `AGENTS.md` as the fuller shared latch contract for this project.
 
-Cursor preview boundary: this install is MCP plus Cursor Rules plus `AGENTS.md`.
-It does not install Cursor hooks, slash commands, plugins, compaction, or a
-native Cursor model backend.
+Cursor adapter boundary: this install is MCP plus Cursor Rules plus `AGENTS.md`
+plus project-local `.cursor/commands` prompts. It does not install Cursor hooks,
+a native Cursor model backend, Cursor transcript discovery, or native Cursor
+compaction.

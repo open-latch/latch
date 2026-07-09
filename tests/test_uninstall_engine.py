@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import json
 import sys
 import tempfile
 from pathlib import Path
@@ -11,6 +12,9 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
 import install_engine as ie  # noqa: E402
+import agents_md_sync  # noqa: E402
+import cursor_rules_sync  # noqa: E402
+import install_cursor as ic  # noqa: E402
 import uninstall_engine as ue  # noqa: E402
 
 
@@ -91,8 +95,49 @@ def test_remove_commands_removes_existing_legacy_alias_exact_primary_body():
         restore()
 
 
+def test_strip_cursor_project_removes_latch_owned_wiring_only():
+    root = Path(tempfile.mkdtemp(prefix="latch-uninstall-cursor-"))
+    try:
+        mcp = root / ".cursor" / "mcp.json"
+        mcp.parent.mkdir(parents=True)
+        body, _ = ic.merge_mcp_config(
+            json.dumps({
+                "mcpServers": {
+                    "other": {"command": "node", "args": ["server.js"]},
+                },
+                "setting": True,
+            }) + "\n",
+            "/py",
+            "/srv.py",
+        )
+        mcp.write_text(body, encoding="utf-8")
+        cursor_rules_sync.sync(root / ".cursor" / "rules" / "latch.mdc")
+        ic.sync_cursor_commands(root / ".cursor" / "commands")
+        user_command = root / ".cursor" / "commands" / "mine.md"
+        user_command.write_text("user-owned command\n", encoding="utf-8")
+        agents_md_sync.sync(root / "AGENTS.md", create=True)
+
+        changes = ue.strip_cursor_project(str(root), dry_run=False)
+        _assert(any("removed Cursor MCP server latch" in c for c in changes), changes)
+        _assert(any("removed Cursor rule" in c for c in changes), changes)
+        _assert(any("removed Cursor command latch-gate.md" in c for c in changes), changes)
+        _assert(any("stripped managed region" in c for c in changes), changes)
+
+        remaining = json.loads(mcp.read_text(encoding="utf-8"))
+        _assert("latch" not in remaining.get("mcpServers", {}), remaining)
+        _assert("other" in remaining.get("mcpServers", {}), remaining)
+        _assert(user_command.exists(), "user-owned Cursor command should survive")
+        rows = ue.cursor_project_removed(str(root))
+        _assert(all(ok for ok, _label in rows), rows)
+        print("PASS strip_cursor_project_removes_latch_owned_wiring_only")
+    finally:
+        import shutil
+        shutil.rmtree(root, ignore_errors=True)
+
+
 if __name__ == "__main__":
     test_remove_commands_removes_exact_source_body_without_path_marker()
     test_remove_commands_preserves_user_modified_same_name_command()
     test_remove_commands_removes_existing_legacy_alias_exact_primary_body()
+    test_strip_cursor_project_removes_latch_owned_wiring_only()
     print("\nAll uninstall_engine command tests pass.")

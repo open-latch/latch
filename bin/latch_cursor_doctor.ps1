@@ -1,11 +1,11 @@
 <#
 .SYNOPSIS
-  Verify latch's Cursor preview wiring.
+  Verify latch's Cursor adapter wiring.
 
 .DESCRIPTION
-  Checks .cursor/mcp.json, AGENTS.md, the MCP launch target, and optionally
-  Cursor CLI MCP visibility. It does not inspect or mutate Claude Code or Codex
-  settings.
+  Checks .cursor/mcp.json, AGENTS.md, .cursor/rules, .cursor/commands, the MCP
+  launch target, and optionally Cursor CLI MCP visibility. It does not inspect
+  or mutate Claude Code or Codex settings.
 #>
 $ErrorActionPreference = "Stop"
 
