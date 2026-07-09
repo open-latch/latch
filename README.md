@@ -92,9 +92,11 @@ first-run mission.
   managed `CLAUDE.md` behavior contract.
 - **Codex:** the same KB and MCP tools with Codex-specific `AGENTS.md`,
   SessionStart, Codex backend defaults, and a manual compaction wrapper.
-- **Cursor preview:** project-scoped MCP wiring through `.cursor/mcp.json` plus
-  the shared `AGENTS.md` contract. Native Cursor-backed gate calls, hooks, and
-  plugin/skill packaging are deferred until a design-partner proof needs them.
+- **Cursor preview:** project-scoped MCP wiring through `.cursor/mcp.json`, a
+  managed `.cursor/rules/latch.mdc` activation rule, and the shared `AGENTS.md`
+  contract. Native Cursor-backed gate calls, hooks, slash commands, compaction,
+  and plugin/skill packaging are deferred until a design-partner proof needs
+  them.
 - **Claude Code + Codex together:** one shared local latch KB, so decisions and
   rejected paths captured through either agent can gate both.
 
@@ -199,14 +201,17 @@ Restart Codex or start a new Codex thread after install so `config.toml`,
 
 ### Cursor Preview
 
-Cursor uses the same local latch MCP server and `AGENTS.md` behavior contract.
-The preview installer writes project-scoped `.cursor/mcp.json`, so it is safe to
-try from one repo without touching Claude Code or Codex config.
+Cursor uses the same local latch MCP server, a Cursor-native activation rule,
+and the shared `AGENTS.md` behavior contract. The preview installer writes
+project-scoped `.cursor/mcp.json` and `.cursor/rules/latch.mdc`, so it is safe
+to try from one repo without touching Claude Code or Codex config.
 
-If you want model-backed `latch_gate`, heal, or tree calls from this Cursor
-adapter, point it at an existing backend with `--model-backend codex` or
-`--model-backend claude`. A native Cursor CLI backend is intentionally deferred
-until a design-partner install proves it is needed.
+If you want model-backed `latch_gate` calls from this Cursor adapter, point it
+at an existing backend with `--model-backend codex` or `--model-backend claude`.
+A native Cursor CLI backend is intentionally deferred until a design-partner
+install proves it is needed. Cursor preview does not install slash commands,
+hooks, compaction, or native maintenance commands; use the shell wrappers or the
+Claude/Codex surfaces for those paths.
 
 ```bash
 # From the project repo where Cursor should follow latch.
@@ -219,9 +224,13 @@ until a design-partner install proves it is needed.
 ```
 
 Restart Cursor or run `agent mcp list` after install so Cursor reloads the MCP
-server. The Cursor doctor treats the live `agent mcp` probe as advisory: missing
-or unavailable Cursor CLI shows as a warning, while config, launch-target, and
-`AGENTS.md` drift are failures.
+server and project rule. The Cursor doctor treats a missing or unavailable
+Cursor CLI as a warning. Static config, launch-target, `AGENTS.md`, and Cursor
+rule drift are failures; when the CLI is available, missing critical MCP tools
+such as `latch_gate` are also failures.
+
+For the narrow proof path, see
+[`runbooks/cursor_gate_smoke.md`](./runbooks/cursor_gate_smoke.md).
 
 ### Both Agents
 
@@ -299,6 +308,8 @@ At natural stopping points, capture the session:
 
 - Claude Code: run `/latch-compact`.
 - Codex: run `/path/to/latch/bin/run_codex_compact_now.sh`.
+- Cursor preview: use a shell or Claude/Codex compaction path; Cursor compaction
+  is not installed yet.
 
 Compaction is user-initiated because it spends a model call and writes a durable
 summary into the KB.
@@ -384,8 +395,8 @@ Third-party attribution notices for vendored assets are in [NOTICE](./NOTICE).
 
 This public repo is the local single-player decision-seatbelt core: install,
 doctor, seed/report, local KB, `latch_gate`, receipts, evals, and Claude Code /
-Codex wiring. It is intended to be inspectable, forkable, and useful without a
-cloud account.
+Codex / Cursor-preview wiring. It is intended to be inspectable, forkable, and
+useful without a cloud account.
 
 The latch name and branding are not licensed under Apache 2.0. See
 [TRADEMARK.md](./TRADEMARK.md) for lightweight trademark guidelines and
