@@ -4,6 +4,7 @@
 This adapter wires the local latch engine into Cursor's project surfaces:
 
 * ``.cursor/mcp.json`` gets the local ``latch`` MCP server.
+* ``.cursor/rules/latch.mdc`` gets the Cursor-native activation rule.
 * ``AGENTS.md`` gets the shared latch agent contract.
 
 It intentionally does not install Cursor hooks, plugins, skills, or a native
@@ -21,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 import agents_md_sync
+import cursor_rules_sync
 import install_engine
 
 SERVER_NAME = "latch"
@@ -32,6 +34,7 @@ KB_HOME = Path(
     or Path(__file__).resolve().parent.parent
 )
 DEFAULT_MCP_PATH = Path(".cursor") / "mcp.json"
+DEFAULT_RULE_PATH = cursor_rules_sync.DEFAULT_RULE_PATH
 
 
 def _forward_slash(value: str) -> str:
@@ -170,6 +173,12 @@ def _check(args: argparse.Namespace, python_path: str, server_py: str) -> int:
     if not args.skip_agents:
         status = agents_md_sync.evaluate(Path(args.agents_md))
         checks.append((status == agents_md_sync.OK, f"AGENTS.md managed region: {status}"))
+    if not args.skip_rules:
+        status = cursor_rules_sync.evaluate(Path(args.rules_mdc))
+        checks.append((
+            status == cursor_rules_sync.OK,
+            f"Cursor rule {args.rules_mdc}: {status}",
+        ))
 
     failed = 0
     for ok, label in checks:
@@ -180,16 +189,19 @@ def _check(args: argparse.Namespace, python_path: str, server_py: str) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description="latch Cursor installer (MCP + AGENTS.md).")
+    ap = argparse.ArgumentParser(description="latch Cursor installer (MCP + Cursor Rules + AGENTS.md).")
     ap.add_argument("--python", help="interpreter to register for the MCP server")
     ap.add_argument("--mcp-json", default=str(DEFAULT_MCP_PATH),
                     help="Cursor MCP config path (default: .cursor/mcp.json)")
     ap.add_argument("--agents-md", default="AGENTS.md",
                     help="AGENTS.md path to sync (default: ./AGENTS.md)")
+    ap.add_argument("--rules-mdc", default=str(DEFAULT_RULE_PATH),
+                    help="Cursor rule path (default: .cursor/rules/latch.mdc)")
     ap.add_argument("--model-backend", choices=("claude", "codex"),
                     help="set LATCH_MODEL_BACKEND/LATCH_GATE_BACKEND to an existing backend")
     ap.add_argument("--skip-mcp", action="store_true", help="do not touch .cursor/mcp.json")
     ap.add_argument("--skip-agents", action="store_true", help="do not touch AGENTS.md")
+    ap.add_argument("--skip-rules", action="store_true", help="do not touch Cursor Rules")
     ap.add_argument("--yes", "-y", action="store_true", help="confirm first-time AGENTS.md wiring")
     ap.add_argument("--dry-run", action="store_true", help="print what would change")
     ap.add_argument("--check", action="store_true", help="verify wiring only")
@@ -205,6 +217,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  KB_HOME      : {KB_HOME}")
     print(f"  interpreter  : {python_path}")
     print(f"  MCP config   : {'skipped' if args.skip_mcp else args.mcp_json}")
+    print(f"  Cursor rule  : {'skipped' if args.skip_rules else args.rules_mdc}")
     print(f"  AGENTS.md    : {'skipped' if args.skip_agents else args.agents_md}")
     print(f"  model backend: {args.model_backend or 'engine default'}")
     print(f"  mode         : {'DRY-RUN (no writes)' if args.dry_run else 'apply'}\n")
@@ -235,11 +248,25 @@ def main(argv: list[str] | None = None) -> int:
             if rc != 0:
                 return rc
 
+    if not args.skip_rules:
+        rules_path = Path(args.rules_mdc)
+        if args.dry_run:
+            status = cursor_rules_sync.evaluate(rules_path)
+            print(f"  [DRY ] Cursor rule status: {status}")
+        else:
+            action = cursor_rules_sync.sync(rules_path)
+            if action == "synced":
+                print(f"  [OK  ] Cursor rule synced (backup: {rules_path}.latchbak)")
+            elif action == "created":
+                print(f"  [OK  ] Cursor rule created at {rules_path}")
+            else:
+                print(f"  [OK  ] Cursor rule {action}: {rules_path}")
+
     print()
     if args.dry_run:
         print("Dry run only - re-run without --dry-run to apply.")
     else:
-        print("Done. Restart Cursor or run 'agent mcp list' so Cursor reloads the MCP server.")
+        print("Done. Restart Cursor or run 'agent mcp list' so Cursor reloads the MCP server and project rule.")
         print("Native Cursor-backed gate calls were not installed; pass --model-backend claude|codex to use an existing backend.")
     print()
     return 0
