@@ -15,6 +15,7 @@ verification commands, see
 Start with the smallest useful review-and-apply scan:
 
 ```bash
+cd /path/to/user/project
 /path/to/latch/bin/latch_seed.sh --source both --last-sessions 20 --apply
 ```
 
@@ -23,8 +24,8 @@ your relevant sessions live. `--apply` still prints the structured report first
 and writes only if you approve the prompt. Omit `--apply` for a preview-only
 run.
 
-Review the structured report. Pick the strongest 1-3 examples where the report
-found a rejected path, governing rule, or "do not do this again" decision. Good
+Review the structured report. Pick one strongest example where the report found
+a rejected path, governing rule, or "do not do this again" decision. Good
 examples have:
 
 - a concrete forbidden approach,
@@ -37,6 +38,19 @@ the printed catch-demo command, or ask Claude Code/Codex to implement
 the rejected approach. The expected result is a foreground **Latch gate** receipt
 before edits: latch cites the saved decision, explains the conflict, and
 recommends the allowed path. The agent should not silently proceed.
+
+For the shell proof, verify the gate did not edit files:
+
+```bash
+git status --short > /tmp/latch-proof.before
+/path/to/latch/bin/run_latch_gate.sh '<generated request>' | tee /tmp/latch-gate-proof.json
+git status --short > /tmp/latch-proof.after
+diff -u /tmp/latch-proof.before /tmp/latch-proof.after
+```
+
+The diff should be empty. Treat `SKIPPED`, `recommendation: null`, empty cited
+evidence, or `PROCEED` on a plainly violating request as a failed proof target;
+widen the session window once or switch sources before falling back to Path B.
 
 ## Path B: No Useful History Yet
 
@@ -81,13 +95,15 @@ single-process approach. The agent should not silently proceed.
 
 ## Keep The Demo Focused
 
-Default to 1-3 high-confidence examples. Offering to scan more sessions is fine
-when the first pass is weak, but the first-run proof should stay narrow: install,
-seed, choose one rejected path, see the gate fire.
+Default to one high-confidence example. Offering to scan more sessions is fine
+when the first pass is weak, but the first-run proof should stay narrow:
+install, seed, choose one rejected path, see the gate fire.
 
 The pass is successful when:
 
 - the gate receipt appears before file edits,
 - the receipt cites a specific saved decision or rule,
+- the recommendation is `MODIFY`, `DO_NOT_PROCEED`, or
+  `NEEDS_HUMAN_JUDGMENT`,
 - the agent does not silently proceed down the rejected path,
 - the user can tell why latch intervened without learning internal machinery.

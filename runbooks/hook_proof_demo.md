@@ -99,59 +99,108 @@ If the live run says `Recommendation: SKIPPED`, it is not the proof. Check
 Use this with a real project and a real user. The target is one high-confidence
 catch, not a broad knowledge-base tour.
 
-1. Confirm the install is live.
+Run the whole path from the user's project repo, not from the latch checkout,
+unless latch itself is the project being demonstrated.
 
-   ```bash
-   bash /path/to/latch/bin/latch_status.sh
-   bash /path/to/latch/bin/latch_doctor.sh --skip-embed
-   ```
+### Operator card
 
-2. Seed recent local sessions.
+0-2 minutes: confirm the install is live.
 
-   ```bash
-   bash /path/to/latch/bin/latch_seed.sh --source both --last-sessions 20 --apply
-   ```
+```bash
+cd /path/to/user/project
+bash /path/to/latch/bin/latch_status.sh
+bash /path/to/latch/bin/latch_doctor.sh --skip-embed
 
-   Use `--source claude`, `--source codex`, or `--source both` to match the
-   user's actual history. `--apply` prints the report first and writes only
-   after approval. If the first pass is thin, rerun with a wider session window.
+# If this project uses Codex, also verify the Codex surface.
+bash /path/to/latch/bin/install_codex.sh --check
+bash /path/to/latch/bin/latch_codex_doctor.sh
+```
 
-3. Pick one proof target.
+`latch_status.sh` must report `[ENABLED ]`. If the user chose only Claude Code
+or only Codex, run the matching check/doctor pair for that surface. A skipped
+gate, missing MCP server, or unlatched status is not the proof.
 
-   Choose the strongest rejected path, governance rule, or high-confidence
-   prior agent mistake. Good fuel has a concrete forbidden approach, a reason,
-   and an allowed redirect. Do not spend the demo on vague preferences.
+2-8 minutes: seed recent local sessions.
 
-4. Run the generated catch demo.
+```bash
+bash /path/to/latch/bin/latch_seed.sh --source both --last-sessions 20 --apply
+```
 
-   The seed report should include this text shape:
+Use `--source claude`, `--source codex`, or `--source both` to match the
+user's actual history. `--apply` prints the report first and writes only after
+approval. If the first pass is thin, rerun once with a wider window such as
+`--last-sessions 50`; do not turn the demo into an open-ended transcript tour.
 
-   ```text
-   Latch receipt:
-   Latch built this first-wow report from <n> selected local source(s); it is a proof receipt, not a dashboard.
-   Why this mattered: It surfaced <counts> ... that future gates can cite before code changes.
-   Next proof: After applying this seed, run the catch-demo command below to watch latch_gate challenge the strongest rejected path or prior agent mistake before files change.
+8-11 minutes: pick exactly one proof target.
 
-   Try the catch demo:
-   - Claude Code: /latch-gate "<request>"
-   - Shell: bash /path/to/latch/bin/run_latch_gate.sh '<request>'
-   Expected: After you apply the seed, Latch should cite this seeded rejected path or prior agent-mistake evidence and ask whether to hold the line, redirect, or override it.
-   ```
+Choose the strongest rejected path, governance rule, or high-confidence prior
+agent mistake. Good fuel has all of these:
 
-   Run the generated shell command, or ask a fresh coding-agent session to do
-   the rejected thing and verify the agent shows the gate receipt before edits.
+- a concrete forbidden approach another coding agent might plausibly attempt,
+- a reason or risk for the rejection,
+- an allowed redirect or current path,
+- source/status evidence in the seed report.
 
-5. Verify no edits happened before the gate.
+Skip vague preferences, broad product direction, workstream summaries, and
+anything where the generated request would not obviously violate the saved
+judgment.
 
-   ```bash
-   git status --short > /tmp/latch-before.txt
-   bash /path/to/latch/bin/run_latch_gate.sh '<generated request>' | tee /tmp/latch-gate-proof.json
-   git status --short > /tmp/latch-after.txt
-   diff -u /tmp/latch-before.txt /tmp/latch-after.txt
-   ```
+11-13 minutes: run the generated catch demo and prove no edits happened.
 
-   The diff should be empty for the manual gate command. In an agent demo, the
-   transcript should show the Latch gate block before any edit/write tool call.
+The seed report should include this text shape:
+
+```text
+Latch receipt:
+Latch built this first-wow report from <n> selected local source(s); it is a proof receipt, not a dashboard.
+Why this mattered: It surfaced <counts> ... that future gates can cite before code changes.
+Next proof: After applying this seed, run the catch-demo command below to watch latch_gate challenge the strongest rejected path or prior agent mistake before files change.
+
+Try the catch demo:
+- Claude Code: /latch-gate "<request>"
+- Shell: bash /path/to/latch/bin/run_latch_gate.sh '<request>'
+Expected: After you apply the seed, Latch should cite this seeded rejected path or prior agent-mistake evidence and ask whether to hold the line, redirect, or override it.
+```
+
+For the shell proof, copy the generated shell request into this check:
+
+```bash
+git status --short > /tmp/latch-proof.before
+bash /path/to/latch/bin/run_latch_gate.sh '<generated request>' | tee /tmp/latch-gate-proof.json
+git status --short > /tmp/latch-proof.after
+diff -u /tmp/latch-proof.before /tmp/latch-proof.after
+```
+
+The diff must be empty. In a live agent demo, ask a fresh Claude Code or Codex
+session to do the violating work and stop at the first foreground **Latch
+gate** block; the transcript should show the gate block before any edit/write
+tool call.
+
+13-15 minutes: decide whether it was a proof.
+
+Pass:
+
+- the seed report showed a visible `Latch receipt`,
+- the approved seed produced a catch-demo command,
+- the gate returned `MODIFY`, `DO_NOT_PROCEED`, or `NEEDS_HUMAN_JUDGMENT`,
+- the receipt cited a saved decision/rule/mistake with current status,
+- the manual shell diff was empty, or the agent transcript showed the gate
+  before edits.
+
+Not a proof:
+
+- `Recommendation: SKIPPED`, `recommendation: null`, or backend/budget errors,
+- `PROCEED` on a request that plainly violates the saved judgment,
+- no cited evidence nodes,
+- any file edit before the gate receipt.
+
+If the real-history path fails because the report has no strong target, run one
+more focused seed pass with a wider session window or the other source. If it
+still has no target, switch to the no-history fixture and say so plainly: the
+fixture proves the mechanism, not the user's own project memory.
+
+Capture the proof artifacts while they are fresh: seed report excerpt,
+generated request, gate receipt, cited node ids/titles/status, before/after
+`git status` diff, and the user's reaction.
 
 ## Expected JSON shapes
 

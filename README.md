@@ -74,11 +74,16 @@ The detailed run:
 3. Confirm the doctor/check output says latch is connected.
 4. Seed latch from recent local Claude/Codex sessions.
 5. Review the structured seed report and approve useful staging evidence.
-6. Pick the strongest 1-3 rejected-path or rule examples.
-7. Ask a coding agent to violate one of them.
+6. Pick one strongest rejected-path, governance-rule, or prior agent-mistake
+   example with a concrete forbidden approach, rationale, redirect, and
+   source/status evidence.
+7. Run the printed catch-demo command, or ask a coding agent to violate that
+   one saved judgment.
 8. Expect a foreground **Latch gate** receipt before edits: latch ran the gate,
    cited the saved decision/rationale/source/status, and recommended the
-   compliant path. The agent should not silently proceed.
+   compliant path. The agent should not silently proceed. `SKIPPED`,
+   `recommendation: null`, empty evidence, or `PROCEED` on a plainly violating
+   request is not the proof.
 
 That is the first product proof: prior judgment becomes a visible gate in the
 next agent's path.
@@ -261,16 +266,28 @@ The report is the first value moment. Look for:
 
 ## Rejected-Path Demo
 
-Keep the demo narrow. Use the strongest 1-3 rejected-path or governance-rule
-examples from the seed report, then choose one to test.
+Keep the demo narrow. Use the strongest rejected-path, governance-rule, or
+prior agent-mistake example from the seed report.
 
 1. Apply the seed evidence you approve.
-2. Run the printed `/latch-gate` or `bin/run_latch_gate.sh` catch-demo command, or ask
-   Claude Code/Codex to implement the rejected approach.
+2. Run the printed `/latch-gate` or `bin/run_latch_gate.sh` catch-demo command,
+   or ask Claude Code/Codex to implement the rejected approach.
 3. Expect a foreground **Latch gate** receipt: latch ran the gate, cited the
    saved decision/rationale/source/status, explained the conflict, and
    recommended the compliant path before file edits. The agent should not
    silently proceed.
+
+For the shell proof, capture a no-edit receipt:
+
+```bash
+git status --short > /tmp/latch-proof.before
+/path/to/latch/bin/run_latch_gate.sh '<generated request>' | tee /tmp/latch-gate-proof.json
+git status --short > /tmp/latch-proof.after
+diff -u /tmp/latch-proof.before /tmp/latch-proof.after
+```
+
+The diff should be empty. In an agent demo, the transcript should show the
+**Latch gate** block before any edit/write tool call.
 
 If the first pass does not find a strong example, go wider on purpose:
 increase `--last-sessions N`, switch sources, or use the no-history mission in
