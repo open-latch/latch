@@ -139,6 +139,18 @@ def write_config(path: Path, content: str) -> None:
     path.write_text(content, encoding="utf-8")
 
 
+def _agents_sync_args(agents_md: str, *, yes: bool) -> list[str]:
+    args: list[str] = []
+    if yes:
+        args.append("--yes")
+    args.extend([
+        "--surface-name", "Cursor",
+        "--wording-label", "shared AGENTS.md",
+        agents_md,
+    ])
+    return args
+
+
 def _print_changes(label: str, changes: list[str], *, dry_run: bool) -> None:
     tag = "DRY " if dry_run else "OK  "
     print(f"  [{tag}] {label}:")
@@ -219,8 +231,7 @@ def main(argv: list[str] | None = None) -> int:
             status = agents_md_sync.evaluate(Path(args.agents_md))
             print(f"  [DRY ] AGENTS.md status: {status}")
         else:
-            sync_args = ["--yes", str(args.agents_md)] if args.yes else [str(args.agents_md)]
-            rc = agents_md_sync.main(sync_args)
+            rc = agents_md_sync.main(_agents_sync_args(str(args.agents_md), yes=args.yes))
             if rc != 0:
                 return rc
 

@@ -1,10 +1,12 @@
 """Unit tests for the Cursor installer config merge."""
 from __future__ import annotations
 
+import io
 import json
 import shutil
 import sys
 import tempfile
+from contextlib import redirect_stdout
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
@@ -116,6 +118,44 @@ def test_write_config_backs_up_existing():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_agents_sync_args_are_cursor_branded():
+    yes_args = ic._agents_sync_args("AGENTS.md", yes=True)
+    _assert(yes_args == [
+        "--yes",
+        "--surface-name", "Cursor",
+        "--wording-label", "shared AGENTS.md",
+        "AGENTS.md",
+    ], yes_args)
+
+    prompt_args = ic._agents_sync_args("AGENTS.md", yes=False)
+    _assert(prompt_args == [
+        "--surface-name", "Cursor",
+        "--wording-label", "shared AGENTS.md",
+        "AGENTS.md",
+    ], prompt_args)
+    print("PASS agents_sync_args_are_cursor_branded")
+
+
+def test_first_wire_notice_is_cursor_branded():
+    d = Path(tempfile.mkdtemp(prefix="latch-cursor-agents-"))
+    try:
+        out = io.StringIO()
+        with redirect_stdout(out):
+            rc = ic.main([
+                "--skip-mcp",
+                "--agents-md", str(d / "AGENTS.md"),
+                "--yes",
+            ])
+        text = out.getvalue()
+        _assert(rc == 0, f"expected install success, got {rc}")
+        _assert("into Cursor for this project" in text, text)
+        _assert("shared AGENTS.md wording" in text, text)
+        _assert("into Codex for this project" not in text, text)
+        print("PASS first_wire_notice_is_cursor_branded")
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def test_check_mode_verifies_mcp_and_agents():
     d = Path(tempfile.mkdtemp(prefix="latch-cursor-check-"))
     try:
@@ -155,5 +195,7 @@ if __name__ == "__main__":
     test_merge_mcp_config_migrates_legacy_adapter_names()
     test_merge_mcp_config_idempotent()
     test_write_config_backs_up_existing()
+    test_agents_sync_args_are_cursor_branded()
+    test_first_wire_notice_is_cursor_branded()
     test_check_mode_verifies_mcp_and_agents()
     print("\nAll install_cursor tests pass.")
