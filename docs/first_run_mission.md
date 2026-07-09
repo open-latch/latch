@@ -6,6 +6,10 @@ Run this after the quickstart script has connected Claude Code, Codex, or both,
 and the doctor/check commands pass. The quickstart offers the seed step at the
 end; use the commands below when you skipped that prompt or want to rerun it.
 
+For the proof-ready package with timed paths, exact receipt shapes, and
+verification commands, see
+[`runbooks/hook_proof_demo.md`](../runbooks/hook_proof_demo.md).
+
 ## Path A: Use Recent Sessions
 
 Start with the smallest useful review-and-apply scan:
