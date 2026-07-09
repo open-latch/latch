@@ -12,6 +12,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import agents_md_sync  # noqa: E402
+import cursor_rules_sync  # noqa: E402
 import install_engine  # noqa: E402
 import install_cursor as ic  # noqa: E402
 
@@ -139,11 +140,13 @@ def test_agents_sync_args_are_cursor_branded():
 def test_first_wire_notice_is_cursor_branded():
     d = Path(tempfile.mkdtemp(prefix="latch-cursor-agents-"))
     try:
+        rule = d / ".cursor" / "rules" / "latch.mdc"
         out = io.StringIO()
         with redirect_stdout(out):
             rc = ic.main([
                 "--skip-mcp",
                 "--agents-md", str(d / "AGENTS.md"),
+                "--rules-mdc", str(rule),
                 "--yes",
             ])
         text = out.getvalue()
@@ -151,6 +154,8 @@ def test_first_wire_notice_is_cursor_branded():
         _assert("into Cursor for this project" in text, text)
         _assert("shared AGENTS.md wording" in text, text)
         _assert("into Codex for this project" not in text, text)
+        _assert(cursor_rules_sync.evaluate(rule) == cursor_rules_sync.OK,
+                "Cursor rule should be installed by default")
         print("PASS first_wire_notice_is_cursor_branded")
     finally:
         shutil.rmtree(d, ignore_errors=True)
@@ -160,6 +165,7 @@ def test_check_mode_verifies_mcp_and_agents():
     d = Path(tempfile.mkdtemp(prefix="latch-cursor-check-"))
     try:
         config = d / ".cursor" / "mcp.json"
+        rule = d / ".cursor" / "rules" / "latch.mdc"
         agents = d / "AGENTS.md"
         python_path = install_engine.resolve_python(sys.executable)
         server_py = str((ic.KB_HOME / "src" / "mcp_server.py")).replace("\\", "/")
@@ -167,11 +173,13 @@ def test_check_mode_verifies_mcp_and_agents():
         config.parent.mkdir(parents=True)
         config.write_text(body, encoding="utf-8")
         agents_md_sync.sync(agents, create=True)
+        cursor_rules_sync.sync(rule)
 
         rc = ic.main([
             "--python", sys.executable,
             "--mcp-json", str(config),
             "--agents-md", str(agents),
+            "--rules-mdc", str(rule),
             "--check",
         ])
         _assert(rc == 0, f"expected check success, got {rc}")
@@ -180,9 +188,19 @@ def test_check_mode_verifies_mcp_and_agents():
             "--python", sys.executable,
             "--mcp-json", str(d / "missing.json"),
             "--agents-md", str(agents),
+            "--rules-mdc", str(rule),
             "--check",
         ])
         _assert(rc == 1, f"expected check failure for missing config, got {rc}")
+
+        rc = ic.main([
+            "--python", sys.executable,
+            "--mcp-json", str(config),
+            "--agents-md", str(agents),
+            "--rules-mdc", str(d / "missing-rule.mdc"),
+            "--check",
+        ])
+        _assert(rc == 1, f"expected check failure for missing rule, got {rc}")
         print("PASS check_mode_verifies_mcp_and_agents")
     finally:
         shutil.rmtree(d, ignore_errors=True)

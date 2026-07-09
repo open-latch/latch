@@ -13,6 +13,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import agents_md_sync  # noqa: E402
+import cursor_rules_sync  # noqa: E402
 import cursor_doctor as cd  # noqa: E402
 import install_cursor as ic  # noqa: E402
 
@@ -94,6 +95,21 @@ def test_check_agents_md_status():
     print("PASS check_agents_md_status")
 
 
+def test_check_cursor_rule_status():
+    d = _tmp()
+    try:
+        target = d / ".cursor" / "rules" / "latch.mdc"
+        cursor_rules_sync.sync(target)
+        ok = cd.check_cursor_rule(target)
+        _assert(ok.level == cd.OK, ok)
+        target.write_text("custom\n", encoding="utf-8")
+        bad = cd.check_cursor_rule(target)
+        _assert(bad.level == cd.FAIL and "status is drift" in bad.detail, bad)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+    print("PASS check_cursor_rule_status")
+
+
 def test_check_mcp_launch_target():
     d = _tmp()
     try:
@@ -127,7 +143,7 @@ def test_check_cursor_cli_mcp_ok_and_failure():
         ok_agent = _fake_exe(
             d / "agent-ok",
             "printf '%s\\n' \"$@\" >> \"$FAKE_CURSOR_AGENT_ARGS\"\n"
-            "printf '%s\\n' 'ok'\n",
+            "printf '%s\\n' 'latch_search latch_get latch_recent latch_gate'\n",
         )
         ok = cd.check_cursor_cli_mcp(agent_bin=str(ok_agent), timeout_s=1)
         _assert(ok.level == cd.OK, ok)
@@ -150,10 +166,27 @@ def test_check_cursor_cli_mcp_ok_and_failure():
     print("PASS check_cursor_cli_mcp_ok_and_failure")
 
 
+def test_check_cursor_cli_mcp_fails_when_critical_tools_missing():
+    d = _tmp()
+    try:
+        agent = _fake_exe(
+            d / "agent-missing-tools",
+            "printf '%s\\n' 'latch_search latch_gate'\n",
+        )
+        check = cd.check_cursor_cli_mcp(agent_bin=str(agent), timeout_s=1)
+        _assert(check.level == cd.FAIL, check)
+        _assert("latch_get" in check.detail and "latch_recent" in check.detail,
+                check)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+    print("PASS check_cursor_cli_mcp_fails_when_critical_tools_missing")
+
+
 def test_run_all_static_and_cli_checks():
     d = _tmp()
     try:
         config = d / ".cursor" / "mcp.json"
+        rule = d / ".cursor" / "rules" / "latch.mdc"
         config.parent.mkdir(parents=True)
         server = d / "mcp_server.py"
         server.write_text("# ok\n", encoding="utf-8")
@@ -161,17 +194,22 @@ def test_run_all_static_and_cli_checks():
         config.write_text(body, encoding="utf-8")
         agents = d / "AGENTS.md"
         agents_md_sync.sync(agents, create=True)
-        agent = _fake_exe(d / "agent", "printf '%s\\n' 'ok'\n")
+        cursor_rules_sync.sync(rule)
+        agent = _fake_exe(
+            d / "agent",
+            "printf '%s\\n' 'latch_search latch_get latch_recent latch_gate'\n",
+        )
 
         checks = cd.run_all(
             config_path=config,
             agents_path=agents,
+            rules_path=rule,
             python_path=sys.executable,
             server_py=str(server),
             agent_bin=str(agent),
             cli_timeout_s=1,
         )
-        _assert([c.level for c in checks] == [cd.OK, cd.OK, cd.OK, cd.OK], checks)
+        _assert([c.level for c in checks] == [cd.OK, cd.OK, cd.OK, cd.OK, cd.OK], checks)
     finally:
         shutil.rmtree(d, ignore_errors=True)
     print("PASS run_all_static_and_cli_checks")
@@ -181,8 +219,10 @@ if __name__ == "__main__":
     test_check_cursor_config_ok_and_missing()
     test_json_mode_reports_malformed_cursor_config()
     test_check_agents_md_status()
+    test_check_cursor_rule_status()
     test_check_mcp_launch_target()
     test_check_cursor_cli_mcp_warns_when_missing()
     test_check_cursor_cli_mcp_ok_and_failure()
+    test_check_cursor_cli_mcp_fails_when_critical_tools_missing()
     test_run_all_static_and_cli_checks()
     print("\nAll cursor_doctor tests pass.")
