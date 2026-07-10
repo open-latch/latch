@@ -191,8 +191,46 @@ def test_tree_codex_backend_uses_generic_model_env():
     print("PASS tree_codex_backend_uses_generic_model_env")
 
 
+def test_heal_and_tree_use_cursor_maintenance_backend():
+    env = _snapshot_env()
+    original = model_backends.cursor_backend.invoke_prompt
+    calls = []
+    try:
+        os.environ["LATCH_MAINTENANCE_BACKEND"] = "cursor"
+
+        def fake_cursor(prompt, *, timeout_s, purpose, agent_bin=None, model=None):
+            calls.append({
+                "prompt": prompt,
+                "timeout_s": timeout_s,
+                "purpose": purpose,
+                "agent_bin": agent_bin,
+                "model": model,
+            })
+            response = TREE_JSON if purpose == "tree_summary" else HEAL_JSON
+            return response, None, False
+
+        model_backends.cursor_backend.invoke_prompt = fake_cursor
+        heal_out = heal.arbitrate(*_nodes(), similarity=0.91)
+        tree_out = tree._invoke_summary([
+            {"kind": "fact", "title": "deploy", "body": "deploy with compose"}
+        ])
+
+        _assert(heal_out["decision"] == "keep_both", heal_out)
+        _assert(heal_out["backend"] == "cursor", heal_out)
+        _assert(tree_out == {
+            "title": "deployment notes",
+            "body": "summarizes deployment decisions",
+        }, tree_out)
+        _assert([call["purpose"] for call in calls] == ["arbitrate", "tree_summary"], calls)
+    finally:
+        model_backends.cursor_backend.invoke_prompt = original
+        _restore_env(env)
+    print("PASS heal_and_tree_use_cursor_maintenance_backend")
+
+
 if __name__ == "__main__":
     test_heal_defaults_to_claude_backend()
     test_heal_codex_backend_uses_existing_gate_env_fallback()
     test_tree_codex_backend_uses_generic_model_env()
+    test_heal_and_tree_use_cursor_maintenance_backend()
     print("\nAll maintenance backend tests pass.")

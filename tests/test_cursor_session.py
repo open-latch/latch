@@ -9,6 +9,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import cursor_session  # noqa: E402
+import cursor_transcript  # noqa: E402
 import paths  # noqa: E402
 
 
@@ -55,6 +56,34 @@ def test_cursor_session_marker_missing_or_invalid():
         cursor_session.marker_path(tmp).parent.mkdir(parents=True, exist_ok=True)
         cursor_session.marker_path(tmp).write_text("{bad", encoding="utf-8")
         assert cursor_session.read_session_id(tmp) is None
+    finally:
+        shutil.rmtree(project_dir, ignore_errors=True)
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_cursor_transcript_resolution_is_exact_and_fail_closed():
+    tmp = Path(tempfile.mkdtemp(prefix="cursor-session-transcript-"))
+    project_dir = paths.project_dir(tmp)
+    transcript = tmp / "current.jsonl"
+    transcript.write_text('{"type":"user","message":"hi"}\n', encoding="utf-8")
+    try:
+        cursor_session.write_marker(tmp, "cursor-conversation", transcript_path=str(transcript))
+        sid, resolved = cursor_transcript.resolve_current(
+            str(tmp), session_id="cursor-conversation", transcript_path=str(transcript),
+        )
+        assert sid == "cursor-conversation"
+        assert resolved == transcript.resolve()
+
+        for kwargs in (
+            {"session_id": "other"},
+            {"transcript_path": str(tmp / "other.jsonl")},
+        ):
+            try:
+                cursor_transcript.resolve_current(str(tmp), **kwargs)
+            except cursor_transcript.CursorTranscriptError:
+                pass
+            else:
+                raise AssertionError(f"expected fail-closed mismatch for {kwargs}")
     finally:
         shutil.rmtree(project_dir, ignore_errors=True)
         shutil.rmtree(tmp, ignore_errors=True)

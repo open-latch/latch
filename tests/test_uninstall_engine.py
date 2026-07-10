@@ -154,9 +154,41 @@ def test_strip_cursor_project_removes_latch_owned_wiring_only():
         shutil.rmtree(root, ignore_errors=True)
 
 
+def test_cursor_only_main_never_calls_global_uninstall():
+    root = Path(tempfile.mkdtemp(prefix="latch-uninstall-cursor-only-"))
+    original_unregister = ue.unregister_mcp
+    original_remove_commands = ue.remove_commands
+    try:
+        mcp = root / ".cursor" / "mcp.json"
+        mcp.parent.mkdir(parents=True)
+        body, _ = ic.merge_mcp_config("", "/py", "/srv.py")
+        mcp.write_text(body, encoding="utf-8")
+
+        def forbidden(*_args, **_kwargs):
+            raise AssertionError("Cursor-only uninstall touched global Claude wiring")
+
+        ue.unregister_mcp = forbidden
+        ue.remove_commands = forbidden
+        rc = ue.main([
+            "--yes", "--cursor-only", "--cursor-project", str(root),
+        ])
+        _assert(rc == 0, rc)
+        remaining = json.loads(mcp.read_text(encoding="utf-8"))
+        _assert("latch" not in remaining.get("mcpServers", {}), remaining)
+        _assert(ue.main([
+            "--check", "--cursor-only", "--cursor-project", str(root),
+        ]) == 0, "Cursor-only removal check should pass")
+    finally:
+        ue.unregister_mcp = original_unregister
+        ue.remove_commands = original_remove_commands
+        import shutil
+        shutil.rmtree(root, ignore_errors=True)
+
+
 if __name__ == "__main__":
     test_remove_commands_removes_exact_source_body_without_path_marker()
     test_remove_commands_preserves_user_modified_same_name_command()
     test_remove_commands_removes_existing_legacy_alias_exact_primary_body()
     test_strip_cursor_project_removes_latch_owned_wiring_only()
+    test_cursor_only_main_never_calls_global_uninstall()
     print("\nAll uninstall_engine command tests pass.")

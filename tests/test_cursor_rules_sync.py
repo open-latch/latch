@@ -32,8 +32,9 @@ def test_render_rule_has_cursor_frontmatter_and_gate_contract():
     _assert("/opt/latch/bin/install_cursor.sh --yes" in out,
             "KB_HOME placeholder should resolve")
     _assert(".cursor/commands" in out and "--with-hooks" in out
-            and "native Cursor model backend" in out,
-            "rule should state Cursor adapter boundaries")
+            and "Cursor Agent CLI is the native" in out
+            and "never\ndiscovers or guesses historical Cursor transcripts" in out,
+            "rule should state Cursor runtime boundaries")
     print("PASS render_rule_has_cursor_frontmatter_and_gate_contract")
 
 

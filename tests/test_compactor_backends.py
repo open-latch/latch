@@ -1,6 +1,7 @@
 """Unit tests for compactor summarizer backends."""
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import sys
@@ -129,6 +130,55 @@ def test_invoke_codex_once_uses_isolated_exec_shape():
     print("PASS invoke_codex_once_uses_isolated_exec_shape")
 
 
+def test_invoke_cursor_once_uses_isolated_ask_shape():
+    d = _tmp()
+    old_response = os.environ.get("FAKE_CURSOR_RESPONSE")
+    old_args = os.environ.get("FAKE_CURSOR_ARGS")
+    old_stdin = os.environ.get("FAKE_CURSOR_STDIN")
+    old_cursor_bin = compactor.cursor_backend.CURSOR_AGENT_BIN
+    try:
+        fake = _fake_exe(
+            d / "agent",
+            "printf '%s\\n' \"$@\" > \"$FAKE_CURSOR_ARGS\"\n"
+            "cat > \"$FAKE_CURSOR_STDIN\"\n"
+            "printf '%s\\n' \"$FAKE_CURSOR_RESPONSE\"\n",
+        )
+        os.environ["FAKE_CURSOR_RESPONSE"] = (
+            '{"type":"result","subtype":"success","is_error":false,'
+            '"result":' + json.dumps(COMPACTION_JSON) + ',"session_id":"sid"}'
+        )
+        os.environ["FAKE_CURSOR_ARGS"] = str(d / "args.txt")
+        os.environ["FAKE_CURSOR_STDIN"] = str(d / "stdin.txt")
+        raw, err = compactor._invoke_cursor_once(
+            "summarize this", cursor_bin=str(fake), timeout_s=2,
+        )
+        _assert(err is None and raw == COMPACTION_JSON, (raw, err))
+        args = (d / "args.txt").read_text(encoding="utf-8").splitlines()
+        _assert("--mode" in args and "ask" in args, args)
+        _assert("--force" not in args and "--yolo" not in args, args)
+        compactor.cursor_backend.CURSOR_AGENT_BIN = str(fake)
+        payload = {
+            "prior_summary": "", "related_kb_nodes": [],
+            "transcript": "[user] compact this", "project_path": "/repo",
+            "session_id": "sid",
+        }
+        parsed = compactor._invoke_summarizer(payload, backend="cursor")
+        _assert(parsed and parsed["session_summary"]["body"] == "Summary body", parsed)
+    finally:
+        compactor.cursor_backend.CURSOR_AGENT_BIN = old_cursor_bin
+        for name, value in {
+            "FAKE_CURSOR_RESPONSE": old_response,
+            "FAKE_CURSOR_ARGS": old_args,
+            "FAKE_CURSOR_STDIN": old_stdin,
+        }.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+        shutil.rmtree(d, ignore_errors=True)
+    print("PASS invoke_cursor_once_uses_isolated_ask_shape")
+
+
 def test_invoke_summarizer_parses_codex_result():
     d = _tmp()
     old_bin = compactor.CODEX_BIN
@@ -228,6 +278,7 @@ def test_invoke_summarizer_repairs_parsed_empty_result():
 if __name__ == "__main__":
     test_invoke_claude_once_disallows_action_tools()
     test_invoke_codex_once_uses_isolated_exec_shape()
+    test_invoke_cursor_once_uses_isolated_ask_shape()
     test_invoke_summarizer_parses_codex_result()
     test_repair_prompt_is_self_contained_for_isolated_backend()
     test_invoke_summarizer_repairs_parsed_empty_result()

@@ -11,10 +11,9 @@ This adapter wires the local latch engine into Cursor's project surfaces:
 * With ``--with-hooks``, ``.cursor/hooks.json`` gets merge-safe session,
   per-prompt gate-enforcement, and activity hooks.
 
-It intentionally does not install native Cursor compaction, transcript-history
-discovery, or a native Cursor model backend. Cursor can use latch MCP tools
-through the project MCP config; model-backed gate calls continue to use the
-existing Claude/Codex backends when explicitly selected.
+It intentionally does not discover historical Cursor transcripts. The native
+Cursor backend is the default; ``--model-backend claude|codex`` remains an
+explicit compatibility override.
 """
 from __future__ import annotations
 
@@ -43,9 +42,12 @@ DEFAULT_RULE_PATH = cursor_rules_sync.DEFAULT_RULE_PATH
 DEFAULT_COMMANDS_DIR = Path(".cursor") / "commands"
 DEFAULT_HOOKS_PATH = cursor_hooks.DEFAULT_HOOKS_PATH
 COMMANDS_SRC = KB_HOME / "commands"
+CURSOR_COMMANDS_SRC = KB_HOME / "cursor_commands"
 COMMAND_PLACEHOLDER = install_engine.COMMAND_PLACEHOLDER
+CURSOR_BACKEND_PLACEHOLDER = "<CURSOR_MODEL_BACKEND>"
 CURSOR_COMMAND_FILES = (
     "latch-budget-approve.md",
+    "latch-compact.md",
     "latch-decay.md",
     "latch-gate.md",
     "latch-gate-report.md",
@@ -54,13 +56,20 @@ CURSOR_COMMAND_FILES = (
     "latch-tree.md",
     "unlatch.md",
 )
-UNSUPPORTED_CURSOR_COMMAND_FILES = ("latch-compact.md",)
+UNSUPPORTED_CURSOR_COMMAND_FILES: tuple[str, ...] = ()
 CURSOR_COMMAND_FOOTER = (
     "\n\n---\n\n"
     "Cursor boundary: this project-local command is a reusable prompt for "
     "Cursor Agent. It may ask Agent to call latch MCP tools or run latch shell "
-    "wrappers. It is not a Cursor hook, native Cursor model backend, Cursor "
-    "transcript import, or native Cursor compaction integration.\n"
+    "wrappers. It never authorizes undocumented Cursor-history discovery.\n"
+)
+CURSOR_COMPACT_ASSETS = (
+    Path("src") / "cursor_backend.py",
+    Path("src") / "cursor_compact.py",
+    Path("src") / "cursor_transcript.py",
+    Path("bin") / "run_cursor_compact_now.sh",
+    Path("bin") / "run_cursor_compact_now.ps1",
+    Path("cursor_commands") / "latch-compact.md",
 )
 
 
@@ -93,10 +102,14 @@ def _dump(obj: dict[str, Any]) -> str:
 
 
 def _adapter_env(model_backend: str | None = None) -> dict[str, str]:
-    env = {"LATCH_ADAPTER": ADAPTER_NAME}
-    if model_backend:
-        env["LATCH_MODEL_BACKEND"] = model_backend
-        env["LATCH_GATE_BACKEND"] = model_backend
+    backend = model_backend or "cursor"
+    env = {
+        "LATCH_ADAPTER": ADAPTER_NAME,
+        "LATCH_MODEL_BACKEND": backend,
+        "LATCH_GATE_BACKEND": backend,
+        "LATCH_MAINTENANCE_BACKEND": backend,
+        "LATCH_COMPACTOR_BACKEND": backend,
+    }
     return env
 
 
@@ -188,23 +201,40 @@ def write_config(path: Path, content: str) -> None:
     path.write_text(content, encoding="utf-8")
 
 
-def render_cursor_command(name: str, kb_home: str | None = None) -> str:
-    src = COMMANDS_SRC / name
+def render_cursor_command(
+    name: str,
+    kb_home: str | None = None,
+    *,
+    model_backend: str | None = None,
+) -> str:
+    override = CURSOR_COMMANDS_SRC / name
+    src = override if override.is_file() else COMMANDS_SRC / name
     if name not in CURSOR_COMMAND_FILES:
         raise ValueError(f"unsupported Cursor command: {name}")
     if not src.is_file():
         raise FileNotFoundError(src)
     home = kb_home if kb_home is not None else str(KB_HOME).replace("\\", "/")
+    backend = model_backend or "cursor"
     body = src.read_text(encoding="utf-8").replace(COMMAND_PLACEHOLDER, home)
-    if name == "latch-pm.md":
-        body = body.replace(
-            "Optionally offer `/latch-compact` to summarize the\n"
-            "conversation itself into the KB.",
-            "Cursor-native `/latch-compact` is not installed in this adapter. "
-            "If the user wants to preserve the conversation, point them to the "
-            "shell/Codex/Claude compaction path documented in latch."
-        )
-    return body.rstrip() + CURSOR_COMMAND_FOOTER
+    body = body.replace(CURSOR_BACKEND_PLACEHOLDER, backend)
+    body = body.replace(
+        f"bash {home}/bin/run_latch_gate.sh",
+        f"LATCH_GATE_BACKEND={backend} LATCH_MODEL_BACKEND={backend} "
+        f"bash {home}/bin/run_latch_gate.sh",
+    )
+    body = body.replace(
+        f'python "{home}/src/maintenance.py"',
+        f'LATCH_MAINTENANCE_BACKEND={backend} LATCH_MODEL_BACKEND={backend} '
+        f'python "{home}/src/maintenance.py"',
+    )
+    backend_note = (
+        "\n\nCursor shell-fallback backend: `" + backend + "`. On PowerShell, "
+        "set `LATCH_MODEL_BACKEND`, `LATCH_GATE_BACKEND`, "
+        "`LATCH_MAINTENANCE_BACKEND`, and `LATCH_COMPACTOR_BACKEND` to `"
+        + backend + "` before a shell fallback. MCP calls already inherit "
+        "the configured backend.\n"
+    )
+    return body.rstrip() + backend_note + CURSOR_COMMAND_FOOTER
 
 
 def _read_text(path: Path) -> str:
@@ -228,7 +258,12 @@ def _is_managed_cursor_command_body(body: str) -> bool:
     return "Cursor boundary: this project-local command is a reusable prompt" in body
 
 
-def sync_cursor_commands(commands_dir: Path = DEFAULT_COMMANDS_DIR, *, dry_run: bool = False) -> list[str]:
+def sync_cursor_commands(
+    commands_dir: Path = DEFAULT_COMMANDS_DIR,
+    *,
+    dry_run: bool = False,
+    model_backend: str | None = None,
+) -> list[str]:
     if not COMMANDS_SRC.is_dir():
         return [f"no commands/ directory at {COMMANDS_SRC} - skipped"]
     collisions: list[Path] = []
@@ -237,7 +272,7 @@ def sync_cursor_commands(commands_dir: Path = DEFAULT_COMMANDS_DIR, *, dry_run: 
         if not target.is_file():
             continue
         existing = _read_text(target)
-        desired = render_cursor_command(name)
+        desired = render_cursor_command(name, model_backend=model_backend)
         if existing != desired and not _is_managed_cursor_command_body(existing):
             collisions.append(target)
     if collisions:
@@ -250,7 +285,7 @@ def sync_cursor_commands(commands_dir: Path = DEFAULT_COMMANDS_DIR, *, dry_run: 
     if not dry_run:
         commands_dir.mkdir(parents=True, exist_ok=True)
     for name in CURSOR_COMMAND_FILES:
-        desired = render_cursor_command(name)
+        desired = render_cursor_command(name, model_backend=model_backend)
         target = commands_dir / name
         existing = _read_text(target)
         if existing == desired:
@@ -276,7 +311,11 @@ def sync_cursor_commands(commands_dir: Path = DEFAULT_COMMANDS_DIR, *, dry_run: 
     return changes
 
 
-def cursor_commands_status(commands_dir: Path = DEFAULT_COMMANDS_DIR) -> tuple[bool, str]:
+def cursor_commands_status(
+    commands_dir: Path = DEFAULT_COMMANDS_DIR,
+    *,
+    model_backend: str | None = None,
+) -> tuple[bool, str]:
     if not COMMANDS_SRC.is_dir():
         return True, f"Cursor commands: no commands/ source at {COMMANDS_SRC}"
     missing: list[str] = []
@@ -290,7 +329,9 @@ def cursor_commands_status(commands_dir: Path = DEFAULT_COMMANDS_DIR) -> tuple[b
         body = _read_text(target)
         if COMMAND_PLACEHOLDER in body:
             unresolved.append(name)
-        if body != render_cursor_command(name):
+        if CURSOR_BACKEND_PLACEHOLDER in body:
+            unresolved.append(name)
+        if body != render_cursor_command(name, model_backend=model_backend):
             drifted.append(name)
     unsupported = [
         name for name in UNSUPPORTED_CURSOR_COMMAND_FILES
@@ -303,12 +344,19 @@ def cursor_commands_status(commands_dir: Path = DEFAULT_COMMANDS_DIR) -> tuple[b
     if drifted:
         problems.append(f"drifted {', '.join(drifted[:3])}{'...' if len(drifted) > 3 else ''}")
     if unresolved:
-        problems.append(f"unresolved {COMMAND_PLACEHOLDER} in {', '.join(unresolved[:3])}")
+        problems.append(f"unresolved command placeholder in {', '.join(unresolved[:3])}")
     if unsupported:
         problems.append(f"unsupported installed {', '.join(unsupported)}")
     if problems:
         return False, f"Cursor commands missing or drifted in {commands_dir}: " + "; ".join(problems)
     return True, f"Cursor commands installed in {commands_dir} ({len(CURSOR_COMMAND_FILES)} workflows)"
+
+
+def cursor_compact_assets_status() -> tuple[bool, str]:
+    missing = [str(path) for path in CURSOR_COMPACT_ASSETS if not (KB_HOME / path).is_file()]
+    if missing:
+        return False, "Cursor native backend/compact assets missing: " + ", ".join(missing)
+    return True, "Cursor native backend/current-session compact assets present"
 
 
 def remove_cursor_mcp_config(path: Path, *, dry_run: bool = False) -> list[str]:
@@ -395,7 +443,9 @@ def _check(args: argparse.Namespace, python_path: str, server_py: str) -> int:
             f"Cursor rule {args.rules_mdc}: {status}",
         ))
     if not args.skip_commands:
-        checks.append(cursor_commands_status(Path(args.commands_dir)))
+        checks.append(cursor_commands_status(
+            Path(args.commands_dir), model_backend=args.model_backend,
+        ))
     if args.with_hooks:
         checks.append(cursor_hooks.hooks_status(
             Path(args.hooks_json),
@@ -405,6 +455,7 @@ def _check(args: argparse.Namespace, python_path: str, server_py: str) -> int:
             str(KB_HOME / "src" / "hooks" / "cursor_pre_tool_use.py"),
             str(KB_HOME / "src" / "hooks" / "cursor_post_tool_use.py"),
         ))
+    checks.append(cursor_compact_assets_status())
 
     failed = 0
     for ok, label in checks:
@@ -429,8 +480,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="Cursor hooks config path (default: .cursor/hooks.json)")
     ap.add_argument("--with-hooks", action="store_true",
                     help="install/check opt-in Cursor session, gate-enforcement, and activity hooks")
-    ap.add_argument("--model-backend", choices=("claude", "codex"),
-                    help="set LATCH_MODEL_BACKEND/LATCH_GATE_BACKEND to an existing backend")
+    ap.add_argument("--model-backend", choices=("cursor", "claude", "codex"),
+                    help="model backend (default: native Cursor Agent CLI)")
     ap.add_argument("--skip-mcp", action="store_true", help="do not touch .cursor/mcp.json")
     ap.add_argument("--skip-agents", action="store_true", help="do not touch AGENTS.md")
     ap.add_argument("--skip-rules", action="store_true", help="do not touch Cursor Rules")
@@ -454,7 +505,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  Commands     : {'skipped' if args.skip_commands else args.commands_dir}")
     print(f"  Hooks        : {args.hooks_json if args.with_hooks else 'skipped (pass --with-hooks)'}")
     print(f"  AGENTS.md    : {'skipped' if args.skip_agents else args.agents_md}")
-    print(f"  model backend: {args.model_backend or 'engine default'}")
+    print(f"  model backend: {args.model_backend or 'cursor (native default)'}")
     print(f"  mode         : {'DRY-RUN (no writes)' if args.dry_run else 'apply'}\n")
 
     if not args.skip_mcp:
@@ -503,7 +554,10 @@ def main(argv: list[str] | None = None) -> int:
 
     if not args.skip_commands:
         try:
-            changes = sync_cursor_commands(Path(args.commands_dir), dry_run=args.dry_run)
+            changes = sync_cursor_commands(
+                Path(args.commands_dir), dry_run=args.dry_run,
+                model_backend=args.model_backend,
+            )
         except CursorAssetCollisionError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 2
@@ -538,7 +592,7 @@ def main(argv: list[str] | None = None) -> int:
         print("Done. Restart Cursor or run 'agent mcp list' so Cursor reloads the project wiring.")
         if not args.with_hooks:
             print("Cursor hooks were not installed; re-run with --with-hooks for session briefing, pre-edit gating, and activity context.")
-        print("Native Cursor-backed gate calls were not installed; pass --model-backend claude|codex to use an existing backend.")
+        print("Cursor Agent CLI is the native model backend; pass --model-backend claude|codex only for an explicit compatibility override.")
     print()
     return 0
 

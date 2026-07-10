@@ -97,13 +97,15 @@ first-run mission.
   managed `CLAUDE.md` behavior contract.
 - **Codex:** the same KB and MCP tools with Codex-specific `AGENTS.md`,
   SessionStart, Codex backend defaults, and a manual compaction wrapper.
-- **Cursor adapter:** project-scoped MCP wiring through `.cursor/mcp.json`, a
+- **Cursor:** project-scoped MCP wiring through `.cursor/mcp.json`, a
   managed `.cursor/rules/latch.mdc` activation rule, project-local
   `.cursor/commands` prompts, and the shared `AGENTS.md` contract. An opt-in
   `.cursor/hooks.json` layer adds SessionStart KB briefing, a current-session
   transcript handoff, per-prompt pre-edit gate enforcement, and post-tool latch
-  activity context. Native Cursor-backed gate calls, transcript-history
-  discovery, and native Cursor compaction remain deferred.
+  activity context. The Cursor Agent CLI is the native model backend for gate,
+  maintenance, and compaction calls. Manual compaction accepts only the current
+  SessionStart-provided conversation/transcript pair; historical transcript
+  discovery remains deliberately unsupported.
 - **Claude Code + Codex together:** one shared local latch KB, so decisions and
   rejected paths captured through either agent can gate both.
 
@@ -145,15 +147,16 @@ non-interactive runs, choose explicitly:
 /path/to/latch/bin/latch_quickstart.sh --agents both
 /path/to/latch/bin/latch_quickstart.sh --agents claude
 /path/to/latch/bin/latch_quickstart.sh --agents codex
-/path/to/latch/bin/latch_quickstart.sh --agents cursor --cursor-model-backend codex
-/path/to/latch/bin/latch_quickstart.sh --agents all --cursor-model-backend codex
+/path/to/latch/bin/latch_quickstart.sh --agents cursor --cursor-with-hooks
+/path/to/latch/bin/latch_quickstart.sh --agents all --cursor-with-hooks
 ```
 
 The quickstart delegates to the existing installers, syncs the project behavior
 contract, runs doctor/check commands, then moves directly into seed-first setup.
 It disables the per-installer seed prompts so there is one seed handoff at the
 end. Seed source still uses local Claude/Codex transcripts (`claude`, `codex`,
-or `both`); Cursor transcript import is not installed yet.
+or `both`); Cursor-origin seeding is a separate capability from current-session
+manual compaction and is not installed yet.
 
 One latch clone can serve many repos. Run the quickstart script again from each
 project repo where you want the agent behavior contract. The manual steps below
@@ -255,30 +258,37 @@ rephrased gate requests, and stale or cross-session receipts cannot authorize a
 mutation. Disabling or unlatching latch disables this enforcement as well. The
 hooks do not auto-compact or discover historical Cursor transcripts.
 
-If you want model-backed `latch_gate` calls from this Cursor adapter, point it
-at an existing backend with `--model-backend codex` or `--model-backend claude`.
-A native Cursor CLI backend is intentionally deferred until a design-partner
-install proves it is needed. Cursor adapter command prompts cover latch's
-supported manual workflows through MCP or shell wrappers. Cursor transcript
-history and native Cursor compaction are not installed yet; use the shell
-wrappers or the Claude/Codex compaction surfaces for those paths.
+The native model path uses an authenticated Cursor Agent CLI in headless
+`--print` / JSON / Ask mode. It never passes `--force` or `--yolo`, and it runs
+each model call in an empty temporary workspace. Explicit compatibility
+overrides remain available with `--model-backend codex` or
+`--model-backend claude`.
+
+The installed `/latch-compact` command and `run_cursor_compact_now` wrappers
+compact only the current conversation. Resolution fails closed unless the
+opt-in SessionStart hook recorded an exact conversation id and
+`transcript_path` pair; latch never scans Cursor databases or guesses the most
+recent chat.
 
 ```bash
 # From the project repo where Cursor should follow latch.
-/path/to/latch/bin/install_cursor.sh --yes --with-hooks --model-backend codex
-# Windows: C:\path\to\latch\bin\install_cursor.ps1 --yes --with-hooks --model-backend codex
+/path/to/latch/bin/install_cursor.sh --yes --with-hooks
+# Windows: C:\path\to\latch\bin\install_cursor.ps1 --yes --with-hooks
 
 # Verify any time.
-/path/to/latch/bin/install_cursor.sh --check --with-hooks --model-backend codex
-/path/to/latch/bin/latch_cursor_doctor.sh --with-hooks --model-backend codex
+/path/to/latch/bin/install_cursor.sh --check --with-hooks
+/path/to/latch/bin/latch_cursor_doctor.sh --with-hooks
 ```
 
 Restart Cursor after installing hooks so it reloads `.cursor/hooks.json`; run
-`agent mcp list` to inspect the MCP server. The Cursor doctor treats a missing
-or unavailable Cursor CLI as a warning. Static config, launch-target,
-`AGENTS.md`, and Cursor
-rule/command drift are failures; when the CLI is available, missing critical
-MCP tools such as `latch_gate` are also failures.
+`agent mcp list` to inspect the MCP server. With the native default, the doctor
+requires a reachable, authenticated Cursor Agent CLI and validates its JSON Ask
+mode with a small read-only probe. Static config, launch-target, `AGENTS.md`,
+rule/command drift, and native-backend failures are errors. MCP list visibility
+remains a warning when the CLI cannot complete that separate inspection; if it
+does complete, missing critical tools such as `latch_gate` are errors. A
+current-session compact marker is informational by default and can be required
+with `--require-compact` during live acceptance.
 
 For the narrow proof path, see
 [`runbooks/cursor_gate_smoke.md`](./runbooks/cursor_gate_smoke.md).
@@ -372,8 +382,9 @@ At natural stopping points, capture the session:
 
 - Claude Code: run `/latch-compact`.
 - Codex: run `/path/to/latch/bin/run_codex_compact_now.sh`.
-- Cursor adapter: use a shell or Claude/Codex compaction path; native Cursor
-  compaction is not installed yet.
+- Cursor: run `/latch-compact` or
+  `/path/to/latch/bin/run_cursor_compact_now.sh` from the current hooked
+  conversation (`run_cursor_compact_now.ps1` on Windows).
 
 Compaction is user-initiated because it spends a model call and writes a durable
 summary into the KB.
@@ -430,8 +441,8 @@ context, repo access, or other installed tools.
 bash bin/uninstall.sh --dry-run
 bash bin/uninstall.sh
 # Also remove latch-owned Cursor wiring from the current project:
-bash bin/uninstall.sh --dry-run --cursor-project "$PWD"
-bash bin/uninstall.sh --yes --cursor-project "$PWD"
+bash bin/uninstall.sh --dry-run --cursor-only --cursor-project "$PWD"
+bash bin/uninstall.sh --yes --cursor-only --cursor-project "$PWD"
 ```
 
 ## Proof Discipline

@@ -1,39 +1,44 @@
 # Cursor gate smoke proof
 
-Use this runbook to prove the Cursor adapter path: Cursor can see latch through
-MCP, is activated by a project rule, has project-local latch command prompts,
-and enforces a `latch_gate` receipt before coding-shaped edits. This is not a
-native Cursor backend, transcript-discovery, or native compaction proof.
+Use this runbook to prove the Cursor runtime path: Cursor can see latch through
+MCP, use its own Agent CLI for model calls, enforce a `latch_gate` receipt
+before coding-shaped edits, and manually compact only the current hooked
+conversation. Historical transcript discovery is outside this proof.
 
 ## Success criteria
 
 - `.cursor/mcp.json` registers the project `latch` MCP server.
 - `.cursor/rules/latch.mdc` exists and tells Cursor to run `latch_gate` before
   implementation-shaped edits.
-- `.cursor/commands/` contains latch-owned command prompts for supported manual
-  workflows, excluding native Cursor compaction.
+- `.cursor/commands/` contains latch-owned command prompts including
+  `/latch-compact`.
 - `AGENTS.md` carries the full shared latch contract.
 - `.cursor/hooks.json` contains latch session, per-prompt gate-enforcement, and
   activity hooks with fail-closed prompt/mutation entries.
-- `latch_cursor_doctor.sh` passes static checks.
+- `latch_cursor_doctor.sh` passes static checks and its read-only native Cursor
+  backend probe.
 - If Cursor's `agent` CLI is available, the doctor confirms critical tools:
   `latch_search`, `latch_get`, `latch_recent`, and `latch_gate`.
 - In Cursor chat, a violating implementation request produces a visible
   **Latch gate** block before file edits.
 - A mutation attempted before that receipt is denied; the same mutation can
   reach Cursor's normal permission flow after an exact-request gate receipt.
+- `/latch-compact` resolves the exact current SessionStart conversation and
+  transcript, writes a rolling summary, and reports `current_session_only`.
 
 ## Install in the target project
 
 Run from the project repo where Cursor should follow latch:
 
 ```bash
-/path/to/latch/bin/install_cursor.sh --yes --with-hooks --model-backend codex
-/path/to/latch/bin/install_cursor.sh --check --with-hooks --model-backend codex
-/path/to/latch/bin/latch_cursor_doctor.sh --with-hooks --model-backend codex
+/path/to/latch/bin/install_cursor.sh --yes --with-hooks
+/path/to/latch/bin/install_cursor.sh --check --with-hooks
+/path/to/latch/bin/latch_cursor_doctor.sh --with-hooks
 ```
 
-Use `--model-backend claude` instead if Claude is the configured gate backend.
+Run `agent login` first if Cursor Agent is not authenticated. Use
+`--model-backend claude` or `--model-backend codex` only to exercise an explicit
+compatibility backend instead of native Cursor.
 
 Expected files in the target project:
 
@@ -42,6 +47,7 @@ Expected files in the target project:
 .cursor/hooks.json
 .cursor/rules/latch.mdc
 .cursor/commands/latch-gate.md
+.cursor/commands/latch-compact.md
 AGENTS.md
 ```
 
@@ -58,8 +64,8 @@ available and `latch_gate` is missing from `list-tools`, the install is not
 ready.
 
 Project-local command prompts should be visible from Cursor's `/` command menu
-after reload. They are reusable prompts that call MCP tools or shell wrappers;
-they do not install native Cursor compaction.
+after reload. They are reusable prompts that call MCP tools or the checked-in
+host-appropriate shell wrappers.
 
 ## Seed a proof target
 
@@ -145,6 +151,30 @@ and prove that it still cannot authorize a missing-preview seed apply, changed
 PM candidate, alternate launcher, script, project, or argument shape. Those
 operations use an exclusive narrow receipt lane.
 
+## Prove current-session compaction
+
+From the same Cursor conversation, run `/latch-compact`. The command delegates
+to the host-appropriate wrapper and must return JSON containing:
+
+```json
+{
+  "ok": true,
+  "current_session_only": true,
+  "summary_written": true,
+  "summary_node_id": 123
+}
+```
+
+Then require the marker/transcript pair explicitly:
+
+```bash
+/path/to/latch/bin/latch_cursor_doctor.sh --with-hooks --require-compact
+```
+
+Negative proof matters: remove or alter the marker's `transcript_path`, pass a
+different session id, or pass a different transcript path. Each attempt must
+fail without scanning Cursor storage or falling back to Claude/Codex history.
+
 Retain the live proof under a dated directory outside the repo. Save Cursor
 version, doctor JSON, sanitized hooks config, before/after git status, the
 visible gate block, and the denial message. Do not save raw prompt history or
@@ -155,14 +185,14 @@ private Cursor storage.
 Preview removal without touching unrelated Cursor config:
 
 ```bash
-/path/to/latch/bin/uninstall.sh --dry-run --cursor-project "$PWD"
+/path/to/latch/bin/uninstall.sh --dry-run --cursor-only --cursor-project "$PWD"
 ```
 
 Apply removal only when you mean to remove latch from this Cursor project:
 
 ```bash
-/path/to/latch/bin/uninstall.sh --yes --cursor-project "$PWD"
-/path/to/latch/bin/uninstall.sh --check --cursor-project "$PWD"
+/path/to/latch/bin/uninstall.sh --yes --cursor-only --cursor-project "$PWD"
+/path/to/latch/bin/uninstall.sh --check --cursor-only --cursor-project "$PWD"
 ```
 
 The uninstall path removes latch-owned Cursor MCP entries, the clean managed
@@ -172,14 +202,14 @@ servers/settings, unrelated hooks, and unrelated `.cursor/commands` files.
 
 ## Boundaries
 
-Cursor adapter is MCP plus Cursor Rules, project-local Cursor commands,
-`AGENTS.md`, and opt-in session/gate/activity hooks.
+Cursor is MCP plus Cursor Rules, project-local Cursor commands, `AGENTS.md`, a
+native read-only Agent CLI model backend, and opt-in session/gate/activity
+hooks. Current-session manual compaction depends only on the explicit
+SessionStart handoff.
 
 It deliberately does not install:
 
-- native Cursor model-backed gate calls
 - Cursor transcript discovery
-- native Cursor compaction
 - plugins or skills packaging
 
 If the design-partner proof needs any of those, scope a follow-up PR from the

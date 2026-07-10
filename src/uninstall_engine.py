@@ -43,7 +43,8 @@ What it does NOT remove unless asked:
     accumulated KB. ``--purge`` removes the projects/ data + kill-switch files
     (the repo + venv you delete by hand: ``rm -rf ${LATCH_HOME}``).
   * **Project-local Cursor wiring** is removed only when ``--cursor-project`` is
-    supplied. That path removes latch-owned ``.cursor/mcp.json`` server entries,
+    supplied. Pass ``--cursor-only`` to leave the global Claude Code engine
+    wiring untouched. That path removes latch-owned ``.cursor/mcp.json`` server entries,
     ``.cursor/rules/latch.mdc``, ``.cursor/commands`` files, latch-owned
     ``.cursor/hooks.json`` entries, and the AGENTS.md managed region for that
     project while preserving unrelated Cursor config.
@@ -60,6 +61,8 @@ Design notes (same as install_engine):
 Usage:
     python src/uninstall_engine.py [--dry-run] [--check] [--purge]
                                    [--claude-md PATH ...] [--yes]
+    python src/uninstall_engine.py --cursor-only --cursor-project PATH
+                                   [--dry-run | --check] [--yes]
 or via the wrappers:
     bash bin/uninstall.sh
     .\\bin\\uninstall.ps1   (PowerShell)
@@ -451,46 +454,51 @@ def purge_data(dry_run: bool) -> list[str]:
 # --------------------------------------------------------------------------- #
 # --check (verify nothing latch-owned remains in Claude Code config)
 # --------------------------------------------------------------------------- #
-def check(cursor_projects: list[str] | None = None) -> int:
-    claude = ie.find_claude()
+def check(
+    cursor_projects: list[str] | None = None,
+    *,
+    cursor_only: bool = False,
+) -> int:
     rows: list[tuple[bool, str]] = []
 
-    if claude:
-        present = []
-        for name in ALL_SERVER_NAMES:
-            try:
-                if ie._run([claude, "mcp", "get", name], timeout=30).returncode == 0:
-                    present.append(name)
-            except Exception:
-                pass
-        rows.append((not present,
-                     "latch-owned MCP servers deregistered"
-                     if not present else f"still registered: {', '.join(present)}"))
-    else:
-        rows.append((False, "claude CLI on PATH (needed to verify MCP state)"))
+    if not cursor_only:
+        claude = ie.find_claude()
+        if claude:
+            present = []
+            for name in ALL_SERVER_NAMES:
+                try:
+                    if ie._run([claude, "mcp", "get", name], timeout=30).returncode == 0:
+                        present.append(name)
+                except Exception:
+                    pass
+            rows.append((not present,
+                         "latch-owned MCP servers deregistered"
+                         if not present else f"still registered: {', '.join(present)}"))
+        else:
+            rows.append((False, "claude CLI on PATH (needed to verify MCP state)"))
 
-    settings: dict = {}
-    if SETTINGS_PATH.exists():
-        try:
-            settings = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            print(f"FAIL - {SETTINGS_PATH} is not valid JSON")
-            return 1
-    hooks = settings.get("hooks", {})
-    for event in MANAGED_EVENTS:
-        clean = not any(ie._is_latch_hook_entry(e) for e in hooks.get(event, []))
-        rows.append((clean, f"no latch hook in hooks.{event}"))
-    allow = settings.get("permissions", {}).get("allow", [])
-    perm_clean = (
-        not any(r in ALL_PERMISSION_RULES for r in allow)
-        and not any(any(str(r).startswith(prefix) for prefix in PER_TOOL_PREFIXES) for r in allow)
-    )
-    rows.append((perm_clean, "no latch-owned MCP permission rules"))
-    ms = settings.get("mcpServers")
-    dead = [name for name in ALL_SERVER_NAMES if isinstance(ms, dict) and name in ms]
-    rows.append((not dead,
-                 "no latch-owned mcpServers block" if not dead
-                 else f"dead mcpServers block(s) present: {', '.join(dead)}"))
+        settings: dict = {}
+        if SETTINGS_PATH.exists():
+            try:
+                settings = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                print(f"FAIL - {SETTINGS_PATH} is not valid JSON")
+                return 1
+        hooks = settings.get("hooks", {})
+        for event in MANAGED_EVENTS:
+            clean = not any(ie._is_latch_hook_entry(e) for e in hooks.get(event, []))
+            rows.append((clean, f"no latch hook in hooks.{event}"))
+        allow = settings.get("permissions", {}).get("allow", [])
+        perm_clean = (
+            not any(r in ALL_PERMISSION_RULES for r in allow)
+            and not any(any(str(r).startswith(prefix) for prefix in PER_TOOL_PREFIXES) for r in allow)
+        )
+        rows.append((perm_clean, "no latch-owned MCP permission rules"))
+        ms = settings.get("mcpServers")
+        dead = [name for name in ALL_SERVER_NAMES if isinstance(ms, dict) and name in ms]
+        rows.append((not dead,
+                     "no latch-owned mcpServers block" if not dead
+                     else f"dead mcpServers block(s) present: {', '.join(dead)}"))
 
     for project in cursor_projects or []:
         rows.extend(cursor_project_removed(project))
@@ -502,9 +510,13 @@ def check(cursor_projects: list[str] | None = None) -> int:
     print()
     if failed:
         print(f"STILL PRESENT - {failed} latch item(s) remain. "
-              "Run: bash bin/uninstall.sh")
+              "Run: bash bin/uninstall.sh"
+              + (" --cursor-only --cursor-project PATH" if cursor_only else ""))
         return 1
-    print("OK - no latch wiring remains in Claude Code config.")
+    if cursor_only:
+        print("OK - no latch-owned Cursor wiring remains in the requested project(s).")
+    else:
+        print("OK - no latch wiring remains in Claude Code config.")
     return 0
 
 
@@ -524,24 +536,35 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--cursor-project", action="append", default=[], metavar="PATH",
                     help="also remove latch-owned Cursor wiring from this project "
                          "(.cursor/mcp.json, .cursor/rules/latch.mdc, .cursor/commands, .cursor/hooks.json, AGENTS.md)")
+    ap.add_argument("--cursor-only", action="store_true",
+                    help="remove/check only --cursor-project wiring; preserve global Claude Code wiring")
     ap.add_argument("--purge", action="store_true",
                     help="also delete KB data (projects/) and kill-switch files")
     ap.add_argument("--yes", "-y", action="store_true",
                     help="skip the confirmation prompt")
     args = ap.parse_args(argv)
 
-    if args.check:
-        return check(args.cursor_project)
+    if args.cursor_only and not args.cursor_project:
+        ap.error("--cursor-only requires at least one --cursor-project PATH")
+    if args.cursor_only and (args.claude_md or args.purge):
+        ap.error("--cursor-only cannot be combined with --claude-md or --purge")
 
-    print("\nlatch engine uninstaller")
+    if args.check:
+        return check(args.cursor_project, cursor_only=args.cursor_only)
+
+    print("\nlatch Cursor project uninstaller" if args.cursor_only else "\nlatch engine uninstaller")
     print(f"  KB_HOME  : {KB_HOME}")
     print(f"  settings : {SETTINGS_PATH}")
     print(f"  mode     : {'DRY-RUN (no writes)' if args.dry_run else 'apply'}\n")
 
     if not args.dry_run and not args.yes:
         try:
-            prompt = "Remove latch's MCP registration, hooks, permission, and slash commands from Claude Code"
-            if args.cursor_project:
+            prompt = (
+                "Remove latch-owned Cursor wiring from the requested project(s)"
+                if args.cursor_only
+                else "Remove latch's MCP registration, hooks, permission, and slash commands from Claude Code"
+            )
+            if args.cursor_project and not args.cursor_only:
                 prompt += ", plus latch-owned Cursor wiring from the requested project(s)"
             ans = input(prompt + "? [y/N] ").strip().lower()
         except EOFError:
@@ -552,43 +575,44 @@ def main(argv: list[str] | None = None) -> int:
 
     rc = 0
 
-    # --- 1. MCP deregistration ----------------------------------------------
-    claude = ie.find_claude()
-    level, msg = unregister_mcp(claude, args.dry_run)
-    print(f"  [{level:4}] MCP: {msg}")
-    if level == "FAIL":
-        rc = 1
+    if not args.cursor_only:
+        # --- 1. MCP deregistration ------------------------------------------
+        claude = ie.find_claude()
+        level, msg = unregister_mcp(claude, args.dry_run)
+        print(f"  [{level:4}] MCP: {msg}")
+        if level == "FAIL":
+            rc = 1
 
-    # --- 2. settings.json ----------------------------------------------------
-    if SETTINGS_PATH.exists():
-        try:
-            settings = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
-        except json.JSONDecodeError as e:
-            print(f"  [FAIL] settings.json is not valid JSON ({e}); fix by hand.")
-            return 1
-        new_settings, changes = unmerge_settings(settings)
-        if not changes:
-            print("  [OK  ] settings.json: no latch hooks/permission present")
-        elif args.dry_run:
-            print("  [DRY ] settings.json would change:")
-            for c in changes:
-                print(f"           - {c}")
+        # --- 2. settings.json ------------------------------------------------
+        if SETTINGS_PATH.exists():
+            try:
+                settings = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
+            except json.JSONDecodeError as e:
+                print(f"  [FAIL] settings.json is not valid JSON ({e}); fix by hand.")
+                return 1
+            new_settings, changes = unmerge_settings(settings)
+            if not changes:
+                print("  [OK  ] settings.json: no latch hooks/permission present")
+            elif args.dry_run:
+                print("  [DRY ] settings.json would change:")
+                for c in changes:
+                    print(f"           - {c}")
+            else:
+                backup = write_settings_with_backup(new_settings)
+                print(f"  [OK  ] settings.json updated (backup: {backup}):")
+                for c in changes:
+                    print(f"           - {c}")
         else:
-            backup = write_settings_with_backup(new_settings)
-            print(f"  [OK  ] settings.json updated (backup: {backup}):")
-            for c in changes:
-                print(f"           - {c}")
-    else:
-        print("  [OK  ] settings.json: not present")
+            print("  [OK  ] settings.json: not present")
 
-    # --- 3. slash commands ---------------------------------------------------
-    cmd_changes = remove_commands(args.dry_run)
-    if not cmd_changes:
-        print("  [OK  ] slash commands: none of latch's commands present")
-    else:
-        print(f"  [{'DRY ' if args.dry_run else 'OK  '}] slash commands:")
-        for c in cmd_changes:
-            print(f"           - {c}")
+        # --- 3. slash commands ----------------------------------------------
+        cmd_changes = remove_commands(args.dry_run)
+        if not cmd_changes:
+            print("  [OK  ] slash commands: none of latch's commands present")
+        else:
+            print(f"  [{'DRY ' if args.dry_run else 'OK  '}] slash commands:")
+            for c in cmd_changes:
+                print(f"           - {c}")
 
     # --- 4. CLAUDE.md managed region (opt-in per project) --------------------
     md_changes = strip_claude_md(args.claude_md, args.dry_run)
@@ -619,6 +643,11 @@ def main(argv: list[str] | None = None) -> int:
     print()
     if args.dry_run:
         print("Dry run only — re-run without --dry-run to apply.\n")
+        return rc
+    if args.cursor_only:
+        print("Done. Restart Cursor so project wiring reloads.\n")
+        print("Verify removal with: bash bin/uninstall.sh --check --cursor-only "
+              "--cursor-project /path/to/project")
         return rc
     print("Done. Restart Claude Code so the MCP roster + hooks reload.")
     if not args.claude_md:
