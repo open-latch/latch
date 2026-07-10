@@ -126,7 +126,8 @@ gate, missing MCP server, or unlatched status is not the proof.
 bash /path/to/latch/bin/latch_seed.sh --source both --last-sessions 20 --apply
 ```
 
-Use `--source claude`, `--source codex`, or `--source both` to match the
+Use `--source claude`, `--source codex`, `--source cursor`, `--source both`, or
+`--source all` to match the
 user's actual history. `--apply` prints the report first and writes only after
 approval. If the first pass is thin, rerun once with a wider window such as
 `--last-sessions 50`; do not turn the demo into an open-ended transcript tour.

@@ -196,6 +196,7 @@ def test_first_wire_notice_is_cursor_branded():
                 "--agents-md", str(d / "AGENTS.md"),
                 "--rules-mdc", str(rule),
                 "--commands-dir", str(d / ".cursor" / "commands"),
+                "--skills-dir", str(d / ".cursor" / "skills"),
                 "--yes",
             ])
         text = out.getvalue()
@@ -207,6 +208,8 @@ def test_first_wire_notice_is_cursor_branded():
                 "Cursor rule should be installed by default")
         _assert((d / ".cursor" / "commands" / "latch-gate.md").is_file(),
                 "Cursor command prompts should be installed by default")
+        _assert((d / ".cursor" / "skills" / "source-command-latch-gate" / "SKILL.md").is_file(),
+                "Cursor skills should be installed by default")
         print("PASS first_wire_notice_is_cursor_branded")
     finally:
         shutil.rmtree(d, ignore_errors=True)
@@ -226,6 +229,7 @@ def test_check_mode_verifies_mcp_and_agents():
         agents_md_sync.sync(agents, create=True)
         cursor_rules_sync.sync(rule)
         ic.sync_cursor_commands(d / ".cursor" / "commands")
+        ic.sync_cursor_skills(d / ".cursor" / "skills")
 
         rc = ic.main([
             "--python", sys.executable,
@@ -233,6 +237,7 @@ def test_check_mode_verifies_mcp_and_agents():
             "--agents-md", str(agents),
             "--rules-mdc", str(rule),
             "--commands-dir", str(d / ".cursor" / "commands"),
+            "--skills-dir", str(d / ".cursor" / "skills"),
             "--check",
         ])
         _assert(rc == 0, f"expected check success, got {rc}")
@@ -243,6 +248,7 @@ def test_check_mode_verifies_mcp_and_agents():
             "--agents-md", str(agents),
             "--rules-mdc", str(rule),
             "--commands-dir", str(d / ".cursor" / "commands"),
+            "--skills-dir", str(d / ".cursor" / "skills"),
             "--check",
         ])
         _assert(rc == 1, f"expected check failure for missing config, got {rc}")
@@ -253,6 +259,7 @@ def test_check_mode_verifies_mcp_and_agents():
             "--agents-md", str(agents),
             "--rules-mdc", str(d / "missing-rule.mdc"),
             "--commands-dir", str(d / ".cursor" / "commands"),
+            "--skills-dir", str(d / ".cursor" / "skills"),
             "--check",
         ])
         _assert(rc == 1, f"expected check failure for missing rule, got {rc}")
@@ -269,6 +276,8 @@ def test_cursor_commands_sync_status_and_remove():
         _assert(any("Cursor command latch-gate.md" in c for c in changes), changes)
         _assert((commands / "latch-compact.md").exists(),
                 "Cursor-native compaction command should be installed")
+        _assert((commands / "latch-seed.md").exists(),
+                "Cursor-origin seed command should be installed")
         gate = commands / "latch-gate.md"
         body = gate.read_text(encoding="utf-8")
         _assert("<KB_HOME>" not in body, "Cursor commands should resolve KB_HOME")
@@ -280,6 +289,9 @@ def test_cursor_commands_sync_status_and_remove():
                 compact)
         _assert("Latch operation id: latch-compact run" in compact, compact)
         _assert("LATCH_COMPACTOR_BACKEND=cursor" in compact, compact)
+        seed_command = (commands / "latch-seed.md").read_text(encoding="utf-8")
+        _assert("--source cursor" in seed_command and "Never add `--yes`" in seed_command,
+                seed_command)
         ok, detail = ic.cursor_commands_status(commands)
         _assert(ok, detail)
 
@@ -359,12 +371,44 @@ def test_cursor_commands_render_selected_compatibility_backend():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_cursor_skills_sync_status_remove_and_plugin_manifest():
+    d = Path(tempfile.mkdtemp(prefix="latch-cursor-skills-"))
+    try:
+        skills = d / ".cursor" / "skills"
+        changes = ic.sync_cursor_skills(skills, model_backend="codex")
+        _assert(len(changes) == len(ic.CURSOR_SKILL_NAMES), changes)
+        gate = skills / "source-command-latch-gate" / "SKILL.md"
+        seed_skill = skills / "source-command-latch-seed" / "SKILL.md"
+        _assert(gate.is_file() and seed_skill.is_file(), changes)
+        gate_body = gate.read_text(encoding="utf-8")
+        _assert("<KB_HOME>" not in gate_body and "<CURSOR_MODEL_BACKEND>" not in gate_body,
+                gate_body)
+        _assert("codex" in gate_body and "Latch Cursor skill boundary:" in gate_body,
+                gate_body)
+        ok, detail = ic.cursor_skills_status(skills, model_backend="codex")
+        _assert(ok, detail)
+        ok, detail = ic.cursor_skills_status(skills, model_backend="cursor")
+        _assert(not ok and "drifted" in detail, detail)
+        plugin_ok, plugin_detail = ic.cursor_plugin_status()
+        _assert(plugin_ok, plugin_detail)
+
+        custom = skills / "custom-skill" / "SKILL.md"
+        custom.parent.mkdir(parents=True)
+        custom.write_text("---\nname: custom-skill\ndescription: user owned\n---\n", encoding="utf-8")
+        removed = ic.remove_cursor_skills(skills)
+        _assert(any("removed Cursor skill source-command-latch-gate" in row for row in removed),
+                removed)
+        _assert(custom.is_file(), "uninstall should preserve unrelated Cursor skills")
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def test_with_hooks_installs_and_check_requires_hooks():
     d = Path(tempfile.mkdtemp(prefix="latch-cursor-hooks-install-"))
     try:
         hooks = d / ".cursor" / "hooks.json"
         rc = ic.main([
-            "--skip-mcp", "--skip-agents", "--skip-rules", "--skip-commands",
+            "--skip-mcp", "--skip-agents", "--skip-rules", "--skip-commands", "--skip-skills",
             "--hooks-json", str(hooks), "--with-hooks", "--yes",
         ])
         _assert(rc == 0, rc)
@@ -378,13 +422,13 @@ def test_with_hooks_installs_and_check_requires_hooks():
         )
         _assert(ok, detail)
         rc = ic.main([
-            "--skip-mcp", "--skip-agents", "--skip-rules", "--skip-commands",
+            "--skip-mcp", "--skip-agents", "--skip-rules", "--skip-commands", "--skip-skills",
             "--hooks-json", str(hooks), "--with-hooks", "--check",
         ])
         _assert(rc == 0, rc)
         hooks.unlink()
         rc = ic.main([
-            "--skip-mcp", "--skip-agents", "--skip-rules", "--skip-commands",
+            "--skip-mcp", "--skip-agents", "--skip-rules", "--skip-commands", "--skip-skills",
             "--hooks-json", str(hooks), "--with-hooks", "--check",
         ])
         _assert(rc == 1, rc)
@@ -407,5 +451,6 @@ if __name__ == "__main__":
     test_cursor_commands_sync_status_and_remove()
     test_cursor_commands_refuse_user_owned_same_name_collision()
     test_cursor_commands_render_selected_compatibility_backend()
+    test_cursor_skills_sync_status_remove_and_plugin_manifest()
     test_with_hooks_installs_and_check_requires_hooks()
     print("\nAll install_cursor tests pass.")

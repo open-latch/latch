@@ -10,6 +10,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import seed  # noqa: E402
+import cursor_session  # noqa: E402
+import cursor_transcript  # noqa: E402
+import paths  # noqa: E402
 
 
 def _assert(cond, msg):
@@ -97,6 +100,82 @@ def test_machine_generated_claude_records_are_ignored():
     )
     _assert(sources == [], f"sdk-cli transcript should not seed sources: {sources}")
     print("PASS machine_generated_claude_records_are_ignored")
+
+
+def test_cursor_source_uses_exact_current_marker_without_history_scan():
+    root = Path(tempfile.mkdtemp(prefix="latch-seed-cursor-current-"))
+    project = root / "repo" / "latch"
+    project.mkdir(parents=True)
+    project_dir = paths.project_dir(str(project))
+    transcript = root / "current-cursor.jsonl"
+    _write_jsonl(transcript, [
+        {"role": "user", "content": "We decided not to use Redis in Cursor."},
+        {"role": "assistant", "content": "Understood."},
+    ])
+    try:
+        cursor_session.write_marker(
+            str(project), "cursor-seed-session", transcript_path=str(transcript),
+        )
+        sources = seed.discover_sources(
+            source="cursor",
+            project_path=str(project),
+            lookback_days=5,
+            max_sessions=10,
+            claude_home=str(root / ".claude"),
+            codex_home=str(root / ".codex"),
+            now=datetime.now(timezone.utc),
+        )
+        _assert(len(sources) == 1, sources)
+        _assert(sources[0].agent == "cursor", sources[0])
+        _assert(sources[0].id == "cursor:cursor-seed-session", sources[0])
+        _assert("[user] We decided not to use Redis" in sources[0].text, sources[0].text)
+        candidates = seed.deterministic_candidates(sources, max_candidates=5)
+        _assert(candidates and "Seeded rejected path" in candidates[0].title, candidates)
+    finally:
+        import shutil
+        shutil.rmtree(project_dir, ignore_errors=True)
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_cursor_source_accepts_only_explicit_path_without_marker():
+    root = Path(tempfile.mkdtemp(prefix="latch-seed-cursor-explicit-"))
+    project = root / "repo"
+    project.mkdir()
+    transcript = root / "explicit.txt"
+    transcript.write_text(
+        "[user] Always keep Cursor seed writes preview-first.\n",
+        encoding="utf-8",
+    )
+    try:
+        sources = seed.discover_sources(
+            source="cursor",
+            project_path=str(project),
+            lookback_days=5,
+            max_sessions=10,
+            claude_home=str(root / ".claude"),
+            codex_home=str(root / ".codex"),
+            cursor_transcripts=[str(transcript)],
+            now=datetime.now(timezone.utc),
+        )
+        _assert(len(sources) == 1 and sources[0].id == "cursor:explicit", sources)
+
+        try:
+            seed.discover_sources(
+                source="cursor",
+                project_path=str(project),
+                lookback_days=5,
+                max_sessions=10,
+                claude_home=str(root / ".claude"),
+                codex_home=str(root / ".codex"),
+                now=datetime.now(timezone.utc),
+            )
+        except cursor_transcript.CursorTranscriptError as e:
+            _assert("no current Cursor SessionStart marker" in str(e), e)
+        else:
+            raise AssertionError("Cursor seeding without a marker or explicit path must fail closed")
+    finally:
+        import shutil
+        shutil.rmtree(root, ignore_errors=True)
 
 
 def test_both_source_selection_uses_global_recency_split():
@@ -187,6 +266,26 @@ def test_auto_source_noninteractive_uses_only_available_source():
     _assert(args.source == "codex",
             f"single available source should be selected automatically: {args.source}")
     print("PASS auto_source_noninteractive_uses_only_available_source")
+
+
+def test_explicit_cursor_transcript_is_validated_before_auto_fallback():
+    args = seed.parse_args([
+        "--lookback-days", "5",
+        "--cursor-transcript", "/definitely/missing/cursor-transcript.jsonl",
+    ])
+    try:
+        seed.prompt_choices(args)
+    except SystemExit as exc:
+        _assert("not a readable file" in str(exc), exc)
+    else:
+        raise AssertionError("invalid explicit Cursor transcript must not fall back to another source")
+
+
+def test_source_agents_keeps_both_stable_and_all_adds_cursor():
+    _assert(seed.source_agents("both") == ("claude", "codex"),
+            "both must preserve the existing Claude+Codex contract")
+    _assert(seed.source_agents("all") == ("claude", "codex", "cursor"),
+            "all must be the explicit opt-in that adds Cursor")
 
 
 def test_llm_call_estimate_is_capped():
@@ -772,7 +871,7 @@ def test_render_text_explains_immediate_value():
     out = seed.render_text(args=args, sources=[], candidates=[], llm_estimate=0)
     _assert("immediate judgment value from latch" in out,
             "rendered seed report should name immediate judgment value")
-    _assert("selected local Claude and/or Codex chats" in out,
+    _assert("selected local agent chats" in out,
             "rendered seed report should explain what gets read")
     _assert("first new compacted session" in out,
             "rendered seed report should explain cold-start benefit")
@@ -859,9 +958,13 @@ def test_apply_success_message_surfaces_post_write_proof():
 if __name__ == "__main__":
     test_deterministic_seed_candidates_from_claude_transcript()
     test_machine_generated_claude_records_are_ignored()
+    test_cursor_source_uses_exact_current_marker_without_history_scan()
+    test_cursor_source_accepts_only_explicit_path_without_marker()
     test_both_source_selection_uses_global_recency_split()
     test_auto_source_noninteractive_requires_explicit_choice_when_ambiguous()
     test_auto_source_noninteractive_uses_only_available_source()
+    test_explicit_cursor_transcript_is_validated_before_auto_fallback()
+    test_source_agents_keeps_both_stable_and_all_adds_cursor()
     test_llm_call_estimate_is_capped()
     test_seed_help_hides_internal_no_llm_switch()
     test_no_llm_requires_internal_override()

@@ -22,6 +22,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).parent))
 
 import codex_transcript  # noqa: E402
+import cursor_transcript  # noqa: E402
 
 DEFAULT_LOOKBACK_DAYS = 14
 LOOKBACK_CHOICES = (5, 14, 30)
@@ -32,7 +33,7 @@ DEFAULT_LLM_WARNING_THRESHOLD = int(os.environ.get("LATCH_SEED_LLM_CONFIRM_THRES
 NO_LLM_INTERNAL_ENV = "LATCH_SEED_ALLOW_NO_LLM"
 MAX_SOURCE_CHARS = 120_000
 MAX_LLM_SOURCE_CHARS = 28_000
-SOURCE_CHOICES = ("claude", "codex", "both")
+SOURCE_CHOICES = ("claude", "codex", "cursor", "both", "all")
 AGENT_MISTAKE_MIN_CONFIDENCE = 0.85
 KB_HOME = Path(__file__).resolve().parent.parent
 
@@ -179,16 +180,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     ap.add_argument("--project", default=os.getcwd(),
                     help="project path whose transcripts should be seeded (default: cwd)")
-    ap.add_argument("--source", choices=("auto", "claude", "codex", "both"), default="auto",
-                    help=("transcript source to scan. Use 'both' to merge Claude and Codex "
-                          "by recency; 'auto' prompts interactively when possible"))
+    ap.add_argument("--source", choices=("auto", *SOURCE_CHOICES), default="auto",
+                    help=("transcript source to scan. 'both' means Claude+Codex; "
+                          "'all' also includes the exact current/explicit Cursor transcript"))
     ap.add_argument("--lookback-days", type=int, choices=LOOKBACK_CHOICES,
                     help="retention horizon to scan: 5, 14, or 30 days")
     ap.add_argument("--llm", choices=("yes", "no"), default="yes",
                     help=argparse.SUPPRESS)
     ap.add_argument("--allow-internal-no-llm", action="store_true",
                     help=argparse.SUPPRESS)
-    ap.add_argument("--backend", choices=("claude", "codex"),
+    ap.add_argument("--backend", choices=("claude", "codex", "cursor"),
                     help="LLM backend for seed refinement (default follows latch model env)")
     ap.add_argument("--max-llm-calls", type=int, default=DEFAULT_MAX_LLM_CALLS,
                     help=f"maximum LLM calls for this seed pass (default: {DEFAULT_MAX_LLM_CALLS})")
@@ -216,10 +217,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                     help="Claude home directory for transcript discovery")
     ap.add_argument("--codex-home", default=os.environ.get("CODEX_HOME") or str(Path.home() / ".codex"),
                     help="Codex home directory for transcript discovery")
+    ap.add_argument("--cursor-transcript", action="append", default=[], metavar="PATH",
+                    help=("explicit Cursor transcript path (repeatable). Without this, "
+                          "--source cursor uses only the current SessionStart marker; "
+                          "latch never scans Cursor history storage"))
     return ap.parse_args(argv)
 
 
 def prompt_choices(args: argparse.Namespace) -> None:
+    for raw in args.cursor_transcript:
+        path = Path(raw).expanduser()
+        if not path.is_file():
+            raise SystemExit(f"Explicit Cursor transcript is not a readable file: {path}")
     if args.lookback_days is None:
         args.lookback_days = _prompt_int(
             "Retention horizon in days [5/14/30]",
@@ -277,7 +286,8 @@ def _prompt_source(args: argparse.Namespace) -> str:
         if default is None:
             raise SystemExit(
                 "Choose a transcript source for non-interactive seed runs: "
-                "--source claude, --source codex, or --source both."
+                "--source claude, --source codex, --source cursor, "
+                "--source both, or --source all."
             )
         return default
     choices = "/".join(SOURCE_CHOICES)
@@ -307,6 +317,16 @@ def available_sources(args: argparse.Namespace) -> list[str]:
         out.append("claude")
     if (Path(args.codex_home) / "sessions").is_dir():
         out.append("codex")
+    explicit = [Path(path).expanduser() for path in getattr(args, "cursor_transcript", [])]
+    if any(path.is_file() for path in explicit):
+        out.append("cursor")
+    elif not explicit:
+        try:
+            cursor_transcript.resolve_current(str(Path(args.project).expanduser().resolve()))
+        except cursor_transcript.CursorTranscriptError:
+            pass
+        else:
+            out.append("cursor")
     return out
 
 
@@ -328,6 +348,7 @@ def discover_sources(
     max_sessions: int,
     claude_home: str,
     codex_home: str,
+    cursor_transcripts: list[str] | tuple[str, ...] = (),
     all_projects: bool = False,
     now: datetime | None = None,
 ) -> list[SeedSource]:
@@ -339,7 +360,7 @@ def discover_sources(
     if "codex" in selected_agents:
         roots.append(("codex", Path(codex_home) / "sessions", "**/rollout-*.jsonl"))
 
-    paths: list[tuple[datetime, str, Path]] = []
+    paths: list[tuple[datetime, str, Path, str | None]] = []
     for agent, root, pattern in roots:
         if not root.is_dir():
             continue
@@ -350,19 +371,55 @@ def discover_sources(
                 continue
             if mtime < cutoff:
                 continue
-            paths.append((mtime, agent, path))
+            paths.append((mtime, agent, path, None))
+
+    if "cursor" in selected_agents:
+        explicit = list(dict.fromkeys(str(Path(raw).expanduser().resolve()) for raw in cursor_transcripts))
+        resolved_cursor: list[tuple[str | None, Path]] = []
+        if explicit:
+            for raw in explicit:
+                path = Path(raw)
+                if not path.is_file():
+                    raise cursor_transcript.CursorTranscriptError(
+                        f"explicit Cursor transcript is not a readable file: {path}"
+                    )
+                sid = None
+                try:
+                    current_sid, current_path = cursor_transcript.resolve_current(project_path)
+                except cursor_transcript.CursorTranscriptError:
+                    pass
+                else:
+                    if current_path == path:
+                        sid = current_sid
+                resolved_cursor.append((sid, path))
+        else:
+            try:
+                sid, path = cursor_transcript.resolve_current(project_path)
+            except cursor_transcript.CursorTranscriptError:
+                if source == "cursor":
+                    raise
+            else:
+                resolved_cursor.append((sid, path))
+
+        for sid, path in resolved_cursor:
+            try:
+                mtime = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+            except OSError:
+                continue
+            if mtime >= cutoff:
+                paths.append((mtime, "cursor", path, sid))
 
     out: list[SeedSource] = []
-    for mtime, agent, path in sorted(paths, key=lambda item: item[0], reverse=True):
+    for mtime, agent, path, session_id in sorted(paths, key=lambda item: item[0], reverse=True):
         if len(out) >= max_sessions:
             break
         text = read_source_text(agent, path)
         if not text.strip():
             continue
-        if not all_projects and not source_matches_project(path, text, project_path):
+        if agent != "cursor" and not all_projects and not source_matches_project(path, text, project_path):
             continue
         out.append(SeedSource(
-            id=source_id(agent, path, text),
+            id=source_id(agent, path, text, session_id=session_id),
             agent=agent,
             path=str(path),
             mtime=mtime.isoformat(timespec="seconds"),
@@ -376,6 +433,10 @@ def source_agents(source: str) -> tuple[str, ...]:
         return ("claude",)
     if source == "codex":
         return ("codex",)
+    if source == "cursor":
+        return ("cursor",)
+    if source == "all":
+        return ("claude", "codex", "cursor")
     return ("claude", "codex")
 
 
@@ -410,7 +471,46 @@ def _encoded_claude_project_path(project: str) -> str:
 def read_source_text(agent: str, path: Path) -> str:
     if agent == "codex":
         return codex_transcript.read_transcript(path)[-MAX_SOURCE_CHARS:]
+    if agent == "cursor":
+        return read_cursor_transcript(path)[-MAX_SOURCE_CHARS:]
     return read_claude_transcript(path)[-MAX_SOURCE_CHARS:]
+
+
+def read_cursor_transcript(path: Path) -> str:
+    """Flatten a hook-provided Cursor transcript without storage discovery.
+
+    Cursor documents the transcript path but does not make private history
+    scanning part of the hook contract. Accept JSONL role/message shapes and
+    preserve plain-text transcripts as a fallback.
+    """
+    try:
+        raw = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    lines: list[str] = []
+    parsed_rows = 0
+    for line in raw.splitlines():
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(obj, dict):
+            continue
+        parsed_rows += 1
+        message = obj.get("message")
+        role = obj.get("role") or obj.get("type") or "?"
+        content: Any = obj.get("content") or obj.get("text")
+        if isinstance(message, dict):
+            role = message.get("role") or role
+            content = message.get("content") or message.get("text") or content
+        elif isinstance(message, str):
+            content = message
+        text = flatten_content(content)
+        if text:
+            lines.append(f"[{role}] {text}")
+    if lines:
+        return "\n\n".join(lines)
+    return raw if not parsed_rows else ""
 
 
 def read_claude_transcript(path: Path) -> str:
@@ -466,11 +566,19 @@ def flatten_content(content: Any) -> str:
     return str(content).strip() if content else ""
 
 
-def source_id(agent: str, path: Path, text: str) -> str:
+def source_id(
+    agent: str,
+    path: Path,
+    text: str,
+    *,
+    session_id: str | None = None,
+) -> str:
     if agent == "codex":
         sid = codex_transcript.transcript_session_id(path)
         if sid:
             return f"codex:{sid}"
+    if agent == "cursor" and session_id:
+        return f"cursor:{session_id}"
     return f"{agent}:{path.stem}"
 
 
@@ -1228,7 +1336,7 @@ def apply_success_message(inserted: list[int], candidates: list[SeedCandidate]) 
             "The seed is now in the KB. Run the catch demo to watch latch "
             "challenge the strongest rejected path or prior agent mistake "
             "before files change:",
-            f"- Claude Code: {payload['slash_command']}",
+            f"- Claude Code / Cursor: {payload['slash_command']}",
             f"- Shell: {payload['shell_command']}",
             f"Expected: {payload['expected_outcome']}",
         ])
@@ -1266,7 +1374,7 @@ def render_text(
     lines = [
         SEED_INTRO,
         "",
-        "Seeding reads selected local Claude and/or Codex chats for this project and "
+        "Seeding reads selected local agent chats for this project and "
         "proposes decisions, rejected paths, preferences, and concrete follow-ups "
         "that latch can judge against before the first new compacted session.",
         "",
@@ -1343,7 +1451,7 @@ def render_text(
             "Try the catch demo:",
             "After you apply this seed, run one of these to watch latch challenge "
             "the strongest rejected path or prior agent mistake from the report:",
-            f"- Claude Code: {payload['slash_command']}",
+            f"- Claude Code / Cursor: {payload['slash_command']}",
             f"- Shell: {payload['shell_command']}",
             f"Expected: {payload['expected_outcome']}",
         ])
@@ -1414,7 +1522,7 @@ def public_candidate_dict(candidate: SeedCandidate) -> dict[str, Any]:
 
 
 def source_counts(sources: list[SeedSource]) -> dict[str, int]:
-    counts = {"claude": 0, "codex": 0}
+    counts = {"claude": 0, "codex": 0, "cursor": 0}
     for src in sources:
         if src.agent in counts:
             counts[src.agent] += 1
@@ -1468,15 +1576,20 @@ def main(argv: list[str] | None = None) -> int:
     prompt_choices(args)
     args.project = str(Path(args.project).resolve())
 
-    sources = discover_sources(
-        source=args.source,
-        project_path=args.project,
-        lookback_days=args.lookback_days,
-        max_sessions=args.max_sessions,
-        claude_home=args.claude_home,
-        codex_home=args.codex_home,
-        all_projects=args.all_projects,
-    )
+    try:
+        sources = discover_sources(
+            source=args.source,
+            project_path=args.project,
+            lookback_days=args.lookback_days,
+            max_sessions=args.max_sessions,
+            claude_home=args.claude_home,
+            codex_home=args.codex_home,
+            cursor_transcripts=args.cursor_transcript,
+            all_projects=args.all_projects,
+        )
+    except cursor_transcript.CursorTranscriptError as e:
+        print(f"Cursor seed source unavailable: {e}", file=sys.stderr)
+        return 2
     llm_estimate = estimate_llm_calls(
         len(sources),
         calls_per_session=args.calls_per_session,

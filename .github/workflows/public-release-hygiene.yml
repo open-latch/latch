@@ -51,6 +51,7 @@ jobs:
           tests/test_cursor_hooks.py
           tests/test_cursor_hook_runtime.py
           tests/test_cursor_lifecycle_e2e.py
+          tests/test_cursor_plugin.py
           tests/test_cursor_session.py
 
   cursor-cumulative-full-suite:

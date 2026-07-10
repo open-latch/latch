@@ -41,11 +41,13 @@ Use the project `latch` MCP server as the decision-continuity layer:
   side-effect-free.
 - Capture durable user decisions or rejected paths with `latch_capture_decision`
   or `latch_insert` when appropriate.
+- Use `/latch-seed` only for the exact current hook-provided Cursor transcript;
+  preview candidates before any confirmed staging write.
 
 Treat `AGENTS.md` as the fuller shared latch contract for this project.
 
 Cursor boundary: this install is MCP plus Cursor Rules plus `AGENTS.md` plus
-project-local `.cursor/commands` prompts. The Cursor Agent CLI is the native
+project-local `.cursor/commands` prompts and `.cursor/skills`. The Cursor Agent CLI is the native
 model backend. `--with-hooks` adds project-local session, current-prompt
 gate-enforcement, and activity hooks, and enables fail-closed current-session
 manual compaction when Cursor provides the exact `transcript_path`. Latch never

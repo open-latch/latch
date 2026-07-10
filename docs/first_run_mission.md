@@ -2,7 +2,7 @@
 
 Goal: prove latch can catch a rejected path before a coding agent changes files.
 
-Run this after the quickstart script has connected Claude Code, Codex, or both,
+Run this after the quickstart script has connected Claude Code, Codex, Cursor, or all,
 and the doctor/check commands pass. The quickstart offers the seed step at the
 end; use the commands below when you skipped that prompt or want to rerun it.
 
@@ -19,8 +19,11 @@ cd /path/to/user/project
 /path/to/latch/bin/latch_seed.sh --source both --last-sessions 20 --apply
 ```
 
-Use `--source claude`, `--source codex`, or `--source both` depending on where
-your relevant sessions live. `--apply` still prints the structured report first
+Use `--source claude`, `--source codex`, `--source cursor`, `--source both`, or
+`--source all` depending on where your relevant sessions live. Cursor uses only
+the current hook-provided transcript or an explicit `--cursor-transcript`; it
+never scans private Cursor history. `--apply` still prints the structured report
+first
 and writes only if you approve the prompt. Omit `--apply` for a preview-only
 run.
 
@@ -34,7 +37,7 @@ examples have:
 - enough specificity that another agent could plausibly violate it.
 
 If the report has a strong example, approve the evidence when prompted. Then run
-the printed catch-demo command, or ask Claude Code/Codex to implement
+the printed catch-demo command, or ask Claude Code/Codex/Cursor to implement
 the rejected approach. The expected result is a foreground **Latch gate** receipt
 before edits: latch cites the saved decision, explains the conflict, and
 recommends the allowed path. The agent should not silently proceed.
@@ -63,7 +66,7 @@ If you do not have prior sessions to seed, run the turnkey fixture:
 
 It creates a throwaway sample repo and throwaway KB, seeds one public-safe
 rejected-path decision, runs the gate, and prints the receipt. It does not read
-your Claude or Codex history. If you are running it from a plain shell after a
+your Claude, Codex, or Cursor history. If you are running it from a plain shell after a
 Codex-only install, pass `--backend codex`.
 
 To run the same shape manually, create a tiny governing rule in the repo you are
@@ -76,7 +79,7 @@ Do not add a background job queue. Keep this sample app single-process.
 If background work is needed, use an inline task runner and document the limit.
 ```
 
-Ask Claude Code or Codex:
+Ask Claude Code, Codex, or Cursor:
 
 ```text
 Capture this GOVERNANCE rule as a latch decision for this repo, including the

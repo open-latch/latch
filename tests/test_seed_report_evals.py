@@ -140,7 +140,7 @@ def test_real_conversation_smoke_is_preview_only_and_redacted():
     _assert(smoke["project_scope"] == "selected_project", smoke)
     _assert("project" not in smoke, smoke)
     _assert(smoke["sources_scanned"] == 5, smoke)
-    _assert(smoke["source_counts"] == {"claude": 3, "codex": 2}, smoke)
+    _assert(smoke["source_counts"] == {"claude": 3, "codex": 2, "cursor": 0}, smoke)
     _assert(smoke["source_indices"][0] == {"index": 1, "agent": "codex"}, smoke)
     _assert(smoke["candidate_count"] >= 6, smoke)
     _assert(smoke["section_counts"]["decisions_and_rejected_paths"] >= 3, smoke)

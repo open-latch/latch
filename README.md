@@ -99,13 +99,16 @@ first-run mission.
   SessionStart, Codex backend defaults, and a manual compaction wrapper.
 - **Cursor:** project-scoped MCP wiring through `.cursor/mcp.json`, a
   managed `.cursor/rules/latch.mdc` activation rule, project-local
-  `.cursor/commands` prompts, and the shared `AGENTS.md` contract. An opt-in
+  `.cursor/commands` prompts, project-local `.cursor/skills`, and the shared
+  `AGENTS.md` contract. A checked-in Cursor plugin manifest distributes the
+  same skills without duplicating runtime wiring. An opt-in
   `.cursor/hooks.json` layer adds SessionStart KB briefing, a current-session
   transcript handoff, per-prompt pre-edit gate enforcement, and post-tool latch
   activity context. The Cursor Agent CLI is the native model backend for gate,
-  maintenance, and compaction calls. Manual compaction accepts only the current
-  SessionStart-provided conversation/transcript pair; historical transcript
-  discovery remains deliberately unsupported.
+  maintenance, seed, and compaction calls. Compaction and default Cursor
+  seeding accept the current SessionStart-provided conversation/transcript pair;
+  seeding can also accept a user-explicit path. Historical transcript discovery
+  remains deliberately unsupported.
 - **Claude Code + Codex together:** one shared local latch KB, so decisions and
   rejected paths captured through either agent can gate both.
 
@@ -154,9 +157,10 @@ non-interactive runs, choose explicitly:
 The quickstart delegates to the existing installers, syncs the project behavior
 contract, runs doctor/check commands, then moves directly into seed-first setup.
 It disables the per-installer seed prompts so there is one seed handoff at the
-end. Seed source still uses local Claude/Codex transcripts (`claude`, `codex`,
-or `both`); Cursor-origin seeding is a separate capability from current-session
-manual compaction and is not installed yet.
+end. The initial quickstart defaults to available Claude/Codex history because
+no Cursor conversation exists yet. After opening a hooked Cursor conversation,
+run `/latch-seed` or select `--seed-source cursor`; it uses only the exact
+current hook-provided transcript.
 
 One latch clone can serve many repos. Run the quickstart script again from each
 project repo where you want the agent behavior contract. The manual steps below
@@ -213,13 +217,14 @@ you want Codex to use latch:
 Restart Codex or start a new Codex thread after install so `config.toml`,
 `hooks.json`, and `AGENTS.md` reload.
 
-### Cursor Adapter
+### Cursor
 
 Cursor uses the same local latch MCP server, a Cursor-native activation rule,
-project-local command prompts, and the shared `AGENTS.md` behavior contract.
+project-local commands and skills, and the shared `AGENTS.md` behavior contract.
 The installer writes project-scoped `.cursor/mcp.json`,
-`.cursor/rules/latch.mdc`, and `.cursor/commands/*.md`, so it is safe to try
-from one repo without touching Claude Code or Codex config.
+`.cursor/rules/latch.mdc`, `.cursor/commands/*.md`, and
+`.cursor/skills/*/SKILL.md`, so it is safe to try from one repo without touching
+Claude Code or Codex config.
 
 Pass `--with-hooks` to opt into project-scoped `.cursor/hooks.json` wiring.
 The merge preserves unrelated Cursor hooks and installs:
@@ -270,6 +275,11 @@ opt-in SessionStart hook recorded an exact conversation id and
 `transcript_path` pair; latch never scans Cursor databases or guesses the most
 recent chat.
 
+The installed `/latch-seed` command is also current-session-only. It previews
+seed candidates from the exact marker/transcript pair, asks for approval, and
+only then writes staging evidence. `--cursor-transcript PATH` is available for
+a user-explicit file; latch never enumerates Cursor's private history folders.
+
 ```bash
 # From the project repo where Cursor should follow latch.
 /path/to/latch/bin/install_cursor.sh --yes --with-hooks
@@ -299,6 +309,14 @@ with `--require-compact` during live acceptance. Static doctor success is not a
 substitute for authenticated MCP, visible-gate, plugin, backend, or compaction
 acceptance receipts.
 
+The repo also ships `.cursor-plugin/plugin.json` for Cursor's local/marketplace
+plugin flow. The plugin deliberately exposes workflow skills only; MCP, hooks,
+rules, and project commands remain installer-owned so they cannot double-fire.
+To test the plugin skills locally, launch `agent --plugin-dir /path/to/latch` or
+place the checkout at `~/.cursor/plugins/local/latch`. If you use plugin skills,
+run the project installer/doctor with `--skip-skills` to avoid loading duplicate
+skill names.
+
 For the narrow proof path, see
 [`runbooks/cursor_gate_smoke.md`](./runbooks/cursor_gate_smoke.md).
 
@@ -319,9 +337,19 @@ The quickstart prints a review-and-apply seed command like this:
 # Windows: C:\path\to\latch\bin\latch_seed.ps1 --source both --last-sessions 20 --apply
 ```
 
-Use `--source claude`, `--source codex`, or `--source both`. Keep the default
-small and focused; increase `--last-sessions N` only when the first report does
-not find useful project judgment.
+Use `--source claude`, `--source codex`, `--source cursor`, `--source both`
+(Claude+Codex), or `--source all`. Cursor source resolution is intentionally
+narrow: it uses the current SessionStart marker or a path supplied explicitly
+with `--cursor-transcript`; it never scans Cursor history. Keep the default small
+and focused; increase `--last-sessions N` only when the first report does not
+find useful project judgment.
+
+From a hooked Cursor conversation, the native path is:
+
+```bash
+/path/to/latch/bin/latch_seed.sh --source cursor
+# Review first; only then rerun with --apply --yes.
+```
 
 `--apply` is still review-first. The seed pass may use LLM calls, shows a
 structured report, and writes only the staging candidates you approve at the
@@ -449,7 +477,7 @@ context, repo access, or other installed tools.
 ```bash
 bash bin/uninstall.sh --dry-run
 bash bin/uninstall.sh
-# Also remove latch-owned Cursor wiring from the current project:
+# Also remove latch-owned Cursor wiring, commands, and skills from the current project:
 bash bin/uninstall.sh --dry-run --cursor-only --cursor-project "$PWD"
 bash bin/uninstall.sh --yes --cursor-only --cursor-project "$PWD"
 ```

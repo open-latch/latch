@@ -11,7 +11,9 @@ conversation. Historical transcript discovery is outside this proof.
 - `.cursor/rules/latch.mdc` exists and tells Cursor to run `latch_gate` before
   implementation-shaped edits.
 - `.cursor/commands/` contains latch-owned command prompts including
-  `/latch-compact`.
+  `/latch-compact` and `/latch-seed`.
+- `.cursor/skills/` contains the non-conflicting `source-command-*` workflow
+  skills, and the checkout's `.cursor-plugin/plugin.json` validates.
 - `AGENTS.md` carries the full shared latch contract.
 - `.cursor/hooks.json` contains latch session, per-prompt gate-enforcement, and
   activity hooks with fail-closed prompt/mutation entries.
@@ -52,6 +54,9 @@ Expected files in the target project:
 .cursor/rules/latch.mdc
 .cursor/commands/latch-gate.md
 .cursor/commands/latch-compact.md
+.cursor/commands/latch-seed.md
+.cursor/skills/source-command-latch-gate/SKILL.md
+.cursor/skills/source-command-latch-seed/SKILL.md
 AGENTS.md
 ```
 
@@ -75,11 +80,17 @@ host-appropriate shell wrappers.
 
 ## Seed a proof target
 
-Use the same seed-first path as the hook proof runbook:
+From the hooked Cursor conversation, run `/latch-seed`. It must preview the
+exact current transcript before any write. After approving the preview, rerun
+the generated command with `--apply --yes`. The equivalent preview is:
 
 ```bash
-/path/to/latch/bin/latch_seed.sh --source both --last-sessions 20 --apply
+/path/to/latch/bin/latch_seed.sh --source cursor
 ```
+
+Running without a current marker must fail unless the user supplied an explicit,
+readable `--cursor-transcript` path. An unreadable explicit path must also fail.
+For older Claude/Codex sources, use `--source both` separately.
 
 Pick one concrete rejected path, governance rule, or prior agent mistake from
 the seed report. Good proof fuel names a forbidden approach and the accepted
@@ -202,13 +213,15 @@ Apply removal only when you mean to remove latch from this Cursor project:
 ```
 
 The uninstall path removes latch-owned Cursor MCP entries, the clean managed
-Cursor rule, latch-owned Cursor command prompts and hook entries, and the
+Cursor rule, latch-owned Cursor command prompts, skills, and hook entries, and the
 managed `AGENTS.md` region. It preserves unrelated `.cursor/mcp.json`
-servers/settings, unrelated hooks, and unrelated `.cursor/commands` files.
+servers/settings, unrelated hooks, unrelated `.cursor/commands`, and unrelated
+`.cursor/skills` files.
 
 ## Boundaries
 
-Cursor is MCP plus Cursor Rules, project-local Cursor commands, `AGENTS.md`, a
+Cursor is MCP plus Cursor Rules, project-local Cursor commands and skills,
+`AGENTS.md`, a
 native read-only Agent CLI model backend, and opt-in session/gate/activity
 hooks. Current-session manual compaction depends only on the explicit
 SessionStart handoff.
@@ -216,7 +229,6 @@ SessionStart handoff.
 It deliberately does not install:
 
 - Cursor transcript discovery
-- plugins or skills packaging
 
-If the design-partner proof needs any of those, scope a follow-up PR from the
-observed failure rather than broadening this smoke path.
+The optional plugin manifest distributes the workflow skills only. It does not
+replace the installer-owned MCP/rule/hook runtime.
