@@ -26,7 +26,7 @@ def _walk_strings(obj):
         yield obj
 
 
-def _assert_no_real_smoke_coordinates(smoke: dict, *, root: Path, project: Path) -> None:
+def _assert_no_pathlike_coordinates(obj: dict, *, root: Path, project: Path) -> None:
     forbidden = [
         str(root),
         str(project),
@@ -43,10 +43,10 @@ def _assert_no_real_smoke_coordinates(smoke: dict, *, root: Path, project: Path)
         "seed-report-agent-mistake",
     ]
     leaked = [
-        text for text in _walk_strings(smoke)
+        text for text in _walk_strings(obj)
         if any(fragment in text for fragment in forbidden)
     ]
-    _assert(not leaked, f"real-smoke output leaked local coordinates: {leaked}")
+    _assert(not leaked, f"JSON output leaked local coordinates: {leaked}")
 
 
 def test_seed_report_eval_passes_default_bundle():
@@ -108,6 +108,7 @@ def test_seed_report_eval_cli_writes_json():
     _assert(payload["ok"] is True, payload)
     _assert(payload["summary"]["synthetic_llm_candidate_count"] == 2, payload["summary"])
     _assert("real_smoke" not in payload, payload)
+    _assert("transcripts" in payload, payload)
     print("PASS seed_report_eval_cli_writes_json")
 
 
@@ -150,7 +151,7 @@ def test_real_conversation_smoke_is_preview_only_and_redacted():
     _assert("source paths are omitted" in smoke["catch_demo"]["redaction"], smoke["catch_demo"])
     _assert("source_refs" not in smoke, smoke)
     _assert("notes" in smoke and any("project paths" in note for note in smoke["notes"]), smoke)
-    _assert_no_real_smoke_coordinates(smoke, root=root, project=project)
+    _assert_no_pathlike_coordinates(smoke, root=root, project=project)
     print("PASS real_conversation_smoke_is_preview_only_and_redacted")
 
 
@@ -188,10 +189,20 @@ def test_seed_report_eval_cli_can_include_fixture_real_smoke():
     _assert(rc == 0, f"expected real-smoke CLI success, got {rc}")
     payload = json.loads(out.read_text(encoding="utf-8"))
     _assert(payload["ok"] is True, payload)
+    _assert(payload["redaction"]["fixture_eval"] == "summary_only", payload)
+    for omitted in {
+        "catch_demo",
+        "checks",
+        "receipt",
+        "sections",
+        "synthetic_llm_filtered",
+        "transcripts",
+    }:
+        _assert(omitted not in payload, f"{omitted} should not be in real-smoke JSON: {payload}")
     _assert(payload["real_smoke"]["preview_only"] is True, payload["real_smoke"])
     _assert(payload["real_smoke"]["writes_enabled"] is False, payload["real_smoke"])
     _assert(payload["real_smoke"]["sources_scanned"] == 5, payload["real_smoke"])
-    _assert_no_real_smoke_coordinates(payload["real_smoke"], root=root, project=project)
+    _assert_no_pathlike_coordinates(payload, root=root, project=project)
     print("PASS seed_report_eval_cli_can_include_fixture_real_smoke")
 
 

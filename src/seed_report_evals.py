@@ -629,6 +629,31 @@ def real_smoke_demo_summary(candidate: seed.SeedCandidate | None) -> dict[str, A
     }
 
 
+def redacted_real_smoke_json_result(result: dict[str, Any]) -> dict[str, Any]:
+    """Return the public-safe JSON shape for real-smoke runs."""
+    return {
+        "ok": result["ok"],
+        "thesis": result["thesis"],
+        "summary": result["summary"],
+        "real_smoke": result.get("real_smoke"),
+        "redaction": {
+            "mode": "real_smoke_json",
+            "fixture_eval": "summary_only",
+            "omitted": [
+                "fixture transcript manifest",
+                "fixture candidate and report bodies",
+                "fixture catch-demo command",
+                "fixture synthetic-filter details",
+            ],
+            "reason": (
+                "The real-smoke JSON artifact is safe to share as a public "
+                "proof receipt; local transcript coordinates and private "
+                "candidate evidence stay out of the emitted payload."
+            ),
+        },
+    }
+
+
 def grade_report(
     report: list[seed.SeedReportSection],
     checks: tuple[ReportCheck, ...],
@@ -821,7 +846,11 @@ def main(argv: list[str] | None = None) -> int:
         )
     result = run_seed_report_eval(real_smoke=real_smoke)
     output = (
-        json.dumps(result, indent=2, sort_keys=True) + "\n"
+        json.dumps(
+            redacted_real_smoke_json_result(result) if args.real_smoke else result,
+            indent=2,
+            sort_keys=True,
+        ) + "\n"
         if args.format == "json"
         else render_markdown(result)
     )
