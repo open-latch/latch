@@ -584,14 +584,17 @@ def run_real_conversation_smoke(options: RealSmokeOptions) -> dict[str, Any]:
         "preview_only": True,
         "writes_enabled": False,
         "llm_calls": 0,
-        "project": project,
+        "project_scope": "all_projects" if options.all_projects else "selected_project",
         "source": options.source,
         "lookback_days": options.lookback_days,
         "max_sessions": options.max_sessions,
         "all_projects": options.all_projects,
         "sources_scanned": len(sources),
         "source_counts": seed.source_counts(sources),
-        "source_refs": [public_source_ref(src) for src in sources],
+        "source_indices": [
+            {"index": idx, "agent": src.agent}
+            for idx, src in enumerate(sources, start=1)
+        ],
         "candidate_count": len(candidates),
         "section_counts": section_counts,
         "receipt": (
@@ -603,7 +606,8 @@ def run_real_conversation_smoke(options: RealSmokeOptions) -> dict[str, Any]:
             "Manual smoke only; not used by CI.",
             "No seed writes are applied.",
             "No model calls are made; this checks deterministic capture and report wiring.",
-            "Transcript bodies are not included in this result.",
+            "Transcript bodies, project paths, source paths, and session identifiers "
+            "are not included in this result.",
         ],
     }
 
@@ -623,19 +627,6 @@ def real_smoke_demo_summary(candidate: seed.SeedCandidate | None) -> dict[str, A
             "the private local report interactively."
         ),
     }
-
-
-def public_source_ref(src: seed.SeedSource) -> dict[str, str]:
-    return {
-        "agent": src.agent,
-        "id": src.id,
-        "path_tail": path_tail(src.path),
-        "mtime": src.mtime,
-    }
-
-
-def path_tail(path: str, *, parts: int = 4) -> str:
-    return "/".join(Path(path).parts[-parts:])
 
 
 def grade_report(

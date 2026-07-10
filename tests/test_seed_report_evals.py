@@ -15,6 +15,40 @@ def _assert(cond, msg):
         raise AssertionError(msg)
 
 
+def _walk_strings(obj):
+    if isinstance(obj, dict):
+        for value in obj.values():
+            yield from _walk_strings(value)
+    elif isinstance(obj, list):
+        for item in obj:
+            yield from _walk_strings(item)
+    elif isinstance(obj, str):
+        yield obj
+
+
+def _assert_no_real_smoke_coordinates(smoke: dict, *, root: Path, project: Path) -> None:
+    forbidden = [
+        str(root),
+        str(project),
+        "/Users/",
+        "/private/",
+        "/var/",
+        ".claude",
+        ".codex",
+        "/sessions/",
+        "/projects/",
+        ".jsonl",
+        "rollout-",
+        "seed-report-eval",
+        "seed-report-agent-mistake",
+    ]
+    leaked = [
+        text for text in _walk_strings(smoke)
+        if any(fragment in text for fragment in forbidden)
+    ]
+    _assert(not leaked, f"real-smoke output leaked local coordinates: {leaked}")
+
+
 def test_seed_report_eval_passes_default_bundle():
     result = seed_report_evals.run_seed_report_eval()
     _assert(result["ok"] is True, json.dumps(result, indent=2))
@@ -102,8 +136,11 @@ def test_real_conversation_smoke_is_preview_only_and_redacted():
     _assert(smoke["preview_only"] is True, smoke)
     _assert(smoke["writes_enabled"] is False, smoke)
     _assert(smoke["llm_calls"] == 0, smoke)
+    _assert(smoke["project_scope"] == "selected_project", smoke)
+    _assert("project" not in smoke, smoke)
     _assert(smoke["sources_scanned"] == 5, smoke)
     _assert(smoke["source_counts"] == {"claude": 3, "codex": 2}, smoke)
+    _assert(smoke["source_indices"][0] == {"index": 1, "agent": "codex"}, smoke)
     _assert(smoke["candidate_count"] >= 6, smoke)
     _assert(smoke["section_counts"]["decisions_and_rejected_paths"] >= 3, smoke)
     _assert(smoke["receipt"]["must_display_to_user"] is True, smoke)
@@ -111,11 +148,9 @@ def test_real_conversation_smoke_is_preview_only_and_redacted():
     _assert("candidate" not in smoke["catch_demo"], smoke["catch_demo"])
     _assert("request" not in smoke["catch_demo"], smoke["catch_demo"])
     _assert("source paths are omitted" in smoke["catch_demo"]["redaction"], smoke["catch_demo"])
-    refs = smoke["source_refs"]
-    _assert(refs and all("path" not in ref for ref in refs), refs)
-    _assert(all(not ref["path_tail"].startswith("/") for ref in refs), refs)
-    _assert("notes" in smoke and "Transcript bodies are not included in this result." in smoke["notes"],
-            smoke)
+    _assert("source_refs" not in smoke, smoke)
+    _assert("notes" in smoke and any("project paths" in note for note in smoke["notes"]), smoke)
+    _assert_no_real_smoke_coordinates(smoke, root=root, project=project)
     print("PASS real_conversation_smoke_is_preview_only_and_redacted")
 
 
@@ -156,6 +191,7 @@ def test_seed_report_eval_cli_can_include_fixture_real_smoke():
     _assert(payload["real_smoke"]["preview_only"] is True, payload["real_smoke"])
     _assert(payload["real_smoke"]["writes_enabled"] is False, payload["real_smoke"])
     _assert(payload["real_smoke"]["sources_scanned"] == 5, payload["real_smoke"])
+    _assert_no_real_smoke_coordinates(payload["real_smoke"], root=root, project=project)
     print("PASS seed_report_eval_cli_can_include_fixture_real_smoke")
 
 
