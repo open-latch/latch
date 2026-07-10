@@ -97,15 +97,17 @@ first-run mission.
   managed `CLAUDE.md` behavior contract.
 - **Codex:** the same KB and MCP tools with Codex-specific `AGENTS.md`,
   SessionStart, Codex backend defaults, and a manual compaction wrapper.
-- **Cursor preview:** project-scoped MCP wiring through `.cursor/mcp.json` plus
-  the shared `AGENTS.md` contract. Native Cursor-backed gate calls, hooks, and
-  plugin/skill packaging are deferred until a design-partner proof needs them.
+- **Cursor adapter:** project-scoped MCP wiring through `.cursor/mcp.json`, a
+  managed `.cursor/rules/latch.mdc` activation rule, project-local
+  `.cursor/commands` prompts, and the shared `AGENTS.md` contract. Native
+  Cursor-backed gate calls, hooks, Cursor transcript discovery, and native
+  Cursor compaction are deferred until a design-partner proof needs them.
 - **Claude Code + Codex together:** one shared local latch KB, so decisions and
   rejected paths captured through either agent can gate both.
 
 ## Guided Quickstart
 
-Prerequisites: **Claude Code or Codex**, **Python >= 3.11** on a
+Prerequisites: **Claude Code, Codex, or Cursor**, **Python >= 3.11** on a
 native-architecture interpreter, and [`uv`](https://docs.astral.sh/uv/)
 recommended. If `uv` is not installed:
 
@@ -133,19 +135,23 @@ Then run the quickstart from the project repo you want latch to wire:
 # Windows: C:\path\to\latch\bin\latch_quickstart.ps1
 ```
 
-The quickstart asks whether to wire Claude Code, Codex, or both. For
+The quickstart asks whether to wire Claude Code, Codex, Cursor, both
+Claude+Codex surfaces, or all three. For
 non-interactive runs, choose explicitly:
 
 ```bash
 /path/to/latch/bin/latch_quickstart.sh --agents both
 /path/to/latch/bin/latch_quickstart.sh --agents claude
 /path/to/latch/bin/latch_quickstart.sh --agents codex
+/path/to/latch/bin/latch_quickstart.sh --agents cursor --cursor-model-backend codex
+/path/to/latch/bin/latch_quickstart.sh --agents all --cursor-model-backend codex
 ```
 
 The quickstart delegates to the existing installers, syncs the project behavior
 contract, runs doctor/check commands, then moves directly into seed-first setup.
 It disables the per-installer seed prompts so there is one seed handoff at the
-end, with the source set to `claude`, `codex`, or `both` from your choice.
+end. Seed source still uses local Claude/Codex transcripts (`claude`, `codex`,
+or `both`); Cursor transcript import is not installed yet.
 
 One latch clone can serve many repos. Run the quickstart script again from each
 project repo where you want the agent behavior contract. The manual steps below
@@ -202,16 +208,21 @@ you want Codex to use latch:
 Restart Codex or start a new Codex thread after install so `config.toml`,
 `hooks.json`, and `AGENTS.md` reload.
 
-### Cursor Preview
+### Cursor Adapter
 
-Cursor uses the same local latch MCP server and `AGENTS.md` behavior contract.
-The preview installer writes project-scoped `.cursor/mcp.json`, so it is safe to
-try from one repo without touching Claude Code or Codex config.
+Cursor uses the same local latch MCP server, a Cursor-native activation rule,
+project-local command prompts, and the shared `AGENTS.md` behavior contract.
+The installer writes project-scoped `.cursor/mcp.json`,
+`.cursor/rules/latch.mdc`, and `.cursor/commands/*.md`, so it is safe to try
+from one repo without touching Claude Code or Codex config.
 
-If you want model-backed `latch_gate`, heal, or tree calls from this Cursor
-adapter, point it at an existing backend with `--model-backend codex` or
-`--model-backend claude`. A native Cursor CLI backend is intentionally deferred
-until a design-partner install proves it is needed.
+If you want model-backed `latch_gate` calls from this Cursor adapter, point it
+at an existing backend with `--model-backend codex` or `--model-backend claude`.
+A native Cursor CLI backend is intentionally deferred until a design-partner
+install proves it is needed. Cursor adapter command prompts cover latch's
+supported manual workflows through MCP or shell wrappers. Cursor hooks, Cursor
+transcript discovery, and native Cursor compaction are not installed yet; use
+the shell wrappers or the Claude/Codex compaction surfaces for those paths.
 
 ```bash
 # From the project repo where Cursor should follow latch.
@@ -224,15 +235,20 @@ until a design-partner install proves it is needed.
 ```
 
 Restart Cursor or run `agent mcp list` after install so Cursor reloads the MCP
-server. The Cursor doctor treats the live `agent mcp` probe as advisory: missing
-or unavailable Cursor CLI shows as a warning, while config, launch-target, and
-`AGENTS.md` drift are failures.
+server, project rule, and commands. The Cursor doctor treats a missing or unavailable
+Cursor CLI as a warning. Static config, launch-target, `AGENTS.md`, and Cursor
+rule/command drift are failures; when the CLI is available, missing critical
+MCP tools such as `latch_gate` are also failures.
 
-### Both Agents
+For the narrow proof path, see
+[`runbooks/cursor_gate_smoke.md`](./runbooks/cursor_gate_smoke.md).
 
-Run both wiring sections. They intentionally point at the same local latch KB.
-That cross-agent path is part of the first OSS value: Claude Code can capture a
-decision, Codex can later hit the gate for it, and vice versa.
+### Multiple Surfaces
+
+Run the wiring sections you want, or use `--agents all` in quickstart. They
+intentionally point at the same local latch KB. That cross-agent path is part of
+the first OSS value: Claude Code can capture a decision, Codex or Cursor can
+later hit the gate for it, and vice versa.
 
 ## Start By Seeding
 
@@ -316,6 +332,8 @@ At natural stopping points, capture the session:
 
 - Claude Code: run `/latch-compact`.
 - Codex: run `/path/to/latch/bin/run_codex_compact_now.sh`.
+- Cursor adapter: use a shell or Claude/Codex compaction path; native Cursor
+  compaction is not installed yet.
 
 Compaction is user-initiated because it spends a model call and writes a durable
 summary into the KB.
@@ -371,6 +389,9 @@ context, repo access, or other installed tools.
 ```bash
 bash bin/uninstall.sh --dry-run
 bash bin/uninstall.sh
+# Also remove latch-owned Cursor wiring from the current project:
+bash bin/uninstall.sh --dry-run --cursor-project "$PWD"
+bash bin/uninstall.sh --yes --cursor-project "$PWD"
 ```
 
 ## Proof Discipline
@@ -401,8 +422,8 @@ Third-party attribution notices for vendored assets are in [NOTICE](./NOTICE).
 
 This public repo is the local single-player decision-seatbelt core: install,
 doctor, seed/report, local KB, `latch_gate`, receipts, evals, and Claude Code /
-Codex wiring. It is intended to be inspectable, forkable, and useful without a
-cloud account.
+Codex / Cursor adapter wiring. It is intended to be inspectable, forkable, and
+useful without a cloud account.
 
 The latch name and branding are not licensed under Apache 2.0. See
 [TRADEMARK.md](./TRADEMARK.md) for lightweight trademark guidelines and

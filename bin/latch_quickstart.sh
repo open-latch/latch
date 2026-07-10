@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# latch_quickstart.sh — one guided first-run path for Claude Code, Codex, or both.
+# latch_quickstart.sh — one guided first-run path for Claude Code, Codex, Cursor, or all.
 # Delegates to the existing installers, doctors, and seed command.
 set -euo pipefail
 KB_HOME="${LATCH_HOME:-${CLAUDE_KB_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}}"

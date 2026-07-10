@@ -40,7 +40,9 @@ ${LATCH_HOME}/
 │   ├── budget.py             # daily LLM-call budget
 │   ├── doctor.py             # cross-platform install verifier (latch_doctor)
 │   ├── install_codex.py      # Codex MCP config + AGENTS.md installer
+│   ├── install_cursor.py     # Cursor MCP + rules + commands + AGENTS.md installer
 │   ├── agents_md_sync.py     # managed AGENTS.md region sync for Codex
+│   ├── cursor_rules_sync.py  # managed Cursor .mdc activation rule sync
 │   ├── claude_md_sync.py     # managed CLAUDE.md region sync for Claude Code
 │   ├── managed_doc_sync.py   # shared managed-region mechanics
 │   └── hooks/
@@ -92,8 +94,8 @@ ${LATCH_HOME}/
 
 ## Tool & command surface
 
-latch exposes **MCP tools** (callable inline by Claude Code and Codex) and
-Claude Code **slash commands**.
+latch exposes **MCP tools** (callable inline by Claude Code, Codex, and
+Cursor) plus host-specific command prompts where the host supports them.
 The canonical, always-current list is the code:
 
 - **MCP tools** — defined in `src/mcp_server.py`. Read/write KB tools
@@ -104,12 +106,17 @@ The canonical, always-current list is the code:
   `mcp__latch` permission rule the installer adds; `mcp__claude-kb` remains as
   the legacy alias rule for existing registrations. In Codex preview they are
   configured through `config.toml` with the server-level
-  `default_tools_approval_mode = "approve"`.
-- **Slash commands** — markdown in `commands/`, installed into
+  `default_tools_approval_mode = "approve"`. In Cursor they are configured
+  through project `.cursor/mcp.json`; the Cursor CLI can verify them with
+  `agent mcp list-tools latch`.
+- **Command prompts** — markdown in `commands/`, installed into
   `~/.claude/commands/` by the engine installer. Run **`/help`** in a session
   for the current set; `/kb-compact` is the one to know (summarizes the current
-  Claude Code session into the KB on demand). Codex slash commands are not part
-  of the current preview slice; Codex manual compaction uses
+  Claude Code session into the KB on demand). Cursor gets a curated project
+  subset under `.cursor/commands/` for latch workflows that are safe today;
+  `latch-compact.md` is intentionally not installed there because native Cursor
+  compaction is not part of this adapter slice. Codex slash commands are not
+  part of the current preview slice; Codex manual compaction uses
   `bin/run_codex_compact_now.sh` or `bin/run_codex_compact_now.ps1`.
 
 ## Install internals
@@ -213,6 +220,44 @@ JSON, and return the completion result. Bare `--background` is reserved for
 explicit fire-and-forget launches. Codex has a `SessionStart` brief hook, but
 automatic Stop/SessionEnd turn/end compaction remains deliberately deferred.
 
+### Cursor adapter install (project MCP + rules + commands + AGENTS.md)
+
+Cursor support is a project-local adapter around the shared latch MCP server.
+It does **not** write Claude Code or Codex config, and it does **not** install
+Cursor hooks, native Cursor compaction, Cursor transcript discovery, or a native
+Cursor model backend.
+
+`bin/install_cursor.{sh,ps1}` runs `src/install_cursor.py`, which:
+
+- **Manages project `.cursor/mcp.json`** with a `mcpServers.latch` stdio server
+  pointing at `src/mcp_server.py`. It preserves unrelated MCP servers and
+  settings, removes older latch-owned legacy names, and can set
+  `LATCH_MODEL_BACKEND` / `LATCH_GATE_BACKEND` to `claude` or `codex` when
+  `--model-backend` is provided.
+- **Manages `.cursor/rules/latch.mdc`** as a latch-owned always-apply Cursor
+  project rule. The rule activates KB-first behavior and foreground
+  `latch_gate` receipts.
+- **Installs project-local `.cursor/commands/*.md` prompts** for supported
+  latch workflows such as manual gate, gate report, PM seed, maintenance, and
+  unlatch. The installer deliberately removes latch-owned `latch-compact.md`
+  from Cursor commands because Cursor-native compaction is deferred.
+- **Syncs `AGENTS.md`** using the same shared managed-region mechanics as
+  Codex, branded for Cursor on first wiring.
+
+Usage from the project root whose Cursor workspace should use latch:
+
+```bash
+/path/to/latch/bin/install_cursor.sh --yes --model-backend codex
+/path/to/latch/bin/install_cursor.sh --check --model-backend codex
+/path/to/latch/bin/latch_cursor_doctor.sh --model-backend codex
+```
+
+`src/cursor_doctor.py` performs strict static checks for `.cursor/mcp.json`,
+the MCP launch target, `AGENTS.md`, `.cursor/rules/latch.mdc`, and
+`.cursor/commands`. It treats the live Cursor CLI probe as optional: missing
+`agent` is a warning, but if `agent mcp list-tools latch` is available and lacks
+critical tools such as `latch_gate`, the doctor fails.
+
 ### Verify the wiring
 
 - `bash bin/install_engine.sh --check` — every line should read `[OK]` (server
@@ -228,6 +273,12 @@ automatic Stop/SessionEnd turn/end compaction remains deliberately deferred.
   (`codex` by default, or `--summarizer claude`). Run from the target project
   root; pass `--session-id` when outside Codex or when `$CODEX_THREAD_ID` is
   unavailable. Pass `--skip-summarizer` for a static wiring-only check.
+- `bash bin/install_cursor.sh --check --model-backend codex` — Cursor adapter
+  wiring should report the managed MCP server, `AGENTS.md`, Cursor rule, and
+  Cursor command prompts as current.
+- `bash bin/latch_cursor_doctor.sh --model-backend codex` — Cursor adapter
+  health check: static config/launch/rule/commands plus optional live
+  `agent mcp list` / `agent mcp list-tools latch`.
 - In a new session: the `SessionStart` brief should appear (empty on a
   brand-new project); tail `projects/<sanitized-cwd>/retrieve.log` after a few
   prompts — expect `path="vector"`/`"graph"` lines with `elapsed_ms` 100–300
@@ -317,18 +368,22 @@ The strict inverse of `bin/install_engine.sh` (+ the slash-command copy):
 bash bin/uninstall.sh --dry-run    # preview exactly what will be removed
 bash bin/uninstall.sh              # apply (asks to confirm; -y to skip)
 bash bin/uninstall.sh --check      # verify nothing latch-owned remains
+bash bin/uninstall.sh --cursor-project "$PWD" --dry-run
 ```
 
 Removes **only** what latch added: latch-owned MCP registrations (`latch` plus
 legacy `claude-kb`), the latch hooks + latch-owned MCP permissions in
 `settings.json` (backed up to a timestamped `settings.json.latchbak-<UTC>`
-first), and latch's `kb-*` slash commands. Not
+first), and latch's Claude Code slash commands. Not
 removed unless asked: the CLAUDE.md managed region (name it explicitly,
-repeatable: `--claude-md /path/to/CLAUDE.md`) and your KB data
-(`projects/<proj>/` SQLite + logs — add `--purge` to delete it and the
-kill-switch sentinel files). Restart Claude Code afterward so the MCP roster +
-hooks reload. To remove latch entirely, delete the repo. Windows:
-`bin\uninstall.ps1`.
+repeatable: `--claude-md /path/to/CLAUDE.md`), project-local Cursor wiring
+(name the project explicitly with `--cursor-project /path/to/project`), and
+your KB data (`projects/<proj>/` SQLite + logs — add `--purge` to delete it and
+the kill-switch sentinel files). Cursor project removal strips only latch-owned
+`.cursor/mcp.json` server entries, a clean latch Cursor rule, latch-owned
+`.cursor/commands` files, and the managed `AGENTS.md` region. Restart the host
+agent afterward so the MCP roster + commands reload. To remove latch entirely,
+delete the repo. Windows: `bin\uninstall.ps1`.
 
 ## Contributing — release hygiene
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Cursor preview wiring verifier."""
+"""Cursor adapter wiring verifier."""
 from __future__ import annotations
 
 import argparse
@@ -12,12 +12,14 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import agents_md_sync
+import cursor_rules_sync
 import install_cursor
 import install_engine
 
 OK = "OK"
 WARN = "WARN"
 FAIL = "FAIL"
+CRITICAL_MCP_TOOLS = ("latch_search", "latch_get", "latch_recent", "latch_gate")
 
 
 @dataclass(frozen=True)
@@ -65,6 +67,22 @@ def check_agents_md(agents_path: Path) -> Check:
     )
 
 
+def check_cursor_rule(rules_path: Path) -> Check:
+    status = cursor_rules_sync.evaluate(rules_path)
+    if status == cursor_rules_sync.OK:
+        return Check("Cursor .cursor/rules/latch.mdc rule", OK, f"{rules_path} is up to date")
+    return Check(
+        "Cursor .cursor/rules/latch.mdc rule",
+        FAIL,
+        f"{rules_path} status is {status}; run bin/install_cursor.sh --yes",
+    )
+
+
+def check_cursor_commands(commands_dir: Path) -> Check:
+    ok, detail = install_cursor.cursor_commands_status(commands_dir)
+    return Check("Cursor .cursor/commands latch commands", OK if ok else FAIL, detail)
+
+
 def check_mcp_launch_target(python_path: str, server_py: str) -> Check:
     missing: list[str] = []
     if not _exists_or_on_path(python_path):
@@ -94,6 +112,10 @@ def _run_agent_mcp(agent_bin: str, args: list[str], timeout_s: float) -> subproc
         return f"{agent_bin} {' '.join(args)} timed out after {timeout_s:g}s"
     except FileNotFoundError as e:
         return f"subprocess failed: {type(e).__name__}: {e}"
+
+
+def _missing_critical_tools(output: str) -> list[str]:
+    return [tool for tool in CRITICAL_MCP_TOOLS if tool not in output]
 
 
 def check_cursor_cli_mcp(
@@ -128,18 +150,36 @@ def check_cursor_cli_mcp(
             WARN,
             f"{resolved} mcp list-tools {install_cursor.SERVER_NAME} exit {tools.returncode}: {_output_excerpt(tools)}",
         )
+    tool_output = (tools.stdout or "") + "\n" + (tools.stderr or "")
+    missing = _missing_critical_tools(tool_output)
+    if missing:
+        return Check(
+            "Cursor CLI MCP visibility",
+            FAIL,
+            f"{resolved} mcp list-tools {install_cursor.SERVER_NAME} missing critical tool(s): "
+            + ", ".join(missing),
+        )
 
-    return Check("Cursor CLI MCP visibility", OK, f"{resolved} mcp list/list-tools {install_cursor.SERVER_NAME} reachable")
+    return Check(
+        "Cursor CLI MCP visibility",
+        OK,
+        f"{resolved} mcp list/list-tools {install_cursor.SERVER_NAME} reachable with "
+        + ", ".join(CRITICAL_MCP_TOOLS),
+    )
 
 
 def run_all(
     *,
     config_path: Path,
     agents_path: Path,
+    rules_path: Path,
+    commands_dir: Path,
     python_path: str,
     server_py: str,
     model_backend: str | None = None,
     skip_agents: bool = False,
+    skip_rules: bool = False,
+    skip_commands: bool = False,
     skip_cli: bool = False,
     agent_bin: str | None = None,
     cli_timeout_s: float = 15.0,
@@ -152,6 +192,14 @@ def run_all(
         checks.append(Check("AGENTS.md managed region", WARN, "skipped (--skip-agents)"))
     else:
         checks.append(check_agents_md(agents_path))
+    if skip_rules:
+        checks.append(Check("Cursor .cursor/rules/latch.mdc rule", WARN, "skipped (--skip-rules)"))
+    else:
+        checks.append(check_cursor_rule(rules_path))
+    if skip_commands:
+        checks.append(Check("Cursor .cursor/commands latch commands", WARN, "skipped (--skip-commands)"))
+    else:
+        checks.append(check_cursor_commands(commands_dir))
     if skip_cli:
         checks.append(Check("Cursor CLI MCP visibility", WARN, "skipped (--skip-cli)"))
     else:
@@ -171,16 +219,20 @@ def print_text(checks: list[Check]) -> None:
     elif warned:
         print(f"OK with {warned} warning(s).")
     else:
-        print("OK - Cursor preview wiring looks healthy.")
+        print("OK - Cursor adapter wiring looks healthy.")
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description="latch Cursor preview doctor")
+    ap = argparse.ArgumentParser(description="latch Cursor adapter doctor")
     ap.add_argument("--python", help="interpreter registered for the MCP server")
     ap.add_argument("--mcp-json", default=str(install_cursor.DEFAULT_MCP_PATH),
                     help="Cursor MCP config path (default: .cursor/mcp.json)")
     ap.add_argument("--agents-md", default="AGENTS.md",
                     help="AGENTS.md path to check (default: ./AGENTS.md)")
+    ap.add_argument("--rules-mdc", default=str(install_cursor.DEFAULT_RULE_PATH),
+                    help="Cursor rule path to check (default: .cursor/rules/latch.mdc)")
+    ap.add_argument("--commands-dir", default=str(install_cursor.DEFAULT_COMMANDS_DIR),
+                    help="Cursor commands directory to check (default: .cursor/commands)")
     ap.add_argument("--model-backend", choices=("claude", "codex"),
                     help="expected existing backend env in .cursor/mcp.json")
     ap.add_argument("--agent-bin", help="Cursor CLI executable for live MCP probe")
@@ -188,6 +240,10 @@ def main(argv: list[str] | None = None) -> int:
                     help="seconds to wait for each Cursor CLI MCP probe")
     ap.add_argument("--skip-agents", action="store_true",
                     help="skip AGENTS.md managed-region check")
+    ap.add_argument("--skip-rules", action="store_true",
+                    help="skip Cursor rule check")
+    ap.add_argument("--skip-commands", action="store_true",
+                    help="skip Cursor commands check")
     ap.add_argument("--skip-cli", action="store_true",
                     help="skip Cursor agent mcp list/list-tools probe")
     ap.add_argument("--json", action="store_true", help="emit machine-readable JSON")
@@ -198,10 +254,14 @@ def main(argv: list[str] | None = None) -> int:
     checks = run_all(
         config_path=Path(args.mcp_json),
         agents_path=Path(args.agents_md),
+        rules_path=Path(args.rules_mdc),
+        commands_dir=Path(args.commands_dir),
         python_path=python_path,
         server_py=server_py,
         model_backend=args.model_backend,
         skip_agents=args.skip_agents,
+        skip_rules=args.skip_rules,
+        skip_commands=args.skip_commands,
         skip_cli=args.skip_cli,
         agent_bin=args.agent_bin,
         cli_timeout_s=args.cli_timeout,

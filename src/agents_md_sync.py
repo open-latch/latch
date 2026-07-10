@@ -72,7 +72,7 @@ def sync(target: Path, kb_home: str | None = None, *, create: bool = True) -> st
             norm = mds._norm(content)
             before = norm.split(LEGACY_BEGIN_MARK, 1)[0]
             after = norm.split(LEGACY_END_MARK, 1)[1]
-            target.write_text(before + block + after, encoding="utf-8", newline="\n")
+            target.write_text(before + block + after, encoding="utf-8")
             return "synced"
     return mds.sync(target, SPEC, home, create=create)
 

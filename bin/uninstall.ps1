@@ -25,6 +25,8 @@
 .EXAMPLE
   .\uninstall.ps1 --claude-md C:/proj/CLAUDE.md --yes
 .EXAMPLE
+  .\uninstall.ps1 --cursor-project C:/proj --yes
+.EXAMPLE
   .\uninstall.ps1 --purge
 #>
 $ErrorActionPreference = "Stop"

@@ -78,7 +78,7 @@ def sync(
     if status == ABSENT:
         if not create:
             return "skipped"
-        target.write_text(block + "\n", encoding="utf-8", newline="\n")
+        target.write_text(block + "\n", encoding="utf-8")
         return "created"
 
     content = target.read_text(encoding="utf-8")
@@ -89,12 +89,12 @@ def sync(
         if not create:
             return "skipped"
         target.write_text(norm.rstrip("\n") + "\n\n" + block + "\n",
-                          encoding="utf-8", newline="\n")
+                          encoding="utf-8")
         return "appended"
 
     before = norm.split(spec.begin_mark, 1)[0]
     after = norm.split(spec.end_mark, 1)[1]
-    target.write_text(before + block + after, encoding="utf-8", newline="\n")
+    target.write_text(before + block + after, encoding="utf-8")
     return "synced"
 
 
@@ -116,7 +116,7 @@ def unsync(target: Path, spec: ManagedDocSpec, *, backup: bool = True) -> str:
     else:
         new = before + after
     new = new.rstrip("\n")
-    target.write_text((new + "\n") if new else "", encoding="utf-8", newline="\n")
+    target.write_text((new + "\n") if new else "", encoding="utf-8")
     return "removed"
 
 

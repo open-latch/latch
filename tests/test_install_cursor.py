@@ -12,6 +12,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import agents_md_sync  # noqa: E402
+import cursor_rules_sync  # noqa: E402
 import install_engine  # noqa: E402
 import install_cursor as ic  # noqa: E402
 
@@ -139,11 +140,14 @@ def test_agents_sync_args_are_cursor_branded():
 def test_first_wire_notice_is_cursor_branded():
     d = Path(tempfile.mkdtemp(prefix="latch-cursor-agents-"))
     try:
+        rule = d / ".cursor" / "rules" / "latch.mdc"
         out = io.StringIO()
         with redirect_stdout(out):
             rc = ic.main([
                 "--skip-mcp",
                 "--agents-md", str(d / "AGENTS.md"),
+                "--rules-mdc", str(rule),
+                "--commands-dir", str(d / ".cursor" / "commands"),
                 "--yes",
             ])
         text = out.getvalue()
@@ -151,6 +155,10 @@ def test_first_wire_notice_is_cursor_branded():
         _assert("into Cursor for this project" in text, text)
         _assert("shared AGENTS.md wording" in text, text)
         _assert("into Codex for this project" not in text, text)
+        _assert(cursor_rules_sync.evaluate(rule) == cursor_rules_sync.OK,
+                "Cursor rule should be installed by default")
+        _assert((d / ".cursor" / "commands" / "latch-gate.md").is_file(),
+                "Cursor command prompts should be installed by default")
         print("PASS first_wire_notice_is_cursor_branded")
     finally:
         shutil.rmtree(d, ignore_errors=True)
@@ -160,6 +168,7 @@ def test_check_mode_verifies_mcp_and_agents():
     d = Path(tempfile.mkdtemp(prefix="latch-cursor-check-"))
     try:
         config = d / ".cursor" / "mcp.json"
+        rule = d / ".cursor" / "rules" / "latch.mdc"
         agents = d / "AGENTS.md"
         python_path = install_engine.resolve_python(sys.executable)
         server_py = str((ic.KB_HOME / "src" / "mcp_server.py")).replace("\\", "/")
@@ -167,11 +176,15 @@ def test_check_mode_verifies_mcp_and_agents():
         config.parent.mkdir(parents=True)
         config.write_text(body, encoding="utf-8")
         agents_md_sync.sync(agents, create=True)
+        cursor_rules_sync.sync(rule)
+        ic.sync_cursor_commands(d / ".cursor" / "commands")
 
         rc = ic.main([
             "--python", sys.executable,
             "--mcp-json", str(config),
             "--agents-md", str(agents),
+            "--rules-mdc", str(rule),
+            "--commands-dir", str(d / ".cursor" / "commands"),
             "--check",
         ])
         _assert(rc == 0, f"expected check success, got {rc}")
@@ -180,10 +193,49 @@ def test_check_mode_verifies_mcp_and_agents():
             "--python", sys.executable,
             "--mcp-json", str(d / "missing.json"),
             "--agents-md", str(agents),
+            "--rules-mdc", str(rule),
+            "--commands-dir", str(d / ".cursor" / "commands"),
             "--check",
         ])
         _assert(rc == 1, f"expected check failure for missing config, got {rc}")
+
+        rc = ic.main([
+            "--python", sys.executable,
+            "--mcp-json", str(config),
+            "--agents-md", str(agents),
+            "--rules-mdc", str(d / "missing-rule.mdc"),
+            "--commands-dir", str(d / ".cursor" / "commands"),
+            "--check",
+        ])
+        _assert(rc == 1, f"expected check failure for missing rule, got {rc}")
         print("PASS check_mode_verifies_mcp_and_agents")
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_cursor_commands_sync_status_and_remove():
+    d = Path(tempfile.mkdtemp(prefix="latch-cursor-commands-"))
+    try:
+        commands = d / ".cursor" / "commands"
+        changes = ic.sync_cursor_commands(commands)
+        _assert(any("Cursor command latch-gate.md" in c for c in changes), changes)
+        _assert(not (commands / "latch-compact.md").exists(),
+                "Cursor-native compaction command should not be installed")
+        gate = commands / "latch-gate.md"
+        body = gate.read_text(encoding="utf-8")
+        _assert("<KB_HOME>" not in body, "Cursor commands should resolve KB_HOME")
+        _assert("Cursor boundary" in body, "Cursor commands should state adapter boundary")
+        ok, detail = ic.cursor_commands_status(commands)
+        _assert(ok, detail)
+
+        custom = commands / "custom.md"
+        custom.write_text("user command\n", encoding="utf-8")
+        removed = ic.remove_cursor_commands(commands)
+        _assert(any("removed Cursor command latch-gate.md" in c for c in removed), removed)
+        _assert(custom.exists(), "uninstall should preserve unrelated Cursor command files")
+        ok, detail = ic.cursor_commands_status(commands)
+        _assert(not ok and "missing" in detail, detail)
+        print("PASS cursor_commands_sync_status_and_remove")
     finally:
         shutil.rmtree(d, ignore_errors=True)
 
@@ -198,4 +250,5 @@ if __name__ == "__main__":
     test_agents_sync_args_are_cursor_branded()
     test_first_wire_notice_is_cursor_branded()
     test_check_mode_verifies_mcp_and_agents()
+    test_cursor_commands_sync_status_and_remove()
     print("\nAll install_cursor tests pass.")
