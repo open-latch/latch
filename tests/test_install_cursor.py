@@ -339,6 +339,8 @@ def test_with_hooks_installs_and_check_requires_hooks():
             hooks,
             install_engine.resolve_python(None),
             str(ic.KB_HOME / "src" / "hooks" / "cursor_session_start.py"),
+            str(ic.KB_HOME / "src" / "hooks" / "cursor_before_submit.py"),
+            str(ic.KB_HOME / "src" / "hooks" / "cursor_pre_tool_use.py"),
             str(ic.KB_HOME / "src" / "hooks" / "cursor_post_tool_use.py"),
         )
         _assert(ok, detail)

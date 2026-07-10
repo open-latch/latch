@@ -254,6 +254,8 @@ def test_run_all_requires_hooks_when_requested():
         hooks_body, _ = cursor_hooks.merge_hooks(
             "", sys.executable,
             str(ic.KB_HOME / "src" / "hooks" / "cursor_session_start.py"),
+            str(ic.KB_HOME / "src" / "hooks" / "cursor_before_submit.py"),
+            str(ic.KB_HOME / "src" / "hooks" / "cursor_pre_tool_use.py"),
             str(ic.KB_HOME / "src" / "hooks" / "cursor_post_tool_use.py"),
             path=hooks,
         )

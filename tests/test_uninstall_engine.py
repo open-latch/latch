@@ -124,6 +124,8 @@ def test_strip_cursor_project_removes_latch_owned_wiring_only():
             }),
             "/py",
             "/repo/src/hooks/cursor_session_start.py",
+            "/repo/src/hooks/cursor_before_submit.py",
+            "/repo/src/hooks/cursor_pre_tool_use.py",
             "/repo/src/hooks/cursor_post_tool_use.py",
             path=hooks_path,
         )

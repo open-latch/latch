@@ -27,9 +27,12 @@ def test_render_rule_has_cursor_frontmatter_and_gate_contract():
     _assert("latch_gate" in out, "rule should name gate tool")
     _assert("findings.must_display_to_user=true" in out,
             "rule should require foreground gate findings")
+    _assert("preToolUse" in out and "current user request verbatim" in out,
+            "rule should explain current-prompt enforcement recovery")
     _assert("/opt/latch/bin/install_cursor.sh --yes" in out,
             "KB_HOME placeholder should resolve")
-    _assert(".cursor/commands" in out and "native Cursor model backend" in out,
+    _assert(".cursor/commands" in out and "--with-hooks" in out
+            and "native Cursor model backend" in out,
             "rule should state Cursor adapter boundaries")
     print("PASS render_rule_has_cursor_frontmatter_and_gate_contract")
 
