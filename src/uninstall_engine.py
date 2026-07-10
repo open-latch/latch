@@ -42,6 +42,10 @@ What it does NOT remove unless asked:
     are left in place so a user can uninstall the wiring without losing their
     accumulated KB. ``--purge`` removes the projects/ data + kill-switch files
     (the repo + venv you delete by hand: ``rm -rf ${LATCH_HOME}``).
+  * **Project-local Cursor wiring** is removed only when ``--cursor-project`` is
+    supplied. That path removes latch-owned ``.cursor/mcp.json`` server entries,
+    ``.cursor/rules/latch.mdc``, ``.cursor/commands`` files, and the AGENTS.md
+    managed region for that project while preserving unrelated Cursor config.
 
 Design notes (same as install_engine):
   * **Stdlib only** — runs under a bare/system Python; does not import the venv.
@@ -85,6 +89,14 @@ MANAGED_EVENTS = ie.MANAGED_EVENTS
 COMMANDS_SRC = KB_HOME / "commands"
 LEGACY_COMMAND_ALIASES = ie.LEGACY_COMMAND_ALIASES
 STALE_LEGACY_COMMANDS = ie.STALE_LEGACY_COMMANDS
+
+
+def _load_cursor_modules():
+    import agents_md_sync
+    import cursor_rules_sync
+    import install_cursor
+
+    return agents_md_sync, cursor_rules_sync, install_cursor
 
 
 # --------------------------------------------------------------------------- #
@@ -277,6 +289,112 @@ def strip_claude_md(targets: list[str], dry_run: bool) -> list[str]:
 
 
 # --------------------------------------------------------------------------- #
+# Cursor project wiring (opt-in per project)
+# --------------------------------------------------------------------------- #
+def strip_cursor_project(project: str, dry_run: bool) -> list[str]:
+    changes: list[str] = []
+    agents_md_sync, cursor_rules_sync, install_cursor = _load_cursor_modules()
+    root = Path(project).expanduser().resolve()
+
+    mcp_path = root / install_cursor.DEFAULT_MCP_PATH
+    if dry_run:
+        try:
+            mcp_changes = install_cursor.remove_cursor_mcp_config(mcp_path, dry_run=True)
+        except SystemExit as e:
+            mcp_changes = [f"invalid Cursor MCP config {mcp_path}: {e}"]
+    else:
+        try:
+            mcp_changes = install_cursor.remove_cursor_mcp_config(mcp_path, dry_run=False)
+        except SystemExit as e:
+            mcp_changes = [f"invalid Cursor MCP config {mcp_path}: {e}"]
+    changes.extend(f"{root}: {change}" for change in mcp_changes)
+
+    rule_path = root / install_cursor.DEFAULT_RULE_PATH
+    if dry_run:
+        status = cursor_rules_sync.evaluate(rule_path)
+        if status == cursor_rules_sync.OK:
+            changes.append(f"would remove Cursor rule {rule_path}")
+        elif status == cursor_rules_sync.DRIFT:
+            changes.append(f"skipped Cursor rule {rule_path} (drifted/user-owned)")
+    else:
+        action = cursor_rules_sync.remove(rule_path)
+        if action == "removed":
+            changes.append(f"removed Cursor rule {rule_path} (backup: {rule_path}.latchbak)")
+        elif action == cursor_rules_sync.DRIFT:
+            changes.append(f"skipped Cursor rule {rule_path} (drifted/user-owned)")
+
+    command_changes = install_cursor.remove_cursor_commands(
+        root / install_cursor.DEFAULT_COMMANDS_DIR,
+        dry_run=dry_run,
+    )
+    changes.extend(f"{root}: {change}" for change in command_changes)
+
+    agents_path = root / "AGENTS.md"
+    if dry_run:
+        status = agents_md_sync.evaluate(agents_path)
+        if status in (agents_md_sync.OK, agents_md_sync.DRIFT):
+            changes.append(f"would strip managed region from {agents_path}")
+    else:
+        action = agents_md_sync.unsync(agents_path)
+        if action == "removed":
+            changes.append(f"stripped managed region from {agents_path} "
+                           f"(backup: {agents_path}.latchbak)")
+    return changes
+
+
+def cursor_project_removed(project: str) -> list[tuple[bool, str]]:
+    agents_md_sync, cursor_rules_sync, install_cursor = _load_cursor_modules()
+    root = Path(project).expanduser().resolve()
+    rows: list[tuple[bool, str]] = []
+
+    mcp_path = root / install_cursor.DEFAULT_MCP_PATH
+    try:
+        if mcp_path.exists():
+            current = mcp_path.read_text(encoding="utf-8")
+            obj = json.loads(current) if current.strip() else {}
+            servers = obj.get("mcpServers") if isinstance(obj, dict) else None
+            present = [
+                name for name in (install_cursor.SERVER_NAME, *install_cursor.LEGACY_SERVER_NAMES)
+                if isinstance(servers, dict) and name in servers
+            ]
+        else:
+            present = []
+    except (OSError, json.JSONDecodeError) as e:
+        present = [f"unreadable ({e})"]
+    if present:
+        rows.append((False, f"Cursor MCP server still present in {mcp_path}: {', '.join(present)}"))
+    else:
+        rows.append((True, f"no latch Cursor MCP server in {mcp_path}"))
+
+    rule_status = cursor_rules_sync.evaluate(root / install_cursor.DEFAULT_RULE_PATH)
+    if rule_status == cursor_rules_sync.OK:
+        rows.append((False, f"Cursor rule still present: {root / install_cursor.DEFAULT_RULE_PATH}"))
+    else:
+        rows.append((True, f"no clean latch Cursor rule ({rule_status})"))
+
+    commands_dir = root / install_cursor.DEFAULT_COMMANDS_DIR
+    leftover_commands = []
+    for name in (*install_cursor.CURSOR_COMMAND_FILES, *install_cursor.UNSUPPORTED_CURSOR_COMMAND_FILES):
+        path = commands_dir / name
+        if path.is_file() and install_cursor._is_latch_cursor_command_body(
+            path.read_text(encoding="utf-8", errors="replace")
+        ):
+            leftover_commands.append(name)
+    if leftover_commands:
+        rows.append((False, f"Cursor latch command(s) still present in {commands_dir}: "
+                           + ", ".join(leftover_commands)))
+    else:
+        rows.append((True, f"no latch Cursor commands in {commands_dir}"))
+
+    agents_status = agents_md_sync.evaluate(root / "AGENTS.md")
+    if agents_status in (agents_md_sync.OK, agents_md_sync.DRIFT):
+        rows.append((False, f"AGENTS.md managed region still present: {root / 'AGENTS.md'} ({agents_status})"))
+    else:
+        rows.append((True, f"no AGENTS.md managed region ({agents_status})"))
+    return rows
+
+
+# --------------------------------------------------------------------------- #
 # Purge (opt-in: KB data + kill-switch files)
 # --------------------------------------------------------------------------- #
 def purge_data(dry_run: bool) -> list[str]:
@@ -303,7 +421,7 @@ def purge_data(dry_run: bool) -> list[str]:
 # --------------------------------------------------------------------------- #
 # --check (verify nothing latch-owned remains in Claude Code config)
 # --------------------------------------------------------------------------- #
-def check() -> int:
+def check(cursor_projects: list[str] | None = None) -> int:
     claude = ie.find_claude()
     rows: list[tuple[bool, str]] = []
 
@@ -344,6 +462,9 @@ def check() -> int:
                  "no latch-owned mcpServers block" if not dead
                  else f"dead mcpServers block(s) present: {', '.join(dead)}"))
 
+    for project in cursor_projects or []:
+        rows.extend(cursor_project_removed(project))
+
     failed = 0
     for ok, label in rows:
         print(f"  [{'OK' if ok else 'XX'}] {label}")
@@ -370,6 +491,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--claude-md", action="append", default=[], metavar="PATH",
                     help="also strip latch's managed region from this CLAUDE.md "
                          "(repeatable)")
+    ap.add_argument("--cursor-project", action="append", default=[], metavar="PATH",
+                    help="also remove latch-owned Cursor wiring from this project "
+                         "(.cursor/mcp.json, .cursor/rules/latch.mdc, .cursor/commands, AGENTS.md)")
     ap.add_argument("--purge", action="store_true",
                     help="also delete KB data (projects/) and kill-switch files")
     ap.add_argument("--yes", "-y", action="store_true",
@@ -377,7 +501,7 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     if args.check:
-        return check()
+        return check(args.cursor_project)
 
     print("\nlatch engine uninstaller")
     print(f"  KB_HOME  : {KB_HOME}")
@@ -386,8 +510,10 @@ def main(argv: list[str] | None = None) -> int:
 
     if not args.dry_run and not args.yes:
         try:
-            ans = input("Remove latch's MCP registration, hooks, permission, and "
-                        "slash commands from Claude Code? [y/N] ").strip().lower()
+            prompt = "Remove latch's MCP registration, hooks, permission, and slash commands from Claude Code"
+            if args.cursor_project:
+                prompt += ", plus latch-owned Cursor wiring from the requested project(s)"
+            ans = input(prompt + "? [y/N] ").strip().lower()
         except EOFError:
             ans = ""
         if ans not in ("y", "yes"):
@@ -441,7 +567,17 @@ def main(argv: list[str] | None = None) -> int:
         for c in md_changes:
             print(f"           - {c}")
 
-    # --- 5. purge (opt-in) ---------------------------------------------------
+    # --- 5. Cursor project wiring (opt-in per project) -----------------------
+    for project in args.cursor_project:
+        cursor_changes = strip_cursor_project(project, args.dry_run)
+        if cursor_changes:
+            print(f"  [{'DRY ' if args.dry_run else 'OK  '}] Cursor project {Path(project).expanduser().resolve()}:")
+            for c in cursor_changes:
+                print(f"           - {c}")
+        else:
+            print(f"  [OK  ] Cursor project {Path(project).expanduser().resolve()}: no latch wiring present")
+
+    # --- 6. purge (opt-in) ---------------------------------------------------
     if args.purge:
         purge_changes = purge_data(args.dry_run)
         if purge_changes:

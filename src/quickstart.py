@@ -2,7 +2,7 @@
 """One-command guided first-run path for latch.
 
 This is an orchestrator, not a new installer. It delegates to the existing
-Claude Code installer, Codex installer, doctor checks, and seed command so the
+Claude Code installer, Codex installer, Cursor installer, doctor checks, and seed command so the
 quickstart can be one obvious path without changing core latch behavior.
 """
 from __future__ import annotations
@@ -24,7 +24,7 @@ KB_HOME = Path(
     or Path(__file__).resolve().parent.parent
 )
 
-AGENT_CHOICES = ("claude", "codex", "both")
+AGENT_CHOICES = ("claude", "codex", "cursor", "both", "all")
 
 
 @dataclass(frozen=True)
@@ -65,7 +65,9 @@ def detect_agent_context(env: Mapping[str, str] | None = None) -> str | None:
 def normalize_agents(value: str) -> tuple[str, ...]:
     if value == "both":
         return ("claude", "codex")
-    if value in ("claude", "codex"):
+    if value == "all":
+        return ("claude", "codex", "cursor")
+    if value in ("claude", "codex", "cursor"):
         return (value,)
     raise ValueError(f"unsupported agent selection: {value}")
 
@@ -88,33 +90,34 @@ def resolve_agents(
         detected = f" Detected current surface: {default}." if default else ""
         raise ValueError(
             "Choose agent surfaces for non-interactive quickstart: "
-            "--agents claude, --agents codex, or --agents both."
+            "--agents claude, --agents codex, --agents cursor, --agents both, or --agents all."
             + detected
         )
 
     suffix = f" (default {default})" if default else ""
     if default == "codex":
-        print("Detected Codex. Type 'both' if you also want Claude Code wired.")
+        print("Detected Codex. Type 'both' if you also want Claude Code wired, or 'all' for Cursor too.")
     elif default == "claude":
-        print("Detected Claude Code. Type 'both' if you also want Codex wired.")
+        print("Detected Claude Code. Type 'both' if you also want Codex wired, or 'all' for Cursor too.")
     while True:
-        raw = input_fn(f"Agent surfaces [claude/codex/both]{suffix}: ").strip().lower()
+        raw = input_fn(f"Agent surfaces [claude/codex/cursor/both/all]{suffix}: ").strip().lower()
         if not raw and default:
             return normalize_agents(default)
         if raw in AGENT_CHOICES:
             return normalize_agents(raw)
-        print("Please enter one of: claude, codex, both")
+        print("Please enter one of: claude, codex, cursor, both, all")
 
 
 def seed_source_for_agents(agents: Sequence[str], requested: str = "auto") -> str:
     if requested != "auto":
         return requested
     selected = set(agents)
-    if selected == {"claude", "codex"}:
+    seedable = selected & {"claude", "codex"}
+    if seedable == {"claude", "codex"} or not seedable:
         return "both"
-    if selected == {"claude"}:
+    if seedable == {"claude"}:
         return "claude"
-    if selected == {"codex"}:
+    if seedable == {"codex"}:
         return "codex"
     return "both"
 
@@ -132,6 +135,7 @@ def build_install_steps(
     agents: Sequence[str],
     python_path: str,
     project: Path,
+    cursor_model_backend: str | None = None,
 ) -> list[Step]:
     steps: list[Step] = []
     selected = set(agents)
@@ -174,6 +178,19 @@ def build_install_steps(
             ],
             project,
         ))
+    if "cursor" in selected:
+        command = [
+            python_path,
+            _src("install_cursor.py"),
+            "--python",
+            python_path,
+            "--agents-md",
+            _project_file(project, "AGENTS.md"),
+            "--yes",
+        ]
+        if cursor_model_backend:
+            command.extend(["--model-backend", cursor_model_backend])
+        steps.append(Step("Wire Cursor", command, project))
     return steps
 
 
@@ -183,6 +200,7 @@ def build_doctor_steps(
     python_path: str,
     project: Path,
     full_codex_doctor: bool = False,
+    cursor_model_backend: str | None = None,
 ) -> list[Step]:
     steps: list[Step] = []
     selected = set(agents)
@@ -221,6 +239,31 @@ def build_doctor_steps(
                 project,
             ),
             Step("Run latch Codex doctor", codex_doctor, project),
+        ])
+    if "cursor" in selected:
+        cursor_check = [
+            python_path,
+            _src("install_cursor.py"),
+            "--python",
+            python_path,
+            "--agents-md",
+            _project_file(project, "AGENTS.md"),
+            "--check",
+        ]
+        cursor_doctor = [
+            python_path,
+            _src("cursor_doctor.py"),
+            "--python",
+            python_path,
+            "--agents-md",
+            _project_file(project, "AGENTS.md"),
+        ]
+        if cursor_model_backend:
+            cursor_check.extend(["--model-backend", cursor_model_backend])
+            cursor_doctor.extend(["--model-backend", cursor_model_backend])
+        steps.extend([
+            Step("Check Cursor wiring", cursor_check, project),
+            Step("Run latch Cursor doctor", cursor_doctor, project),
         ])
     return steps
 
@@ -312,9 +355,9 @@ def offer_seed_after_quickstart(
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap = argparse.ArgumentParser(
-        description="Guided first OSS quickstart for latch (Claude Code, Codex, or both)."
+        description="Guided first OSS quickstart for latch (Claude Code, Codex, Cursor, or all)."
     )
-    ap.add_argument("--agents", choices=("auto", "claude", "codex", "both"), default="auto",
+    ap.add_argument("--agents", choices=("auto", "claude", "codex", "cursor", "both", "all"), default="auto",
                     help="agent surfaces to wire (default: prompt or detect current agent)")
     ap.add_argument("--project", default=os.getcwd(),
                     help="project repo to wire and seed (default: cwd)")
@@ -329,6 +372,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                     help="skip post-install doctor/check commands")
     ap.add_argument("--full-codex-doctor", action="store_true",
                     help="include Codex compact/summarizer probes in the Codex doctor")
+    ap.add_argument("--cursor-model-backend", choices=("claude", "codex"),
+                    help="existing backend for Cursor model-backed gate calls")
     ap.add_argument("--no-seed", action="store_true",
                     help="print the seed command but do not offer to run it")
     return ap.parse_args(argv)
@@ -352,13 +397,19 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     source = seed_source_for_agents(agents, args.seed_source)
-    steps = build_install_steps(agents=agents, python_path=python_path, project=project)
+    steps = build_install_steps(
+        agents=agents,
+        python_path=python_path,
+        project=project,
+        cursor_model_backend=args.cursor_model_backend,
+    )
     if not args.skip_doctor:
         steps.extend(build_doctor_steps(
             agents=agents,
             python_path=python_path,
             project=project,
             full_codex_doctor=args.full_codex_doctor,
+            cursor_model_backend=args.cursor_model_backend,
         ))
     seed_cmd = seed_command_args(
         python_path=python_path,
@@ -373,6 +424,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  interpreter  : {python_path}")
     print(f"  agents       : {', '.join(agents)}")
     print(f"  seed source  : {source}")
+    if "cursor" in agents:
+        print(f"  Cursor backend: {args.cursor_model_backend or 'engine default'}")
     print(f"  last sessions: {args.last_sessions}")
     print(f"  mode         : {'DRY-RUN (no writes)' if args.dry_run else 'apply'}")
 

@@ -45,6 +45,25 @@ def test_build_steps_for_both_delegates_to_existing_installers():
     print("PASS build_steps_for_both_delegates_to_existing_installers")
 
 
+def test_build_steps_for_cursor_delegates_to_cursor_installer():
+    project = Path("/tmp/example-project")
+    steps = qs.build_install_steps(
+        agents=("cursor",),
+        python_path="/py",
+        project=project,
+        cursor_model_backend="codex",
+    )
+    texts = [_cmd_text(step) for step in steps]
+
+    _assert(len(steps) == 1, steps)
+    _assert(any("install_cursor.py" in text
+                and "--agents-md" in text
+                and str(project / "AGENTS.md") in text
+                and "--model-backend codex" in text for text in texts),
+            f"Cursor quickstart should delegate to install_cursor with backend: {texts}")
+    print("PASS build_steps_for_cursor_delegates_to_cursor_installer")
+
+
 def test_build_doctor_steps_cover_selected_surfaces():
     project = Path("/tmp/example-project")
     steps = qs.build_doctor_steps(
@@ -67,6 +86,24 @@ def test_build_doctor_steps_cover_selected_surfaces():
     print("PASS build_doctor_steps_cover_selected_surfaces")
 
 
+def test_build_doctor_steps_cover_cursor_surface():
+    project = Path("/tmp/example-project")
+    steps = qs.build_doctor_steps(
+        agents=("cursor",),
+        python_path="/py",
+        project=project,
+        cursor_model_backend="claude",
+    )
+    texts = [_cmd_text(step) for step in steps]
+    _assert(any("install_cursor.py" in text and "--check" in text
+                and "--model-backend claude" in text for text in texts),
+            f"Cursor install --check missing: {texts}")
+    _assert(any("cursor_doctor.py" in text
+                and "--model-backend claude" in text for text in texts),
+            f"Cursor doctor missing: {texts}")
+    print("PASS build_doctor_steps_cover_cursor_surface")
+
+
 def test_seed_source_follows_agents_by_default():
     _assert(qs.seed_source_for_agents(("claude",), "auto") == "claude",
             "Claude-only quickstart should seed Claude transcripts by default")
@@ -74,6 +111,10 @@ def test_seed_source_follows_agents_by_default():
             "Codex-only quickstart should seed Codex transcripts by default")
     _assert(qs.seed_source_for_agents(("claude", "codex"), "auto") == "both",
             "Both-agent quickstart should seed both transcript sources by default")
+    _assert(qs.seed_source_for_agents(("cursor",), "auto") == "both",
+            "Cursor-only quickstart should seed existing Claude/Codex transcripts by default")
+    _assert(qs.seed_source_for_agents(("claude", "codex", "cursor"), "auto") == "both",
+            "All-agent quickstart should seed both supported transcript sources")
     _assert(qs.seed_source_for_agents(("claude",), "both") == "both",
             "Explicit seed source should win")
     print("PASS seed_source_follows_agents_by_default")
@@ -106,7 +147,7 @@ def test_resolve_agents_requires_choice_noninteractive_even_with_context():
             is_tty=False,
         )
     except ValueError as exc:
-        _assert("--agents both" in str(exc) and "Detected current surface: codex" in str(exc),
+        _assert("--agents all" in str(exc) and "Detected current surface: codex" in str(exc),
                 f"unexpected error: {exc}")
     else:
         raise AssertionError("non-interactive auto mode should require explicit --agents")
@@ -122,6 +163,13 @@ def test_resolve_agents_uses_detected_default_when_interactive():
     )
     _assert(agents == ("codex",), f"expected Codex default, got {agents}")
     print("PASS resolve_agents_uses_detected_default_when_interactive")
+
+
+def test_resolve_agents_accepts_cursor_and_all():
+    _assert(qs.normalize_agents("cursor") == ("cursor",), "cursor should be selectable")
+    _assert(qs.normalize_agents("all") == ("claude", "codex", "cursor"),
+            "all should include Claude, Codex, and Cursor")
+    print("PASS resolve_agents_accepts_cursor_and_all")
 
 
 def test_resolve_agents_requires_choice_without_prompt_or_context():
@@ -180,11 +228,14 @@ def test_quickstart_seed_handoff_prints_once_noninteractive():
 
 if __name__ == "__main__":
     test_build_steps_for_both_delegates_to_existing_installers()
+    test_build_steps_for_cursor_delegates_to_cursor_installer()
     test_build_doctor_steps_cover_selected_surfaces()
+    test_build_doctor_steps_cover_cursor_surface()
     test_seed_source_follows_agents_by_default()
     test_seed_command_includes_project_source_sessions_and_apply()
     test_resolve_agents_requires_choice_noninteractive_even_with_context()
     test_resolve_agents_uses_detected_default_when_interactive()
+    test_resolve_agents_accepts_cursor_and_all()
     test_resolve_agents_requires_choice_without_prompt_or_context()
     test_run_steps_stops_before_later_steps_on_failure()
     test_quickstart_seed_handoff_prints_once_noninteractive()

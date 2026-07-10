@@ -1,0 +1,32 @@
+---
+description: Latch decision-continuity gate for Cursor projects
+alwaysApply: true
+---
+
+# latch Cursor activation
+
+This Cursor rule is managed by latch. Re-run `{{KB_HOME}}/bin/install_cursor.sh --yes`
+from this project to refresh it.
+
+Use the project `latch` MCP server as the decision-continuity layer:
+
+- Before answering when project history, prior decisions, or rejected paths may
+  matter, read latch with `latch_search`, `latch_recent`, or `latch_get`.
+- Before committing to an implementation plan for a coding, build, add, fix,
+  refactor, extend, or rebuild request, call `latch_gate` with the user's
+  request verbatim.
+- When `latch_gate` returns `findings.must_display_to_user=true`, show a
+  concise **Latch gate** block before editing. Include the recommendation,
+  summary, cited evidence node ids/titles/status, risks or better next action,
+  and any uncovered claims.
+- If the gate is skipped, degraded, or returns no recommendation, say so and
+  continue from normal KB-first context.
+- Capture durable user decisions or rejected paths with `latch_capture_decision`
+  or `latch_insert` when appropriate.
+
+Treat `AGENTS.md` as the fuller shared latch contract for this project.
+
+Cursor adapter boundary: this install is MCP plus Cursor Rules plus `AGENTS.md`
+plus project-local `.cursor/commands` prompts. It does not install Cursor hooks,
+a native Cursor model backend, Cursor transcript discovery, or native Cursor
+compaction.

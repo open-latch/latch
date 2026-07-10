@@ -4,12 +4,15 @@
 This adapter wires the local latch engine into Cursor's project surfaces:
 
 * ``.cursor/mcp.json`` gets the local ``latch`` MCP server.
+* ``.cursor/rules/latch.mdc`` gets the Cursor-native activation rule.
+* ``.cursor/commands/*.md`` gets project-local Cursor command prompts for the
+  latch workflows that are safe on Cursor today.
 * ``AGENTS.md`` gets the shared latch agent contract.
 
-It intentionally does not install Cursor hooks, plugins, skills, or a native
-Cursor model backend. Cursor can use latch MCP tools through the project MCP
-config; model-backed gate calls continue to use the existing Claude/Codex
-backends when explicitly selected.
+It intentionally does not install Cursor hooks, native Cursor compaction,
+transcript discovery, or a native Cursor model backend. Cursor can use latch MCP
+tools through the project MCP config; model-backed gate calls continue to use
+the existing Claude/Codex backends when explicitly selected.
 """
 from __future__ import annotations
 
@@ -21,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 import agents_md_sync
+import cursor_rules_sync
 import install_engine
 
 SERVER_NAME = "latch"
@@ -32,6 +36,28 @@ KB_HOME = Path(
     or Path(__file__).resolve().parent.parent
 )
 DEFAULT_MCP_PATH = Path(".cursor") / "mcp.json"
+DEFAULT_RULE_PATH = cursor_rules_sync.DEFAULT_RULE_PATH
+DEFAULT_COMMANDS_DIR = Path(".cursor") / "commands"
+COMMANDS_SRC = KB_HOME / "commands"
+COMMAND_PLACEHOLDER = install_engine.COMMAND_PLACEHOLDER
+CURSOR_COMMAND_FILES = (
+    "latch-budget-approve.md",
+    "latch-decay.md",
+    "latch-gate.md",
+    "latch-gate-report.md",
+    "latch-heal.md",
+    "latch-pm.md",
+    "latch-tree.md",
+    "unlatch.md",
+)
+UNSUPPORTED_CURSOR_COMMAND_FILES = ("latch-compact.md",)
+CURSOR_COMMAND_FOOTER = (
+    "\n\n---\n\n"
+    "Cursor boundary: this project-local command is a reusable prompt for "
+    "Cursor Agent. It may ask Agent to call latch MCP tools or run latch shell "
+    "wrappers. It is not a Cursor hook, native Cursor model backend, Cursor "
+    "transcript import, or native Cursor compaction integration.\n"
+)
 
 
 def _forward_slash(value: str) -> str:
@@ -139,6 +165,155 @@ def write_config(path: Path, content: str) -> None:
     path.write_text(content, encoding="utf-8")
 
 
+def render_cursor_command(name: str, kb_home: str | None = None) -> str:
+    src = COMMANDS_SRC / name
+    if name not in CURSOR_COMMAND_FILES:
+        raise ValueError(f"unsupported Cursor command: {name}")
+    if not src.is_file():
+        raise FileNotFoundError(src)
+    home = kb_home if kb_home is not None else str(KB_HOME).replace("\\", "/")
+    body = src.read_text(encoding="utf-8").replace(COMMAND_PLACEHOLDER, home)
+    if name == "latch-pm.md":
+        body = body.replace(
+            "Optionally offer `/latch-compact` to summarize the\n"
+            "conversation itself into the KB.",
+            "Cursor-native `/latch-compact` is not installed in this adapter. "
+            "If the user wants to preserve the conversation, point them to the "
+            "shell/Codex/Claude compaction path documented in latch."
+        )
+    return body.rstrip() + CURSOR_COMMAND_FOOTER
+
+
+def _read_text(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+
+
+def _is_latch_cursor_command_body(body: str) -> bool:
+    normalized = body.replace("\\", "/")
+    return (
+        "Cursor boundary: this project-local command is a reusable prompt" in body
+        or str(KB_HOME).replace("\\", "/") in normalized
+        or any(marker in normalized for marker in install_engine.LATCH_COMMAND_MARKERS)
+    )
+
+
+def sync_cursor_commands(commands_dir: Path = DEFAULT_COMMANDS_DIR, *, dry_run: bool = False) -> list[str]:
+    if not COMMANDS_SRC.is_dir():
+        return [f"no commands/ directory at {COMMANDS_SRC} - skipped"]
+    changes: list[str] = []
+    if not dry_run:
+        commands_dir.mkdir(parents=True, exist_ok=True)
+    for name in CURSOR_COMMAND_FILES:
+        desired = render_cursor_command(name)
+        target = commands_dir / name
+        existing = _read_text(target)
+        if existing == desired:
+            continue
+        action = "updated" if target.exists() else "installed"
+        if not dry_run:
+            if target.exists():
+                target.with_name(target.name + ".latchbak").write_text(existing, encoding="utf-8")
+            target.write_text(desired, encoding="utf-8")
+        changes.append(f"{action} Cursor command {name}")
+    for name in UNSUPPORTED_CURSOR_COMMAND_FILES:
+        target = commands_dir / name
+        if not target.exists():
+            continue
+        body = _read_text(target)
+        if not _is_latch_cursor_command_body(body):
+            changes.append(f"skipped unsupported Cursor command {name} (looks user-owned)")
+            continue
+        if not dry_run:
+            target.with_name(target.name + ".latchbak").write_text(body, encoding="utf-8")
+            target.unlink()
+        changes.append(f"removed unsupported Cursor command {name}")
+    return changes
+
+
+def cursor_commands_status(commands_dir: Path = DEFAULT_COMMANDS_DIR) -> tuple[bool, str]:
+    if not COMMANDS_SRC.is_dir():
+        return True, f"Cursor commands: no commands/ source at {COMMANDS_SRC}"
+    missing: list[str] = []
+    drifted: list[str] = []
+    unresolved: list[str] = []
+    for name in CURSOR_COMMAND_FILES:
+        target = commands_dir / name
+        if not target.is_file():
+            missing.append(name)
+            continue
+        body = _read_text(target)
+        if COMMAND_PLACEHOLDER in body:
+            unresolved.append(name)
+        if body != render_cursor_command(name):
+            drifted.append(name)
+    unsupported = [
+        name for name in UNSUPPORTED_CURSOR_COMMAND_FILES
+        if (commands_dir / name).is_file()
+        and _is_latch_cursor_command_body(_read_text(commands_dir / name))
+    ]
+    problems = []
+    if missing:
+        problems.append(f"missing {', '.join(missing[:3])}{'...' if len(missing) > 3 else ''}")
+    if drifted:
+        problems.append(f"drifted {', '.join(drifted[:3])}{'...' if len(drifted) > 3 else ''}")
+    if unresolved:
+        problems.append(f"unresolved {COMMAND_PLACEHOLDER} in {', '.join(unresolved[:3])}")
+    if unsupported:
+        problems.append(f"unsupported installed {', '.join(unsupported)}")
+    if problems:
+        return False, f"Cursor commands missing or drifted in {commands_dir}: " + "; ".join(problems)
+    return True, f"Cursor commands installed in {commands_dir} ({len(CURSOR_COMMAND_FILES)} workflows)"
+
+
+def remove_cursor_mcp_config(path: Path, *, dry_run: bool = False) -> list[str]:
+    if not path.exists():
+        return []
+    obj = _json_object(path.read_text(encoding="utf-8"), path=path)
+    servers = obj.get("mcpServers")
+    if not isinstance(servers, dict):
+        return []
+    removed = [name for name in (SERVER_NAME, *LEGACY_SERVER_NAMES) if name in servers]
+    if not removed:
+        return []
+    if not dry_run:
+        for name in removed:
+            del servers[name]
+        if not servers:
+            del obj["mcpServers"]
+        write_config(path, _dump(obj))
+    return [f"removed Cursor MCP server {name}" for name in removed]
+
+
+def remove_cursor_commands(commands_dir: Path = DEFAULT_COMMANDS_DIR, *, dry_run: bool = False) -> list[str]:
+    changes: list[str] = []
+    for name in (*CURSOR_COMMAND_FILES, *UNSUPPORTED_CURSOR_COMMAND_FILES):
+        target = commands_dir / name
+        if not target.is_file():
+            continue
+        body = _read_text(target)
+        desired = render_cursor_command(name) if name in CURSOR_COMMAND_FILES else None
+        if desired is not None and body == desired:
+            if dry_run:
+                changes.append(f"would remove Cursor command {name}")
+            else:
+                target.unlink()
+                changes.append(f"removed Cursor command {name}")
+            continue
+        if not _is_latch_cursor_command_body(body):
+            changes.append(f"skipped Cursor command {name} (looks user-owned)")
+            continue
+        if dry_run:
+            changes.append(f"would remove latch-owned Cursor command {name}")
+        else:
+            target.with_name(target.name + ".latchbak").write_text(body, encoding="utf-8")
+            target.unlink()
+            changes.append(f"removed latch-owned Cursor command {name}")
+    return changes
+
+
 def _agents_sync_args(agents_md: str, *, yes: bool) -> list[str]:
     args: list[str] = []
     if yes:
@@ -170,6 +345,14 @@ def _check(args: argparse.Namespace, python_path: str, server_py: str) -> int:
     if not args.skip_agents:
         status = agents_md_sync.evaluate(Path(args.agents_md))
         checks.append((status == agents_md_sync.OK, f"AGENTS.md managed region: {status}"))
+    if not args.skip_rules:
+        status = cursor_rules_sync.evaluate(Path(args.rules_mdc))
+        checks.append((
+            status == cursor_rules_sync.OK,
+            f"Cursor rule {args.rules_mdc}: {status}",
+        ))
+    if not args.skip_commands:
+        checks.append(cursor_commands_status(Path(args.commands_dir)))
 
     failed = 0
     for ok, label in checks:
@@ -180,16 +363,22 @@ def _check(args: argparse.Namespace, python_path: str, server_py: str) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description="latch Cursor installer (MCP + AGENTS.md).")
+    ap = argparse.ArgumentParser(description="latch Cursor installer (MCP + Cursor Rules + Commands + AGENTS.md).")
     ap.add_argument("--python", help="interpreter to register for the MCP server")
     ap.add_argument("--mcp-json", default=str(DEFAULT_MCP_PATH),
                     help="Cursor MCP config path (default: .cursor/mcp.json)")
     ap.add_argument("--agents-md", default="AGENTS.md",
                     help="AGENTS.md path to sync (default: ./AGENTS.md)")
+    ap.add_argument("--rules-mdc", default=str(DEFAULT_RULE_PATH),
+                    help="Cursor rule path (default: .cursor/rules/latch.mdc)")
+    ap.add_argument("--commands-dir", default=str(DEFAULT_COMMANDS_DIR),
+                    help="Cursor commands directory (default: .cursor/commands)")
     ap.add_argument("--model-backend", choices=("claude", "codex"),
                     help="set LATCH_MODEL_BACKEND/LATCH_GATE_BACKEND to an existing backend")
     ap.add_argument("--skip-mcp", action="store_true", help="do not touch .cursor/mcp.json")
     ap.add_argument("--skip-agents", action="store_true", help="do not touch AGENTS.md")
+    ap.add_argument("--skip-rules", action="store_true", help="do not touch Cursor Rules")
+    ap.add_argument("--skip-commands", action="store_true", help="do not touch .cursor/commands")
     ap.add_argument("--yes", "-y", action="store_true", help="confirm first-time AGENTS.md wiring")
     ap.add_argument("--dry-run", action="store_true", help="print what would change")
     ap.add_argument("--check", action="store_true", help="verify wiring only")
@@ -205,6 +394,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  KB_HOME      : {KB_HOME}")
     print(f"  interpreter  : {python_path}")
     print(f"  MCP config   : {'skipped' if args.skip_mcp else args.mcp_json}")
+    print(f"  Cursor rule  : {'skipped' if args.skip_rules else args.rules_mdc}")
+    print(f"  Commands     : {'skipped' if args.skip_commands else args.commands_dir}")
     print(f"  AGENTS.md    : {'skipped' if args.skip_agents else args.agents_md}")
     print(f"  model backend: {args.model_backend or 'engine default'}")
     print(f"  mode         : {'DRY-RUN (no writes)' if args.dry_run else 'apply'}\n")
@@ -235,11 +426,32 @@ def main(argv: list[str] | None = None) -> int:
             if rc != 0:
                 return rc
 
+    if not args.skip_rules:
+        rules_path = Path(args.rules_mdc)
+        if args.dry_run:
+            status = cursor_rules_sync.evaluate(rules_path)
+            print(f"  [DRY ] Cursor rule status: {status}")
+        else:
+            action = cursor_rules_sync.sync(rules_path)
+            if action == "synced":
+                print(f"  [OK  ] Cursor rule synced (backup: {rules_path}.latchbak)")
+            elif action == "created":
+                print(f"  [OK  ] Cursor rule created at {rules_path}")
+            else:
+                print(f"  [OK  ] Cursor rule {action}: {rules_path}")
+
+    if not args.skip_commands:
+        changes = sync_cursor_commands(Path(args.commands_dir), dry_run=args.dry_run)
+        if changes:
+            _print_changes("Cursor commands", changes, dry_run=args.dry_run)
+        else:
+            print("  [OK  ] Cursor commands already have latch")
+
     print()
     if args.dry_run:
         print("Dry run only - re-run without --dry-run to apply.")
     else:
-        print("Done. Restart Cursor or run 'agent mcp list' so Cursor reloads the MCP server.")
+        print("Done. Restart Cursor or run 'agent mcp list' so Cursor reloads the MCP server, project rule, and commands.")
         print("Native Cursor-backed gate calls were not installed; pass --model-backend claude|codex to use an existing backend.")
     print()
     return 0

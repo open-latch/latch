@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-  One guided first-run path for Claude Code, Codex, or both.
+  One guided first-run path for Claude Code, Codex, Cursor, or all.
 
 .DESCRIPTION
   Windows-native counterpart of bin/latch_quickstart.sh. Delegates to the
