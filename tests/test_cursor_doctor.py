@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import agents_md_sync  # noqa: E402
 import cursor_rules_sync  # noqa: E402
+import cursor_hooks  # noqa: E402
 import cursor_doctor as cd  # noqa: E402
 import install_cursor as ic  # noqa: E402
 
@@ -234,6 +235,41 @@ def test_run_all_static_and_cli_checks():
     print("PASS run_all_static_and_cli_checks")
 
 
+def test_run_all_requires_hooks_when_requested():
+    d = _tmp()
+    try:
+        config = d / ".cursor" / "mcp.json"
+        config.parent.mkdir(parents=True)
+        server = d / "mcp_server.py"
+        server.write_text("# ok\n", encoding="utf-8")
+        body, _ = ic.merge_mcp_config("", sys.executable, str(server))
+        config.write_text(body, encoding="utf-8")
+        agents = d / "AGENTS.md"
+        agents_md_sync.sync(agents, create=True)
+        rule = d / ".cursor" / "rules" / "latch.mdc"
+        cursor_rules_sync.sync(rule)
+        commands = d / ".cursor" / "commands"
+        ic.sync_cursor_commands(commands)
+        hooks = d / ".cursor" / "hooks.json"
+        hooks_body, _ = cursor_hooks.merge_hooks(
+            "", sys.executable,
+            str(ic.KB_HOME / "src" / "hooks" / "cursor_session_start.py"),
+            str(ic.KB_HOME / "src" / "hooks" / "cursor_post_tool_use.py"),
+            path=hooks,
+        )
+        cursor_hooks.write_hooks(hooks, hooks_body)
+        checks = cd.run_all(
+            config_path=config, agents_path=agents, rules_path=rule,
+            commands_dir=commands, python_path=sys.executable,
+            server_py=str(server), skip_cli=True, with_hooks=True,
+            hooks_path=hooks,
+        )
+        hook_check = next(c for c in checks if "hooks.json" in c.name)
+        _assert(hook_check.level == cd.OK, hook_check)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 if __name__ == "__main__":
     test_check_cursor_config_ok_and_missing()
     test_json_mode_reports_malformed_cursor_config()
@@ -245,4 +281,5 @@ if __name__ == "__main__":
     test_check_cursor_cli_mcp_ok_and_failure()
     test_check_cursor_cli_mcp_fails_when_critical_tools_missing()
     test_run_all_static_and_cli_checks()
+    test_run_all_requires_hooks_when_requested()
     print("\nAll cursor_doctor tests pass.")

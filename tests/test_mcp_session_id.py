@@ -9,6 +9,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import codex_session  # noqa: E402
+import cursor_session  # noqa: E402
 import mcp_server  # noqa: E402
 import paths  # noqa: E402
 
@@ -85,10 +86,32 @@ def test_resolve_project_session_id_uses_codex_marker_when_env_lacks_thread():
     print("PASS resolve_project_session_id_uses_codex_marker_when_env_lacks_thread")
 
 
+def test_resolve_project_session_id_uses_cursor_marker_before_codex_backend():
+    tmp = tempfile.mkdtemp(prefix="mcp_cursor_session_marker_")
+    project_dir = paths.project_dir(tmp)
+    try:
+        cursor_session.write_marker(tmp, "cursor-conversation")
+        codex_session.write_marker(tmp, "wrong-codex-thread")
+        env = {
+            "LATCH_ADAPTER": "cursor",
+            "LATCH_MODEL_BACKEND": "codex",
+            "LATCH_GATE_BACKEND": "codex",
+        }
+        _assert(
+            mcp_server._resolve_project_session_id(env, project_cwd=tmp) == "cursor-conversation",
+            "Cursor adapter identity must win over its selected Codex model backend",
+        )
+    finally:
+        shutil.rmtree(project_dir, ignore_errors=True)
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("PASS resolve_project_session_id_uses_cursor_marker_before_codex_backend")
+
+
 if __name__ == "__main__":
     test_resolve_project_session_id_prefers_neutral_override()
     test_resolve_project_session_id_preserves_claude_precedence()
     test_resolve_project_session_id_uses_codex_fallback()
     test_resolve_project_session_id_ignores_blank_values()
     test_resolve_project_session_id_uses_codex_marker_when_env_lacks_thread()
+    test_resolve_project_session_id_uses_cursor_marker_before_codex_backend()
     print("\nAll mcp_session_id tests pass.")

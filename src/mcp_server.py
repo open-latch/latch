@@ -26,6 +26,7 @@ from mcp.server.fastmcp import FastMCP  # noqa: E402
 import artifacts as artifact_store  # noqa: E402
 import capture_streams  # noqa: E402
 import codex_session  # noqa: E402
+import cursor_session  # noqa: E402
 import db  # noqa: E402
 import embeddings  # noqa: E402
 import gate_report  # noqa: E402
@@ -57,6 +58,10 @@ def _is_codex_adapter_env(env: Mapping[str, str]) -> bool:
     return any((env.get(name) or "").strip() for name in ("CODEX_THREAD_ID", "CODEX_HOME"))
 
 
+def _is_cursor_adapter_env(env: Mapping[str, str]) -> bool:
+    return (env.get("LATCH_ADAPTER") or "").strip().lower() == "cursor"
+
+
 def _resolve_project_session_id(
     env: Mapping[str, str] | None = None,
     project_cwd: str | os.PathLike | None = None,
@@ -74,6 +79,10 @@ def _resolve_project_session_id(
         value = (source.get(name) or "").strip()
         if value:
             return value
+    # Cursor can deliberately use the Codex model backend.  The explicit
+    # adapter identity must therefore win over backend-based Codex detection.
+    if _is_cursor_adapter_env(source):
+        return cursor_session.read_session_id(project_cwd or PROJECT_CWD)
     if _is_codex_adapter_env(source):
         return codex_session.read_session_id(project_cwd or PROJECT_CWD)
     return None

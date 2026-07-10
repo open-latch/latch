@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import agents_md_sync  # noqa: E402
 import cursor_rules_sync  # noqa: E402
+import cursor_hooks  # noqa: E402
 import install_engine  # noqa: E402
 import install_cursor as ic  # noqa: E402
 
@@ -240,6 +241,37 @@ def test_cursor_commands_sync_status_and_remove():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_with_hooks_installs_and_check_requires_hooks():
+    d = Path(tempfile.mkdtemp(prefix="latch-cursor-hooks-install-"))
+    try:
+        hooks = d / ".cursor" / "hooks.json"
+        rc = ic.main([
+            "--skip-mcp", "--skip-agents", "--skip-rules", "--skip-commands",
+            "--hooks-json", str(hooks), "--with-hooks", "--yes",
+        ])
+        _assert(rc == 0, rc)
+        ok, detail = cursor_hooks.hooks_status(
+            hooks,
+            install_engine.resolve_python(None),
+            str(ic.KB_HOME / "src" / "hooks" / "cursor_session_start.py"),
+            str(ic.KB_HOME / "src" / "hooks" / "cursor_post_tool_use.py"),
+        )
+        _assert(ok, detail)
+        rc = ic.main([
+            "--skip-mcp", "--skip-agents", "--skip-rules", "--skip-commands",
+            "--hooks-json", str(hooks), "--with-hooks", "--check",
+        ])
+        _assert(rc == 0, rc)
+        hooks.unlink()
+        rc = ic.main([
+            "--skip-mcp", "--skip-agents", "--skip-rules", "--skip-commands",
+            "--hooks-json", str(hooks), "--with-hooks", "--check",
+        ])
+        _assert(rc == 1, rc)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 if __name__ == "__main__":
     test_render_cursor_server_uses_cursor_mcp_shape()
     test_merge_mcp_config_preserves_unrelated_servers_and_settings()
@@ -251,4 +283,5 @@ if __name__ == "__main__":
     test_first_wire_notice_is_cursor_branded()
     test_check_mode_verifies_mcp_and_agents()
     test_cursor_commands_sync_status_and_remove()
+    test_with_hooks_installs_and_check_requires_hooks()
     print("\nAll install_cursor tests pass.")

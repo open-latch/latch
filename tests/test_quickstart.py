@@ -52,6 +52,7 @@ def test_build_steps_for_cursor_delegates_to_cursor_installer():
         python_path="/py",
         project=project,
         cursor_model_backend="codex",
+        cursor_with_hooks=True,
     )
     texts = [_cmd_text(step) for step in steps]
 
@@ -59,7 +60,8 @@ def test_build_steps_for_cursor_delegates_to_cursor_installer():
     _assert(any("install_cursor.py" in text
                 and "--agents-md" in text
                 and str(project / "AGENTS.md") in text
-                and "--model-backend codex" in text for text in texts),
+                and "--model-backend codex" in text
+                and "--with-hooks" in text for text in texts),
             f"Cursor quickstart should delegate to install_cursor with backend: {texts}")
     print("PASS build_steps_for_cursor_delegates_to_cursor_installer")
 
@@ -93,13 +95,16 @@ def test_build_doctor_steps_cover_cursor_surface():
         python_path="/py",
         project=project,
         cursor_model_backend="claude",
+        cursor_with_hooks=True,
     )
     texts = [_cmd_text(step) for step in steps]
     _assert(any("install_cursor.py" in text and "--check" in text
-                and "--model-backend claude" in text for text in texts),
+                and "--model-backend claude" in text
+                and "--with-hooks" in text for text in texts),
             f"Cursor install --check missing: {texts}")
     _assert(any("cursor_doctor.py" in text
-                and "--model-backend claude" in text for text in texts),
+                and "--model-backend claude" in text
+                and "--with-hooks" in text for text in texts),
             f"Cursor doctor missing: {texts}")
     print("PASS build_doctor_steps_cover_cursor_surface")
 

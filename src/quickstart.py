@@ -136,6 +136,7 @@ def build_install_steps(
     python_path: str,
     project: Path,
     cursor_model_backend: str | None = None,
+    cursor_with_hooks: bool = False,
 ) -> list[Step]:
     steps: list[Step] = []
     selected = set(agents)
@@ -190,6 +191,8 @@ def build_install_steps(
         ]
         if cursor_model_backend:
             command.extend(["--model-backend", cursor_model_backend])
+        if cursor_with_hooks:
+            command.append("--with-hooks")
         steps.append(Step("Wire Cursor", command, project))
     return steps
 
@@ -201,6 +204,7 @@ def build_doctor_steps(
     project: Path,
     full_codex_doctor: bool = False,
     cursor_model_backend: str | None = None,
+    cursor_with_hooks: bool = False,
 ) -> list[Step]:
     steps: list[Step] = []
     selected = set(agents)
@@ -261,6 +265,9 @@ def build_doctor_steps(
         if cursor_model_backend:
             cursor_check.extend(["--model-backend", cursor_model_backend])
             cursor_doctor.extend(["--model-backend", cursor_model_backend])
+        if cursor_with_hooks:
+            cursor_check.append("--with-hooks")
+            cursor_doctor.append("--with-hooks")
         steps.extend([
             Step("Check Cursor wiring", cursor_check, project),
             Step("Run latch Cursor doctor", cursor_doctor, project),
@@ -374,6 +381,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                     help="include Codex compact/summarizer probes in the Codex doctor")
     ap.add_argument("--cursor-model-backend", choices=("claude", "codex"),
                     help="existing backend for Cursor model-backed gate calls")
+    ap.add_argument("--cursor-with-hooks", action="store_true",
+                    help="install and verify opt-in Cursor session/activity hooks")
     ap.add_argument("--no-seed", action="store_true",
                     help="print the seed command but do not offer to run it")
     return ap.parse_args(argv)
@@ -402,6 +411,7 @@ def main(argv: list[str] | None = None) -> int:
         python_path=python_path,
         project=project,
         cursor_model_backend=args.cursor_model_backend,
+        cursor_with_hooks=args.cursor_with_hooks,
     )
     if not args.skip_doctor:
         steps.extend(build_doctor_steps(
@@ -410,6 +420,7 @@ def main(argv: list[str] | None = None) -> int:
             project=project,
             full_codex_doctor=args.full_codex_doctor,
             cursor_model_backend=args.cursor_model_backend,
+            cursor_with_hooks=args.cursor_with_hooks,
         ))
     seed_cmd = seed_command_args(
         python_path=python_path,
@@ -426,6 +437,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  seed source  : {source}")
     if "cursor" in agents:
         print(f"  Cursor backend: {args.cursor_model_backend or 'engine default'}")
+        print(f"  Cursor hooks  : {'enabled' if args.cursor_with_hooks else 'not installed'}")
     print(f"  last sessions: {args.last_sessions}")
     print(f"  mode         : {'DRY-RUN (no writes)' if args.dry_run else 'apply'}")
 

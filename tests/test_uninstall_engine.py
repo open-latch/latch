@@ -13,6 +13,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 import install_engine as ie  # noqa: E402
 import agents_md_sync  # noqa: E402
+import cursor_hooks  # noqa: E402
 import cursor_rules_sync  # noqa: E402
 import install_cursor as ic  # noqa: E402
 import uninstall_engine as ue  # noqa: E402
@@ -115,18 +116,34 @@ def test_strip_cursor_project_removes_latch_owned_wiring_only():
         ic.sync_cursor_commands(root / ".cursor" / "commands")
         user_command = root / ".cursor" / "commands" / "mine.md"
         user_command.write_text("user-owned command\n", encoding="utf-8")
+        hooks_path = root / ".cursor" / "hooks.json"
+        hooks_body, _ = cursor_hooks.merge_hooks(
+            json.dumps({
+                "version": 1,
+                "hooks": {"stop": [{"command": "user-stop"}]},
+            }),
+            "/py",
+            "/repo/src/hooks/cursor_session_start.py",
+            "/repo/src/hooks/cursor_post_tool_use.py",
+            path=hooks_path,
+        )
+        cursor_hooks.write_hooks(hooks_path, hooks_body)
         agents_md_sync.sync(root / "AGENTS.md", create=True)
 
         changes = ue.strip_cursor_project(str(root), dry_run=False)
         _assert(any("removed Cursor MCP server latch" in c for c in changes), changes)
         _assert(any("removed Cursor rule" in c for c in changes), changes)
         _assert(any("removed Cursor command latch-gate.md" in c for c in changes), changes)
+        _assert(any("latch-owned Cursor hook" in c for c in changes), changes)
         _assert(any("stripped managed region" in c for c in changes), changes)
 
         remaining = json.loads(mcp.read_text(encoding="utf-8"))
         _assert("latch" not in remaining.get("mcpServers", {}), remaining)
         _assert("other" in remaining.get("mcpServers", {}), remaining)
         _assert(user_command.exists(), "user-owned Cursor command should survive")
+        remaining_hooks = json.loads(hooks_path.read_text(encoding="utf-8"))
+        _assert(remaining_hooks["hooks"] == {"stop": [{"command": "user-stop"}]},
+                remaining_hooks)
         rows = ue.cursor_project_removed(str(root))
         _assert(all(ok for ok, _label in rows), rows)
         print("PASS strip_cursor_project_removes_latch_owned_wiring_only")
