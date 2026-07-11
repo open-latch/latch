@@ -624,6 +624,11 @@ def check_kb_pin() -> tuple[str, str, str]:
     )
 
 
+def _proxy_high_water_warn_at(cap: int) -> int | None:
+    """Ceiling of 75% of a positive configured cap; None when unbounded."""
+    return (cap * 3 + 3) // 4 if cap > 0 else None
+
+
 def check_mcp_runtime_lifecycle() -> tuple[str, str, str]:
     """Surface lifecycle pressure without importing the heavyweight server."""
     name = "MCP runtime lifecycle"
@@ -631,16 +636,30 @@ def check_mcp_runtime_lifecycle() -> tuple[str, str, str]:
         import mcp_broker
 
         policy = mcp_broker.proxy_policy()
-        live = len(mcp_broker.proxy_inventory())
+        inventory = mcp_broker.proxy_inventory()
+        live = len(inventory)
         # Inventory cleanup may emit a stale-heartbeat event; summarize after
         # the sweep so the same doctor run surfaces it.
-        summary = mcp_broker.lifecycle_summary(hours=24)
+        summary = mcp_broker.lifecycle_summary(hours=24, inventory=inventory)
         discovery = mcp_broker.read_discovery()
     except Exception as exc:
         return name, WARN, f"could not inspect lifecycle state: {exc}"
 
     counts = summary.get("counts") or {}
     warning_count = int(summary.get("warning_count") or 0)
+    cap = int(policy["cap"])
+    high_water = int(summary.get("proxy_high_water") or 0)
+    warn_at = _proxy_high_water_warn_at(cap)
+    current_over_cap_s = float(summary.get("current_over_cap_duration_s") or 0.0)
+    currently_over_cap = bool(summary.get("currently_over_cap")) or (
+        cap > 0 and live > cap
+    )
+    latest_start = summary.get("latest_daemon_start") or {}
+    start_detail = (
+        f"latest start={latest_start.get('reason', 'unknown')} "
+        f"in {latest_start.get('cold_start_duration_ms', 'unknown')}ms; "
+        if latest_start else ""
+    )
     if os.environ.get("LATCH_MCP_ALLOW_LEGACY_FALLBACK") or os.environ.get(
         "LATCH_MCP_FORCE_LEGACY"
     ):
@@ -648,6 +667,7 @@ def check_mcp_runtime_lifecycle() -> tuple[str, str, str]:
             "legacy mode/fallback is explicitly enabled; this can restore one "
             "heavyweight model per stdio process"
         )
+    pressure: list[str] = []
     if warning_count:
         signals = ", ".join(
             f"{event}={count}" for event, count in counts.items()
@@ -658,18 +678,40 @@ def check_mcp_runtime_lifecycle() -> tuple[str, str, str]:
                 "daemon_disconnect_unknown_outcome",
             } and count
         )
+        pressure.append(f"{warning_count} lifecycle event(s): {signals}")
+    if warn_at is not None and high_water >= warn_at:
+        pressure.append(
+            f"proxy high-water {high_water} reached the 75% review threshold "
+            f"{warn_at}/{cap}"
+        )
+    if currently_over_cap:
+        pressure.append(
+            f"proxy pool is currently over cap for at least {current_over_cap_s:.1f}s"
+        )
+    if pressure:
+        retirement_boundary = ""
+        if counts.get("proxy_retired"):
+            retirement_boundary = (
+                " A retired proxy cannot prove same-task host restart without a stable "
+                "host connection id; confirm reconnect or start a fresh task."
+            )
         return name, WARN, (
-            f"{warning_count} pressure/failure event(s) in 24h: {signals}. "
-            f"Proxy high-water={summary.get('proxy_high_water', 0)}; max over-cap "
-            f"duration={summary.get('max_over_cap_duration_s', 0)}s. "
+            f"24h lifecycle pressure: {'; '.join(pressure)}. "
+            f"Max completed over-cap duration="
+            f"{summary.get('max_over_cap_duration_s', 0)}s. "
+            f"{start_detail}Peak daemon connections="
+            f"{summary.get('max_peak_connections', 0)}. "
             "Inspect latch_runtime_status lifecycle.recent_warnings and revisit "
-            "the lease/idle defaults if this persists."
+            f"the lease/idle defaults if this persists.{retirement_boundary}"
         )
     owner = f"owner pid={discovery['pid']}" if discovery else "no active owner"
     return name, OK, (
-        f"{owner}; live leases={live}/{policy['cap']}; "
+        f"{owner}; live leases={live}/{cap}; "
         f"retire idle={policy['retire_idle_s']:.0f}s; stale after={policy['stale_s']:.0f}s; "
-        f"24h high-water={summary.get('proxy_high_water', 0)}; "
+        f"24h high-water={high_water}"
+        f"/{warn_at if warn_at is not None else 'unbounded'}; "
+        f"{start_detail}peak daemon connections="
+        f"{summary.get('max_peak_connections', 0)}; "
         "no lifecycle pressure events in 24h"
     )
 

@@ -189,6 +189,17 @@ def _temp_vault() -> Path:
     return Path(tempfile.mkdtemp(prefix="latch_shared_mcp_"))
 
 
+def _lifecycle_rows(kb_dir: Path) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for path in kb_dir.glob("mcp_lifecycle-*.log"):
+        for line in path.read_text(encoding="utf-8").splitlines():
+            try:
+                rows.append(json.loads(line))
+            except ValueError:
+                continue
+    return rows
+
+
 def test_parallel_clients_share_one_heavy_owner_and_keep_context_isolated() -> None:
     kb_dir = _temp_vault()
     clients: list[McpClient] = []
@@ -212,6 +223,11 @@ def test_parallel_clients_share_one_heavy_owner_and_keep_context_isolated() -> N
         _assert(os.path.samefile(second["project_cwd"], project_b), str(second))
         _assert(first["embedding"]["heavy_model_owner_count"] == 1, str(first))
         _assert(second["embedding"]["listener"]["pid"] == first["process_pid"], str(second))
+        _assert(first["daemon"]["peak_connections"] == 2, str(first))
+        started = [row for row in _lifecycle_rows(kb_dir) if row.get("event") == "daemon_started"]
+        _assert(bool(started), "daemon_started lifecycle event missing")
+        _assert(started[-1].get("reason") == "proxy_start", str(started[-1]))
+        _assert(float(started[-1].get("cold_start_duration_ms")) >= 0, str(started[-1]))
 
         vector_a = clients[0].call_tool("latch_embed", {"text": "shared owner parity"})
         vector_b = clients[1].call_tool("latch_embed", {"text": "shared owner parity"})
@@ -248,6 +264,13 @@ def test_owner_crash_restarts_on_next_call_without_replaying_inflight_work() -> 
         _assert(after["process_pid"] != old_pid, f"owner did not change: {after}")
         _assert(after["connection"]["session_id"] == "recovery-session", str(after))
         _assert(client.process.poll() is None, "stdio proxy exited after owner crash")
+        rows = _lifecycle_rows(kb_dir)
+        reasons = [row.get("reason") for row in rows if row.get("event") == "daemon_started"]
+        _assert("daemon_reconnect" in reasons, str(reasons))
+        _assert(
+            any(row.get("event") == "daemon_reconnect_succeeded" for row in rows),
+            "reconnect success lifecycle event missing",
+        )
         print("PASS owner_crash_restarts_on_next_call_without_replaying_inflight_work")
     finally:
         if client is not None:
@@ -312,6 +335,14 @@ def test_idle_owner_is_reclaimed_and_lazily_recreated() -> None:
         after = client.status()
         _assert(after["process_pid"] != old_pid, f"idle owner was not reclaimed: {after}")
         _assert(client.process.poll() is None, "proxy did not survive idle reclamation")
+        idle_events = [
+            row for row in _lifecycle_rows(kb_dir)
+            if row.get("event") == "daemon_idle_exit"
+        ]
+        _assert(bool(idle_events), "daemon_idle_exit lifecycle event missing")
+        _assert(idle_events[-1].get("reason") == "idle_ttl", str(idle_events[-1]))
+        _assert(float(idle_events[-1].get("idle_duration_s")) >= 1.0, str(idle_events[-1]))
+        _assert(int(idle_events[-1].get("peak_connections")) >= 1, str(idle_events[-1]))
         print("PASS idle_owner_is_reclaimed_and_lazily_recreated")
     finally:
         if client is not None:
@@ -395,6 +426,19 @@ def test_prompt_after_idle_exit_wakes_owner_and_emits_truthful_bounded_receipt()
                 break
             time.sleep(0.05)
         _assert(new_pid is not None and new_pid != old_pid, "hook wake did not start a new owner")
+        rows = _lifecycle_rows(kb_dir)
+        _assert(
+            any(row.get("event") == "prompt_retrieval_degraded" for row in rows),
+            "degraded prompt lifecycle event missing",
+        )
+        _assert(
+            any(
+                row.get("event") == "daemon_started"
+                and row.get("reason") == "prompt_hook"
+                for row in rows
+            ),
+            "prompt-hook startup reason missing",
+        )
         print("PASS prompt_after_idle_exit_wakes_owner_and_emits_truthful_bounded_receipt")
     finally:
         if client is not None:
@@ -431,6 +475,12 @@ def test_over_cap_idle_proxy_retires_itself_without_killing_peers() -> None:
             "over-cap proxy did not retire cleanly",
         )
         _assert(all(client.process.poll() is None for client in alive), "peer was killed")
+        retired = [
+            row for row in _lifecycle_rows(kb_dir)
+            if row.get("event") == "proxy_retired"
+        ]
+        _assert(bool(retired), "proxy retirement lifecycle event missing")
+        _assert(retired[-1].get("over_cap_duration_s") is not None, str(retired[-1]))
         print("PASS over_cap_idle_proxy_retires_itself_without_killing_peers")
     finally:
         for client in clients:

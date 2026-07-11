@@ -486,8 +486,9 @@ loading a separate embedding model in every stdio process. Separate named
 vaults or blue/green runtime versions intentionally retain separate owners. Ask
 the agent to call `latch_runtime_status` when diagnosing resource use; it
 reports the shared owner, active connections, proxy lease bound, attribution
-source, model-listener PID, and recent lifecycle pressure without exposing
-authentication tokens. Contributor details and benchmark evidence are in
+source, model-listener PID, startup/cold-start data, peak connections, and
+recent or sustained lifecycle pressure without exposing authentication tokens.
+Contributor details and benchmark evidence are in
 [`docs/mcp_resource_architecture.md`](./docs/mcp_resource_architecture.md).
 
 ## Safety

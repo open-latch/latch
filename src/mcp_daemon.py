@@ -22,6 +22,9 @@ from datetime import datetime, timezone
 from typing import Any
 
 
+_PROCESS_STARTED_MONOTONIC = time.monotonic()
+
+
 def _daemonize_posix() -> bool:
     """Double-fork before heavyweight imports; return True in bootstrap parent.
 
@@ -76,6 +79,17 @@ def _idle_ttl() -> float:
         return DEFAULT_IDLE_TTL_S
 
 
+def _cold_start_duration_ms() -> float:
+    """Wall time from broker spawn request through model-ready publication."""
+    try:
+        requested = float(os.environ["LATCH_MCP_START_REQUEST_EPOCH"])
+        return round(max(0.0, time.time() - requested) * 1000.0, 3)
+    except (KeyError, ValueError):
+        return round(
+            (time.monotonic() - _PROCESS_STARTED_MONOTONIC) * 1000.0, 3
+        )
+
+
 def _drop_response_for_test(payload: dict[str, Any]) -> bool:
     """Deterministic post-handler failure seam used by the integration test.
 
@@ -103,6 +117,7 @@ class DaemonState:
         self._connections: dict[str, dict[str, Any]] = {}
         self._pending: dict[str, set[str]] = {}
         self._accepted = 0
+        self._peak_connections = 0
 
     def register(self, metadata: dict[str, Any]) -> str:
         requested = metadata.get("connection_id")
@@ -121,6 +136,9 @@ class DaemonState:
                 "session_source": metadata.get("session_source"),
                 "proxy_pid": metadata.get("proxy_pid"),
             }
+            self._peak_connections = max(
+                self._peak_connections, len(self._connections)
+            )
             self._pending[connection_id] = set()
         return connection_id
 
@@ -167,6 +185,7 @@ class DaemonState:
                 "idle_ttl_s": self.idle_ttl_s,
                 "last_activity_age_s": round(now - self._last_activity, 3),
                 "active_connections": len(self._connections),
+                "peak_connections": self._peak_connections,
                 "inflight_requests": sum(len(items) for items in self._pending.values()),
                 "connections_accepted": self._accepted,
                 "session_sources": sources,
@@ -329,8 +348,11 @@ async def _idle_monitor(state: DaemonState, cancel_scope: anyio.CancelScope) -> 
             snapshot = state.snapshot()
             mcp_broker.emit_lifecycle(
                 "daemon_idle_exit",
+                reason="idle_ttl",
                 idle_ttl_s=state.idle_ttl_s,
                 uptime_s=snapshot["uptime_s"],
+                idle_duration_s=snapshot["last_activity_age_s"],
+                peak_connections=snapshot["peak_connections"],
                 connections_accepted=snapshot["connections_accepted"],
             )
             cancel_scope.cancel()
@@ -359,7 +381,11 @@ async def _main_async() -> None:
         port=int(port), token=token, pid=os.getpid(), started_at=started_at
     )
     mcp_broker.emit_lifecycle(
-        "daemon_started", pid=os.getpid(), idle_ttl_s=state.idle_ttl_s
+        "daemon_started",
+        pid=os.getpid(),
+        reason=str(os.environ.get("LATCH_MCP_START_REASON") or "unknown"),
+        cold_start_duration_ms=_cold_start_duration_ms(),
+        idle_ttl_s=state.idle_ttl_s,
     )
 
     try:

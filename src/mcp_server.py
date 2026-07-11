@@ -1696,7 +1696,9 @@ def kb_runtime_status() -> dict:
             "listener": embed_owner,
         },
         "process_peak_rss_bytes": _peak_rss_bytes(),
-        "lifecycle": mcp_broker.lifecycle_summary(hours=24),
+        "lifecycle": mcp_broker.lifecycle_summary(
+            hours=24, inventory=proxy_inventory
+        ),
         "recovery": (
             "Idle owners are reclaimed; the stdio proxy reconnects and replays MCP initialization. "
             "In-flight calls are never automatically replayed."

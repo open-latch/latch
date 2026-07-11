@@ -143,7 +143,10 @@ class ProxyBridge:
             session_id, source = _resolve_session(self.metadata["project_cwd"])
             self.metadata["session_id"] = session_id
             self.metadata["session_source"] = source
-        sock, _payload = mcp_broker.connect_mcp(self.metadata)
+        sock, _payload = mcp_broker.connect_mcp(
+            self.metadata,
+            start_reason="daemon_reconnect" if replay else "proxy_connect",
+        )
         self._sock = sock
         self._socket_buffer.clear()
         if replay and self._init_line is not None:
@@ -403,6 +406,7 @@ class ProxyLease:
                 "started_epoch": self.started_epoch,
                 "last_activity_epoch": self.last_activity_epoch,
                 "heartbeat_epoch": time.time(),
+                "over_cap_since_epoch": self._over_cap_since_epoch,
             },
         )
         self._last_heartbeat_monotonic = time.monotonic()
@@ -417,6 +421,8 @@ class ProxyLease:
             cap=int(self.policy["cap"]),
         )
         if int(self.policy["cap"]) > 0 and len(inventory) > int(self.policy["cap"]):
+            self._over_cap_since_epoch = time.time()
+            self._write()
             mcp_broker.emit_lifecycle(
                 "proxy_over_cap",
                 connection_id=self.connection_id,
@@ -442,11 +448,16 @@ class ProxyLease:
         if cap <= 0:
             return False
         inventory = mcp_broker.proxy_inventory()
+        previous = self._over_cap_since_epoch
         if len(inventory) > cap:
             if self._over_cap_since_epoch is None:
                 self._over_cap_since_epoch = time.time()
         else:
             self._over_cap_since_epoch = None
+        if self._over_cap_since_epoch != previous:
+            # Persist only pressure transitions; routine heartbeats already
+            # wrote the lease immediately before this check.
+            self._write()
         retained = {str(row.get("connection_id")) for row in inventory[:cap]}
         idle = time.time() - self.last_activity_epoch
         return (
@@ -480,7 +491,9 @@ def main() -> int:
         # Establish readiness before consuming stdin.  If startup fails, the
         # compatibility fallback can exec without losing the host's initialize
         # request.
-        mcp_broker.ensure_daemon(metadata["project_cwd"])
+        mcp_broker.ensure_daemon(
+            metadata["project_cwd"], start_reason="proxy_start"
+        )
     except mcp_broker.BrokerError as exc:
         if os.environ.get("LATCH_MCP_ALLOW_LEGACY_FALLBACK"):
             mcp_broker.emit_lifecycle("legacy_fallback", reason=str(exc))

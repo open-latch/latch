@@ -37,6 +37,13 @@ DEFAULT_PROXY_CAP = 32
 DEFAULT_PROXY_RETIRE_IDLE_S = 5 * 60.0
 DEFAULT_PROXY_HEARTBEAT_S = 30.0
 DEFAULT_PROXY_STALE_S = 5 * 60.0
+START_REASONS = frozenset({
+    "proxy_start",
+    "proxy_connect",
+    "daemon_reconnect",
+    "connection_retry",
+    "prompt_hook",
+})
 
 
 class BrokerError(RuntimeError):
@@ -238,13 +245,19 @@ def emit_lifecycle(event: str, **fields: Any) -> None:
         pass
 
 
-def lifecycle_summary(*, hours: int = 24) -> dict[str, Any]:
+def lifecycle_summary(
+    *, hours: int = 24, inventory: list[dict[str, Any]] | None = None
+) -> dict[str, Any]:
     """Return bounded operational signals for status/doctor surfaces."""
     cutoff = datetime.now(timezone.utc) - timedelta(hours=max(1, hours))
     counts: Counter[str] = Counter()
     warnings: list[dict[str, Any]] = []
     proxy_high_water = 0
     max_over_cap_duration_s = 0.0
+    max_cold_start_duration_ms = 0.0
+    max_peak_connections = 0
+    latest_daemon_start: dict[str, Any] | None = None
+    latest_daemon_start_ts: datetime | None = None
     warning_events = {
         "daemon_failed", "daemon_start_failed", "proxy_lease_stale",
         "proxy_over_cap", "proxy_retired", "legacy_fallback",
@@ -273,6 +286,23 @@ def lifecycle_summary(*, hours: int = 24) -> dict[str, Any]:
             duration = row.get("over_cap_duration_s")
             if isinstance(duration, (int, float)):
                 max_over_cap_duration_s = max(max_over_cap_duration_s, float(duration))
+            cold_start = row.get("cold_start_duration_ms")
+            if isinstance(cold_start, (int, float)):
+                max_cold_start_duration_ms = max(
+                    max_cold_start_duration_ms, float(cold_start)
+                )
+            peak_connections = row.get("peak_connections")
+            if isinstance(peak_connections, int):
+                max_peak_connections = max(max_peak_connections, peak_connections)
+            if event == "daemon_started" and (
+                latest_daemon_start_ts is None or ts > latest_daemon_start_ts
+            ):
+                latest_daemon_start_ts = ts
+                latest_daemon_start = {
+                    key: row.get(key)
+                    for key in ("ts", "reason", "cold_start_duration_ms", "pid")
+                    if row.get(key) is not None
+                }
             if event in warning_events:
                 warnings.append({
                     key: row.get(key)
@@ -282,11 +312,32 @@ def lifecycle_summary(*, hours: int = 24) -> dict[str, Any]:
                     )
                     if row.get(key) is not None
                 })
+    inventory = proxy_inventory() if inventory is None else inventory
+    cap = int(proxy_policy()["cap"])
+    proxy_high_water = max(proxy_high_water, len(inventory))
+    currently_over_cap = cap > 0 and len(inventory) > cap
+    current_over_cap_duration_s = 0.0
+    if currently_over_cap:
+        observed = [
+            float(row["over_cap_since_epoch"])
+            for row in inventory
+            if isinstance(row.get("over_cap_since_epoch"), (int, float))
+        ]
+        if observed:
+            current_over_cap_duration_s = max(0.0, time.time() - min(observed))
+
     return {
         "window_hours": max(1, hours),
         "counts": dict(sorted(counts.items())),
         "proxy_high_water": proxy_high_water,
         "max_over_cap_duration_s": round(max_over_cap_duration_s, 3),
+        "max_cold_start_duration_ms": round(max_cold_start_duration_ms, 3),
+        "max_peak_connections": max_peak_connections,
+        "latest_daemon_start": latest_daemon_start,
+        "current_live_leases": len(inventory),
+        "currently_over_cap": currently_over_cap,
+        "current_over_cap_duration_s": round(current_over_cap_duration_s, 3),
+        "over_cap_duration_is_lower_bound": currently_over_cap,
         "warning_count": sum(counts[event] for event in warning_events),
         "recent_warnings": warnings[-10:],
     }
@@ -464,13 +515,19 @@ def _start_timeout() -> float:
         return DEFAULT_START_TIMEOUT_S
 
 
-def _spawn_daemon(project_cwd: str) -> int:
+def _start_reason(value: str) -> str:
+    return value if value in START_REASONS else "unknown"
+
+
+def _spawn_daemon(project_cwd: str, *, start_reason: str) -> int:
     daemon_py = Path(__file__).resolve().parent / "mcp_daemon.py"
     env = os.environ.copy()
     env["LATCH_KB_DIR"] = str(runtime_dir())
     env["LATCH_MCP_DAEMON_PROCESS"] = "1"
     env["LATCH_MCP_RUNTIME_KEY"] = RUNTIME_KEY
     env["LATCH_MCP_INITIAL_PROJECT_CWD"] = project_cwd
+    env["LATCH_MCP_START_REASON"] = _start_reason(start_reason)
+    env["LATCH_MCP_START_REQUEST_EPOCH"] = str(time.time())
 
     kwargs: dict[str, Any] = {
         "stdin": subprocess.DEVNULL,
@@ -498,11 +555,17 @@ def _spawn_daemon(project_cwd: str) -> int:
             process.kill()
             process.wait(timeout=5.0)
             raise BrokerError("latch MCP daemon bootstrap did not detach")
-    emit_lifecycle("daemon_spawned", bootstrap_pid=process.pid)
+    emit_lifecycle(
+        "daemon_spawned",
+        bootstrap_pid=process.pid,
+        reason=_start_reason(start_reason),
+    )
     return process.pid
 
 
-def ensure_daemon(project_cwd: str) -> dict[str, Any]:
+def ensure_daemon(
+    project_cwd: str, *, start_reason: str = "proxy_connect"
+) -> dict[str, Any]:
     payload = read_discovery()
     if payload is not None and _probe(payload):
         return payload
@@ -513,7 +576,7 @@ def ensure_daemon(project_cwd: str) -> dict[str, Any]:
         try:
             payload = read_discovery()
             if payload is None or not _probe(payload):
-                _spawn_daemon(project_cwd)
+                _spawn_daemon(project_cwd, start_reason=start_reason)
             while time.monotonic() < deadline:
                 payload = read_discovery()
                 if payload is not None and _probe(payload):
@@ -557,7 +620,13 @@ def request_daemon_start(project_cwd: str) -> bool:
         kwargs["start_new_session"] = True
     try:
         subprocess.Popen(
-            [sys.executable, str(Path(__file__).resolve()), "--ensure-daemon", project_cwd],
+            [
+                sys.executable,
+                str(Path(__file__).resolve()),
+                "--ensure-daemon",
+                project_cwd,
+                "prompt_hook",
+            ],
             **kwargs,
         )
         emit_lifecycle("daemon_wake_requested")
@@ -567,8 +636,11 @@ def request_daemon_start(project_cwd: str) -> bool:
         return False
 
 
-def connect_mcp(metadata: dict[str, Any]) -> tuple[socket.socket, dict[str, Any]]:
-    payload = ensure_daemon(str(metadata.get("project_cwd") or os.getcwd()))
+def connect_mcp(
+    metadata: dict[str, Any], *, start_reason: str = "proxy_connect"
+) -> tuple[socket.socket, dict[str, Any]]:
+    project_cwd = str(metadata.get("project_cwd") or os.getcwd())
+    payload = ensure_daemon(project_cwd, start_reason=start_reason)
     last_error: Exception | None = None
     for _attempt in range(2):
         try:
@@ -588,7 +660,7 @@ def connect_mcp(metadata: dict[str, Any]) -> tuple[socket.socket, dict[str, Any]
             return sock, payload
         except OSError as exc:
             last_error = exc
-            payload = ensure_daemon(str(metadata.get("project_cwd") or os.getcwd()))
+            payload = ensure_daemon(project_cwd, start_reason="connection_retry")
     raise BrokerError(f"could not connect to shared latch MCP daemon: {last_error}")
 
 
@@ -637,9 +709,9 @@ def remove_embed_discovery_if_owner(*, pid: int, token: str) -> None:
 
 
 def _main() -> int:
-    if len(sys.argv) == 3 and sys.argv[1] == "--ensure-daemon":
+    if len(sys.argv) == 4 and sys.argv[1] == "--ensure-daemon":
         try:
-            ensure_daemon(sys.argv[2])
+            ensure_daemon(sys.argv[2], start_reason=_start_reason(sys.argv[3]))
             return 0
         except Exception as exc:
             emit_lifecycle("daemon_start_failed", reason=str(exc))

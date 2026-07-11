@@ -168,7 +168,9 @@ visible rather than silently misattributed.
 - Proxy leases are individual files, not a contended shared registry. Every
   proxy updates only its own lease and retires only itself. Live PIDs with
   expired heartbeats are ignored and removed from capacity accounting; peers
-  are never signaled or killed.
+  are never signaled or killed. Each lease also persists when that proxy first
+  observed over-cap pressure, so runtime status can report the current
+  sustained duration without introducing a shared pressure registry.
 - Default proxy policy: cap 32, five-minute minimum idle before over-cap
   retirement, 30-second heartbeat. Set `LATCH_MCP_PROXY_CAP=0` to disable the
   bound for diagnosis.
@@ -183,13 +185,30 @@ visible rather than silently misattributed.
 - current proxy PID, cwd, session ID, and attribution source;
 - proxy cap/idle/heartbeat policy and live lease count;
 - model-loaded state and embed-listener owner PID/port; and
-- approximate peak RSS without exposing authentication tokens; and
+- approximate peak RSS without exposing authentication tokens;
 - a bounded 24-hour lifecycle summary covering starts, idle exits, degraded
-  prompts, stale/over-cap leases, retirements, reconnects, and failures.
+  prompts, stale/over-cap leases, retirements, reconnects, and failures;
+- daemon start reason, cold-start duration, and peak concurrent connections;
+  and
+- both completed retirement duration and the current over-cap duration. The
+  current value is explicitly a lower bound from live proxies' first
+  observations, not a fabricated host-global timestamp.
 
 `latch doctor` warns on recent lifecycle pressure and on explicit legacy
-fallback. Lifecycle JSONL is transition-only: it records no prompt text, tool
+fallback. It also warns when 24-hour lease high-water reaches 75% of the live
+configured cap (24 at the default 32) or while current over-cap duration is
+non-zero. Lifecycle JSONL is transition-only: it records no prompt text, tool
 arguments, authentication tokens, or per-request traffic.
+
+Daemon reconnect success/failure is observable inside a retained proxy. A
+proxy that retires cannot prove that its host restarted the same task: the old
+process has exited, and current hosts do not provide a stable cross-process
+connection id on every adapter. Latch therefore emits an actionable retirement
+WARN telling the operator to confirm reconnect or start a fresh task; it does
+not invent causal telemetry from an unrelated later proxy start. Start reason
+`daemon_reconnect` similarly means the retained proxy needed a new owner;
+correlate it with a preceding `daemon_idle_exit` to distinguish planned idle
+reclamation from an owner crash.
 
 ## Prototype results
 
@@ -227,11 +246,13 @@ run on 2026-07-11 kept exactly one heavy owner, initialized all clients in
 summed macOS footprint. No active client was retired.
 
 The cap should be revisited from lifecycle evidence rather than silently
-degrading: `proxy_high_water`, `proxy_over_cap`, over-cap duration,
+degrading: `proxy_high_water`, `proxy_over_cap`, current/completed over-cap duration,
 `proxy_retired`, and degraded/reconnect events are summarized by runtime status
-and doctor. Repeated high-water near 32 with long genuinely-active overlap is a
-reason to raise the cap or revisit host integration; retained-but-idle excess
-is exactly what the five-minute retirement policy is designed to absorb.
+and doctor. High-water at 75% of the configured cap is a WARN; at the default,
+that is 24 leases. Repeated high-water near 32 with long genuinely-active
+overlap is a reason to raise the cap or revisit host integration;
+retained-but-idle excess is exactly what the five-minute retirement policy is
+designed to absorb.
 
 ## Verification
 
@@ -246,6 +267,8 @@ The production-representative tests cover:
 - a real post-commit/lost-response mutation with no replay or retry advice;
 - prompt-hook wake and truthful bounded degradation after idle exit;
 - live-PID stale-heartbeat lease cleanup;
+- configured-cap-derived 75% doctor warnings and sustained pressure duration;
+- startup reason/cold duration plus daemon peak-connection accounting;
 - LRU over-cap proxy self-retirement without killing peers; and
 - distinct Codex markers for different workspaces sharing one pinned vault.
 
