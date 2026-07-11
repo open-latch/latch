@@ -1,8 +1,9 @@
-"""Hermetic ONNX vs sentence-transformers parity gate.
+"""Offline ONNX parity gate with an optional live reference lane.
 
-The default corpus is a checked-in public fixture so a clean checkout can run
-the complete suite. Set ``CLAUDE_KB_PARITY_DB`` to an explicit populated
-``kb.db`` to retain the optional large live-corpus lane.
+The required default lane compares a checked-in public corpus with frozen
+sentence-transformers reference vectors and needs no model download. Set
+``CLAUDE_KB_PARITY_DB`` to an explicit populated ``kb.db`` to run the optional
+live-corpus lane (which requires sentence-transformers to be installed).
 """
 from __future__ import annotations
 
@@ -16,12 +17,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 import numpy as np  # noqa: E402
 
 import embeddings  # noqa: E402
-from sentence_transformers import SentenceTransformer  # noqa: E402
-
-
 N_SAMPLES = 1000
 TOL = 1e-5
 FIXTURE_PATH = Path(__file__).resolve().parent / "fixtures" / "embedder_parity_corpus.txt"
+REFERENCE_PATH = Path(__file__).resolve().parent / "fixtures" / "embedder_parity_reference.npy"
 
 
 def _fixture_bodies() -> list[str]:
@@ -62,21 +61,39 @@ def parity_corpus() -> tuple[str, list[str]]:
     return str(FIXTURE_PATH), _fixture_bodies()
 
 
-def test_onnx_matches_sentence_transformers() -> None:
+def _reference_vectors(source: str, bodies: list[str]) -> np.ndarray:
+    if source == str(FIXTURE_PATH):
+        vectors = np.load(REFERENCE_PATH, allow_pickle=False).astype(np.float32)
+        if vectors.shape != (len(bodies), 384):
+            raise RuntimeError(
+                f"frozen parity reference shape {vectors.shape} does not match "
+                f"{len(bodies)} fixture rows"
+            )
+        return vectors
+    try:
+        from sentence_transformers import SentenceTransformer
+    except ImportError as exc:  # pragma: no cover - explicit optional lane
+        raise RuntimeError(
+            "CLAUDE_KB_PARITY_DB requires the optional sentence-transformers dependency"
+        ) from exc
+    model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
+    return model.encode(
+        bodies, normalize_embeddings=True, convert_to_numpy=True, batch_size=32
+    ).astype(np.float32)
+
+
+def test_onnx_matches_frozen_or_live_reference() -> None:
     source, bodies = parity_corpus()
     print(f"Loaded {len(bodies)} bodies from {source}")
 
-    st_model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
-    v_st = st_model.encode(
-        bodies, normalize_embeddings=True, convert_to_numpy=True, batch_size=32
-    ).astype(np.float32)
-    print(f"sentence-transformers: {v_st.shape} dtype={v_st.dtype}")
+    v_reference = _reference_vectors(source, bodies)
+    print(f"reference:            {v_reference.shape} dtype={v_reference.dtype}")
 
     v_onnx = embeddings.embed_batch(bodies)
     print(f"onnx:                 {v_onnx.shape} dtype={v_onnx.dtype}")
 
-    cosines = (v_st * v_onnx).sum(axis=1)
-    abs_diff = np.abs(v_st - v_onnx)
+    cosines = (v_reference * v_onnx).sum(axis=1)
+    abs_diff = np.abs(v_reference - v_onnx)
     abs_max_diff = float(abs_diff.max())
     print(
         f"Cosine: min={cosines.min():.6f} mean={cosines.mean():.6f} "
@@ -93,4 +110,4 @@ def test_onnx_matches_sentence_transformers() -> None:
 
 
 if __name__ == "__main__":
-    test_onnx_matches_sentence_transformers()
+    test_onnx_matches_frozen_or_live_reference()

@@ -1,5 +1,6 @@
-# Reproducible Python 3.11 merge-trust environment.
-# Keep direct runtime and parity-test dependencies coherent across clean runners.
+# Direct inputs for regenerating the Python 3.11 Linux merge-trust lock:
+# uv pip compile requirements-ci.txt --generate-hashes --python-version 3.11 \
+#   --python-platform x86_64-manylinux_2_28 --output-file requirements-ci.lock
 mcp==1.28.1
 onnxruntime==1.23.2
 tokenizers==0.22.2
@@ -8,6 +9,3 @@ sqlite-vec==0.1.9
 pytest==9.1.1
 pytest-asyncio==1.4.0
 cryptography==49.0.0
-sentence-transformers==5.6.0
-torch==2.11.0
-transformers==5.13.1
