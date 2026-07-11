@@ -233,12 +233,12 @@ def test_managed_operation_receipts_are_exact_and_single_use():
     compact = paths.KB_ROOT / "bin" / "run_cursor_compact_now.sh"
     try:
         cgs.begin_prompt(root, sid, "/latch-compact")
-        payload = _shell(f"bash {compact}", root, sid)
+        payload = _shell(f"bash {compact} {sid}", root, sid)
         assert cpre.decision(payload) == {}
         assert cpre.decision(payload)["permission"] == "deny"
 
         cgs.begin_prompt(root, sid, "/latch-compact")
-        wrong_args = _shell(f"bash {compact} --final", root, sid)
+        wrong_args = _shell(f"bash {compact} {sid} --final", root, sid)
         assert cpre.decision(wrong_args)["permission"] == "deny"
         outside = _shell("bash /tmp/run_cursor_compact_now.sh", root, sid)
         assert cpre.decision(outside)["permission"] == "deny"
@@ -326,10 +326,10 @@ def test_other_managed_operations_match_only_expected_wrappers():
 
         cgs.begin_prompt(root, sid, "Latch operation id: latch-compact run")
         compact = paths.KB_ROOT / "bin" / "run_cursor_compact_now.sh"
-        assert cpre.decision(_shell(f"bash {compact}", root, sid)) == {}
+        assert cpre.decision(_shell(f"bash {compact} {sid}", root, sid)) == {}
 
         cgs.begin_prompt(root, sid, "Explain the status")
-        assert cpre.decision(_shell(f"bash {compact}", root, sid))["permission"] == "deny"
+        assert cpre.decision(_shell(f"bash {compact} {sid}", root, sid))["permission"] == "deny"
     finally:
         shutil.rmtree(project_dir, ignore_errors=True)
         shutil.rmtree(root, ignore_errors=True)

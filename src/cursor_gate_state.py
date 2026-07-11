@@ -273,6 +273,7 @@ def begin_prompt(project_path: str, sid: str | None, prompt: str) -> dict[str, A
                 "name": name,
                 "phase": phase,
                 "confirmation": confirmation,
+                "session_id": sid,
                 "prompt_hash": prompt_hash(prompt),
                 "consumed": False,
                 "recorded_at": _now(),
@@ -523,7 +524,10 @@ def _operation_tool_matches(
         return False
     script, args = parsed
     if name == "latch-compact":
-        return script in {"run_cursor_compact_now.sh", "run_cursor_compact_now.ps1"} and not args
+        return (
+            script in {"run_cursor_compact_now.sh", "run_cursor_compact_now.ps1"}
+            and args == [operation.get("session_id")]
+        )
     if name == "latch-seed":
         if script not in {"latch_seed.sh", "latch_seed.ps1"}:
             return False
