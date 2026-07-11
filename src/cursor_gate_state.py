@@ -39,6 +39,19 @@ _READ_ONLY_COMMANDS = {
     "get-content", "select-string", "get-location", "test-path",
 }
 _CONTROL_TOKENS = ("\n", "\r", ";", "&&", "||", "|", ">", "<", "`", "$(")
+_LATCH_SERVER_NAMES = {"latch", "claudekb"}
+_PRE_GATE_LATCH_ALLOWLIST = {
+    "latchsearch", "kbsearch",
+    "latchget", "kbget",
+    "latchrecent", "kbrecent",
+    "latchprojectdirection", "kbprojectdirection",
+    "latchgatereport", "kbgatereport",
+    "latchgate", "kbgate",
+    "latchverify", "kbverify",
+    "latchcorrectplan", "kbcorrectplan",
+    "latchprioritylist", "kbprioritylist",
+    "latchembed", "kbembed",
+}
 
 
 def state_path(project_path: str | os.PathLike | None = None) -> Path:
@@ -234,6 +247,40 @@ def _tool_input(payload: dict[str, Any]) -> dict[str, Any]:
     return {}
 
 
+def _latch_tool_identity(payload: dict[str, Any], raw_name: str) -> str | None:
+    """Return a normalized latch tool name, or None for a non-latch tool.
+
+    Cursor has emitted both qualified tool names and generic MCP payloads.
+    Parse only explicit latch/legacy server identities; never infer latch from
+    an arbitrary non-latch tool whose name merely contains a familiar suffix.
+    """
+    name = (raw_name or "").strip()
+    normalized_name = _normalized_tool_name(name)
+    if normalized_name.startswith("latch") or normalized_name.startswith("kb"):
+        return normalized_name
+
+    tool_input = _tool_input(payload)
+    server = ""
+    for key in ("server", "server_name", "serverName"):
+        value = tool_input.get(key)
+        if isinstance(value, str) and value.strip():
+            server = _normalized_tool_name(value)
+            break
+
+    if name.lower().startswith("mcp__"):
+        parts = name.split("__")
+        if len(parts) >= 3 and _normalized_tool_name(parts[1]) in _LATCH_SERVER_NAMES:
+            return _normalized_tool_name(parts[-1])
+
+    if "mcp" not in normalized_name or server not in _LATCH_SERVER_NAMES:
+        return None
+    for key in ("tool", "tool_name", "toolName", "name"):
+        value = tool_input.get(key)
+        if isinstance(value, str) and value.strip():
+            return _normalized_tool_name(value)
+    return "unknownlatchtool"
+
+
 def mutation_capability(payload: dict[str, Any]) -> tuple[bool, str]:
     """Return whether a preToolUse payload can mutate project/external state.
 
@@ -246,17 +293,12 @@ def mutation_capability(payload: dict[str, Any]) -> tuple[bool, str]:
     name = _normalized_tool_name(raw_name)
     if not name:
         return True, "missing tool name"
-    if name.startswith("latch") or name.startswith("kb"):
-        return False, "latch MCP tool"
+    latch_tool = _latch_tool_identity(payload, raw_name)
+    if latch_tool is not None:
+        if latch_tool in _PRE_GATE_LATCH_ALLOWLIST:
+            return False, f"pre-gate latch tool {latch_tool}"
+        return True, f"mutation-capable or unknown latch tool {latch_tool}"
     if "mcp" in name:
-        tool_input = _tool_input(payload)
-        identity = " ".join(
-            str(tool_input.get(key, ""))
-            for key in ("server", "server_name", "serverName", "tool", "tool_name", "toolName")
-        ).lower()
-        raw_identity = f"{raw_name} {identity}".lower()
-        if "latch" in raw_identity or "claude-kb" in raw_identity or "claudekb" in raw_identity:
-            return False, "latch MCP tool"
         return True, f"non-latch MCP tool {raw_name}"
     if any(marker in name for marker in _MUTATION_MARKERS):
         return True, raw_name

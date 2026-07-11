@@ -90,6 +90,27 @@ def test_pre_tool_use_denies_before_gate_and_preserves_cursor_permissions_after(
         assert denied["permission"] == "deny"
         assert "current Cursor prompt" in denied["user_message"]
         assert cpre.decision({**write_payload, "tool_name": "Read"}) == {}
+        assert cpre.decision({
+            **write_payload,
+            "tool_name": "mcp__latch__latch_gate",
+            "tool_input": {"request": prompt},
+        }) == {}
+        for tool_name in (
+            "latch_insert",
+            "mcp__latch__latch_update",
+            "mcp__latch__latch_append",
+            "mcp__latch__latch_correct_apply",
+            "mcp__claude-kb__kb_link",
+            "latch_capture_decision",
+            "latch_priority_add",
+            "latch_future_unknown",
+        ):
+            blocked = cpre.decision({
+                **write_payload,
+                "tool_name": tool_name,
+                "tool_input": {},
+            })
+            assert blocked["permission"] == "deny", tool_name
 
         assert cgs.record_gate(
             root, "conversation", request=prompt,

@@ -88,6 +88,21 @@ def test_mutation_classifier_is_conservative_and_keeps_gate_tools_available():
         {"tool_name": "mcp__filesystem__write_file", "tool_input": {}},
         {"tool_name": "MCP", "tool_input": {"server": "filesystem", "tool": "read_file"}},
         {"tool_name": "NewUnknownTool", "tool_input": {}},
+        {"tool_name": "latch_insert", "tool_input": {}},
+        {"tool_name": "kb_update", "tool_input": {}},
+        {"tool_name": "mcp__latch__latch_append", "tool_input": {}},
+        {"tool_name": "mcp__claude-kb__kb_correct_apply", "tool_input": {}},
+        {"tool_name": "MCP", "tool_input": {
+            "server": "latch", "tool": "latch_link",
+        }},
+        {"tool_name": "MCP", "tool_input": {
+            "serverName": "claude-kb", "toolName": "kb_unlink",
+        }},
+        {"tool_name": "latch_capture_decision", "tool_input": {}},
+        {"tool_name": "latch_priority_add", "tool_input": {}},
+        {"tool_name": "latch_priority_reorder", "tool_input": {}},
+        {"tool_name": "latch_priority_retire", "tool_input": {}},
+        {"tool_name": "latch_future_unknown", "tool_input": {}},
         {},
     ]
     for payload in mutation_cases:
@@ -101,6 +116,11 @@ def test_mutation_classifier_is_conservative_and_keeps_gate_tools_available():
         {"tool_name": "Task", "tool_input": {"readonly": True}},
         {"tool_name": "mcp__latch__latch_gate", "tool_input": {}},
         {"tool_name": "MCP", "tool_input": {"server": "latch", "tool": "latch_gate"}},
+        {"tool_name": "mcp__claude-kb__kb_search", "tool_input": {}},
+        {"tool_name": "MCP", "tool_input": {
+            "serverName": "claude-kb", "toolName": "kb_correct_plan",
+        }},
+        {"tool_name": "latch_priority_list", "tool_input": {}},
     ]
     for payload in read_cases:
         assert cgs.mutation_capability(payload)[0] is False, payload
