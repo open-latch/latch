@@ -39,6 +39,18 @@ def test_cursor_project_install_doctor_uninstall_round_trip(tmp_path: Path) -> N
     (skills / "mine").mkdir(parents=True)
     home.mkdir()
 
+    # uninstall_engine's legacy all-host check also verifies that no Claude MCP
+    # registration remains. Supply a hermetic CLI stub so this Cursor lifecycle
+    # proof does not depend on a runner-global Claude installation.
+    tool_bin = tmp_path / "bin"
+    tool_bin.mkdir()
+    if os.name == "nt":
+        (tool_bin / "claude.cmd").write_text("@exit /b 1\r\n", encoding="utf-8")
+    else:
+        claude = tool_bin / "claude"
+        claude.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+        claude.chmod(0o755)
+
     mcp = cursor / "mcp.json"
     hooks = cursor / "hooks.json"
     rule = cursor / "rules" / "latch.mdc"
@@ -67,6 +79,7 @@ def test_cursor_project_install_doctor_uninstall_round_trip(tmp_path: Path) -> N
         "CLAUDE_KB_HOME": str(ROOT),
         "LATCH_PYTHON": sys.executable,
         "CLAUDE_KB_PYTHON": sys.executable,
+        "PATH": str(tool_bin) + os.pathsep + os.environ.get("PATH", ""),
     })
     install_args = [
         sys.executable, str(INSTALL),
