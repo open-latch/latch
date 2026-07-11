@@ -15,7 +15,8 @@ import socket
 import subprocess
 import sys
 import time
-from datetime import datetime, timezone
+from collections import Counter
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -25,13 +26,17 @@ import paths
 PROTOCOL_VERSION = 1
 DISCOVERY_FILE = "mcp-daemon.json"
 START_LOCK_FILE = "mcp-daemon.start.lock"
+EMBED_DISCOVERY_FILE = "embed.sock.json"
 LOG_FILE = "mcp-daemon.log"
 PROXY_LEASE_DIR = "mcp-proxies"
+RUNTIME_REGISTRY_DIR = "mcp-runtimes"
+LIFECYCLE_STREAM = "mcp_lifecycle"
 DEFAULT_START_TIMEOUT_S = 30.0
 DEFAULT_CONNECT_TIMEOUT_S = 2.0
 DEFAULT_PROXY_CAP = 32
 DEFAULT_PROXY_RETIRE_IDLE_S = 5 * 60.0
 DEFAULT_PROXY_HEARTBEAT_S = 30.0
+DEFAULT_PROXY_STALE_S = 5 * 60.0
 
 
 class BrokerError(RuntimeError):
@@ -78,12 +83,33 @@ def runtime_dir() -> Path:
     return paths.ensure_project_dir()
 
 
-def discovery_path() -> Path:
-    return runtime_dir() / DISCOVERY_FILE
+def runtime_key_dir(runtime_key: str | None = None) -> Path:
+    """Return the private registry directory for one protocol runtime.
+
+    Discovery and election must be keyed together.  A vault-wide discovery
+    file paired with a vault-wide lock lets v1 -> v2 -> v1 starts overwrite
+    each other and elect two owners for the same runtime.
+    """
+    key = runtime_key or RUNTIME_KEY
+    path = runtime_dir() / "runtime" / RUNTIME_REGISTRY_DIR / key
+    path.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(path, 0o700)
+    except OSError:
+        pass
+    return path
 
 
-def start_lock_path() -> Path:
-    return runtime_dir() / START_LOCK_FILE
+def discovery_path(runtime_key: str | None = None) -> Path:
+    return runtime_key_dir(runtime_key) / DISCOVERY_FILE
+
+
+def start_lock_path(runtime_key: str | None = None) -> Path:
+    return runtime_key_dir(runtime_key) / START_LOCK_FILE
+
+
+def embed_discovery_path(runtime_key: str | None = None) -> Path:
+    return runtime_key_dir(runtime_key) / EMBED_DISCOVERY_FILE
 
 
 def proxy_lease_dir() -> Path:
@@ -119,6 +145,9 @@ def proxy_policy() -> dict[str, int | float]:
         "heartbeat_s": _env_float(
             "LATCH_MCP_PROXY_HEARTBEAT_SEC", DEFAULT_PROXY_HEARTBEAT_S
         ),
+        "stale_s": _env_float(
+            "LATCH_MCP_PROXY_STALE_SEC", DEFAULT_PROXY_STALE_S
+        ),
     }
 
 
@@ -128,15 +157,18 @@ def write_proxy_lease(connection_id: str, payload: dict[str, Any]) -> Path:
     return path
 
 
-def remove_proxy_lease(connection_id: str) -> None:
+def remove_proxy_lease(connection_id: str, *, reason: str = "closed") -> None:
     try:
         (proxy_lease_dir() / f"{connection_id}.json").unlink()
+        emit_lifecycle("proxy_closed", connection_id=connection_id, reason=reason)
     except OSError:
         pass
 
 
 def proxy_inventory() -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
+    stale_s = float(proxy_policy()["stale_s"])
+    now = time.time()
     for path in proxy_lease_dir().glob("*.json"):
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
@@ -153,6 +185,21 @@ def proxy_inventory() -> list[dict[str, Any]]:
             except OSError:
                 pass
             continue
+        heartbeat = payload.get("heartbeat_epoch")
+        if not isinstance(heartbeat, (int, float)) or now - float(heartbeat) > stale_s:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+            emit_lifecycle(
+                "proxy_lease_stale",
+                connection_id=payload.get("connection_id"),
+                pid=pid,
+                heartbeat_age_s=(round(now - float(heartbeat), 3)
+                                 if isinstance(heartbeat, (int, float)) else None),
+                stale_after_s=stale_s,
+            )
+            continue
         rows.append(payload)
     rows.sort(
         key=lambda row: (
@@ -162,6 +209,87 @@ def proxy_inventory() -> list[dict[str, Any]]:
         reverse=True,
     )
     return rows
+
+
+def _lifecycle_path(day: datetime | None = None) -> Path:
+    day = day or datetime.now(timezone.utc)
+    return runtime_dir() / f"{LIFECYCLE_STREAM}-{day:%Y-%m-%d}.log"
+
+
+def emit_lifecycle(event: str, **fields: Any) -> None:
+    """Best-effort, transition-only lifecycle telemetry.
+
+    Rows deliberately exclude prompt text, tool arguments, tokens, and full
+    session inventories.  Logging can never break the MCP path.
+    """
+    try:
+        row = {
+            "ts": _utc_now(),
+            "event": event,
+            "runtime_key": RUNTIME_KEY,
+            "process_pid": os.getpid(),
+            **fields,
+        }
+        path = _lifecycle_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(row, default=str, sort_keys=True) + "\n")
+    except Exception:
+        pass
+
+
+def lifecycle_summary(*, hours: int = 24) -> dict[str, Any]:
+    """Return bounded operational signals for status/doctor surfaces."""
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=max(1, hours))
+    counts: Counter[str] = Counter()
+    warnings: list[dict[str, Any]] = []
+    proxy_high_water = 0
+    max_over_cap_duration_s = 0.0
+    warning_events = {
+        "daemon_failed", "daemon_start_failed", "proxy_lease_stale",
+        "proxy_over_cap", "proxy_retired", "legacy_fallback",
+        "prompt_retrieval_degraded", "daemon_reconnect_failed",
+        "daemon_disconnect_unknown_outcome",
+    }
+    for offset in range(0, max(2, hours // 24 + 2)):
+        path = _lifecycle_path(datetime.now(timezone.utc) - timedelta(days=offset))
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            try:
+                row = json.loads(line)
+                ts = datetime.fromisoformat(str(row["ts"]).replace("Z", "+00:00"))
+            except (ValueError, KeyError, TypeError):
+                continue
+            if ts < cutoff:
+                continue
+            event = str(row.get("event") or "unknown")
+            counts[event] += 1
+            live_leases = row.get("live_leases")
+            if isinstance(live_leases, int):
+                proxy_high_water = max(proxy_high_water, live_leases)
+            duration = row.get("over_cap_duration_s")
+            if isinstance(duration, (int, float)):
+                max_over_cap_duration_s = max(max_over_cap_duration_s, float(duration))
+            if event in warning_events:
+                warnings.append({
+                    key: row.get(key)
+                    for key in (
+                        "ts", "event", "reason", "pid", "live_leases", "cap",
+                        "over_cap_duration_s",
+                    )
+                    if row.get(key) is not None
+                })
+    return {
+        "window_hours": max(1, hours),
+        "counts": dict(sorted(counts.items())),
+        "proxy_high_water": proxy_high_water,
+        "max_over_cap_duration_s": round(max_over_cap_duration_s, 3),
+        "warning_count": sum(counts[event] for event in warning_events),
+        "recent_warnings": warnings[-10:],
+    }
 
 
 def _atomic_json(path: Path, payload: dict[str, Any], *, mode: int = 0o600) -> None:
@@ -265,7 +393,6 @@ def _acquire_start_lock() -> bool:
         "pid": os.getpid(),
         "runtime_key": RUNTIME_KEY,
         "created_at": _utc_now(),
-        "created_monotonic": time.monotonic(),
     }
     try:
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -341,6 +468,7 @@ def _spawn_daemon(project_cwd: str) -> int:
             process.kill()
             process.wait(timeout=5.0)
             raise BrokerError("latch MCP daemon bootstrap did not detach")
+    emit_lifecycle("daemon_spawned", bootstrap_pid=process.pid)
     return process.pid
 
 
@@ -373,6 +501,40 @@ def ensure_daemon(project_cwd: str) -> dict[str, Any]:
     raise BrokerError(
         f"shared latch MCP daemon did not become ready within {_start_timeout():.1f}s"
     )
+
+
+def request_daemon_start(project_cwd: str) -> bool:
+    """Request a detached single-flight startup without blocking a hook."""
+    payload = read_discovery()
+    if payload is not None and _probe(payload, timeout=0.02):
+        return False
+    env = os.environ.copy()
+    env["LATCH_KB_DIR"] = str(runtime_dir())
+    kwargs: dict[str, Any] = {
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+        "cwd": str(paths.KB_ROOT),
+        "env": env,
+        "close_fds": True,
+    }
+    if os.name == "nt":
+        kwargs["creationflags"] = (
+            getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
+            | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+        )
+    else:
+        kwargs["start_new_session"] = True
+    try:
+        subprocess.Popen(
+            [sys.executable, str(Path(__file__).resolve()), "--ensure-daemon", project_cwd],
+            **kwargs,
+        )
+        emit_lifecycle("daemon_wake_requested")
+        return True
+    except OSError as exc:
+        emit_lifecycle("daemon_start_failed", reason=str(exc))
+        return False
 
 
 def connect_mcp(metadata: dict[str, Any]) -> tuple[socket.socket, dict[str, Any]]:
@@ -409,7 +571,6 @@ def publish_discovery(*, port: int, token: str, pid: int, started_at: str) -> Pa
         "token": token,
         "pid": int(pid),
         "started_at": started_at,
-        "kb_dir": str(runtime_dir()),
     }
     path = discovery_path()
     _atomic_json(path, payload)
@@ -428,3 +589,33 @@ def remove_discovery_if_owner(*, pid: int, token: str) -> None:
             discovery_path().unlink()
         except OSError:
             pass
+
+
+def remove_embed_discovery_if_owner(*, pid: int, token: str) -> None:
+    path = embed_discovery_path()
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    if payload.get("pid") == pid and secrets.compare_digest(
+        str(payload.get("token") or ""), token
+    ):
+        try:
+            path.unlink()
+        except OSError:
+            pass
+
+
+def _main() -> int:
+    if len(sys.argv) == 3 and sys.argv[1] == "--ensure-daemon":
+        try:
+            ensure_daemon(sys.argv[2])
+            return 0
+        except Exception as exc:
+            emit_lifecycle("daemon_start_failed", reason=str(exc))
+            return 1
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(_main())

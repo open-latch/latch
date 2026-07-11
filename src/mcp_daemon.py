@@ -58,9 +58,10 @@ import mcp_runtime  # noqa: E402
 import mcp_server  # noqa: E402
 
 
-DEFAULT_IDLE_TTL_S = 30 * 60.0
+DEFAULT_IDLE_TTL_S = 60 * 60.0
 MAX_PRELUDE_BYTES = 64 * 1024
 MAX_MCP_LINE_BYTES = 4 * 1024 * 1024
+_TEST_DROP_RESPONSE_USED = False
 
 
 def _utc_now() -> str:
@@ -73,6 +74,23 @@ def _idle_ttl() -> float:
         return max(1.0, float(raw)) if raw is not None else DEFAULT_IDLE_TTL_S
     except ValueError:
         return DEFAULT_IDLE_TTL_S
+
+
+def _drop_response_for_test(payload: dict[str, Any]) -> bool:
+    """Deterministic post-handler failure seam used by the integration test.
+
+    The response has already been produced (and a mutating handler committed)
+    when the writer sees it.  No production behavior changes unless the
+    explicitly test-scoped environment variable is set.
+    """
+    global _TEST_DROP_RESPONSE_USED
+    wanted = os.environ.get("LATCH_MCP_TEST_DROP_RESPONSE_ID_ONCE")
+    if _TEST_DROP_RESPONSE_USED or not wanted or "id" not in payload:
+        return False
+    if str(payload["id"]) != wanted:
+        return False
+    _TEST_DROP_RESPONSE_USED = True
+    return True
 
 
 class DaemonState:
@@ -99,7 +117,6 @@ class DaemonState:
             self._accepted += 1
             self._connections[connection_id] = {
                 "connected_at": _utc_now(),
-                "last_activity_monotonic": now,
                 "project_cwd": metadata.get("project_cwd"),
                 "session_source": metadata.get("session_source"),
                 "proxy_pid": metadata.get("proxy_pid"),
@@ -117,15 +134,11 @@ class DaemonState:
         with self._lock:
             now = time.monotonic()
             self._last_activity = now
-            if connection_id in self._connections:
-                self._connections[connection_id]["last_activity_monotonic"] = now
 
     def request_started(self, connection_id: str, request_id: Any) -> None:
         with self._lock:
             now = time.monotonic()
             self._last_activity = now
-            if connection_id in self._connections:
-                self._connections[connection_id]["last_activity_monotonic"] = now
             self._pending.setdefault(connection_id, set()).add(repr(request_id))
 
     def request_finished(self, connection_id: str, request_id: Any) -> None:
@@ -245,6 +258,9 @@ async def _run_mcp_connection(
                         state.request_finished(connection_id, payload["id"])
                     else:
                         state.touch(connection_id)
+                    if isinstance(payload, dict) and _drop_response_for_test(payload):
+                        await stream.aclose()
+                        return
                     line = session_message.message.model_dump_json(
                         by_alias=True, exclude_none=True
                     ).encode("utf-8")
@@ -257,11 +273,7 @@ async def _run_mcp_connection(
             tg.start_soon(reader)
             tg.start_soon(writer)
             with mcp_runtime.bind_connection(context):
-                await mcp_server.mcp._mcp_server.run(
-                    read_receive,
-                    write_send,
-                    mcp_server.mcp._mcp_server.create_initialization_options(),
-                )
+                await mcp_server.run_shared_session(read_receive, write_send)
             tg.cancel_scope.cancel()
     finally:
         state.unregister(connection_id)
@@ -314,6 +326,13 @@ async def _idle_monitor(state: DaemonState, cancel_scope: anyio.CancelScope) -> 
     while True:
         await anyio.sleep(interval)
         if state.should_reclaim():
+            snapshot = state.snapshot()
+            mcp_broker.emit_lifecycle(
+                "daemon_idle_exit",
+                idle_ttl_s=state.idle_ttl_s,
+                uptime_s=snapshot["uptime_s"],
+                connections_accepted=snapshot["connections_accepted"],
+            )
             cancel_scope.cancel()
             return
 
@@ -339,6 +358,9 @@ async def _main_async() -> None:
     mcp_broker.publish_discovery(
         port=int(port), token=token, pid=os.getpid(), started_at=started_at
     )
+    mcp_broker.emit_lifecycle(
+        "daemon_started", pid=os.getpid(), idle_ttl_s=state.idle_ttl_s
+    )
 
     try:
         async with anyio.create_task_group() as tg:
@@ -346,6 +368,7 @@ async def _main_async() -> None:
             await listener.serve(lambda stream: _handle_connection(stream, state, token))
     finally:
         mcp_runtime.set_daemon_state(None)
+        mcp_server.shutdown_runtime()
         mcp_broker.remove_discovery_if_owner(pid=os.getpid(), token=token)
         await listener.aclose()
 
@@ -356,6 +379,7 @@ def main() -> int:
     except KeyboardInterrupt:
         return 0
     except Exception as exc:
+        mcp_broker.emit_lifecycle("daemon_failed", reason=str(exc))
         sys.stderr.write(f"[latch] shared MCP daemon failed: {exc}\n")
         return 1
     return 0

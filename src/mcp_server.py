@@ -14,6 +14,7 @@ import secrets
 import socket
 import sys
 import threading
+import atexit
 from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
@@ -76,6 +77,7 @@ mcp = FastMCP("latch")
 PROJECT_CWD = os.getcwd()
 _RUNTIME_INIT_LOCK = threading.Lock()
 _RUNTIME_INITIALIZED = False
+_EMBED_OWNER: tuple[socket.socket, int, str] | None = None
 SESSION_ID_ENV_VARS = (
     "LATCH_SESSION_ID",
     "CLAUDE_CODE_SESSION_ID",
@@ -349,6 +351,7 @@ def _start_embed_listener(project_cwd: str) -> None:
     block on cold-load. Best-effort — failures are logged via stderr only,
     since the MCP tool surface still works without it (just slower hooks).
     """
+    global _EMBED_OWNER
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -357,9 +360,10 @@ def _start_embed_listener(project_cwd: str) -> None:
         host, port = sock.getsockname()
 
         token = secrets.token_hex(16)
-        disc_dir = paths.ensure_project_dir(project_cwd)
-        disc_path = disc_dir / embeddings.DISCOVERY_FILE
+        paths.ensure_project_dir(project_cwd)
+        disc_path = mcp_broker.embed_discovery_path()
         payload = json.dumps({
+            "runtime_key": mcp_broker.RUNTIME_KEY,
             "host": host,
             "port": port,
             "token": token,
@@ -373,6 +377,7 @@ def _start_embed_listener(project_cwd: str) -> None:
         except OSError:
             pass
         os.replace(tmp_path, disc_path)
+        _EMBED_OWNER = (sock, os.getpid(), token)
     except Exception as e:
         sys.stderr.write(f"[latch] embed listener bind failed: {e}\n")
         return
@@ -411,7 +416,9 @@ def _start_embed_listener(project_cwd: str) -> None:
             if not isinstance(text, str):
                 client.sendall(b'{"error":"text_not_string"}\n')
                 return
+            mcp_runtime.touch_daemon()
             vec = embeddings.embed(text)
+            mcp_runtime.touch_daemon()
             client.sendall(json.dumps({"vec": vec.tolist()}).encode("utf-8") + b"\n")
         except Exception as e:
             try:
@@ -437,6 +444,41 @@ def _start_embed_listener(project_cwd: str) -> None:
     # mcp.run() (see __main__ block). Doing it on a daemon thread races the
     # Windows DLL loader with FastMCP's asyncio init and deadlocks scipy's
     # C-extension imports, which jams Thread.start() process-wide.
+
+
+def shutdown_runtime() -> None:
+    """Remove process-owned discovery and close the embed listener."""
+    global _EMBED_OWNER
+    owner, _EMBED_OWNER = _EMBED_OWNER, None
+    if owner is None:
+        return
+    sock, pid, token = owner
+    try:
+        sock.close()
+    except OSError:
+        pass
+    mcp_broker.remove_embed_discovery_if_owner(pid=pid, token=token)
+
+
+atexit.register(shutdown_runtime)
+
+
+async def run_shared_session(read_stream, write_stream) -> None:
+    """Compatibility boundary for FastMCP's custom-stream server runner.
+
+    FastMCP does not expose a public custom-stream entry point in the pinned
+    release.  Keep the private lookup isolated here, validate its shape, and
+    cover this adapter with a focused test so dependency upgrades fail loudly.
+    """
+    server = getattr(mcp, "_mcp_server", None)
+    run = getattr(server, "run", None)
+    options = getattr(server, "create_initialization_options", None)
+    if server is None or not callable(run) or not callable(options):
+        raise RuntimeError(
+            "installed mcp package is incompatible with latch's shared runtime; "
+            "install the version range pinned in requirements.txt"
+        )
+    await run(read_stream, write_stream, options())
 
 
 @mcp.tool(name="latch_search")
@@ -1626,11 +1668,7 @@ def kb_runtime_status() -> dict:
     connection = mcp_runtime.connection_snapshot()
     embed_owner: dict[str, Any] | None = None
     try:
-        payload = json.loads(
-            (paths.project_dir(_project_cwd()) / embeddings.DISCOVERY_FILE).read_text(
-                encoding="utf-8"
-            )
-        )
+        payload = json.loads(mcp_broker.embed_discovery_path().read_text(encoding="utf-8"))
         if isinstance(payload, dict):
             embed_owner = {
                 key: payload.get(key)
@@ -1658,6 +1696,7 @@ def kb_runtime_status() -> dict:
             "listener": embed_owner,
         },
         "process_peak_rss_bytes": _peak_rss_bytes(),
+        "lifecycle": mcp_broker.lifecycle_summary(hours=24),
         "recovery": (
             "Idle owners are reclaimed; the stdio proxy reconnects and replays MCP initialization. "
             "In-flight calls are never automatically replayed."

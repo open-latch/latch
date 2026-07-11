@@ -112,11 +112,10 @@ class ProxyBridge:
         self._init_line: bytes | None = None
         self._initialized_line: bytes | None = None
         self._init_id: Any = None
-        self._init_completed = False
         self._replaying = False
         self._replay_id: Any = None
         self._deferred: list[bytes] = []
-        self._pending: set[Any] = set()
+        self._pending: dict[Any, str] = {}
         self.retired = False
 
     def _stdin_reader(self) -> None:
@@ -151,6 +150,10 @@ class ProxyBridge:
             sock.sendall(self._init_line)
             self._replaying = True
             self._replay_id = self._init_id
+            mcp_broker.emit_lifecycle(
+                "daemon_reconnect_succeeded",
+                connection_id=self.metadata["connection_id"],
+            )
 
     def _close_socket(self) -> None:
         sock, self._sock = self._sock, None
@@ -175,11 +178,19 @@ class ProxyBridge:
 
     def _daemon_lost(self, reason: str) -> None:
         self._close_socket()
-        for request_id in list(self._pending):
+        for request_id, operation in list(self._pending.items()):
             self._emit_request_error(
                 request_id,
-                f"Latch shared daemon disconnected during the request ({reason}); retry once. "
-                "The proxy did not replay the call because it may have mutated state.",
+                f"Latch shared daemon disconnected during {operation} ({reason}). "
+                "The outcome is unknown: the operation may have committed before the "
+                "response was lost. Inspect current latch state before deciding whether "
+                "to issue a new operation; the proxy did not replay it.",
+            )
+        if self._pending:
+            mcp_broker.emit_lifecycle(
+                "daemon_disconnect_unknown_outcome",
+                pending_count=len(self._pending),
+                reason=reason,
             )
         self._pending.clear()
         if self._deferred:
@@ -188,7 +199,8 @@ class ProxyBridge:
                 if "id" in message:
                     self._emit_request_error(
                         message["id"],
-                        "Latch shared daemon could not be reinitialized; retry once.",
+                        "Latch shared daemon could not be reinitialized. This deferred "
+                        "request was not sent; issue a new request after runtime recovery.",
                     )
             self._deferred.clear()
         self._replaying = False
@@ -201,12 +213,15 @@ class ProxyBridge:
             if method == "initialize" and "id" in message:
                 self._init_line = line
                 self._init_id = message["id"]
-                self._init_completed = False
                 self._initialized_line = None
             elif method == "notifications/initialized":
                 self._initialized_line = line
             if "id" in message and method:
-                self._pending.add(message["id"])
+                params = message.get("params")
+                tool = params.get("name") if method == "tools/call" and isinstance(params, dict) else None
+                self._pending[message["id"]] = (
+                    f"tools/call {tool}" if isinstance(tool, str) else str(method)
+                )
         assert self._sock is not None
         self._sock.sendall(line)
 
@@ -227,6 +242,11 @@ class ProxyBridge:
                 replay = bool(self._init_line is not None and not is_fresh_initialize)
                 self._connect(replay=replay)
             except (OSError, mcp_broker.BrokerError) as exc:
+                mcp_broker.emit_lifecycle(
+                    "daemon_reconnect_failed" if self._init_line is not None else "daemon_start_failed",
+                    connection_id=self.metadata["connection_id"],
+                    reason=str(exc),
+                )
                 if "id" in message:
                     self._emit_request_error(message["id"], str(exc))
                 return
@@ -239,7 +259,7 @@ class ProxyBridge:
             self._forward(line)
         except OSError as exc:
             if "id" in message:
-                self._pending.add(message["id"])
+                self._pending[message["id"]] = str(message.get("method") or "request")
             self._daemon_lost(str(exc))
 
     def _finish_replay(self) -> None:
@@ -267,9 +287,7 @@ class ProxyBridge:
 
         if "id" in message and ("result" in message or "error" in message):
             request_id = message["id"]
-            self._pending.discard(request_id)
-            if request_id == self._init_id and "result" in message:
-                self._init_completed = True
+            self._pending.pop(request_id, None)
         self._emit(line)
 
     def _read_daemon(self) -> None:
@@ -343,6 +361,13 @@ class ProxyBridge:
                             "if this host does not reconnect it automatically\n"
                         )
                         sys.stderr.flush()
+                        mcp_broker.emit_lifecycle(
+                            "proxy_retired",
+                            connection_id=self.metadata["connection_id"],
+                            reason="idle_over_cap",
+                            cap=int(self._lease.policy["cap"]),
+                            over_cap_duration_s=self._lease.over_cap_duration_s(),
+                        )
                         self.retired = True
                         return 0
 
@@ -365,6 +390,7 @@ class ProxyLease:
         self.started_epoch = time.time()
         self.last_activity_epoch = self.started_epoch
         self._last_heartbeat_monotonic = 0.0
+        self._over_cap_since_epoch: float | None = None
         self.policy = mcp_broker.proxy_policy()
 
     def _write(self) -> None:
@@ -383,6 +409,20 @@ class ProxyLease:
 
     def start(self) -> None:
         self._write()
+        inventory = mcp_broker.proxy_inventory()
+        mcp_broker.emit_lifecycle(
+            "proxy_started",
+            connection_id=self.connection_id,
+            live_leases=len(inventory),
+            cap=int(self.policy["cap"]),
+        )
+        if int(self.policy["cap"]) > 0 and len(inventory) > int(self.policy["cap"]):
+            mcp_broker.emit_lifecycle(
+                "proxy_over_cap",
+                connection_id=self.connection_id,
+                live_leases=len(inventory),
+                cap=int(self.policy["cap"]),
+            )
 
     def touch(self) -> None:
         self.last_activity_epoch = time.time()
@@ -402,6 +442,11 @@ class ProxyLease:
         if cap <= 0:
             return False
         inventory = mcp_broker.proxy_inventory()
+        if len(inventory) > cap:
+            if self._over_cap_since_epoch is None:
+                self._over_cap_since_epoch = time.time()
+        else:
+            self._over_cap_since_epoch = None
         retained = {str(row.get("connection_id")) for row in inventory[:cap]}
         idle = time.time() - self.last_activity_epoch
         return (
@@ -410,8 +455,13 @@ class ProxyLease:
             and idle >= float(self.policy["retire_idle_s"])
         )
 
+    def over_cap_duration_s(self) -> float | None:
+        if self._over_cap_since_epoch is None:
+            return None
+        return round(max(0.0, time.time() - self._over_cap_since_epoch), 3)
+
     def close(self) -> None:
-        mcp_broker.remove_proxy_lease(self.connection_id)
+        mcp_broker.remove_proxy_lease(self.connection_id, reason="proxy_exit")
 
 
 def _exec_legacy_server() -> None:
@@ -424,6 +474,7 @@ def _exec_legacy_server() -> None:
 def main() -> int:
     metadata = connection_metadata()
     if os.environ.get("LATCH_MCP_FORCE_LEGACY"):
+        mcp_broker.emit_lifecycle("legacy_fallback", reason="forced_by_env")
         _exec_legacy_server()
     try:
         # Establish readiness before consuming stdin.  If startup fails, the
@@ -431,11 +482,19 @@ def main() -> int:
         # request.
         mcp_broker.ensure_daemon(metadata["project_cwd"])
     except mcp_broker.BrokerError as exc:
-        if os.environ.get("LATCH_MCP_NO_LEGACY_FALLBACK"):
-            sys.stderr.write(f"[latch] shared MCP daemon unavailable: {exc}\n")
-            return 1
-        sys.stderr.write(f"[latch] shared MCP daemon unavailable; using legacy server: {exc}\n")
-        _exec_legacy_server()
+        if os.environ.get("LATCH_MCP_ALLOW_LEGACY_FALLBACK"):
+            mcp_broker.emit_lifecycle("legacy_fallback", reason=str(exc))
+            sys.stderr.write(
+                f"[latch] shared MCP daemon unavailable; explicit legacy fallback enabled: {exc}\n"
+            )
+            _exec_legacy_server()
+        mcp_broker.emit_lifecycle("daemon_start_failed", reason=str(exc))
+        sys.stderr.write(
+            f"[latch] shared MCP daemon unavailable: {exc}. "
+            "Run latch doctor; legacy mode is opt-in with "
+            "LATCH_MCP_ALLOW_LEGACY_FALLBACK=1.\n"
+        )
+        return 1
     bridge = ProxyBridge(metadata)
     code = bridge.run()
     if bridge.retired:

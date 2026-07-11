@@ -13,8 +13,6 @@ import socket as _socket
 import threading as _threading
 
 import numpy as np
-import onnxruntime as _ort
-from tokenizers import Tokenizer as _Tokenizer
 
 import paths as _paths
 
@@ -29,8 +27,10 @@ _TOKENIZER_PATH = _VENDOR_DIR / "tokenizer.json"
 
 _LOAD_TIMEOUT = 60.0
 
-_SESSION: "_ort.InferenceSession | None" = None
-_TOKENIZER: "_Tokenizer | None" = None
+_ort = None
+_Tokenizer = None
+_SESSION = None
+_TOKENIZER = None
 _LOAD_LOCK = _threading.Lock()
 
 
@@ -43,7 +43,7 @@ def _ensure_loaded() -> None:
     """Lazy-init the ONNX session and tokenizer. Mirrors the torch loader's
     deadlock-guard: if the lock can't be acquired in _LOAD_TIMEOUT seconds,
     raise rather than block every caller indefinitely."""
-    global _SESSION, _TOKENIZER
+    global _ort, _Tokenizer, _SESSION, _TOKENIZER
     if _SESSION is not None and _TOKENIZER is not None:
         return
     if not _LOAD_LOCK.acquire(timeout=_LOAD_TIMEOUT):
@@ -51,6 +51,12 @@ def _ensure_loaded() -> None:
             f"_LOAD_LOCK held > {_LOAD_TIMEOUT}s; loader likely deadlocked"
         )
     try:
+        if _ort is None:
+            import onnxruntime as _onnxruntime
+            _ort = _onnxruntime
+        if _Tokenizer is None:
+            from tokenizers import Tokenizer as _TokenizerClass
+            _Tokenizer = _TokenizerClass
         if _SESSION is None:
             _SESSION = _ort.InferenceSession(
                 str(_MODEL_PATH), providers=["CPUExecutionProvider"]
@@ -139,8 +145,11 @@ def embed_remote(
     The shared MCP daemon owns the model; hook subprocesses only see vectors.
     Returns None on any failure.
     """
-    from paths import project_dir  # local import; avoid circular
-    disc = project_dir(project_cwd) / DISCOVERY_FILE
+    # Discovery is runtime-keyed so blue/green daemons cannot overwrite each
+    # other's embed endpoint.  Import locally to keep module initialization
+    # ordering simple (mcp_broker itself remains stdlib-only).
+    import mcp_broker
+    disc = mcp_broker.embed_discovery_path()
     if not disc.exists():
         return None
     try:
@@ -148,7 +157,10 @@ def embed_remote(
     except (OSError, ValueError):
         return None
     host, port, token = meta.get("host"), meta.get("port"), meta.get("token")
-    if not host or not port or not token:
+    if (
+        not host or not port or not token
+        or meta.get("runtime_key") != mcp_broker.RUNTIME_KEY
+    ):
         return None
     try:
         with _socket.create_connection((host, int(port)), timeout=timeout) as s:

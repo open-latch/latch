@@ -31,6 +31,7 @@ class ConnectionContext:
 
 class RuntimeState(Protocol):
     def snapshot(self) -> dict[str, Any]: ...
+    def touch(self, connection_id: str | None = None) -> None: ...
 
 
 _CONNECTION: ContextVar[ConnectionContext | None] = ContextVar(
@@ -65,3 +66,10 @@ def set_daemon_state(state: RuntimeState | None) -> None:
 def daemon_snapshot() -> dict[str, Any] | None:
     state = _DAEMON_STATE
     return state.snapshot() if state is not None else None
+
+
+def touch_daemon() -> None:
+    """Count non-MCP owner activity such as prompt-hook embedding RPCs."""
+    state = _DAEMON_STATE
+    if state is not None:
+        state.touch()

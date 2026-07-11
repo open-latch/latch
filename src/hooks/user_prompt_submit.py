@@ -22,17 +22,17 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
 import sys
 import time
 from datetime import datetime, timezone
-from pathlib import Path
 
 from _common import hook_field, log, project_cwd, read_hook_input, session_id
 
-from paths import UNLATCHED_MESSAGE, is_disabled, is_in_compact, is_unlatched_mode, project_dir
+from paths import UNLATCHED_MESSAGE, is_disabled, is_in_compact, is_unlatched_mode
 
+
+_PROCESS_STARTED = time.perf_counter()
 
 TOP_K = 5
 MAX_INJECT = 5
@@ -48,6 +48,7 @@ DEPTH_KEYWORDS = re.compile(
     re.IGNORECASE,
 )
 HARD_BUDGET_MS = 250
+SUBPROCESS_BUDGET_RESERVE_MS = 25
 LOG_STREAM = "retrieve"
 
 np = None
@@ -56,11 +57,12 @@ embeddings = None
 log_utils = None
 profiles = None
 search = None
+mcp_broker = None
 _RUNTIME_LOADED = False
 
 
 def _load_runtime() -> None:
-    global np, db, embeddings, log_utils, profiles, search, _RUNTIME_LOADED
+    global np, db, embeddings, log_utils, profiles, search, mcp_broker, _RUNTIME_LOADED
     if _RUNTIME_LOADED:
         return
     import numpy as _np
@@ -69,6 +71,7 @@ def _load_runtime() -> None:
     import log_utils as _log_utils
     import profiles as _profiles
     import search as _search
+    import mcp_broker as _mcp_broker
 
     np = _np
     db = _db
@@ -76,6 +79,7 @@ def _load_runtime() -> None:
     log_utils = _log_utils
     profiles = _profiles
     search = _search
+    mcp_broker = _mcp_broker
     _RUNTIME_LOADED = True
 
 # Deterministic correction-signal scan (no LLM, sub-millisecond). When a
@@ -166,7 +170,12 @@ def main() -> int:
 
     t0 = time.perf_counter()
     try:
-        injected = _retrieve_and_inject(cwd, sid, prompt, log_entry)
+        injected = _retrieve_and_inject(
+            cwd, sid, prompt, log_entry,
+            deadline=_PROCESS_STARTED + (
+                HARD_BUDGET_MS - SUBPROCESS_BUDGET_RESERVE_MS
+            ) / 1000.0,
+        )
     except Exception as e:
         log_entry["error"] = f"{type(e).__name__}: {e}"
         _write_log(cwd, log_entry)
@@ -183,7 +192,10 @@ def main() -> int:
 
     _write_log(cwd, log_entry)
 
-    context = _format_injection(injected) if injected else _format_no_hits()
+    if log_entry.get("skip") == "embed_daemon_unavailable":
+        context = _format_runtime_unavailable()
+    else:
+        context = _format_injection(injected) if injected else _format_no_hits()
     # Include mc_directive + cite_directive on the main path too — previously
     # dropped here, so the mission-control standing contract only surfaced on the
     # short-prompt / no-session early-outs. Both are '' for non-mission-control.
@@ -204,7 +216,9 @@ def _print_context(context: str) -> None:
     print(json.dumps(out))
 
 
-def _retrieve_and_inject(cwd: str, sid: str, prompt: str, log_entry: dict) -> list[dict]:
+def _retrieve_and_inject(
+    cwd: str, sid: str, prompt: str, log_entry: dict, *, deadline: float | None = None,
+) -> list[dict]:
     _load_runtime()
     conn = db.connect(cwd)
     try:
@@ -221,9 +235,15 @@ def _retrieve_and_inject(cwd: str, sid: str, prompt: str, log_entry: dict) -> li
         # subprocess, so falling through to it would blow HARD_BUDGET_MS
         # by ~80x. If the daemon is unreachable or still warming, skip
         # retrieval for this turn rather than block the user's prompt.
-        qvec = embeddings.embed_remote(prompt, cwd)
+        deadline = deadline or (time.perf_counter() + HARD_BUDGET_MS / 1000.0)
+        qvec = _embed_with_bounded_wake(prompt, cwd, deadline, log_entry)
         if qvec is None:
             log_entry["skip"] = "embed_daemon_unavailable"
+            mcp_broker.emit_lifecycle(
+                "prompt_retrieval_degraded",
+                reason="embed_daemon_unavailable",
+                wake_requested=bool(log_entry.get("daemon_wake_requested")),
+            )
             return []
         qblob = embeddings.to_blob(qvec)
 
@@ -262,6 +282,33 @@ def _retrieve_and_inject(cwd: str, sid: str, prompt: str, log_entry: dict) -> li
         return injected
     finally:
         conn.close()
+
+
+def _embed_with_bounded_wake(prompt: str, cwd: str, deadline: float, log_entry: dict):
+    """Use the warm owner or request one without exceeding the hook wall."""
+    remaining = deadline - time.perf_counter()
+    if remaining <= 0:
+        log_entry["daemon_wake_requested"] = mcp_broker.request_daemon_start(cwd)
+        return None
+
+    # Only call the embed endpoint when the MCP owner has published readiness;
+    # its embed listener appears before model pre-warm completes.
+    if mcp_broker.read_discovery() is not None:
+        qvec = embeddings.embed_remote(prompt, cwd, timeout=max(0.005, min(0.05, remaining)))
+        if qvec is not None:
+            return qvec
+
+    log_entry["daemon_wake_requested"] = mcp_broker.request_daemon_start(cwd)
+    # Poll the tiny discovery file, not the warming embed endpoint. Reserve a
+    # small tail for one bounded embed RPC if startup completes in time.
+    while time.perf_counter() < deadline - 0.06:
+        if mcp_broker.read_discovery() is not None:
+            remaining = deadline - time.perf_counter()
+            return embeddings.embed_remote(
+                prompt, cwd, timeout=max(0.005, min(0.05, remaining))
+            )
+        time.sleep(0.01)
+    return None
 
 
 def _vector_path(
@@ -403,6 +450,16 @@ def _format_no_hits() -> str:
         "the KB has nothing — it means similarity scoring missed. Actively "
         "query latch (`latch_search` / `latch_get` / `latch_recent`) before "
         "responding — every prompt, no exception."
+    )
+
+
+def _format_runtime_unavailable() -> str:
+    return (
+        "## KB auto-retrieval temporarily unavailable\n\n"
+        "The shared latch runtime was idle, starting, or unreachable, so this "
+        "prompt was **not similarity-scored**. This is not a below-threshold "
+        "result. Latch requested a background wake; actively query "
+        "(`latch_search` / `latch_get` / `latch_recent`) before responding."
     )
 
 

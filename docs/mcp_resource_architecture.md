@@ -1,8 +1,8 @@
 # Bounded latch MCP runtime — issue 1465
 
-Status: local prototype on `mcp-resource-lifecycle`; no remote or public action
-has been taken. Measurements were collected on macOS 13.5, Apple Silicon, on
-2026-07-10.
+Status: public draft PR #21 on `mcp-resource-lifecycle`; intentionally not
+merge-ready pending independent review and cross-platform receipts.
+Measurements were collected on macOS 13.5, Apple Silicon, on 2026-07-10.
 
 ## Decision
 
@@ -120,7 +120,8 @@ sections.
   ONNX and enters `mcp_proxy.py`. Existing installer/config paths do not change.
 - The first proxy acquires an atomic start lock and launches `mcp_daemon.py`.
   Concurrent proxies wait for the same owner.
-- Discovery is an atomically replaced, mode-0600 JSON file. The daemon binds
+- Discovery and election locks live in a runtime-keyed registry beneath the
+  pinned vault. Files are atomically replaced and mode 0600. The daemon binds
   only `127.0.0.1`; connections authenticate with a 256-bit random token.
 - A runtime key fingerprints the internal transport version, relevant source
   files, model, and tokenizer. Upgrades are blue/green: new connections elect a
@@ -153,14 +154,21 @@ visible rather than silently misattributed.
 
 ### Recovery and reclamation
 
-- The daemon defaults to a 30-minute global idle TTL. It does not reclaim while
-  any request is in flight.
+- The daemon defaults to a 60-minute global idle TTL. It does not reclaim while
+  any request is in flight, and prompt-hook embed traffic refreshes activity so
+  a task that is still being used is not mistaken for an idle owner.
 - Proxies remain alive after daemon reclamation. On the next host message, they
   elect/reconnect to an owner and replay only MCP initialization.
-- If the owner dies during a tool call, the proxy returns an error and asks for
-  one retry. It never automatically replays a potentially mutating call.
+- The prompt hook requests a single-flight background wake within its 250 ms
+  wall. If the owner is not ready, it emits an explicit "not similarity-scored"
+  receipt instead of falsely reporting a below-floor result.
+- If the owner dies during a tool call, the proxy reports an unknown outcome
+  and directs the caller to inspect current state before deciding on a new
+  operation. It never automatically replays a potentially mutating call.
 - Proxy leases are individual files, not a contended shared registry. Every
-  proxy updates only its own lease and retires only itself.
+  proxy updates only its own lease and retires only itself. Live PIDs with
+  expired heartbeats are ignored and removed from capacity accounting; peers
+  are never signaled or killed.
 - Default proxy policy: cap 32, five-minute minimum idle before over-cap
   retirement, 30-second heartbeat. Set `LATCH_MCP_PROXY_CAP=0` to disable the
   bound for diagnosis.
@@ -175,7 +183,13 @@ visible rather than silently misattributed.
 - current proxy PID, cwd, session ID, and attribution source;
 - proxy cap/idle/heartbeat policy and live lease count;
 - model-loaded state and embed-listener owner PID/port; and
-- approximate peak RSS without exposing authentication tokens.
+- approximate peak RSS without exposing authentication tokens; and
+- a bounded 24-hour lifecycle summary covering starts, idle exits, degraded
+  prompts, stale/over-cap leases, retirements, reconnects, and failures.
+
+`latch doctor` warns on recent lifecycle pressure and on explicit legacy
+fallback. Lifecycle JSONL is transition-only: it records no prompt text, tool
+arguments, authentication tokens, or per-request traffic.
 
 ## Prototype results
 
@@ -186,23 +200,38 @@ tool-list, tool-call, and embedding paths.
 |---|---:|---:|
 | Sessions | 14 | 14 |
 | Heavy model owners | 14 | 1 |
-| Summed process footprint | 2,238 MB | 351 MB |
-| Reduction | — | 84.3% |
+| Summed process footprint | 2,238 MB | 362 MB |
+| Reduction | — | 83.8% |
 | Proxy footprint | n/a | 14 MB each |
-| All 14 clients ready, sequential launch | not captured | 1.25 s |
-| Shared embed p95 at 14 clients | — | 7.94 ms |
+| All 14 clients ready, sequential launch | not captured | 0.86 s |
+| Shared embed p95 at 14 clients | — | 8.08 ms |
 
-proxy/loopback cost on an unusually small tool call. The UserPromptSubmit hook
 An isolated warm microbenchmark measured shared `latch_embed` p95 at 7.94 ms
 versus 7.17 ms through a legacy process: +0.77 ms absolute. This is the fixed
 proxy/loopback cost on an unusually small tool call. The UserPromptSubmit hook
-proxy/loopback cost on an unusually small tool call. The UserPromptSubmit hook
 does not traverse the stdio proxy; it continues to use the daemon's embed
 listener directly. The existing hook benchmark remained below its 250 ms
-budget: 159.0 ms median and 171.9 ms maximum wall time in the measured run.
+budget: 114.3 ms median and 179.9 ms maximum wall time in the fresh measured run.
 
 The same text embedded through separate proxies produced vectors equal within
 `1e-7`; retrieval representation and quality are unchanged.
+
+### Why 32 remains the candidate cap
+
+The original live failure showed 14 retained contexts, so 32 is not presented
+as a discovered universal concurrency limit. It is a deliberately conservative
+first-release candidate: 2.3× the observed count, while still giving the
+lightweight side a finite steady-state bound. A fresh 32-client production-path
+run on 2026-07-11 kept exactly one heavy owner, initialized all clients in
+1.37 seconds, measured 5.86 ms embed p95 over 64 calls, and used about 590 MB of
+summed macOS footprint. No active client was retired.
+
+The cap should be revisited from lifecycle evidence rather than silently
+degrading: `proxy_high_water`, `proxy_over_cap`, over-cap duration,
+`proxy_retired`, and degraded/reconnect events are summarized by runtime status
+and doctor. Repeated high-water near 32 with long genuinely-active overlap is a
+reason to raise the cap or revisit host integration; retained-but-idle excess
+is exactly what the five-minute retirement policy is designed to absorb.
 
 ## Verification
 
@@ -213,6 +242,10 @@ The production-representative tests cover:
 - identical embeddings across clients;
 - owner crash and re-election;
 - idle owner reclamation and lazy recreation;
+- v1 → v2 → v1 blue/green discovery isolation;
+- a real post-commit/lost-response mutation with no replay or retry advice;
+- prompt-hook wake and truthful bounded degradation after idle exit;
+- live-PID stale-heartbeat lease cleanup;
 - LRU over-cap proxy self-retirement without killing peers; and
 - distinct Codex markers for different workspaces sharing one pinned vault.
 
@@ -221,6 +254,7 @@ Commands:
 ```bash
 .venv/bin/python tests/test_mcp_shared_runtime.py
 .venv/bin/python tests/measure_mcp_resource_scaling.py --sessions 14 --requests 50
+.venv/bin/python tests/measure_mcp_resource_scaling.py --sessions 32 --requests 64
 .venv/bin/python tests/measure_mcp_resource_scaling.py --sessions 8 --requests 100 --compare-legacy
 .venv/bin/python tests/measure_hook_latency.py
 ```
@@ -241,8 +275,8 @@ Recommended rollout after review:
    after an intentionally over-cap idle proxy exits.
 4. Keep default cap 32 during the first release; tune only from observed active
    concurrency, not process-leak counts.
-5. Remove legacy startup only after shared-daemon recovery has survived upgrade
-   and crash dogfood.
+5. Keep legacy startup explicit-only; do not silently restore the old heavy
+   topology when shared-owner startup fails.
 
 Reversal is immediate and local:
 
@@ -253,8 +287,9 @@ Reversal is immediate and local:
   it; or
 - revert the `mcp_server.py` early dispatch and new runtime modules.
 
-Broker startup failure falls back to the legacy server unless
-`LATCH_MCP_NO_LEGACY_FALLBACK=1` is set for strict testing.
+Broker startup failure is visible and fails closed by default. Operators can
+set `LATCH_MCP_ALLOW_LEGACY_FALLBACK=1` for an explicit temporary fallback;
+`LATCH_MCP_FORCE_LEGACY=1` remains the direct diagnostic override.
 
 ## Remaining boundary
 

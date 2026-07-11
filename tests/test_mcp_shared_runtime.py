@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import queue
+import sqlite3
 import shutil
 import signal
 import subprocess
@@ -17,6 +18,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parent.parent
 SERVER = ROOT / "src" / "mcp_server.py"
+PROMPT_HOOK = ROOT / "src" / "hooks" / "user_prompt_submit.py"
 
 
 def _assert(condition: Any, message: str) -> None:
@@ -36,6 +38,7 @@ class McpClient:
         proxy_retire_idle: float | None = None,
         proxy_heartbeat: float | None = None,
         project_cwd: Path | None = None,
+        env_overrides: dict[str, str] | None = None,
     ):
         env = os.environ.copy()
         env.update(
@@ -43,7 +46,6 @@ class McpClient:
                 "LATCH_KB_DIR": str(kb_dir),
                 "LATCH_SESSION_ID": session_id,
                 "LATCH_MCP_DAEMON_IDLE_TTL_SEC": str(idle_ttl),
-                "LATCH_MCP_NO_LEGACY_FALLBACK": "1",
                 # A disposable test vault must not start the unrelated nightly
                 # maintenance subprocess.
                 "CLAUDE_KB_IN_MAINTENANCE": "1",
@@ -57,6 +59,8 @@ class McpClient:
             env["LATCH_MCP_PROXY_RETIRE_IDLE_SEC"] = str(proxy_retire_idle)
         if proxy_heartbeat is not None:
             env["LATCH_MCP_PROXY_HEARTBEAT_SEC"] = str(proxy_heartbeat)
+        if env_overrides:
+            env.update(env_overrides)
         self.process = subprocess.Popen(
             [sys.executable, str(SERVER)],
             cwd=str(project_cwd or ROOT),
@@ -166,19 +170,19 @@ class McpClient:
 
 def _daemon_pid(kb_dir: Path) -> int | None:
     try:
-        return int(json.loads((kb_dir / "mcp-daemon.json").read_text())["pid"])
-    except (OSError, ValueError, KeyError):
+        files = list((kb_dir / "runtime" / "mcp-runtimes").glob("*/mcp-daemon.json"))
+        return int(json.loads(files[0].read_text())["pid"])
+    except (OSError, ValueError, KeyError, IndexError):
         return None
 
 
 def _stop_daemon(kb_dir: Path) -> None:
-    pid = _daemon_pid(kb_dir)
-    if pid is None:
-        return
-    try:
-        os.kill(pid, signal.SIGTERM)
-    except ProcessLookupError:
-        return
+    for path in (kb_dir / "runtime" / "mcp-runtimes").glob("*/mcp-daemon.json"):
+        try:
+            pid = int(json.loads(path.read_text())["pid"])
+            os.kill(pid, signal.SIGTERM)
+        except (OSError, ValueError, KeyError):
+            continue
 
 
 def _temp_vault() -> Path:
@@ -252,6 +256,52 @@ def test_owner_crash_restarts_on_next_call_without_replaying_inflight_work() -> 
         shutil.rmtree(kb_dir, ignore_errors=True)
 
 
+def test_committed_mutation_with_lost_response_is_not_replayed_or_called_retryable() -> None:
+    kb_dir = _temp_vault()
+    client: McpClient | None = None
+    title = "post-commit response-loss sentinel"
+    try:
+        client = McpClient(
+            kb_dir,
+            "unknown-outcome-session",
+            env_overrides={"LATCH_MCP_TEST_DROP_RESPONSE_ID_ONCE": "2"},
+        )
+        try:
+            client.call_tool(
+                "latch_insert",
+                {
+                    "kind": "fact",
+                    "title": title,
+                    "body": "The mutation committed before its response channel was dropped.",
+                },
+            )
+            raise AssertionError("fault injection did not drop the committed response")
+        except AssertionError as exc:
+            message = str(exc).lower()
+            _assert("outcome is unknown" in message, message)
+            _assert("inspect current latch state" in message, message)
+            _assert("retry" not in message, message)
+
+        def count_rows() -> int:
+            conn = sqlite3.connect(kb_dir / "kb.db")
+            try:
+                return int(conn.execute(
+                    "SELECT COUNT(*) FROM nodes WHERE title = ?", (title,)
+                ).fetchone()[0])
+            finally:
+                conn.close()
+
+        _assert(count_rows() == 1, "committed mutation missing or duplicated")
+        client.status()
+        _assert(count_rows() == 1, "proxy replayed an unknown mutation")
+        print("PASS committed_mutation_with_lost_response_is_not_replayed_or_retryable")
+    finally:
+        if client is not None:
+            client.close()
+        _stop_daemon(kb_dir)
+        shutil.rmtree(kb_dir, ignore_errors=True)
+
+
 def test_idle_owner_is_reclaimed_and_lazily_recreated() -> None:
     kb_dir = _temp_vault()
     client: McpClient | None = None
@@ -263,6 +313,89 @@ def test_idle_owner_is_reclaimed_and_lazily_recreated() -> None:
         _assert(after["process_pid"] != old_pid, f"idle owner was not reclaimed: {after}")
         _assert(client.process.poll() is None, "proxy did not survive idle reclamation")
         print("PASS idle_owner_is_reclaimed_and_lazily_recreated")
+    finally:
+        if client is not None:
+            client.close()
+        _stop_daemon(kb_dir)
+        shutil.rmtree(kb_dir, ignore_errors=True)
+
+
+def test_prompt_embed_activity_keeps_owner_warm() -> None:
+    kb_dir = _temp_vault()
+    client: McpClient | None = None
+    try:
+        client = McpClient(kb_dir, "embed-activity-session", idle_ttl=1.0)
+        old_pid = client.status()["process_pid"]
+        env = os.environ.copy()
+        env.update({"LATCH_KB_DIR": str(kb_dir), "PYTHONPATH": str(ROOT / "src")})
+        code = (
+            "import embeddings,time\n"
+            "for _ in range(4):\n"
+            " assert embeddings.embed_remote('keep warm', '.', timeout=1) is not None\n"
+            " time.sleep(.35)\n"
+        )
+        subprocess.run([sys.executable, "-c", code], env=env, check=True, timeout=5.0)
+        _assert(_daemon_pid(kb_dir) == old_pid, "prompt embedding did not refresh owner activity")
+        print("PASS prompt_embed_activity_keeps_owner_warm")
+    finally:
+        if client is not None:
+            client.close()
+        _stop_daemon(kb_dir)
+        shutil.rmtree(kb_dir, ignore_errors=True)
+
+
+def test_prompt_after_idle_exit_wakes_owner_and_emits_truthful_bounded_receipt() -> None:
+    kb_dir = _temp_vault()
+    client: McpClient | None = None
+    try:
+        client = McpClient(kb_dir, "prompt-idle-session", idle_ttl=1.0)
+        old_pid = client.status()["process_pid"]
+        client.close()
+        client = None
+
+        registry = kb_dir / "runtime" / "mcp-runtimes"
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and list(registry.glob("*/mcp-daemon.json")):
+            time.sleep(0.05)
+        _assert(not list(registry.glob("*/mcp-daemon.json")), "idle owner did not exit")
+
+        env = os.environ.copy()
+        env.update({
+            "LATCH_KB_DIR": str(kb_dir),
+            "LATCH_MCP_DAEMON_IDLE_TTL_SEC": "60",
+            "CLAUDE_KB_IN_MAINTENANCE": "1",
+            "PYTHONPATH": str(ROOT / "src"),
+        })
+        started = time.perf_counter()
+        proc = subprocess.run(
+            [sys.executable, str(PROMPT_HOOK)],
+            input=json.dumps({
+                "session_id": "prompt-idle-session",
+                "cwd": str(ROOT),
+                "prompt": "what durable decisions apply to this change",
+            }).encode("utf-8"),
+            capture_output=True,
+            timeout=5.0,
+            env=env,
+        )
+        wall_ms = (time.perf_counter() - started) * 1000
+        _assert(proc.returncode == 0, proc.stderr.decode(errors="replace"))
+        output = json.loads(proc.stdout.decode("utf-8"))
+        context = output["hookSpecificOutput"]["additionalContext"]
+        _assert("temporarily unavailable" in context, context)
+        _assert("not similarity-scored" in context, context)
+        _assert("none auto-retrieved (sim below floor)" not in context.lower(), context)
+        _assert(wall_ms < 250, f"idle prompt hook blocked for {wall_ms:.1f} ms")
+
+        deadline = time.monotonic() + 35.0
+        new_pid = None
+        while time.monotonic() < deadline:
+            new_pid = _daemon_pid(kb_dir)
+            if new_pid is not None and new_pid != old_pid:
+                break
+            time.sleep(0.05)
+        _assert(new_pid is not None and new_pid != old_pid, "hook wake did not start a new owner")
+        print("PASS prompt_after_idle_exit_wakes_owner_and_emits_truthful_bounded_receipt")
     finally:
         if client is not None:
             client.close()
@@ -309,6 +442,9 @@ def test_over_cap_idle_proxy_retires_itself_without_killing_peers() -> None:
 if __name__ == "__main__":
     test_parallel_clients_share_one_heavy_owner_and_keep_context_isolated()
     test_owner_crash_restarts_on_next_call_without_replaying_inflight_work()
+    test_committed_mutation_with_lost_response_is_not_replayed_or_called_retryable()
     test_idle_owner_is_reclaimed_and_lazily_recreated()
+    test_prompt_embed_activity_keeps_owner_warm()
+    test_prompt_after_idle_exit_wakes_owner_and_emits_truthful_bounded_receipt()
     test_over_cap_idle_proxy_retires_itself_without_killing_peers()
     print("\nAll shared MCP runtime tests pass.")

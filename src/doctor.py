@@ -624,6 +624,56 @@ def check_kb_pin() -> tuple[str, str, str]:
     )
 
 
+def check_mcp_runtime_lifecycle() -> tuple[str, str, str]:
+    """Surface lifecycle pressure without importing the heavyweight server."""
+    name = "MCP runtime lifecycle"
+    try:
+        import mcp_broker
+
+        policy = mcp_broker.proxy_policy()
+        live = len(mcp_broker.proxy_inventory())
+        # Inventory cleanup may emit a stale-heartbeat event; summarize after
+        # the sweep so the same doctor run surfaces it.
+        summary = mcp_broker.lifecycle_summary(hours=24)
+        discovery = mcp_broker.read_discovery()
+    except Exception as exc:
+        return name, WARN, f"could not inspect lifecycle state: {exc}"
+
+    counts = summary.get("counts") or {}
+    warning_count = int(summary.get("warning_count") or 0)
+    if os.environ.get("LATCH_MCP_ALLOW_LEGACY_FALLBACK") or os.environ.get(
+        "LATCH_MCP_FORCE_LEGACY"
+    ):
+        return name, WARN, (
+            "legacy mode/fallback is explicitly enabled; this can restore one "
+            "heavyweight model per stdio process"
+        )
+    if warning_count:
+        signals = ", ".join(
+            f"{event}={count}" for event, count in counts.items()
+            if event in {
+                "daemon_failed", "daemon_start_failed", "proxy_lease_stale",
+                "proxy_over_cap", "proxy_retired", "legacy_fallback",
+                "prompt_retrieval_degraded", "daemon_reconnect_failed",
+                "daemon_disconnect_unknown_outcome",
+            } and count
+        )
+        return name, WARN, (
+            f"{warning_count} pressure/failure event(s) in 24h: {signals}. "
+            f"Proxy high-water={summary.get('proxy_high_water', 0)}; max over-cap "
+            f"duration={summary.get('max_over_cap_duration_s', 0)}s. "
+            "Inspect latch_runtime_status lifecycle.recent_warnings and revisit "
+            "the lease/idle defaults if this persists."
+        )
+    owner = f"owner pid={discovery['pid']}" if discovery else "no active owner"
+    return name, OK, (
+        f"{owner}; live leases={live}/{policy['cap']}; "
+        f"retire idle={policy['retire_idle_s']:.0f}s; stale after={policy['stale_s']:.0f}s; "
+        f"24h high-water={summary.get('proxy_high_water', 0)}; "
+        "no lifecycle pressure events in 24h"
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Orchestration
 # --------------------------------------------------------------------------- #
@@ -654,8 +704,10 @@ def run_all(skip_embed: bool, no_arch: bool, allow_old_py: bool,
         results.append(("ONNX embedder", SKIP, "skipped: required imports failed"))
     if no_mcp:
         results.append(("MCP server wiring", SKIP, "skipped (--no-mcp)"))
+        results.append(("MCP runtime lifecycle", SKIP, "skipped (--no-mcp)"))
     else:
         results.append(check_mcp_wiring())
+        results.append(check_mcp_runtime_lifecycle())
     if no_commands:
         results.append(("slash commands installed", SKIP, "skipped (--no-commands)"))
     else:
@@ -716,8 +768,11 @@ def main(argv: list[str] | None = None) -> int:
             "machine": platform.machine(),
             "executable": sys.executable,
             "python": platform.python_version(),
-            "checks": [{"name": n, "level": l, "detail": d} for n, l, d in results],
-            "ok": all(l != FAIL for _, l, _ in results),
+            "checks": [
+                {"name": name, "level": level, "detail": detail}
+                for name, level, detail in results
+            ],
+            "ok": all(level != FAIL for _, level, _ in results),
         }
         print(json.dumps(payload, indent=2))
         return 0 if payload["ok"] else 1
