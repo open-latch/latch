@@ -28,6 +28,10 @@ def decision(payload: dict) -> dict:
         return {}
     cwd = cursor_gate_state.project_cwd(payload)
     sid = cursor_gate_state.session_id(payload, cwd)
+    operation_allowed, _operation_reason = \
+        cursor_gate_state.consume_operation_authorization(cwd, sid, payload)
+    if operation_allowed:
+        return {}
     allowed, _reason = cursor_gate_state.mutation_authorized(cwd, sid)
     if allowed:
         # Empty output preserves Cursor's own permission/autorun behavior.

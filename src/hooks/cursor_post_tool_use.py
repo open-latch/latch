@@ -65,6 +65,8 @@ def find_gate_result(value, depth: int = 0) -> dict | None:
 
 
 def record_gate_receipt(payload: dict) -> tuple[bool, str] | None:
+    if not cursor_gate_state.is_latch_gate_tool(payload):
+        return None
     result = find_gate_result(cursor_tool_response(payload))
     if result is None:
         return None

@@ -228,13 +228,17 @@ The merge preserves unrelated Cursor hooks and installs:
   per-request conversation id, so MCP structural rows remain unattributed
   instead of inheriting another interleaved conversation's project marker.
 - `beforeSubmitPrompt`: fingerprints the current prompt without storing its
-  text and invalidates any prior gate receipt.
+  text, invalidates any prior gate receipt, and recognizes only explicit
+  managed latch operations for a separate one-shot operation lane.
 - `preToolUse`: denies mutation-capable tools until the current prompt has a
-  matching, usable `latch_gate` receipt. Read-only tools remain available
-  through a conservative allowlist; unknown or malformed payloads deny.
-- `postToolUse`: recognizes latch `kb_activity` and gate `findings` in tool
-  results, arms the current prompt only when `latch_gate` used the request
-  verbatim, and returns a concise instruction to surface the receipt. Cursor
+  matching, usable `latch_gate` receipt. Exact native read tools remain
+  available; free-form Shell, unknown, and malformed payloads deny. Explicit
+  latch operations can consume one session/prompt/tool/argument-bound receipt
+  instead; preview/apply and confirmation workflows require a later explicit
+  operation confirmation and the receipt is single-use.
+- `postToolUse`: recognizes latch `kb_activity` and gate `findings` in the
+  verified `latch_gate` tool result, arms the current prompt only when that gate
+  used the request verbatim, and returns a concise instruction to surface the receipt. Cursor
   has no equivalent of Claude Code's deterministic user-only `systemMessage`
   channel, so receipt visibility is agent-context delivery backed by the
   `AGENTS.md` foregrounding contract—not a claim that Cursor renders the line

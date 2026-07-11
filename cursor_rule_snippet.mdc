@@ -25,6 +25,13 @@ Use the project `latch` MCP server as the decision-continuity layer:
 - If `preToolUse` denies a mutation for a missing current-prompt receipt, call
   `latch_gate` with the current user request verbatim, surface the findings,
   and then retry. Never work around or disable the hook silently.
+- Explicit latch slash workflows use a separate one-shot operation receipt
+  bound to the current Cursor session, prompt, expected tool, and exact argument
+  shape. That narrow lane keeps compact/seed/maintenance workflows usable
+  without treating them as coding requests or exempting arbitrary latch writes.
+- Free-form Shell commands are mutation-capable. Use Cursor's exact native read
+  tools before the gate; a program name alone is not proof that its options are
+  side-effect-free.
 - Capture durable user decisions or rejected paths with `latch_capture_decision`
   or `latch_insert` when appropriate.
 
