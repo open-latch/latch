@@ -278,6 +278,7 @@ def test_cursor_commands_sync_status_and_remove():
         compact = (commands / "latch-compact.md").read_text(encoding="utf-8")
         _assert("run_cursor_compact_now" in compact and "fail-closed" in compact,
                 compact)
+        _assert("Latch operation id: latch-compact run" in compact, compact)
         _assert("LATCH_COMPACTOR_BACKEND=cursor" in compact, compact)
         ok, detail = ic.cursor_commands_status(commands)
         _assert(ok, detail)

@@ -32,13 +32,11 @@ def _transcript(root: Path) -> Path:
     return path
 
 
-def test_resolve_current_uses_only_marker_pair():
+def test_resolve_current_uses_only_explicit_scoped_marker_pair():
     root, project_dir = _tmp()
     try:
         transcript = _transcript(root)
         cursor_session.write_marker(str(root), "cursor-session", transcript_path=str(transcript))
-        sid, path = cursor_transcript.resolve_current(str(root))
-        assert sid == "cursor-session" and path == transcript.resolve()
         sid, path = cursor_transcript.resolve_current(
             str(root), session_id="cursor-session", transcript_path=str(transcript),
         )
@@ -55,14 +53,17 @@ def test_resolve_current_fails_closed_without_exact_marker_pair():
         try:
             cursor_transcript.resolve_current(str(root))
         except cursor_transcript.CursorTranscriptError as e:
-            assert "no current Cursor" in str(e)
+            assert "explicit current Cursor session id" in str(e)
         else:
             raise AssertionError("missing marker must fail")
 
         cursor_session.write_marker(str(root), "cursor-session", transcript_path=str(transcript))
         for kwargs, expected in [
-            ({"session_id": "other"}, "does not match current session"),
-            ({"transcript_path": str(root / "other.jsonl")}, "does not match current Cursor marker"),
+            ({"session_id": "other"}, "no SessionStart marker for requested"),
+            ({
+                "session_id": "cursor-session",
+                "transcript_path": str(root / "other.jsonl"),
+            }, "does not match current Cursor marker"),
         ]:
             try:
                 cursor_transcript.resolve_current(str(root), **kwargs)
@@ -80,7 +81,7 @@ def test_resolve_current_refuses_marker_without_transcript_path():
     try:
         cursor_session.write_marker(str(root), "cursor-session")
         try:
-            cursor_transcript.resolve_current(str(root))
+            cursor_transcript.resolve_current(str(root), session_id="cursor-session")
         except cursor_transcript.CursorTranscriptError as e:
             assert "undocumented Cursor storage" in str(e)
         else:
@@ -108,7 +109,9 @@ def test_cursor_compact_main_passes_current_pair_to_shared_compactor(capsys):
             return {"ok": True, "summary_node_id": 42}
 
         cursor_compact.compactor.run_compaction = fake_run
-        rc = cursor_compact.main(["--project", str(root), "--summarizer", "cursor"])
+        rc = cursor_compact.main([
+            "cursor-session", "--project", str(root), "--summarizer", "cursor",
+        ])
         assert rc == 0
         output = json.loads(capsys.readouterr().out)
         assert output["current_session_only"] is True

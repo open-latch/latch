@@ -21,18 +21,22 @@ def resolve_current(
     session_id: str | None = None,
     transcript_path: str | None = None,
 ) -> tuple[str, Path]:
-    marker = cursor_session.read_marker(project_path)
+    explicit_sid = (session_id or "").strip()
+    if not explicit_sid:
+        raise CursorTranscriptError(
+            "an explicit current Cursor session id is required; use the id "
+            "surfaced by the SessionStart hook"
+        )
+    marker = cursor_session.read_marker(project_path, session_id=explicit_sid)
     if not marker:
         raise CursorTranscriptError(
-            "no current Cursor SessionStart marker; start or resume a Cursor "
-            "conversation with --with-hooks enabled"
+            f"no SessionStart marker for requested Cursor session {explicit_sid}"
         )
     marker_sid = marker.get("session_id")
     if not isinstance(marker_sid, str) or not marker_sid.strip():
         raise CursorTranscriptError("current Cursor marker has no session id")
     marker_sid = marker_sid.strip()
-    explicit_sid = (session_id or "").strip()
-    if explicit_sid and explicit_sid != marker_sid:
+    if explicit_sid != marker_sid:
         raise CursorTranscriptError(
             f"requested Cursor session {explicit_sid} does not match current session {marker_sid}"
         )
