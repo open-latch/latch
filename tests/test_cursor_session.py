@@ -21,6 +21,27 @@ def test_cursor_session_marker_round_trip():
         payload = cursor_session.read_marker(tmp)
         assert payload["source"] == "cursor_session_start"
         assert cursor_session.read_session_id(tmp) == "cursor-conversation"
+        assert cursor_session.read_marker(
+            tmp, session_id="cursor-conversation",
+        ) == payload
+    finally:
+        shutil.rmtree(project_dir, ignore_errors=True)
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_cursor_session_markers_are_scoped_across_interleaved_conversations():
+    tmp = tempfile.mkdtemp(prefix="cursor-session-scoped-")
+    project_dir = paths.project_dir(tmp)
+    try:
+        cursor_session.write_marker(tmp, "conversation-a", transcript_path="/tmp/a.jsonl")
+        cursor_session.write_marker(tmp, "conversation-b", transcript_path="/tmp/b.jsonl")
+        assert cursor_session.read_marker(tmp)["session_id"] == "conversation-b"
+        assert cursor_session.read_marker(
+            tmp, session_id="conversation-a",
+        )["transcript_path"] == "/tmp/a.jsonl"
+        assert cursor_session.read_marker(
+            tmp, session_id="conversation-b",
+        )["transcript_path"] == "/tmp/b.jsonl"
     finally:
         shutil.rmtree(project_dir, ignore_errors=True)
         shutil.rmtree(tmp, ignore_errors=True)

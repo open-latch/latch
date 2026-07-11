@@ -113,6 +113,11 @@ def main() -> int:
         except Exception as e:
             log(f"cursor_session_start record_retrievals failed: {e}")
 
+    if sid:
+        briefing = (
+            f"{briefing}\n\nLatch Cursor session id: `{sid}`. "
+            "Managed current-session workflows must pass this exact id to their wrapper."
+        )
     emit_cursor_context(briefing)
     return 0
 
