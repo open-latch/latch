@@ -242,6 +242,15 @@ def test_managed_operation_receipts_are_exact_and_single_use():
         assert cpre.decision(wrong_args)["permission"] == "deny"
         outside = _shell("bash /tmp/run_cursor_compact_now.sh", root, sid)
         assert cpre.decision(outside)["permission"] == "deny"
+
+        cgs.begin_prompt(root, sid, "/latch-compact")
+        compact_ps1 = paths.KB_ROOT / "bin" / "run_cursor_compact_now.ps1"
+        powershell = (
+            '$env:LATCH_COMPACTOR_BACKEND = "cursor"\n'
+            '$env:LATCH_MODEL_BACKEND = "cursor"\n'
+            f'& "{compact_ps1}" "{sid}"'
+        )
+        assert cpre.decision(_shell(powershell, root, sid)) == {}
     finally:
         shutil.rmtree(project_dir, ignore_errors=True)
         shutil.rmtree(root, ignore_errors=True)

@@ -12,6 +12,7 @@ import json
 import os
 import re
 import shlex
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -442,12 +443,12 @@ def _operation_shell_argv(payload: dict[str, Any]) -> tuple[str, list[str]] | No
     if not isinstance(command, str) or not command.strip():
         return None
     text = command.replace("\\\n", " ").strip()
-    if any(token in text for token in ("&&", "||", "|", ">", "<", "`", "$(", "\r", "\n")):
+    if any(token in text for token in ("&&", "||", "|", ">", "<", "`", "$(")):
         return None
 
     # PowerShell skills may set only the documented backend variables before
     # invoking one exact wrapper in the same Shell tool call.
-    segments = [segment.strip() for segment in text.split(";")]
+    segments = [segment.strip() for segment in re.split(r";|\r?\n", text) if segment.strip()]
     if len(segments) > 1:
         for segment in segments[:-1]:
             match = re.fullmatch(
@@ -570,7 +571,17 @@ def consume_operation_authorization(
     try:
         fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
     except FileExistsError:
-        return False, "operation receipt is already being consumed"
+        try:
+            stale = time.time() - lock.stat().st_mtime > 10
+        except OSError:
+            stale = False
+        if not stale:
+            return False, "operation receipt is already being consumed"
+        try:
+            lock.unlink()
+            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except (FileExistsError, OSError):
+            return False, "operation receipt is already being consumed"
     try:
         os.close(fd)
         state = read_state(project_path, sid)
