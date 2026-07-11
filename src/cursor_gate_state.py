@@ -435,7 +435,7 @@ def _strip_quotes(value: str) -> str:
     return text
 
 
-def _operation_shell_argv(payload: dict[str, Any]) -> tuple[str, list[str]] | None:
+def _operation_shell_argv(payload: dict[str, Any]) -> tuple[Path, list[str]] | None:
     raw_name = _normalized_tool_name(_tool_name(payload))
     if raw_name not in _SHELL_NAMES and "shell" not in raw_name and "terminal" not in raw_name:
         return None
@@ -482,12 +482,26 @@ def _operation_shell_argv(payload: dict[str, Any]) -> tuple[str, list[str]] | No
         parts = parts[1:]
         if not parts:
             return None
-    script = Path(parts[0]).expanduser()
+    script = Path(parts[0]).expanduser().resolve(strict=False)
     try:
         script.resolve(strict=False).relative_to(paths.KB_ROOT.resolve(strict=False))
     except (OSError, ValueError):
         return None
-    return script.name.lower(), parts[1:]
+    return script, parts[1:]
+
+
+def _trusted_script(script: Path, relative_path: str) -> bool:
+    """Require the exact managed script, not merely a trusted-looking basename."""
+    expected = (paths.KB_ROOT / relative_path).resolve(strict=False)
+    return script == expected
+
+
+def _same_project(left: str | os.PathLike, right: str | os.PathLike) -> bool:
+    try:
+        return Path(left).expanduser().resolve(strict=False) == \
+            Path(right).expanduser().resolve(strict=False)
+    except (OSError, TypeError, ValueError):
+        return False
 
 
 def _report_args_are_read_only(args: list[str]) -> bool:
@@ -507,6 +521,7 @@ def _report_args_are_read_only(args: list[str]) -> bool:
 def _operation_tool_matches(
     operation: dict[str, Any],
     payload: dict[str, Any],
+    project_path: str,
 ) -> bool:
     name = operation.get("name")
     phase = operation.get("phase")
@@ -527,11 +542,17 @@ def _operation_tool_matches(
     script, args = parsed
     if name == "latch-compact":
         return (
-            script in {"run_cursor_compact_now.sh", "run_cursor_compact_now.ps1"}
+            (
+                _trusted_script(script, "bin/run_cursor_compact_now.sh")
+                or _trusted_script(script, "bin/run_cursor_compact_now.ps1")
+            )
             and args == [operation.get("session_id")]
         )
     if name == "latch-seed":
-        if script not in {"latch_seed.sh", "latch_seed.ps1"}:
+        if not (
+            _trusted_script(script, "bin/latch_seed.sh")
+            or _trusted_script(script, "bin/latch_seed.ps1")
+        ):
             return False
         expected = [
             "--source", "cursor", "--cursor-session-id", operation.get("session_id"),
@@ -541,16 +562,32 @@ def _operation_tool_matches(
         return args == expected
     if name == "latch-gate-report":
         return (
-            script in {"latch_gate_report.sh", "latch_gate_report.ps1"}
+            (
+                _trusted_script(script, "bin/latch_gate_report.sh")
+                or _trusted_script(script, "bin/latch_gate_report.ps1")
+            )
             and _report_args_are_read_only(args)
         )
     if name == "latch-budget-approve":
-        return script == "budget.py" and len(args) == 2 and args[0] in {"approve", "status"}
+        return (
+            _trusted_script(script, "src/budget.py")
+            and len(args) == 2
+            and args[0] in {"approve", "status"}
+            and _same_project(args[1], project_path)
+        )
     if name in {"latch-decay", "latch-heal", "latch-tree"}:
         expected = {"latch-decay": "weekly", "latch-heal": "nightly", "latch-tree": "tree"}[name]
-        return script == "maintenance.py" and len(args) == 2 and args[0] == expected
+        return (
+            _trusted_script(script, "src/maintenance.py")
+            and len(args) == 2
+            and args[0] == expected
+            and _same_project(args[1], project_path)
+        )
     if name == "unlatch":
-        if script not in {"unlatch.sh", "unlatch.ps1"}:
+        if not (
+            _trusted_script(script, "bin/unlatch.sh")
+            or _trusted_script(script, "bin/unlatch.ps1")
+        ):
             return False
         if phase == "inspect":
             return not args
@@ -592,7 +629,7 @@ def consume_operation_authorization(
             return False, "no unconsumed operation receipt for this prompt"
         if receipt.get("prompt_hash") != state.get("prompt_hash"):
             return False, "operation receipt belongs to another prompt"
-        if not _operation_tool_matches(receipt, payload):
+        if not _operation_tool_matches(receipt, payload, project_path):
             return False, "tool or arguments do not match the authorized latch operation"
         receipt["consumed"] = True
         receipt["consumed_at"] = _now()

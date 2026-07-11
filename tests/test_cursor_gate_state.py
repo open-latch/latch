@@ -344,3 +344,79 @@ def test_other_managed_operations_match_only_expected_wrappers():
     finally:
         shutil.rmtree(project_dir, ignore_errors=True)
         shutil.rmtree(root, ignore_errors=True)
+
+
+def test_managed_maintenance_receipt_rejects_wrong_project_and_script_path():
+    import cursor_pre_tool_use as cpre
+
+    root, project_dir = _tmp()
+    other_root = tempfile.mkdtemp()
+    sid = "managed-operation-project-binding"
+    attacker_dir = paths.KB_ROOT / "attacker"
+    attacker_script = attacker_dir / "maintenance.py"
+    official_script = paths.KB_ROOT / "src" / "maintenance.py"
+    try:
+        cgs.begin_prompt(root, sid, "/latch-heal")
+        wrong_project = _shell(
+            f"python {official_script} nightly {other_root}", root, sid,
+        )
+        assert cpre.decision(wrong_project)["permission"] == "deny"
+
+        attacker_dir.mkdir(exist_ok=True)
+        attacker_script.write_text("# not a managed script\n", encoding="utf-8")
+        cgs.begin_prompt(root, sid, "/latch-heal")
+        wrong_script = _shell(
+            f"python {attacker_script} nightly {root}", root, sid,
+        )
+        assert cpre.decision(wrong_script)["permission"] == "deny"
+
+        cgs.begin_prompt(root, sid, "/latch-heal")
+        expected = _shell(f"python {official_script} nightly {root}", root, sid)
+        assert cpre.decision(expected) == {}
+    finally:
+        attacker_script.unlink(missing_ok=True)
+        try:
+            attacker_dir.rmdir()
+        except OSError:
+            pass
+        shutil.rmtree(project_dir, ignore_errors=True)
+        shutil.rmtree(root, ignore_errors=True)
+        shutil.rmtree(other_root, ignore_errors=True)
+
+
+def test_managed_budget_receipt_rejects_wrong_project_and_script_path():
+    import cursor_pre_tool_use as cpre
+
+    root, project_dir = _tmp()
+    other_root = tempfile.mkdtemp()
+    sid = "managed-budget-project-binding"
+    attacker_dir = paths.KB_ROOT / "attacker"
+    attacker_script = attacker_dir / "budget.py"
+    official_script = paths.KB_ROOT / "src" / "budget.py"
+    try:
+        cgs.begin_prompt(root, sid, "/latch-budget-approve")
+        wrong_project = _shell(
+            f"python {official_script} approve {other_root}", root, sid,
+        )
+        assert cpre.decision(wrong_project)["permission"] == "deny"
+
+        attacker_dir.mkdir(exist_ok=True)
+        attacker_script.write_text("# not a managed script\n", encoding="utf-8")
+        cgs.begin_prompt(root, sid, "/latch-budget-approve")
+        wrong_script = _shell(
+            f"python {attacker_script} approve {root}", root, sid,
+        )
+        assert cpre.decision(wrong_script)["permission"] == "deny"
+
+        cgs.begin_prompt(root, sid, "/latch-budget-approve")
+        expected = _shell(f"python {official_script} approve {root}", root, sid)
+        assert cpre.decision(expected) == {}
+    finally:
+        attacker_script.unlink(missing_ok=True)
+        try:
+            attacker_dir.rmdir()
+        except OSError:
+            pass
+        shutil.rmtree(project_dir, ignore_errors=True)
+        shutil.rmtree(root, ignore_errors=True)
+        shutil.rmtree(other_root, ignore_errors=True)
