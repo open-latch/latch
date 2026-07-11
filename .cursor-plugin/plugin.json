@@ -9,7 +9,7 @@
   "publisher": "open-latch",
   "homepage": "https://github.com/open-latch/latch",
   "repository": "https://github.com/open-latch/latch",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "keywords": [
     "decision-continuity",
     "project-judgment",

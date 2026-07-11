@@ -37,6 +37,7 @@ def test_cursor_plugin_manifest_matches_official_schema_surface():
     assert re.fullmatch(r"[a-z0-9]([a-z0-9.-]*[a-z0-9])?", manifest["name"])
     assert set(manifest) <= OFFICIAL_MANIFEST_KEYS
     assert manifest["skills"] == "./cursor_skills/"
+    assert manifest["license"] == "Apache-2.0"
     assert "commands" not in manifest, "project commands remain installer-owned; avoid duplicates"
     assert "hooks" not in manifest and "mcpServers" not in manifest, (
         "plugin skills must not duplicate project runtime wiring"

@@ -462,7 +462,15 @@ def test_cursor_skills_refuse_user_owned_same_name_collision():
 
 
 def test_asset_collision_preflight_prevents_any_partial_install():
-    for collision_kind in ("command", "skill"):
+    collision_cases = (
+        ("command-file", "command", "file"),
+        ("command-directory", "command", "directory"),
+        ("command-dangling-symlink", "command", "dangling-symlink"),
+        ("skill-file", "skill", "file"),
+        ("skill-directory", "skill", "directory"),
+        ("skill-dangling-symlink", "skill", "dangling-symlink"),
+    )
+    for case_name, collision_kind, path_kind in collision_cases:
         d = Path(tempfile.mkdtemp(prefix=f"latch-cursor-{collision_kind}-transaction-"))
         try:
             cursor = d / ".cursor"
@@ -475,7 +483,13 @@ def test_asset_collision_preflight_prevents_any_partial_install():
                 collision = skills / "source-command-latch-gate" / "SKILL.md"
                 payload = b"---\nname: source-command-latch-gate\ndescription: user skill\n---\n"
             collision.parent.mkdir(parents=True)
-            collision.write_bytes(payload)
+            outside_target = d / "outside" / f"{case_name}.md"
+            if path_kind == "file":
+                collision.write_bytes(payload)
+            elif path_kind == "directory":
+                collision.mkdir()
+            else:
+                collision.symlink_to(outside_target)
 
             rc = ic.main([
                 "--mcp-json", str(cursor / "mcp.json"),
@@ -486,12 +500,18 @@ def test_asset_collision_preflight_prevents_any_partial_install():
                 "--hooks-json", str(cursor / "hooks.json"),
                 "--with-hooks", "--yes",
             ])
-            _assert(rc == 2, (collision_kind, rc))
-            _assert(collision.read_bytes() == payload, collision_kind)
-            _assert(not (cursor / "mcp.json").exists(), collision_kind)
-            _assert(not (d / "AGENTS.md").exists(), collision_kind)
-            _assert(not (cursor / "rules" / "latch.mdc").exists(), collision_kind)
-            _assert(not (cursor / "hooks.json").exists(), collision_kind)
+            _assert(rc == 2, (case_name, rc))
+            if path_kind == "file":
+                _assert(collision.read_bytes() == payload, case_name)
+            elif path_kind == "directory":
+                _assert(collision.is_dir(), case_name)
+            else:
+                _assert(collision.is_symlink(), case_name)
+                _assert(not outside_target.exists(), case_name)
+            _assert(not (cursor / "mcp.json").exists(), case_name)
+            _assert(not (d / "AGENTS.md").exists(), case_name)
+            _assert(not (cursor / "rules" / "latch.mdc").exists(), case_name)
+            _assert(not (cursor / "hooks.json").exists(), case_name)
             if collision_kind == "skill":
                 _assert(not commands.exists(), "command assets must not precede skill preflight")
             else:

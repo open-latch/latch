@@ -284,7 +284,10 @@ def cursor_command_collisions(
     collisions: list[Path] = []
     for name in CURSOR_COMMAND_FILES:
         target = commands_dir / name
-        if not target.is_file():
+        if not target.exists() and not target.is_symlink():
+            continue
+        if target.is_symlink() or not target.is_file():
+            collisions.append(target)
             continue
         existing = _read_text(target)
         desired = render_cursor_command(name, model_backend=model_backend)
@@ -423,8 +426,15 @@ def cursor_skill_collisions(
 ) -> list[Path]:
     collisions: list[Path] = []
     for name in CURSOR_SKILL_NAMES:
-        target = skills_dir / name / "SKILL.md"
-        if not target.is_file():
+        skill_dir = skills_dir / name
+        target = skill_dir / "SKILL.md"
+        if skill_dir.is_symlink() or (skill_dir.exists() and not skill_dir.is_dir()):
+            collisions.append(skill_dir)
+            continue
+        if not target.exists() and not target.is_symlink():
+            continue
+        if target.is_symlink() or not target.is_file():
+            collisions.append(target)
             continue
         existing = _read_text(target)
         desired = render_cursor_skill(name, model_backend=model_backend)
