@@ -256,12 +256,14 @@ def test_seed_operation_requires_preview_then_explicit_apply():
     try:
         cgs.begin_prompt(root, sid, "/latch-seed apply")
         apply_payload = _shell(
-            f"bash {seed} --source cursor --apply --yes", root, sid,
+            f"bash {seed} --source cursor --cursor-session-id {sid} --apply --yes", root, sid,
         )
         assert cpre.decision(apply_payload)["permission"] == "deny"
 
         cgs.begin_prompt(root, sid, "/latch-seed")
-        preview = _shell(f"bash {seed} --source cursor", root, sid)
+        preview = _shell(
+            f"bash {seed} --source cursor --cursor-session-id {sid}", root, sid,
+        )
         assert cpre.decision(preview) == {}
         assert cpre.decision(preview)["permission"] == "deny"
 

@@ -531,7 +531,9 @@ def _operation_tool_matches(
     if name == "latch-seed":
         if script not in {"latch_seed.sh", "latch_seed.ps1"}:
             return False
-        expected = ["--source", "cursor"]
+        expected = [
+            "--source", "cursor", "--cursor-session-id", operation.get("session_id"),
+        ]
         if phase == "apply":
             expected += ["--apply", "--yes"]
         return args == expected
