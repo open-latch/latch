@@ -329,6 +329,12 @@ def test_other_managed_operations_match_only_expected_wrappers():
             cgs.begin_prompt(root, sid, prompt)
             assert cpre.decision(_shell(command, root, sid)) == {}, prompt
 
+        maintenance = paths.KB_ROOT / "src" / "maintenance.py"
+        cgs.begin_prompt(root, sid, "/latch-heal")
+        assert cpre.decision(_shell(
+            f'python {maintenance} nightly "$PWD"', root, sid,
+        )) == {}
+
         cgs.begin_prompt(root, sid, "/unlatch")
         unlatch = paths.KB_ROOT / "bin" / "unlatch.sh"
         assert cpre.decision(_shell(f"bash {unlatch}", root, sid)) == {}
@@ -411,6 +417,15 @@ def test_managed_budget_receipt_rejects_wrong_project_and_script_path():
         cgs.begin_prompt(root, sid, "/latch-budget-approve")
         expected = _shell(f"python {official_script} approve {root}", root, sid)
         assert cpre.decision(expected) == {}
+
+        cgs.begin_prompt(root, sid, "/latch-budget-approve")
+        pwd_form = _shell(f'python {official_script} approve "$PWD"', root, sid)
+        assert cpre.decision(pwd_form) == {}
+
+        cgs.begin_prompt(root, sid, "/latch-budget-approve")
+        wrong_cwd = _shell(f'python {official_script} approve "$PWD"', root, sid)
+        wrong_cwd["tool_input"]["cwd"] = other_root
+        assert cpre.decision(wrong_cwd)["permission"] == "deny"
     finally:
         attacker_script.unlink(missing_ok=True)
         try:

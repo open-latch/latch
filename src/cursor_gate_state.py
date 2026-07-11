@@ -504,6 +504,26 @@ def _same_project(left: str | os.PathLike, right: str | os.PathLike) -> bool:
         return False
 
 
+def _project_argument_matches(
+    value: str,
+    project_path: str,
+    payload: dict[str, Any],
+) -> bool:
+    """Match a literal project path or the shell's constrained PWD sentinel."""
+    if value not in {"$PWD", "${PWD}"}:
+        return _same_project(value, project_path)
+
+    # The parser rejects command chaining and arbitrary environment setup, so
+    # PWD can only mean the Shell tool's starting directory. If Cursor exposes
+    # an explicit per-tool cwd, require it to be the hook's current project.
+    tool_input = _tool_input(payload)
+    for key in ("cwd", "workingDirectory", "workdir"):
+        explicit_cwd = tool_input.get(key)
+        if isinstance(explicit_cwd, str) and explicit_cwd.strip():
+            return _same_project(explicit_cwd, project_path)
+    return True
+
+
 def _report_args_are_read_only(args: list[str]) -> bool:
     value_flags = {"--days", "--limit", "--start", "--end"}
     index = 0
@@ -573,7 +593,7 @@ def _operation_tool_matches(
             _trusted_script(script, "src/budget.py")
             and len(args) == 2
             and args[0] in {"approve", "status"}
-            and _same_project(args[1], project_path)
+            and _project_argument_matches(args[1], project_path, payload)
         )
     if name in {"latch-decay", "latch-heal", "latch-tree"}:
         expected = {"latch-decay": "weekly", "latch-heal": "nightly", "latch-tree": "tree"}[name]
@@ -581,7 +601,7 @@ def _operation_tool_matches(
             _trusted_script(script, "src/maintenance.py")
             and len(args) == 2
             and args[0] == expected
-            and _same_project(args[1], project_path)
+            and _project_argument_matches(args[1], project_path, payload)
         )
     if name == "unlatch":
         if not (
