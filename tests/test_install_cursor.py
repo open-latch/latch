@@ -229,6 +229,17 @@ def test_cursor_commands_sync_status_and_remove():
         ok, detail = ic.cursor_commands_status(commands)
         _assert(ok, detail)
 
+        gate.write_text(body + "\nmanaged drift\n", encoding="utf-8")
+        changes = ic.sync_cursor_commands(commands)
+        _assert(any("updated Cursor command latch-gate.md" in c for c in changes), changes)
+        _assert(gate.read_text(encoding="utf-8") == body,
+                "latch-owned command drift should be repaired")
+        _assert(gate.with_name("latch-gate.md.latchbak").read_text(encoding="utf-8").endswith(
+            "managed drift\n"
+        ), "latch-owned drift should retain a backup")
+        _assert(ic.sync_cursor_commands(commands) == [],
+                "repeated command install should be idempotent")
+
         custom = commands / "custom.md"
         custom.write_text("user command\n", encoding="utf-8")
         removed = ic.remove_cursor_commands(commands)
@@ -237,6 +248,40 @@ def test_cursor_commands_sync_status_and_remove():
         ok, detail = ic.cursor_commands_status(commands)
         _assert(not ok and "missing" in detail, detail)
         print("PASS cursor_commands_sync_status_and_remove")
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_cursor_commands_refuse_user_owned_same_name_collision():
+    d = Path(tempfile.mkdtemp(prefix="latch-cursor-command-collision-"))
+    try:
+        commands = d / ".cursor" / "commands"
+        commands.mkdir(parents=True)
+        gate = commands / "latch-gate.md"
+        custom = b"user-owned gate command\n"
+        gate.write_bytes(custom)
+
+        try:
+            ic.sync_cursor_commands(commands)
+        except ic.CursorAssetCollisionError as exc:
+            _assert("refusing to overwrite user-owned Cursor command" in str(exc), exc)
+        else:
+            raise AssertionError("same-name user command must fail closed")
+
+        _assert(gate.read_bytes() == custom, "collision must preserve the user file byte-for-byte")
+        _assert(not gate.with_name("latch-gate.md.latchbak").exists(),
+                "fail-closed collision must not create a misleading backup")
+        _assert(not (commands / "latch-pm.md").exists(),
+                "collision preflight must happen before any command writes")
+
+        rc = ic.main([
+            "--skip-mcp", "--skip-agents", "--skip-rules",
+            "--commands-dir", str(commands),
+        ])
+        _assert(rc == 2, rc)
+        removed = ic.remove_cursor_commands(commands)
+        _assert(gate.read_bytes() == custom, "uninstall must preserve a collision-blocked user file")
+        _assert(any("looks user-owned" in row for row in removed), removed)
     finally:
         shutil.rmtree(d, ignore_errors=True)
 
@@ -283,5 +328,6 @@ if __name__ == "__main__":
     test_first_wire_notice_is_cursor_branded()
     test_check_mode_verifies_mcp_and_agents()
     test_cursor_commands_sync_status_and_remove()
+    test_cursor_commands_refuse_user_owned_same_name_collision()
     test_with_hooks_installs_and_check_requires_hooks()
     print("\nAll install_cursor tests pass.")

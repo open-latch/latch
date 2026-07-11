@@ -92,13 +92,21 @@ PROJECT_SESSION_ID = _resolve_project_session_id()
 
 
 def _project_session_id() -> str | None:
-    """Return a stable session id once one can be resolved.
+    """Return the current adapter session id.
 
     Codex may launch the MCP server without CODEX_THREAD_ID in its environment.
     In that case the SessionStart hook writes a project-scoped marker. Do not
     cache None: the hook can create the marker after this module imports.
+
+    Cursor can reuse one project MCP process across conversations, so its
+    project marker is deliberately refreshed on every call.  Caching that
+    marker would pin structural provenance to the first conversation seen by
+    the process.  Claude/Codex environment-derived ids retain the existing
+    stable process cache.
     """
     global PROJECT_SESSION_ID
+    if _is_cursor_adapter_env(os.environ):
+        return _resolve_project_session_id()
     if PROJECT_SESSION_ID:
         return PROJECT_SESSION_ID
     sid = _resolve_project_session_id()

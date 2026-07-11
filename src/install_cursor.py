@@ -65,6 +65,10 @@ CURSOR_COMMAND_FOOTER = (
 )
 
 
+class CursorAssetCollisionError(RuntimeError):
+    """Raised before install would overwrite a user-owned Cursor asset."""
+
+
 def _forward_slash(value: str) -> str:
     return value.replace("\\", "/")
 
@@ -205,9 +209,29 @@ def _is_latch_cursor_command_body(body: str) -> bool:
     )
 
 
+def _is_managed_cursor_command_body(body: str) -> bool:
+    """Use the installed footer as the strict ownership marker for updates."""
+    return "Cursor boundary: this project-local command is a reusable prompt" in body
+
+
 def sync_cursor_commands(commands_dir: Path = DEFAULT_COMMANDS_DIR, *, dry_run: bool = False) -> list[str]:
     if not COMMANDS_SRC.is_dir():
         return [f"no commands/ directory at {COMMANDS_SRC} - skipped"]
+    collisions: list[Path] = []
+    for name in CURSOR_COMMAND_FILES:
+        target = commands_dir / name
+        if not target.is_file():
+            continue
+        existing = _read_text(target)
+        desired = render_cursor_command(name)
+        if existing != desired and not _is_managed_cursor_command_body(existing):
+            collisions.append(target)
+    if collisions:
+        names = ", ".join(str(path) for path in collisions)
+        raise CursorAssetCollisionError(
+            "refusing to overwrite user-owned Cursor command(s): " + names
+            + "; move or rename the file(s), then rerun the installer"
+        )
     changes: list[str] = []
     if not dry_run:
         commands_dir.mkdir(parents=True, exist_ok=True)
@@ -458,7 +482,11 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"  [OK  ] Cursor rule {action}: {rules_path}")
 
     if not args.skip_commands:
-        changes = sync_cursor_commands(Path(args.commands_dir), dry_run=args.dry_run)
+        try:
+            changes = sync_cursor_commands(Path(args.commands_dir), dry_run=args.dry_run)
+        except CursorAssetCollisionError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
         if changes:
             _print_changes("Cursor commands", changes, dry_run=args.dry_run)
         else:

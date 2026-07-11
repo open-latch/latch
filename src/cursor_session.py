@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -39,9 +40,15 @@ def write_marker(
         "updated_at": datetime.now(timezone.utc).isoformat(),
         "source": "cursor_session_start",
     }
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    os.replace(tmp, path)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    try:
+        tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        os.replace(tmp, path)
+    finally:
+        try:
+            tmp.unlink()
+        except FileNotFoundError:
+            pass
     return path
 
 
