@@ -32,6 +32,9 @@ ${LATCH_HOME}/
 │   ├── embeddings.py         # local ONNX MiniLM embedder (vendored all-MiniLM-L6-v2)
 │   ├── search.py             # hybrid FTS + cosine retrieval
 │   ├── mcp_server.py         # MCP tools: kb_search/get/recent/insert/...
+│   ├── mcp_proxy.py          # lightweight per-host stdio compatibility process
+│   ├── mcp_daemon.py         # shared multi-connection MCP/model owner
+│   ├── mcp_broker.py         # discovery, election, leases, and bounded lifecycle
 │   ├── compactor.py          # session -> KB nodes via Claude or Codex backend
 │   ├── gate.py               # decision-chain assembly + classifier (kb_gate)
 │   ├── heal.py               # on-insert + nightly contradiction healer
@@ -91,6 +94,13 @@ ${LATCH_HOME}/
   request, then classifies the request as `PROCEED` / `MODIFY` /
   `DO_NOT_PROCEED` / `NEEDS_HUMAN_JUDGMENT`. (Renamed from `kb_preflight`
   2026-05-19.)
+- **Bounded MCP runtime.** Host-created stdio processes enter a lightweight
+  proxy before importing FastMCP/ONNX. One lazily elected daemon per pinned
+  vault/runtime key owns the warm model and serves multiple logical MCP
+  sessions. Idle owners are reclaimed; over-cap idle proxies retire themselves
+  through an LRU lease pool. See
+  [docs/mcp_resource_architecture.md](./docs/mcp_resource_architecture.md) for
+  the root-cause evidence, invariants, benchmarks, and rollback path.
 
 ## Tool & command surface
 

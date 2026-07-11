@@ -480,6 +480,14 @@ At natural stopping points, capture the session:
 Compaction is user-initiated because it spends a model call and writes a durable
 summary into the KB.
 
+Latch shares its heavyweight local MCP/model runtime across tasks and subagents
+instead of loading a separate embedding model in every stdio process. Ask the
+agent to call `latch_runtime_status` when diagnosing resource use; it reports
+the shared owner, active connections, proxy lease bound, attribution source,
+and model-listener PID without exposing authentication tokens. Contributor
+details and benchmark evidence are in
+[`docs/mcp_resource_architecture.md`](./docs/mcp_resource_architecture.md).
+
 ## Safety
 
 **Local-first storage.** latch stores project judgment locally in SQLite. It

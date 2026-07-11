@@ -34,6 +34,11 @@ _TOKENIZER: "_Tokenizer | None" = None
 _LOAD_LOCK = _threading.Lock()
 
 
+def is_loaded() -> bool:
+    """Whether this process currently owns a ready heavyweight embedder."""
+    return _SESSION is not None and _TOKENIZER is not None
+
+
 def _ensure_loaded() -> None:
     """Lazy-init the ONNX session and tokenizer. Mirrors the torch loader's
     deadlock-guard: if the lock can't be acquired in _LOAD_TIMEOUT seconds,
@@ -129,10 +134,10 @@ def embed_remote(
     project_cwd: "str | _os.PathLike",
     timeout: float = DEFAULT_REMOTE_TIMEOUT,
 ) -> "np.ndarray | None":
-    """Call the per-project MCP server's embed listener over loopback TCP.
+    """Call the pinned vault's shared embed listener over loopback TCP.
 
-    Identical wire protocol to the torch embedder — the daemon is what owns
-    the model now, callers just see vec lists. Returns None on any failure.
+    The shared MCP daemon owns the model; hook subprocesses only see vectors.
+    Returns None on any failure.
     """
     from paths import project_dir  # local import; avoid circular
     disc = project_dir(project_cwd) / DISCOVERY_FILE
