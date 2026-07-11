@@ -409,6 +409,21 @@ def sync_cursor_skills(
 ) -> list[str]:
     if not CURSOR_SKILLS_SRC.is_dir():
         return [f"no cursor_skills/ directory at {CURSOR_SKILLS_SRC} - skipped"]
+    collisions: list[Path] = []
+    for name in CURSOR_SKILL_NAMES:
+        target = skills_dir / name / "SKILL.md"
+        if not target.is_file():
+            continue
+        existing = _read_text(target)
+        desired = render_cursor_skill(name, model_backend=model_backend)
+        if existing != desired and not _is_latch_cursor_skill_body(existing):
+            collisions.append(target)
+    if collisions:
+        names = ", ".join(str(path) for path in collisions)
+        raise CursorAssetCollisionError(
+            "refusing to overwrite user-owned Cursor skill(s): " + names
+            + "; move or rename the skill(s), then rerun the installer"
+        )
     changes: list[str] = []
     for name in CURSOR_SKILL_NAMES:
         desired = render_cursor_skill(name, model_backend=model_backend)
@@ -721,10 +736,14 @@ def main(argv: list[str] | None = None) -> int:
             print("  [OK  ] Cursor commands already have latch")
 
     if not args.skip_skills:
-        changes = sync_cursor_skills(
-            Path(args.skills_dir), dry_run=args.dry_run,
-            model_backend=args.model_backend,
-        )
+        try:
+            changes = sync_cursor_skills(
+                Path(args.skills_dir), dry_run=args.dry_run,
+                model_backend=args.model_backend,
+            )
+        except CursorAssetCollisionError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
         if changes:
             _print_changes("Cursor skills", changes, dry_run=args.dry_run)
         else:

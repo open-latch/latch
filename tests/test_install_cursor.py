@@ -392,6 +392,18 @@ def test_cursor_skills_sync_status_remove_and_plugin_manifest():
         plugin_ok, plugin_detail = ic.cursor_plugin_status()
         _assert(plugin_ok, plugin_detail)
 
+        gate.write_text(gate_body + "\nmanaged drift\n", encoding="utf-8")
+        changes = ic.sync_cursor_skills(skills, model_backend="codex")
+        _assert(any("updated Cursor skill source-command-latch-gate" in row for row in changes),
+                changes)
+        _assert(gate.read_text(encoding="utf-8") == gate_body,
+                "latch-owned skill drift should be repaired")
+        _assert(gate.with_name("SKILL.md.latchbak").read_text(encoding="utf-8").endswith(
+            "managed drift\n"
+        ), "latch-owned skill drift should retain a backup")
+        _assert(ic.sync_cursor_skills(skills, model_backend="codex") == [],
+                "repeated skill install should be idempotent")
+
         custom = skills / "custom-skill" / "SKILL.md"
         custom.parent.mkdir(parents=True)
         custom.write_text("---\nname: custom-skill\ndescription: user owned\n---\n", encoding="utf-8")
@@ -399,6 +411,40 @@ def test_cursor_skills_sync_status_remove_and_plugin_manifest():
         _assert(any("removed Cursor skill source-command-latch-gate" in row for row in removed),
                 removed)
         _assert(custom.is_file(), "uninstall should preserve unrelated Cursor skills")
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_cursor_skills_refuse_user_owned_same_name_collision():
+    d = Path(tempfile.mkdtemp(prefix="latch-cursor-skill-collision-"))
+    try:
+        skills = d / ".cursor" / "skills"
+        gate = skills / "source-command-latch-gate" / "SKILL.md"
+        gate.parent.mkdir(parents=True)
+        custom = b"---\nname: source-command-latch-gate\ndescription: user owned\n---\n"
+        gate.write_bytes(custom)
+
+        try:
+            ic.sync_cursor_skills(skills)
+        except ic.CursorAssetCollisionError as exc:
+            _assert("refusing to overwrite user-owned Cursor skill" in str(exc), exc)
+        else:
+            raise AssertionError("same-name user skill must fail closed")
+
+        _assert(gate.read_bytes() == custom, "collision must preserve the user skill byte-for-byte")
+        _assert(not gate.with_name("SKILL.md.latchbak").exists(),
+                "fail-closed collision must not create a misleading backup")
+        _assert(not (skills / "source-command-latch-seed").exists(),
+                "collision preflight must happen before any skill writes")
+
+        rc = ic.main([
+            "--skip-mcp", "--skip-agents", "--skip-rules", "--skip-commands",
+            "--skills-dir", str(skills),
+        ])
+        _assert(rc == 2, rc)
+        removed = ic.remove_cursor_skills(skills)
+        _assert(gate.read_bytes() == custom, "uninstall must preserve a collision-blocked user skill")
+        _assert(any("looks user-owned" in row for row in removed), removed)
     finally:
         shutil.rmtree(d, ignore_errors=True)
 
@@ -452,5 +498,6 @@ if __name__ == "__main__":
     test_cursor_commands_refuse_user_owned_same_name_collision()
     test_cursor_commands_render_selected_compatibility_backend()
     test_cursor_skills_sync_status_remove_and_plugin_manifest()
+    test_cursor_skills_refuse_user_owned_same_name_collision()
     test_with_hooks_installs_and_check_requires_hooks()
     print("\nAll install_cursor tests pass.")
