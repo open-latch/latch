@@ -100,8 +100,8 @@ first-run mission.
 - **Cursor adapter:** project-scoped MCP wiring through `.cursor/mcp.json`, a
   managed `.cursor/rules/latch.mdc` activation rule, project-local
   `.cursor/commands` prompts, and the shared `AGENTS.md` contract. An opt-in
-  `.cursor/hooks.json` layer adds SessionStart KB briefing, current-conversation
-  provenance, and post-tool latch activity context. Native Cursor-backed gate
+  `.cursor/hooks.json` layer adds SessionStart KB briefing, a current-session
+  transcript handoff, and post-tool latch activity context. Native Cursor-backed gate
   calls, transcript-history discovery, pre-edit enforcement, and native Cursor
   compaction remain deferred.
 - **Claude Code + Codex together:** one shared local latch KB, so decisions and
@@ -221,9 +221,12 @@ from one repo without touching Claude Code or Codex config.
 Pass `--with-hooks` to opt into project-scoped `.cursor/hooks.json` wiring.
 The merge preserves unrelated Cursor hooks and installs:
 
-- `sessionStart`: records the current Cursor conversation id for latch's
-  structural logs, re-syncs an already-managed `AGENTS.md`, and returns the KB
-  brief through Cursor's native `additional_context` field.
+- `sessionStart`: records the current Cursor conversation/transcript pair for
+  direct hook activity and explicit current-session workflows, re-syncs an
+  already-managed `AGENTS.md`, and returns the KB brief through Cursor's native
+  `additional_context` field. Cursor's reused MCP process has no verified
+  per-request conversation id, so MCP structural rows remain unattributed
+  instead of inheriting another interleaved conversation's project marker.
 - `postToolUse`: recognizes latch `kb_activity` and gate `findings` in tool
   results and returns a concise instruction to surface the receipt. Cursor has
   no equivalent of Claude Code's deterministic user-only `systemMessage`

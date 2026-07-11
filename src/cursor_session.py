@@ -1,8 +1,10 @@
-"""Cursor session handoff helpers.
+"""Cursor current-conversation transcript handoff helpers.
 
-Cursor passes a conversation id to project hooks, but the MCP child process is
-started independently.  The SessionStart hook writes the current id to this
-small project marker so structural latch logs can retain Cursor provenance.
+Cursor passes a conversation id and transcript path to project hooks.  The
+SessionStart hook writes the current pair to this small project marker for
+explicit current-session seed/compact workflows.  The long-lived MCP process
+must not use the project-wide marker as request provenance because multiple
+Cursor conversations can interleave in one project.
 """
 from __future__ import annotations
 

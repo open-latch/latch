@@ -26,7 +26,6 @@ from mcp.server.fastmcp import FastMCP  # noqa: E402
 import artifacts as artifact_store  # noqa: E402
 import capture_streams  # noqa: E402
 import codex_session  # noqa: E402
-import cursor_session  # noqa: E402
 import db  # noqa: E402
 import embeddings  # noqa: E402
 import gate_report  # noqa: E402
@@ -75,14 +74,17 @@ def _resolve_project_session_id(
     structural logs (id=1091 / id=1108).
     """
     source = os.environ if env is None else env
+    # Cursor project hooks receive a conversation id, but calls into its reused
+    # MCP process do not carry a verified per-request conversation identity.
+    # A project marker is therefore only a current-transcript handoff for
+    # explicit seed/compact workflows, never provenance for MCP structural
+    # rows: two Cursor conversations can interleave in the same project.
+    if _is_cursor_adapter_env(source):
+        return None
     for name in SESSION_ID_ENV_VARS:
         value = (source.get(name) or "").strip()
         if value:
             return value
-    # Cursor can deliberately use the Codex model backend.  The explicit
-    # adapter identity must therefore win over backend-based Codex detection.
-    if _is_cursor_adapter_env(source):
-        return cursor_session.read_session_id(project_cwd or PROJECT_CWD)
     if _is_codex_adapter_env(source):
         return codex_session.read_session_id(project_cwd or PROJECT_CWD)
     return None
@@ -98,15 +100,15 @@ def _project_session_id() -> str | None:
     In that case the SessionStart hook writes a project-scoped marker. Do not
     cache None: the hook can create the marker after this module imports.
 
-    Cursor can reuse one project MCP process across conversations, so its
-    project marker is deliberately refreshed on every call.  Caching that
-    marker would pin structural provenance to the first conversation seen by
-    the process.  Claude/Codex environment-derived ids retain the existing
-    stable process cache.
+    Cursor can reuse one project MCP process across interleaved conversations,
+    and MCP calls do not carry a verified conversation id.  Never infer one
+    from the project's last SessionStart marker; unattributed is safer than a
+    false cross-conversation attribution.  Claude/Codex environment-derived
+    ids retain the existing stable process cache.
     """
     global PROJECT_SESSION_ID
     if _is_cursor_adapter_env(os.environ):
-        return _resolve_project_session_id()
+        return None
     if PROJECT_SESSION_ID:
         return PROJECT_SESSION_ID
     sid = _resolve_project_session_id()
