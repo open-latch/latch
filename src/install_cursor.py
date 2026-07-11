@@ -281,6 +281,8 @@ def cursor_command_collisions(
     *,
     model_backend: str | None = None,
 ) -> list[Path]:
+    if commands_dir.is_symlink() or (commands_dir.exists() and not commands_dir.is_dir()):
+        return [commands_dir]
     collisions: list[Path] = []
     for name in CURSOR_COMMAND_FILES:
         target = commands_dir / name
@@ -424,6 +426,8 @@ def cursor_skill_collisions(
     *,
     model_backend: str | None = None,
 ) -> list[Path]:
+    if skills_dir.is_symlink() or (skills_dir.exists() and not skills_dir.is_dir()):
+        return [skills_dir]
     collisions: list[Path] = []
     for name in CURSOR_SKILL_NAMES:
         skill_dir = skills_dir / name

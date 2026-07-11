@@ -10,6 +10,6 @@ Latch operation id: latch-decay run
 Latch Cursor skill boundary: resolve `latch_home` as `${CURSOR_PLUGIN_ROOT}`
 when set, otherwise use the absolute checkout in the project-sync footer.
 Select native `cursor` for plugin installs or the backend in that footer. Run
-`python "$latch_home/src/maintenance.py" weekly "$(pwd)"` with
+`python "$latch_home/src/maintenance.py" weekly "$PWD"` with
 `LATCH_MAINTENANCE_BACKEND` and `LATCH_MODEL_BACKEND` set to that backend.
 Report `decayed_rows`, `promoted_count`, and `promoted_ids`.

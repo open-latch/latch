@@ -66,6 +66,15 @@ def test_cursor_plugin_skills_are_complete_nonconflicting_and_portable():
         assert "~/.cursor/projects" not in text
         assert "agent-transcripts" not in text
 
+        if name in {
+            "source-command-latch-budget-approve",
+            "source-command-latch-decay",
+            "source-command-latch-heal",
+            "source-command-latch-tree",
+        }:
+            assert '"$PWD"' in text
+            assert "$(pwd)" not in text
+
 
 def test_cursor_plugin_status_accepts_checked_in_distribution():
     ok, detail = ic.cursor_plugin_status()

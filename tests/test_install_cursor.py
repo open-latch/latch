@@ -520,6 +520,44 @@ def test_asset_collision_preflight_prevents_any_partial_install():
             shutil.rmtree(d, ignore_errors=True)
 
 
+def test_asset_directory_symlink_preflight_prevents_any_partial_install():
+    for asset_kind in ("commands", "skills"):
+        for target_kind in ("existing", "dangling"):
+            d = Path(tempfile.mkdtemp(
+                prefix=f"latch-cursor-{asset_kind}-{target_kind}-parent-symlink-",
+            ))
+            outside = Path(tempfile.mkdtemp(prefix="latch-cursor-outside-assets-"))
+            try:
+                cursor = d / ".cursor"
+                cursor.mkdir(parents=True)
+                commands = cursor / "commands"
+                skills = cursor / "skills"
+                asset_dir = commands if asset_kind == "commands" else skills
+                symlink_target = outside if target_kind == "existing" else outside / "missing"
+                asset_dir.symlink_to(symlink_target, target_is_directory=True)
+
+                rc = ic.main([
+                    "--mcp-json", str(cursor / "mcp.json"),
+                    "--agents-md", str(d / "AGENTS.md"),
+                    "--rules-mdc", str(cursor / "rules" / "latch.mdc"),
+                    "--commands-dir", str(commands),
+                    "--skills-dir", str(skills),
+                    "--hooks-json", str(cursor / "hooks.json"),
+                    "--with-hooks", "--yes",
+                ])
+                _assert(rc == 2, (asset_kind, target_kind, rc))
+                _assert(asset_dir.is_symlink(), (asset_kind, target_kind))
+                _assert(not (outside / "latch-gate.md").exists(), asset_kind)
+                _assert(not (outside / "source-command-latch-gate").exists(), asset_kind)
+                _assert(not (cursor / "mcp.json").exists(), asset_kind)
+                _assert(not (d / "AGENTS.md").exists(), asset_kind)
+                _assert(not (cursor / "rules" / "latch.mdc").exists(), asset_kind)
+                _assert(not (cursor / "hooks.json").exists(), asset_kind)
+            finally:
+                shutil.rmtree(d, ignore_errors=True)
+                shutil.rmtree(outside, ignore_errors=True)
+
+
 def test_with_hooks_installs_and_check_requires_hooks():
     d = Path(tempfile.mkdtemp(prefix="latch-cursor-hooks-install-"))
     try:
