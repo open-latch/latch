@@ -5,6 +5,8 @@ description: Show a read-only report over recent latch gate activity. Use when t
 
 # Latch gate report for Cursor
 
+Latch operation id: latch-gate-report run
+
 Latch Cursor skill boundary: resolve `latch_home` as `${CURSOR_PLUGIN_ROOT}`
 when set, otherwise use the absolute checkout in the project-sync footer.
 Translate any user-supplied date/limit filters

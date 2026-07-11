@@ -123,6 +123,7 @@ def test_cursor_source_uses_exact_current_marker_without_history_scan():
             max_sessions=10,
             claude_home=str(root / ".claude"),
             codex_home=str(root / ".codex"),
+            cursor_session_id="cursor-seed-session",
             now=datetime.now(timezone.utc),
         )
         _assert(len(sources) == 1, sources)
@@ -170,7 +171,7 @@ def test_cursor_source_accepts_only_explicit_path_without_marker():
                 now=datetime.now(timezone.utc),
             )
         except cursor_transcript.CursorTranscriptError as e:
-            _assert("no current Cursor SessionStart marker" in str(e), e)
+            _assert("explicit current Cursor session id" in str(e), e)
         else:
             raise AssertionError("Cursor seeding without a marker or explicit path must fail closed")
     finally:

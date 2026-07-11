@@ -221,6 +221,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                     help=("explicit Cursor transcript path (repeatable). Without this, "
                           "--source cursor uses only the current SessionStart marker; "
                           "latch never scans Cursor history storage"))
+    ap.add_argument("--cursor-session-id",
+                    help=("exact current Cursor session id surfaced by SessionStart; "
+                          "required for marker-based --source cursor"))
     return ap.parse_args(argv)
 
 
@@ -320,9 +323,12 @@ def available_sources(args: argparse.Namespace) -> list[str]:
     explicit = [Path(path).expanduser() for path in getattr(args, "cursor_transcript", [])]
     if any(path.is_file() for path in explicit):
         out.append("cursor")
-    elif not explicit:
+    elif not explicit and getattr(args, "cursor_session_id", None):
         try:
-            cursor_transcript.resolve_current(str(Path(args.project).expanduser().resolve()))
+            cursor_transcript.resolve_current(
+                str(Path(args.project).expanduser().resolve()),
+                session_id=args.cursor_session_id,
+            )
         except cursor_transcript.CursorTranscriptError:
             pass
         else:
@@ -349,6 +355,7 @@ def discover_sources(
     claude_home: str,
     codex_home: str,
     cursor_transcripts: list[str] | tuple[str, ...] = (),
+    cursor_session_id: str | None = None,
     all_projects: bool = False,
     now: datetime | None = None,
 ) -> list[SeedSource]:
@@ -385,7 +392,9 @@ def discover_sources(
                     )
                 sid = None
                 try:
-                    current_sid, current_path = cursor_transcript.resolve_current(project_path)
+                    current_sid, current_path = cursor_transcript.resolve_current(
+                        project_path, session_id=cursor_session_id,
+                    )
                 except cursor_transcript.CursorTranscriptError:
                     pass
                 else:
@@ -394,7 +403,9 @@ def discover_sources(
                 resolved_cursor.append((sid, path))
         else:
             try:
-                sid, path = cursor_transcript.resolve_current(project_path)
+                sid, path = cursor_transcript.resolve_current(
+                    project_path, session_id=cursor_session_id,
+                )
             except cursor_transcript.CursorTranscriptError:
                 if source == "cursor":
                     raise
@@ -1585,6 +1596,7 @@ def main(argv: list[str] | None = None) -> int:
             claude_home=args.claude_home,
             codex_home=args.codex_home,
             cursor_transcripts=args.cursor_transcript,
+            cursor_session_id=args.cursor_session_id,
             all_projects=args.all_projects,
         )
     except cursor_transcript.CursorTranscriptError as e:

@@ -5,6 +5,8 @@ description: Confirmed toggle for latch Unlatched mode. Use when the user invoke
 
 # Unlatch for Cursor
 
+Latch operation id: unlatch inspect
+
 Latch Cursor skill boundary: resolve `latch_home` as `${CURSOR_PLUGIN_ROOT}`
 when set, otherwise use the absolute checkout in the project-sync footer.
 Inspect state with the host-appropriate

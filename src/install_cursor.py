@@ -258,7 +258,7 @@ def render_cursor_command(
 def _read_text(path: Path) -> str:
     try:
         return path.read_text(encoding="utf-8")
-    except OSError:
+    except (OSError, UnicodeError):
         return ""
 
 
@@ -276,14 +276,11 @@ def _is_managed_cursor_command_body(body: str) -> bool:
     return "Cursor boundary: this project-local command is a reusable prompt" in body
 
 
-def sync_cursor_commands(
-    commands_dir: Path = DEFAULT_COMMANDS_DIR,
+def cursor_command_collisions(
+    commands_dir: Path,
     *,
-    dry_run: bool = False,
     model_backend: str | None = None,
-) -> list[str]:
-    if not COMMANDS_SRC.is_dir():
-        return [f"no commands/ directory at {COMMANDS_SRC} - skipped"]
+) -> list[Path]:
     collisions: list[Path] = []
     for name in CURSOR_COMMAND_FILES:
         target = commands_dir / name
@@ -293,12 +290,30 @@ def sync_cursor_commands(
         desired = render_cursor_command(name, model_backend=model_backend)
         if existing != desired and not _is_managed_cursor_command_body(existing):
             collisions.append(target)
-    if collisions:
-        names = ", ".join(str(path) for path in collisions)
-        raise CursorAssetCollisionError(
-            "refusing to overwrite user-owned Cursor command(s): " + names
-            + "; move or rename the file(s), then rerun the installer"
-        )
+    return collisions
+
+
+def _raise_command_collisions(collisions: list[Path]) -> None:
+    if not collisions:
+        return
+    names = ", ".join(str(path) for path in collisions)
+    raise CursorAssetCollisionError(
+        "refusing to overwrite user-owned Cursor command(s): " + names
+        + "; move or rename the file(s), then rerun the installer"
+    )
+
+
+def sync_cursor_commands(
+    commands_dir: Path = DEFAULT_COMMANDS_DIR,
+    *,
+    dry_run: bool = False,
+    model_backend: str | None = None,
+) -> list[str]:
+    if not COMMANDS_SRC.is_dir():
+        return [f"no commands/ directory at {COMMANDS_SRC} - skipped"]
+    _raise_command_collisions(cursor_command_collisions(
+        commands_dir, model_backend=model_backend,
+    ))
     changes: list[str] = []
     if not dry_run:
         commands_dir.mkdir(parents=True, exist_ok=True)
@@ -401,14 +416,11 @@ def _is_latch_cursor_skill_body(body: str) -> bool:
     return "Latch Cursor skill boundary:" in body
 
 
-def sync_cursor_skills(
-    skills_dir: Path = DEFAULT_SKILLS_DIR,
+def cursor_skill_collisions(
+    skills_dir: Path,
     *,
-    dry_run: bool = False,
     model_backend: str | None = None,
-) -> list[str]:
-    if not CURSOR_SKILLS_SRC.is_dir():
-        return [f"no cursor_skills/ directory at {CURSOR_SKILLS_SRC} - skipped"]
+) -> list[Path]:
     collisions: list[Path] = []
     for name in CURSOR_SKILL_NAMES:
         target = skills_dir / name / "SKILL.md"
@@ -418,12 +430,30 @@ def sync_cursor_skills(
         desired = render_cursor_skill(name, model_backend=model_backend)
         if existing != desired and not _is_latch_cursor_skill_body(existing):
             collisions.append(target)
-    if collisions:
-        names = ", ".join(str(path) for path in collisions)
-        raise CursorAssetCollisionError(
-            "refusing to overwrite user-owned Cursor skill(s): " + names
-            + "; move or rename the skill(s), then rerun the installer"
-        )
+    return collisions
+
+
+def _raise_skill_collisions(collisions: list[Path]) -> None:
+    if not collisions:
+        return
+    names = ", ".join(str(path) for path in collisions)
+    raise CursorAssetCollisionError(
+        "refusing to overwrite user-owned Cursor skill(s): " + names
+        + "; move or rename the skill(s), then rerun the installer"
+    )
+
+
+def sync_cursor_skills(
+    skills_dir: Path = DEFAULT_SKILLS_DIR,
+    *,
+    dry_run: bool = False,
+    model_backend: str | None = None,
+) -> list[str]:
+    if not CURSOR_SKILLS_SRC.is_dir():
+        return [f"no cursor_skills/ directory at {CURSOR_SKILLS_SRC} - skipped"]
+    _raise_skill_collisions(cursor_skill_collisions(
+        skills_dir, model_backend=model_backend,
+    ))
     changes: list[str] = []
     for name in CURSOR_SKILL_NAMES:
         desired = render_cursor_skill(name, model_backend=model_backend)
@@ -664,6 +694,23 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.check:
         return _check(args, python_path, server_py)
+
+    # Asset ownership is a transaction precondition. Check every requested
+    # command and skill before touching MCP, AGENTS.md, rules, hooks, or any
+    # other managed asset so a late same-name collision cannot leave a partial
+    # install behind.
+    try:
+        if not args.skip_commands:
+            _raise_command_collisions(cursor_command_collisions(
+                Path(args.commands_dir), model_backend=args.model_backend,
+            ))
+        if not args.skip_skills:
+            _raise_skill_collisions(cursor_skill_collisions(
+                Path(args.skills_dir), model_backend=args.model_backend,
+            ))
+    except CursorAssetCollisionError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
 
     print("\nlatch Cursor installer")
     print(f"  KB_HOME      : {KB_HOME}")

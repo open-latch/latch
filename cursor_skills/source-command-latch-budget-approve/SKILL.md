@@ -5,6 +5,8 @@ description: Unlock today's latch LLM budget. Use only when the user explicitly 
 
 # Latch budget approve for Cursor
 
+Latch operation id: latch-budget-approve run
+
 Latch Cursor skill boundary: this workflow is safe for project-synced skills
 and the Cursor plugin. Never approve the budget proactively.
 

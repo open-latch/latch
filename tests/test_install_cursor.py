@@ -385,6 +385,18 @@ def test_cursor_skills_sync_status_remove_and_plugin_manifest():
                 gate_body)
         _assert("codex" in gate_body and "Latch Cursor skill boundary:" in gate_body,
                 gate_body)
+        seed_body = seed_skill.read_text(encoding="utf-8")
+        _assert("Latch operation id: latch-seed preview" in seed_body, seed_body)
+        _assert("--cursor-session-id" in seed_body and "/latch-seed apply" in seed_body,
+                seed_body)
+        compact_body = (skills / "source-command-latch-compact" / "SKILL.md").read_text(
+            encoding="utf-8",
+        )
+        _assert("Latch operation id: latch-compact run" in compact_body, compact_body)
+        pm_body = (skills / "source-command-latch-pm" / "SKILL.md").read_text(
+            encoding="utf-8",
+        )
+        _assert("/latch-pm apply" in pm_body, pm_body)
         ok, detail = ic.cursor_skills_status(skills, model_backend="codex")
         _assert(ok, detail)
         ok, detail = ic.cursor_skills_status(skills, model_backend="cursor")
@@ -447,6 +459,45 @@ def test_cursor_skills_refuse_user_owned_same_name_collision():
         _assert(any("looks user-owned" in row for row in removed), removed)
     finally:
         shutil.rmtree(d, ignore_errors=True)
+
+
+def test_asset_collision_preflight_prevents_any_partial_install():
+    for collision_kind in ("command", "skill"):
+        d = Path(tempfile.mkdtemp(prefix=f"latch-cursor-{collision_kind}-transaction-"))
+        try:
+            cursor = d / ".cursor"
+            commands = cursor / "commands"
+            skills = cursor / "skills"
+            if collision_kind == "command":
+                collision = commands / "latch-gate.md"
+                payload = b"user command bytes\x00\xff"
+            else:
+                collision = skills / "source-command-latch-gate" / "SKILL.md"
+                payload = b"---\nname: source-command-latch-gate\ndescription: user skill\n---\n"
+            collision.parent.mkdir(parents=True)
+            collision.write_bytes(payload)
+
+            rc = ic.main([
+                "--mcp-json", str(cursor / "mcp.json"),
+                "--agents-md", str(d / "AGENTS.md"),
+                "--rules-mdc", str(cursor / "rules" / "latch.mdc"),
+                "--commands-dir", str(commands),
+                "--skills-dir", str(skills),
+                "--hooks-json", str(cursor / "hooks.json"),
+                "--with-hooks", "--yes",
+            ])
+            _assert(rc == 2, (collision_kind, rc))
+            _assert(collision.read_bytes() == payload, collision_kind)
+            _assert(not (cursor / "mcp.json").exists(), collision_kind)
+            _assert(not (d / "AGENTS.md").exists(), collision_kind)
+            _assert(not (cursor / "rules" / "latch.mdc").exists(), collision_kind)
+            _assert(not (cursor / "hooks.json").exists(), collision_kind)
+            if collision_kind == "skill":
+                _assert(not commands.exists(), "command assets must not precede skill preflight")
+            else:
+                _assert(not skills.exists(), "skill assets must not follow command collision")
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
 
 
 def test_with_hooks_installs_and_check_requires_hooks():

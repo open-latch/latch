@@ -5,6 +5,8 @@ description: Run nightly latch heal and contradiction resolution. Use when the u
 
 # Latch heal for Cursor
 
+Latch operation id: latch-heal run
+
 Latch Cursor skill boundary: resolve `latch_home` as `${CURSOR_PLUGIN_ROOT}`
 when set, otherwise use the absolute checkout in the project-sync footer.
 Select native `cursor` for plugin installs or the backend in that footer. Run
