@@ -208,8 +208,8 @@ def test_parallel_clients_share_one_heavy_owner_and_keep_context_isolated() -> N
         _assert(first["process_pid"] != clients[0].process.pid, "proxy loaded heavy server")
         _assert(first["connection"]["session_id"] == "session-a", str(first))
         _assert(second["connection"]["session_id"] == "session-b", str(second))
-        _assert(first["project_cwd"] == str(project_a.resolve()), str(first))
-        _assert(second["project_cwd"] == str(project_b.resolve()), str(second))
+        _assert(os.path.samefile(first["project_cwd"], project_a), str(first))
+        _assert(os.path.samefile(second["project_cwd"], project_b), str(second))
         _assert(first["embedding"]["heavy_model_owner_count"] == 1, str(first))
         _assert(second["embedding"]["listener"]["pid"] == first["process_pid"], str(second))
 

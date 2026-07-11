@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import sys
 import time
@@ -48,7 +49,10 @@ DEPTH_KEYWORDS = re.compile(
     re.IGNORECASE,
 )
 HARD_BUDGET_MS = 250
-SUBPROCESS_BUDGET_RESERVE_MS = 25
+# Windows process/DLL startup is materially slower than POSIX on the supported
+# hosts. Reserve it from the user-visible wall instead of letting the in-hook
+# retrieval deadline consume the entire 250 ms contract.
+SUBPROCESS_BUDGET_RESERVE_MS = 125 if os.name == "nt" else 25
 LOG_STREAM = "retrieve"
 
 np = None
