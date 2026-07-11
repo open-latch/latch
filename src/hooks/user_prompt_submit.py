@@ -30,6 +30,7 @@ from datetime import datetime, timezone
 
 from _common import hook_field, log, project_cwd, read_hook_input, session_id
 
+import mcp_broker
 from paths import UNLATCHED_MESSAGE, is_disabled, is_in_compact, is_unlatched_mode
 
 
@@ -61,24 +62,27 @@ embeddings = None
 log_utils = None
 profiles = None
 search = None
-mcp_broker = None
 _LIGHT_RUNTIME_LOADED = False
 _RUNTIME_LOADED = False
 
 
+def _load_log_runtime() -> None:
+    global log_utils
+    if log_utils is None:
+        import log_utils as _log_utils
+        log_utils = _log_utils
+
+
 def _load_light_runtime() -> None:
-    global db, log_utils, profiles, mcp_broker, _LIGHT_RUNTIME_LOADED
+    global db, log_utils, profiles, _LIGHT_RUNTIME_LOADED
     if _LIGHT_RUNTIME_LOADED:
         return
     import db as _db
-    import log_utils as _log_utils
     import profiles as _profiles
-    import mcp_broker as _mcp_broker
 
+    _load_log_runtime()
     db = _db
-    log_utils = _log_utils
     profiles = _profiles
-    mcp_broker = _mcp_broker
     _LIGHT_RUNTIME_LOADED = True
 
 
@@ -130,7 +134,6 @@ def main() -> int:
         return 0
     if is_disabled() or is_in_compact():
         return 0
-    _load_light_runtime()
     payload = read_hook_input()
     sid = session_id(payload)
     cwd = project_cwd(payload)
@@ -142,6 +145,42 @@ def main() -> int:
         and "kb_priority" not in prompt.lower()
         and "latch_priority" not in prompt.lower()
     )
+
+    # On the ordinary post-idle path, return before DB/profile resolution. A
+    # Windows sqlite-vec DLL load can exceed the entire visible hook budget,
+    # while there is no vector to retrieve with until the owner is warm anyway.
+    if (
+        sid
+        and prompt
+        and len(prompt.split()) >= MIN_PROMPT_WORDS
+        and mcp_broker.read_discovery() is None
+    ):
+        log_entry = {
+            "mission_control": False,
+            "ts": _now(),
+            "sid": sid,
+            "prompt_hash": _phash(prompt),
+            "prompt_words": len(prompt.split()),
+            "cwd": cwd,
+            "correction_signal": correction_signal,
+            "guideline_signal": guideline_signal,
+            "cite_nudge": 0,
+            "skip": "embed_daemon_unavailable",
+        }
+        log_entry["daemon_wake_requested"] = mcp_broker.request_daemon_start(cwd)
+        mcp_broker.emit_lifecycle(
+            "prompt_retrieval_degraded",
+            reason="embed_daemon_unavailable",
+            wake_requested=bool(log_entry["daemon_wake_requested"]),
+        )
+        _write_log(cwd, log_entry)
+        context = _format_runtime_unavailable()
+        nudge = _extra_nudges(correction_signal, guideline_signal)
+        if nudge:
+            context = nudge + "\n\n" + context
+        _print_context(context)
+        return 0
+
     mc_directive = _mission_control_directive(cwd, prompt)
     # Slice 3-B: surface the advisory cite-correction nudge queued by last turn's
     # Stop-hook detector (mission-control actors only; marker is 0 for everyone
@@ -180,27 +219,6 @@ def main() -> int:
         nudge = _extra_nudges(correction_signal, guideline_signal, mc_directive, cite_directive)
         if nudge:
             _print_context(nudge)
-        return 0
-
-    # The normal idle-exit case has no current owner discovery. Return a
-    # truthful receipt before importing NumPy/ONNX-facing retrieval modules;
-    # on Windows those imports alone can consume the hook's visible wall.
-    if mcp_broker.read_discovery() is None:
-        log_entry["skip"] = "embed_daemon_unavailable"
-        log_entry["daemon_wake_requested"] = mcp_broker.request_daemon_start(cwd)
-        mcp_broker.emit_lifecycle(
-            "prompt_retrieval_degraded",
-            reason="embed_daemon_unavailable",
-            wake_requested=bool(log_entry["daemon_wake_requested"]),
-        )
-        _write_log(cwd, log_entry)
-        context = _format_runtime_unavailable()
-        nudge = _extra_nudges(
-            correction_signal, guideline_signal, mc_directive, cite_directive
-        )
-        if nudge:
-            context = nudge + "\n\n" + context
-        _print_context(context)
         return 0
 
     t0 = time.perf_counter()
@@ -600,7 +618,7 @@ def _write_log(cwd: str, entry: dict) -> None:
     explicit kwarg. Both keys end up in the row — readers should prefer
     `session_id` going forward.
     """
-    _load_light_runtime()
+    _load_log_runtime()
     try:
         log_utils.emit_event(
             LOG_STREAM, entry,
