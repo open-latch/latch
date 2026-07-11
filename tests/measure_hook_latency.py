@@ -30,6 +30,7 @@ def main() -> int:
     tmp = tempfile.mkdtemp(prefix="kb_latency_")
     print(f"project: {tmp}")
     os.environ["LATCH_KB_DIR"] = tmp
+    os.environ["CLAUDE_KB_IN_MAINTENANCE"] = "1"
     paths._PINNED_DIR = False
 
     # Seed a small KB so retrieval has something to work with.

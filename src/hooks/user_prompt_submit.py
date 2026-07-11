@@ -62,28 +62,38 @@ log_utils = None
 profiles = None
 search = None
 mcp_broker = None
+_LIGHT_RUNTIME_LOADED = False
 _RUNTIME_LOADED = False
 
 
-def _load_runtime() -> None:
-    global np, db, embeddings, log_utils, profiles, search, mcp_broker, _RUNTIME_LOADED
-    if _RUNTIME_LOADED:
+def _load_light_runtime() -> None:
+    global db, log_utils, profiles, mcp_broker, _LIGHT_RUNTIME_LOADED
+    if _LIGHT_RUNTIME_LOADED:
         return
-    import numpy as _np
     import db as _db
-    import embeddings as _embeddings
     import log_utils as _log_utils
     import profiles as _profiles
-    import search as _search
     import mcp_broker as _mcp_broker
 
-    np = _np
     db = _db
-    embeddings = _embeddings
     log_utils = _log_utils
     profiles = _profiles
-    search = _search
     mcp_broker = _mcp_broker
+    _LIGHT_RUNTIME_LOADED = True
+
+
+def _load_runtime() -> None:
+    global np, embeddings, search, _RUNTIME_LOADED
+    if _RUNTIME_LOADED:
+        return
+    _load_light_runtime()
+    import numpy as _np
+    import embeddings as _embeddings
+    import search as _search
+
+    np = _np
+    embeddings = _embeddings
+    search = _search
     _RUNTIME_LOADED = True
 
 # Deterministic correction-signal scan (no LLM, sub-millisecond). When a
@@ -120,7 +130,7 @@ def main() -> int:
         return 0
     if is_disabled() or is_in_compact():
         return 0
-    _load_runtime()
+    _load_light_runtime()
     payload = read_hook_input()
     sid = session_id(payload)
     cwd = project_cwd(payload)
@@ -170,6 +180,27 @@ def main() -> int:
         nudge = _extra_nudges(correction_signal, guideline_signal, mc_directive, cite_directive)
         if nudge:
             _print_context(nudge)
+        return 0
+
+    # The normal idle-exit case has no current owner discovery. Return a
+    # truthful receipt before importing NumPy/ONNX-facing retrieval modules;
+    # on Windows those imports alone can consume the hook's visible wall.
+    if mcp_broker.read_discovery() is None:
+        log_entry["skip"] = "embed_daemon_unavailable"
+        log_entry["daemon_wake_requested"] = mcp_broker.request_daemon_start(cwd)
+        mcp_broker.emit_lifecycle(
+            "prompt_retrieval_degraded",
+            reason="embed_daemon_unavailable",
+            wake_requested=bool(log_entry["daemon_wake_requested"]),
+        )
+        _write_log(cwd, log_entry)
+        context = _format_runtime_unavailable()
+        nudge = _extra_nudges(
+            correction_signal, guideline_signal, mc_directive, cite_directive
+        )
+        if nudge:
+            context = nudge + "\n\n" + context
+        _print_context(context)
         return 0
 
     t0 = time.perf_counter()
@@ -505,7 +536,7 @@ def _mission_control_directive(cwd: str, prompt: str) -> str:
     / trust-and-go). Fail-open: any error -> '' so the hook never breaks the
     user's prompt. The Tier-2 enforcement surface for 'blocking by contract' —
     latch has no interceptor (KB id=1398)."""
-    _load_runtime()
+    _load_light_runtime()
     try:
         conn = db.connect(cwd)
         try:
@@ -521,7 +552,7 @@ def _take_cite_nudge(cwd: str, sid: str) -> int:
     """Read + reset the pending cite-nudge marker for this session (Slice 3-B).
     Fail-open: any error -> 0 so the hook never breaks the user's prompt. Cheap:
     a single indexed read, and a write only when a nudge was actually queued."""
-    _load_runtime()
+    _load_light_runtime()
     try:
         conn = db.connect(cwd)
         try:
@@ -569,7 +600,7 @@ def _write_log(cwd: str, entry: dict) -> None:
     explicit kwarg. Both keys end up in the row — readers should prefer
     `session_id` going forward.
     """
-    _load_runtime()
+    _load_light_runtime()
     try:
         log_utils.emit_event(
             LOG_STREAM, entry,
