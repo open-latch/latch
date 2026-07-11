@@ -56,7 +56,8 @@ _OPERATION_NAMES = {
     "latch-pm", "unlatch",
 }
 _OPERATION_MARKER_RE = re.compile(
-    r"(?im)^\s*Latch operation id:\s*([a-z0-9-]+)(?:\s+(preview|apply|run|inspect))?\s*$"
+    r"(?im)^\s*Latch operation id:\s*([a-z0-9-]+)"
+    r"(?:\s+(preview|prepare|apply|run|inspect))?\s*$"
 )
 
 

@@ -280,7 +280,7 @@ def test_pm_operation_receipt_allows_only_one_staging_decision_insert():
     root, project_dir = _tmp()
     sid = "pm-session"
     try:
-        cgs.begin_prompt(root, sid, "/latch-pm")
+        cgs.begin_prompt(root, sid, "Latch operation id: latch-pm prepare")
         cgs.begin_prompt(root, sid, "/latch-pm apply")
         insert = {
             "workspaceRoot": root,
@@ -294,7 +294,7 @@ def test_pm_operation_receipt_allows_only_one_staging_decision_insert():
         assert cpre.decision(insert) == {}
         assert cpre.decision(insert)["permission"] == "deny"
 
-        cgs.begin_prompt(root, sid, "/latch-pm")
+        cgs.begin_prompt(root, sid, "Latch operation id: latch-pm prepare")
         cgs.begin_prompt(root, sid, "/latch-pm apply")
         wrong = {**insert, "tool_name": "mcp__latch__latch_update"}
         assert cpre.decision(wrong)["permission"] == "deny"
