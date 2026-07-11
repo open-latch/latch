@@ -339,6 +339,36 @@ def read_discovery(*, require_current: bool = True) -> dict[str, Any] | None:
 def _pid_alive(pid: int) -> bool:
     if pid <= 0:
         return False
+    if os.name == "nt":
+        # On Windows os.kill(pid, 0) is not a harmless existence probe: Python
+        # maps kill through Win32 termination/control-event semantics and it can
+        # interrupt the process being inspected. Query the process handle
+        # directly instead, using only the standard library.
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            open_process = kernel32.OpenProcess
+            open_process.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+            open_process.restype = wintypes.HANDLE
+            get_exit_code = kernel32.GetExitCodeProcess
+            get_exit_code.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+            get_exit_code.restype = wintypes.BOOL
+            close_handle = kernel32.CloseHandle
+            close_handle.argtypes = [wintypes.HANDLE]
+            close_handle.restype = wintypes.BOOL
+
+            handle = open_process(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+            if not handle:
+                return ctypes.get_last_error() == 5  # ACCESS_DENIED means it exists.
+            try:
+                exit_code = wintypes.DWORD()
+                return bool(get_exit_code(handle, ctypes.byref(exit_code))) and exit_code.value == 259
+            finally:
+                close_handle(handle)
+        except (AttributeError, OSError, ValueError):
+            return False
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
