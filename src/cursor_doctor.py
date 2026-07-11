@@ -138,6 +138,11 @@ def _missing_critical_tools(output: str) -> list[str]:
     return [tool for tool in CRITICAL_MCP_TOOLS if tool not in output]
 
 
+def _needs_mcp_approval(output: str) -> bool:
+    text = (output or "").lower()
+    return "needs approval" in text or "not been approved" in text or "not approved" in text
+
+
 def check_cursor_cli_mcp(
     *,
     agent_bin: str | None = None,
@@ -160,11 +165,27 @@ def check_cursor_cli_mcp(
             WARN,
             f"{resolved} mcp list exit {listed.returncode}: {_output_excerpt(listed)}",
         )
+    listed_output = (listed.stdout or "") + "\n" + (listed.stderr or "")
+    if _needs_mcp_approval(listed_output):
+        return Check(
+            "Cursor CLI MCP visibility",
+            WARN,
+            "latch is statically configured but still needs separate user-controlled "
+            f"MCP approval in Cursor: {_output_excerpt(listed)}",
+        )
 
     tools = _run_agent_mcp(resolved, ["mcp", "list-tools", install_cursor.SERVER_NAME], timeout_s)
     if isinstance(tools, str):
         return Check("Cursor CLI MCP visibility", WARN, tools)
     if tools.returncode != 0:
+        excerpt = _output_excerpt(tools)
+        if _needs_mcp_approval(excerpt):
+            return Check(
+                "Cursor CLI MCP visibility",
+                WARN,
+                "latch is statically configured but still needs separate user-controlled "
+                f"MCP approval in Cursor: {excerpt}",
+            )
         return Check(
             "Cursor CLI MCP visibility",
             WARN,
@@ -214,7 +235,13 @@ def check_cursor_model_backend(
         agent_bin=resolved,
     )
     if text is None:
-        return Check("Cursor native model backend", FAIL, error or "Cursor backend probe failed")
+        detail = error or "Cursor backend probe failed"
+        if "authentication required" in detail.lower() or "not logged in" in detail.lower():
+            detail = (
+                "Cursor Agent login is required for live native-backend acceptance; "
+                "static wiring alone is not sufficient: " + detail
+            )
+        return Check("Cursor native model backend", FAIL, detail)
     try:
         payload = json.loads(text.strip())
     except json.JSONDecodeError as e:

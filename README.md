@@ -281,14 +281,23 @@ recent chat.
 ```
 
 Restart Cursor after installing hooks so it reloads `.cursor/hooks.json`; run
-`agent mcp list` to inspect the MCP server. With the native default, the doctor
+`agent mcp list` to inspect the MCP server. Live acceptance has two separate,
+user-controlled prerequisites: authenticate the Agent CLI with `agent login`,
+and approve the project `latch` MCP server in Cursor when Cursor prompts for
+approval. A `needs approval` / `not approved` result proves the static config
+was discovered, but it does not prove that MCP tools or the visible gate can run.
+This project does not invent an undocumented CLI approval command.
+
+With the native default, the doctor
 requires a reachable, authenticated Cursor Agent CLI and validates its JSON Ask
 mode with a small read-only probe. Static config, launch-target, `AGENTS.md`,
 rule/command drift, and native-backend failures are errors. MCP list visibility
 remains a warning when the CLI cannot complete that separate inspection; if it
 does complete, missing critical tools such as `latch_gate` are errors. A
 current-session compact marker is informational by default and can be required
-with `--require-compact` during live acceptance.
+with `--require-compact` during live acceptance. Static doctor success is not a
+substitute for authenticated MCP, visible-gate, plugin, backend, or compaction
+acceptance receipts.
 
 For the narrow proof path, see
 [`runbooks/cursor_gate_smoke.md`](./runbooks/cursor_gate_smoke.md).

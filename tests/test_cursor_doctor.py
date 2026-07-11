@@ -176,6 +176,19 @@ def test_check_cursor_cli_mcp_ok_and_failure():
         )
         warn = cd.check_cursor_cli_mcp(agent_bin=str(fail_agent), timeout_s=1)
         _assert(warn.level == cd.WARN and "exit 2" in warn.detail, warn)
+
+        approval_agent = _fake_exe(
+            d / "agent-approval",
+            "if [ \"$1 $2\" = \"mcp list\" ]; then\n"
+            "  printf '%s\\n' 'latch: not loaded (needs approval)'\n"
+            "  exit 0\n"
+            "fi\n"
+            "printf '%s\\n' 'MCP server latch has not been approved' >&2\n"
+            "exit 1\n",
+        )
+        approval = cd.check_cursor_cli_mcp(agent_bin=str(approval_agent), timeout_s=1)
+        _assert(approval.level == cd.WARN, approval)
+        _assert("user-controlled MCP approval" in approval.detail, approval)
     finally:
         if old_args is None:
             os.environ.pop("FAKE_CURSOR_AGENT_ARGS", None)
@@ -299,11 +312,15 @@ def test_cursor_native_backend_probe_ok_and_auth_failure():
         )
         _assert(ok.level == cd.OK, ok)
 
-        fail_agent = _fake_exe(d / "agent-fail", "cat >/dev/null\necho not-logged-in >&2\nexit 1\n")
+        fail_agent = _fake_exe(
+            d / "agent-fail",
+            "cat >/dev/null\necho 'Authentication required. Please run agent login.' >&2\nexit 1\n",
+        )
         failed = cd.check_cursor_model_backend(
             backend="cursor", agent_bin=str(fail_agent), timeout_s=2,
         )
-        _assert(failed.level == cd.FAIL and "not-logged-in" in failed.detail, failed)
+        _assert(failed.level == cd.FAIL and "login is required" in failed.detail, failed)
+        _assert("static wiring alone is not sufficient" in failed.detail, failed)
 
         compatibility = cd.check_cursor_model_backend(backend="codex")
         _assert(compatibility.level == cd.WARN and "compatibility" in compatibility.detail,

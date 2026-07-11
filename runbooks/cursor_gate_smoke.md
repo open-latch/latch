@@ -36,7 +36,11 @@ Run from the project repo where Cursor should follow latch:
 /path/to/latch/bin/latch_cursor_doctor.sh --with-hooks
 ```
 
-Run `agent login` first if Cursor Agent is not authenticated. Use
+Run `agent login` first if Cursor Agent is not authenticated. Authentication
+does not approve project MCP servers: separately approve the `latch` server in
+Cursor when Cursor prompts. If `agent mcp list` reports `needs approval` or
+`not approved`, static wiring exists but live MCP/gate acceptance is still
+blocked. Do not invent an undocumented CLI approval command. Use
 `--model-backend claude` or `--model-backend codex` only to exercise an explicit
 compatibility backend instead of native Cursor.
 
@@ -60,8 +64,10 @@ agent mcp list-tools latch
 
 If `agent` is unavailable, the doctor reports a warning for the live CLI probe.
 That warning does not invalidate the static install proof. If `agent` is
-available and `latch_gate` is missing from `list-tools`, the install is not
-ready.
+available but the server is unapproved, retain that as a separate user-action
+gap. If approval succeeds and `latch_gate` is still missing from `list-tools`,
+the install is not ready. Static doctor success alone is not live visible-gate,
+native-backend, plugin, or compaction acceptance.
 
 Project-local command prompts should be visible from Cursor's `/` command menu
 after reload. They are reusable prompts that call MCP tools or the checked-in
