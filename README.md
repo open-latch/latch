@@ -271,13 +271,14 @@ overrides remain available with `--model-backend codex` or
 
 The installed `/latch-compact` command and `run_cursor_compact_now` wrappers
 compact only the current conversation. Resolution fails closed unless the
-opt-in SessionStart hook recorded an exact conversation id and
-`transcript_path` pair; latch never scans Cursor databases or guesses the most
-recent chat.
+opt-in SessionStart hook recorded an exact per-session conversation id and
+`transcript_path` pair and the wrapper receives that surfaced session id
+explicitly; latch never scans Cursor databases or guesses the most recent chat.
 
 The installed `/latch-seed` command is also current-session-only. It previews
 seed candidates from the exact marker/transcript pair, asks for approval, and
-only then writes staging evidence. `--cursor-transcript PATH` is available for
+only then accepts a separate `/latch-seed apply` confirmation and writes staging
+evidence. `--cursor-transcript PATH` is available for
 a user-explicit file; latch never enumerates Cursor's private history folders.
 
 ```bash
@@ -339,15 +340,15 @@ The quickstart prints a review-and-apply seed command like this:
 
 Use `--source claude`, `--source codex`, `--source cursor`, `--source both`
 (Claude+Codex), or `--source all`. Cursor source resolution is intentionally
-narrow: it uses the current SessionStart marker or a path supplied explicitly
-with `--cursor-transcript`; it never scans Cursor history. Keep the default small
+narrow: it uses the per-session marker named by `--cursor-session-id` or a path
+supplied explicitly with `--cursor-transcript`; it never scans Cursor history. Keep the default small
 and focused; increase `--last-sessions N` only when the first report does not
 find useful project judgment.
 
 From a hooked Cursor conversation, the native path is:
 
 ```bash
-/path/to/latch/bin/latch_seed.sh --source cursor
+/path/to/latch/bin/latch_seed.sh --source cursor --cursor-session-id SESSION_ID
 # Review first; only then rerun with --apply --yes.
 ```
 
@@ -420,7 +421,7 @@ At natural stopping points, capture the session:
 - Claude Code: run `/latch-compact`.
 - Codex: run `/path/to/latch/bin/run_codex_compact_now.sh`.
 - Cursor: run `/latch-compact` or
-  `/path/to/latch/bin/run_cursor_compact_now.sh` from the current hooked
+  `/path/to/latch/bin/run_cursor_compact_now.sh SESSION_ID` from the current hooked
   conversation (`run_cursor_compact_now.ps1` on Windows).
 
 Compaction is user-initiated because it spends a model call and writes a durable

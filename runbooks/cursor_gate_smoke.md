@@ -81,15 +81,17 @@ host-appropriate shell wrappers.
 ## Seed a proof target
 
 From the hooked Cursor conversation, run `/latch-seed`. It must preview the
-exact current transcript before any write. After approving the preview, rerun
-the generated command with `--apply --yes`. The equivalent preview is:
+exact current transcript before any write. Copy the exact session id surfaced
+by SessionStart. After approving the preview, reply exactly `/latch-seed apply`
+before the generated command reruns with `--apply --yes`. The equivalent preview is:
 
 ```bash
-/path/to/latch/bin/latch_seed.sh --source cursor
+/path/to/latch/bin/latch_seed.sh --source cursor --cursor-session-id SESSION_ID
 ```
 
-Running without a current marker must fail unless the user supplied an explicit,
-readable `--cursor-transcript` path. An unreadable explicit path must also fail.
+Running without an explicit session id and its matching per-session marker must
+fail unless the user supplied an explicit, readable `--cursor-transcript` path.
+An unreadable explicit path must also fail.
 For older Claude/Codex sources, use `--source both` separately.
 
 Pick one concrete rejected path, governance rule, or prior agent mistake from
@@ -171,7 +173,8 @@ operations use an exclusive narrow receipt lane.
 ## Prove current-session compaction
 
 From the same Cursor conversation, run `/latch-compact`. The command delegates
-to the host-appropriate wrapper and must return JSON containing:
+to the host-appropriate wrapper with the exact SessionStart-surfaced session id
+and must return JSON containing:
 
 ```json
 {
