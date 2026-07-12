@@ -304,8 +304,8 @@ designed to absorb.
 
 ## Verification
 
-Latest blocker-remediation receipts: 56 focused lifecycle/doctor/Codex/embed
-tests and 939 hermetic tests passed locally after rebasing onto current main;
+Latest blocker-remediation receipts: 57 focused lifecycle/doctor/Codex/embed
+tests and 940 hermetic tests passed locally after rebasing onto current main;
 changed-file Ruff, public-release
 hygiene, compilation, and `git diff --check` passed. Warm prompt-hook wall was
 96.8–139.3 ms. Fourteen clients used one owner at 0.97 s readiness and 8.01 ms
@@ -323,13 +323,14 @@ lease migration; no parallel capacity state machine or production fault seam
 was added. That size remains an explicit independent-review target rather than
 being presented as inherently minimal.
 
-The three-OS workflow runs the focused suite on macOS, Ubuntu, and Windows. On
-Windows, the one intentional skip is only the end-to-end `fa162bd` snapshot
-because that historical version's own `os.kill(pid, 0)` probe is destructive
-there. Windows still runs the current daemon against `fa162bd`'s root-discovery
-and epoch-less wire contract, so the compatibility behavior under review is
-cross-platform. Reviewers should use the live PR checks—not a copied run id—as
-the authority for the final pushed head.
+The three-OS workflow runs the focused suite on macOS, Ubuntu, and Windows.
+Exact historical snapshot tests run when those objects exist in the checkout;
+the `fa162bd` end-to-end snapshot is also skipped on Windows because that old
+version's own `os.kill(pid, 0)` probe is destructive there. Every platform
+still runs the current daemon against both the keyed pre-capability and
+`fa162bd` root-discovery epoch-less wire contracts, so the compatibility
+behavior under review is cross-platform. Reviewers should use the live PR
+checks—not a copied run id—as the authority for the final pushed head.
 
 The production-representative tests cover:
 
@@ -346,8 +347,9 @@ The production-representative tests cover:
 - lease migration and aggregate over-cap pressure across compatible old/new
   runtime keys;
 - bounded fresh-task rejection through real `7bcb86d` and pre-registry
-  `fa162bd` proxy snapshots on POSIX, plus the `fa162bd` root-discovery and
-  epoch-less wire contract on all three CI operating systems;
+  `fa162bd` proxy snapshots when those objects are available, plus both keyed
+  and `fa162bd` root-discovery epoch-less wire contracts on all three CI
+  operating systems;
 - no current or alias discovery publication before runtime initialization;
 - incompatible-protocol rejection before ownership fencing/heavy imports;
 - configured-cap-derived 75% doctor warnings and sustained pressure duration;

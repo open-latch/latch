@@ -544,6 +544,18 @@ def _copy_git_src(commit: str, target: Path) -> None:
         )
 
 
+def _require_historical_commit(commit: str) -> None:
+    available = subprocess.run(
+        ["git", "cat-file", "-e", f"{commit}^{{commit}}"],
+        cwd=ROOT,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    if available.returncode != 0:
+        pytest.skip(f"historical commit {commit} is not present in this checkout")
+
+
 def _assert_historical_proxy_requires_fresh_task(commit: str) -> None:
     kb_dir = _temp_vault()
     install = Path(tempfile.mkdtemp(prefix=f"latch-{commit}-install-"))
@@ -605,6 +617,7 @@ def _assert_historical_proxy_requires_fresh_task(commit: str) -> None:
 
 
 def test_pre_capability_registry_proxy_requires_fresh_task_after_upgrade() -> None:
+    _require_historical_commit("7bcb86d")
     _assert_historical_proxy_requires_fresh_task("7bcb86d")
 
 
@@ -613,18 +626,26 @@ def test_pre_capability_registry_proxy_requires_fresh_task_after_upgrade() -> No
     reason="fa162bd's own os.kill(pid, 0) probe is destructive on Windows",
 )
 def test_fa162bd_pre_registry_proxy_requires_fresh_task_after_upgrade() -> None:
+    _require_historical_commit("fa162bd")
     _assert_historical_proxy_requires_fresh_task("fa162bd")
 
 
-def test_pre_registry_transport_receives_fresh_task_error_cross_platform() -> None:
-    """Exercise fa162bd's root discovery and epoch-less wire contract."""
+@pytest.mark.parametrize(
+    "pre_registry",
+    (False, True),
+    ids=("keyed-pre-capability", "fa162bd-pre-registry"),
+)
+def test_epochless_transport_receives_fresh_task_error_cross_platform(
+    pre_registry: bool,
+) -> None:
+    """Exercise both historical discovery layouts and epoch-less wire contract."""
     kb_dir = _temp_vault()
     env = os.environ.copy()
     env.update({
         "LATCH_HOME": str(ROOT),
         "LATCH_KB_DIR": str(kb_dir),
         "LATCH_MCP_DAEMON_PROCESS": "1",
-        "LATCH_MCP_RUNTIME_KEY": "fa162bd-pre-registry",
+        "LATCH_MCP_RUNTIME_KEY": "historical-epochless",
         "LATCH_MCP_INITIAL_PROJECT_CWD": str(ROOT),
         "LATCH_MCP_DAEMON_IDLE_TTL_SEC": "60",
         "CLAUDE_KB_IN_MAINTENANCE": "1",
@@ -638,7 +659,16 @@ def test_pre_registry_transport_receives_fresh_task_error_cross_platform() -> No
         stderr=subprocess.PIPE,
     )
     try:
-        legacy_discovery = kb_dir / "mcp-daemon.json"
+        requested_key = "historical-epochless"
+        legacy_discovery = (
+            kb_dir / "mcp-daemon.json"
+            if pre_registry
+            else kb_dir
+            / "runtime"
+            / "mcp-runtimes"
+            / requested_key
+            / "mcp-daemon.json"
+        )
         deadline = time.monotonic() + 15.0
         while time.monotonic() < deadline and not legacy_discovery.exists():
             if process.poll() is not None:
@@ -656,7 +686,7 @@ def test_pre_registry_transport_receives_fresh_task_error_cross_platform() -> No
                 "op": "mcp",
                 "protocol": 1,
                 "token": payload["token"],
-                "runtime_key": "fa162bd-pre-registry",
+                "runtime_key": requested_key,
                 "connection_id": "fa162bd-wire-contract",
                 "project_cwd": str(ROOT),
                 "proxy_pid": os.getpid(),
