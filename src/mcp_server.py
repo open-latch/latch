@@ -1680,6 +1680,7 @@ def kb_runtime_status() -> dict:
     policy = mcp_broker.proxy_policy()
     lease_state = mcp_broker.proxy_lease_state(policy=policy)
     proxy_inventory = list(lease_state["live"])
+    legacy_inventory = list(lease_state.get("legacy_incompatible") or [])
     return {
         "mode": "shared_daemon" if daemon is not None else "legacy_stdio",
         "process_pid": os.getpid(),
@@ -1690,11 +1691,17 @@ def kb_runtime_status() -> dict:
         "proxy_pool": {
             **policy,
             "live_leases": len(proxy_inventory),
+            "legacy_incompatible_leases": len(legacy_inventory),
+            "observed_live_leases": len(proxy_inventory) + len(legacy_inventory),
             "stale_leases": int(lease_state.get("stale_count") or 0),
             "max_stale_lease_age_s": float(
                 lease_state.get("max_stale_age_s") or 0.0
             ),
-            "scope": "runtime_key",
+            "scope": "owner_runtime_key",
+            "owner_runtime_key": lease_state.get("owner_runtime_key"),
+            "alias_runtime_key_count": len(
+                lease_state.get("alias_runtime_keys") or []
+            ),
             "bounded": bool(int(policy["cap"])),
         },
         "embedding": {

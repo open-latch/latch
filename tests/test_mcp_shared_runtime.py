@@ -339,7 +339,7 @@ def test_parallel_clients_share_one_heavy_owner_and_keep_context_isolated() -> N
         _assert(os.path.samefile(second["project_cwd"], project_b), str(second))
         _assert(first["embedding"]["heavy_model_owner_count"] == 1, str(first))
         _assert(second["embedding"]["listener"]["pid"] == first["process_pid"], str(second))
-        _assert(first["proxy_pool"]["scope"] == "runtime_key", str(first))
+        _assert(first["proxy_pool"]["scope"] == "owner_runtime_key", str(first))
         _assert(first["daemon"]["peak_connections"] == 2, str(first))
         started = [row for row in _lifecycle_rows(kb_dir) if row.get("event") == "daemon_started"]
         _assert(bool(started), "daemon_started lifecycle event missing")
@@ -429,13 +429,14 @@ def test_retained_proxy_recovers_after_in_place_compatible_upgrade() -> None:
         os.utime(runtime_module, (stat.st_atime + 60, stat.st_mtime + 60))
         _assert(runtime_key() == current_key, "runtime key changed from mtime only")
 
-        # Simulate the retained pre-handshake proxy reviewed at d9ef85b: it
-        # passes its runtime key but not an explicit protocol version.
+        # Produce an older content key while retaining the explicit capability
+        # epoch. This is the supported future in-place-upgrade path.
         broker_path = install_src / "mcp_broker.py"
         broker_source = broker_path.read_text(encoding="utf-8")
-        protocol_line = '    env["LATCH_MCP_PROTOCOL_VERSION"] = str(PROTOCOL_VERSION)\n'
-        _assert(protocol_line in broker_source, "protocol handshake line moved")
-        broker_path.write_text(broker_source.replace(protocol_line, ""), encoding="utf-8")
+        broker_path.write_text(
+            broker_source + "\n# compatible-upgrade-test-fingerprint\n",
+            encoding="utf-8",
+        )
         old_key = runtime_key()
         _assert(old_key != current_key, "test install did not produce an old runtime key")
 
@@ -481,6 +482,8 @@ def test_retained_proxy_recovers_after_in_place_compatible_upgrade() -> None:
         _assert(after["process_pid"] != old_pid, str(after))
         _assert(after["daemon"]["runtime_key"] == current_key, str(after))
         _assert(after["connection"]["runtime_key"] == old_key, str(after))
+        _assert(after["proxy_pool"]["scope"] == "owner_runtime_key", str(after))
+        _assert(after["proxy_pool"]["live_leases"] == 2, str(after))
         discoveries = list(
             (kb_dir / "runtime" / "mcp-runtimes").glob("*/mcp-daemon.json")
         )
@@ -489,6 +492,25 @@ def test_retained_proxy_recovers_after_in_place_compatible_upgrade() -> None:
             for path in discoveries
         }
         _assert(owner_pids == {after["process_pid"]}, str(owner_pids))
+        client_connection_id = before["connection"]["connection_id"]
+        migrated_lease = (
+            kb_dir
+            / "runtime"
+            / "mcp-runtimes"
+            / current_key
+            / "mcp-proxies"
+            / f"{client_connection_id}.json"
+        )
+        old_lease = (
+            kb_dir
+            / "runtime"
+            / "mcp-runtimes"
+            / old_key
+            / "mcp-proxies"
+            / f"{client_connection_id}.json"
+        )
+        _assert(migrated_lease.exists(), "capable proxy did not migrate its lease")
+        _assert(not old_lease.exists(), "historical lease remained after migration")
         _assert(client.process.poll() is None, "retained proxy exited after upgrade")
         print("PASS retained_proxy_recovers_after_in_place_compatible_upgrade")
     finally:
@@ -499,6 +521,93 @@ def test_retained_proxy_recovers_after_in_place_compatible_upgrade() -> None:
         _stop_daemon(kb_dir)
         shutil.rmtree(kb_dir, ignore_errors=True)
         shutil.rmtree(install, ignore_errors=True)
+
+
+def _copy_git_src(commit: str, target: Path) -> None:
+    files = subprocess.check_output(
+        ["git", "ls-tree", "-r", "--name-only", commit, "src"],
+        cwd=ROOT,
+        text=True,
+        timeout=15.0,
+    ).splitlines()
+    for relative in files:
+        destination = target / Path(relative).relative_to("src")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(
+            subprocess.check_output(
+                ["git", "show", f"{commit}:{relative}"],
+                cwd=ROOT,
+                timeout=15.0,
+            )
+        )
+
+
+def _assert_historical_proxy_requires_fresh_task(commit: str) -> None:
+    kb_dir = _temp_vault()
+    install = Path(tempfile.mkdtemp(prefix=f"latch-{commit}-install-"))
+    install_src = install / "src"
+    client: McpClient | None = None
+    try:
+        _copy_git_src(commit, install_src)
+        overrides = {
+            "LATCH_HOME": str(ROOT),
+            "PYTHONPATH": str(install_src),
+            "PYTHONDONTWRITEBYTECODE": "1",
+        }
+        client = McpClient(
+            kb_dir,
+            f"historical-{commit}",
+            server_path=install_src / "mcp_server.py",
+            env_overrides=overrides,
+        )
+        old_pid = client.status()["process_pid"]
+        shutil.rmtree(install_src)
+        shutil.copytree(
+            ROOT / "src",
+            install_src,
+            ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+        )
+        os.kill(old_pid, signal.SIGTERM)
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            try:
+                os.kill(old_pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.05)
+
+        started = time.monotonic()
+        try:
+            client.status()
+        except AssertionError as exc:
+            message = str(exc).lower()
+            _assert("start a fresh task" in message, message)
+            _assert("request was not executed" in message, message)
+        else:
+            raise AssertionError("pre-capability proxy joined the current runtime")
+        _assert(time.monotonic() - started < 10.0, "fresh-task rejection was not bounded")
+        _assert(client.process.poll() is None, "historical proxy exited before surfacing error")
+        owner_pids = {
+            int(json.loads(path.read_text(encoding="utf-8"))["pid"])
+            for path in (kb_dir / "runtime" / "mcp-runtimes").glob(
+                "*/mcp-daemon.json"
+            )
+        }
+        _assert(len(owner_pids) == 1, str(owner_pids))
+    finally:
+        if client is not None:
+            client.close()
+        _stop_daemon(kb_dir)
+        shutil.rmtree(kb_dir, ignore_errors=True)
+        shutil.rmtree(install, ignore_errors=True)
+
+
+def test_pre_capability_registry_proxy_requires_fresh_task_after_upgrade() -> None:
+    _assert_historical_proxy_requires_fresh_task("7bcb86d")
+
+
+def test_fa162bd_pre_registry_proxy_requires_fresh_task_after_upgrade() -> None:
+    _assert_historical_proxy_requires_fresh_task("fa162bd")
 
 
 def test_committed_mutation_with_lost_response_is_not_replayed_or_called_retryable() -> None:

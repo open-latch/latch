@@ -87,6 +87,7 @@ def connection_metadata(project_cwd: str | None = None) -> dict[str, Any]:
         "proxy_pid": os.getpid(),
         "proxy_started_at": _utc_now(),
         "runtime_key": mcp_broker.RUNTIME_KEY,
+        "proxy_capability_epoch": mcp_broker.PROXY_CAPABILITY_EPOCH,
     }
 
 
@@ -143,10 +144,18 @@ class ProxyBridge:
             session_id, source = _resolve_session(self.metadata["project_cwd"])
             self.metadata["session_id"] = session_id
             self.metadata["session_source"] = source
-        sock, _payload = mcp_broker.connect_mcp(
+        sock, payload = mcp_broker.connect_mcp(
             self.metadata,
             start_reason="daemon_reconnect" if replay else "proxy_connect",
         )
+        owner_runtime_key = payload.get("owner_runtime_key")
+        if not isinstance(owner_runtime_key, str):
+            owner_runtime_key = str(payload["runtime_key"])
+        try:
+            self._lease.migrate_scope(owner_runtime_key)
+        except Exception:
+            sock.close()
+            raise
         self._sock = sock
         self._socket_buffer.clear()
         if replay and self._init_line is not None:
@@ -186,10 +195,11 @@ class ProxyBridge:
                 "to issue a new operation; the proxy did not replay it.",
             )
         if self._pending:
-            mcp_broker.emit_lifecycle(
-                "daemon_disconnect_unknown_outcome",
-                pending_count=len(self._pending),
-                reason=reason,
+                mcp_broker.emit_lifecycle(
+                    "daemon_disconnect_unknown_outcome",
+                    pending_count=len(self._pending),
+                    reason=reason,
+                    runtime_key=self._lease.runtime_key,
             )
         self._pending.clear()
         if self._deferred:
@@ -245,6 +255,7 @@ class ProxyBridge:
                     "daemon_reconnect_failed" if self._init_line is not None else "daemon_start_failed",
                     connection_id=self.metadata["connection_id"],
                     reason=str(exc),
+                    runtime_key=self._lease.runtime_key,
                 )
                 if "id" in message:
                     self._emit_request_error(message["id"], str(exc))
@@ -287,6 +298,7 @@ class ProxyBridge:
                 mcp_broker.emit_lifecycle(
                     "daemon_reconnect_succeeded",
                     connection_id=self.metadata["connection_id"],
+                    runtime_key=self._lease.runtime_key,
                 )
             return
 
@@ -372,6 +384,7 @@ class ProxyBridge:
                             reason="idle_over_cap",
                             cap=int(self._lease.policy["cap"]),
                             over_cap_duration_s=self._lease.over_cap_duration_s(),
+                            runtime_key=self._lease.runtime_key,
                         )
                         self.retired = True
                         return 0
@@ -392,6 +405,10 @@ class ProxyLease:
         self.connection_id = str(metadata["connection_id"])
         self.pid = int(metadata["proxy_pid"])
         self.runtime_key = str(metadata["runtime_key"])
+        self.proxy_capability_epoch = int(
+            metadata.get("proxy_capability_epoch")
+            or mcp_broker.PROXY_CAPABILITY_EPOCH
+        )
         self.started_epoch = time.time()
         self.last_activity_epoch = self.started_epoch
         self._last_heartbeat_monotonic = 0.0
@@ -405,22 +422,26 @@ class ProxyLease:
                 "connection_id": self.connection_id,
                 "pid": self.pid,
                 "runtime_key": self.runtime_key,
+                "owner_runtime_key": self.runtime_key,
+                "proxy_capability_epoch": self.proxy_capability_epoch,
                 "started_epoch": self.started_epoch,
                 "last_activity_epoch": self.last_activity_epoch,
                 "heartbeat_epoch": time.time(),
                 "over_cap_since_epoch": self._over_cap_since_epoch,
             },
+            runtime_key=self.runtime_key,
         )
         self._last_heartbeat_monotonic = time.monotonic()
 
     def start(self) -> None:
         self._write()
-        inventory = mcp_broker.proxy_inventory()
+        inventory = mcp_broker.proxy_inventory(owner_runtime_key=self.runtime_key)
         mcp_broker.emit_lifecycle(
             "proxy_started",
             connection_id=self.connection_id,
             live_leases=len(inventory),
             cap=int(self.policy["cap"]),
+            runtime_key=self.runtime_key,
         )
         if int(self.policy["cap"]) > 0 and len(inventory) > int(self.policy["cap"]):
             self._over_cap_since_epoch = time.time()
@@ -430,7 +451,34 @@ class ProxyLease:
                 connection_id=self.connection_id,
                 live_leases=len(inventory),
                 cap=int(self.policy["cap"]),
+                runtime_key=self.runtime_key,
             )
+
+    def migrate_scope(self, owner_runtime_key: str) -> None:
+        """Atomically join the ready owner's one capability lease pool."""
+        if owner_runtime_key == self.runtime_key:
+            return
+        previous_runtime_key = self.runtime_key
+        self.runtime_key = owner_runtime_key
+        try:
+            self._write()
+        except Exception:
+            self.runtime_key = previous_runtime_key
+            raise
+        mcp_broker.remove_proxy_lease(
+            self.connection_id,
+            runtime_key=previous_runtime_key,
+            reason="proxy_lease_migrated",
+        )
+        inventory = mcp_broker.proxy_inventory(owner_runtime_key=self.runtime_key)
+        mcp_broker.emit_lifecycle(
+            "proxy_lease_migrated",
+            connection_id=self.connection_id,
+            previous_runtime_key=previous_runtime_key,
+            live_leases=len(inventory),
+            cap=int(self.policy["cap"]),
+            runtime_key=self.runtime_key,
+        )
 
     def touch(self) -> None:
         self.last_activity_epoch = time.time()
@@ -449,7 +497,7 @@ class ProxyLease:
         cap = int(self.policy["cap"])
         if cap <= 0:
             return False
-        inventory = mcp_broker.proxy_inventory()
+        inventory = mcp_broker.proxy_inventory(owner_runtime_key=self.runtime_key)
         previous = self._over_cap_since_epoch
         if len(inventory) > cap:
             if self._over_cap_since_epoch is None:
@@ -474,7 +522,11 @@ class ProxyLease:
         return round(max(0.0, time.time() - self._over_cap_since_epoch), 3)
 
     def close(self) -> None:
-        mcp_broker.remove_proxy_lease(self.connection_id, reason="proxy_exit")
+        mcp_broker.remove_proxy_lease(
+            self.connection_id,
+            runtime_key=self.runtime_key,
+            reason="proxy_exit",
+        )
 
 
 def _exec_legacy_server() -> None:
@@ -493,9 +545,12 @@ def main() -> int:
         # Establish readiness before consuming stdin.  If startup fails, the
         # compatibility fallback can exec without losing the host's initialize
         # request.
-        mcp_broker.ensure_daemon(
+        payload = mcp_broker.ensure_daemon(
             metadata["project_cwd"], start_reason="proxy_start"
         )
+        owner_runtime_key = payload.get("owner_runtime_key")
+        if isinstance(owner_runtime_key, str):
+            metadata["runtime_key"] = owner_runtime_key
     except mcp_broker.BrokerError as exc:
         if os.environ.get("LATCH_MCP_ALLOW_LEGACY_FALLBACK"):
             mcp_broker.emit_lifecycle("legacy_fallback", reason=str(exc))

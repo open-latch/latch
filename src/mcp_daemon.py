@@ -69,24 +69,49 @@ def _requested_protocol_version() -> int:
         return -1
 
 
-def _alias_ready_owner(runtime_key: str) -> bool:
-    """Point a retained compatible proxy key at the one current owner."""
+def _requested_proxy_capability_epoch() -> int:
+    raw = os.environ.get("LATCH_MCP_PROXY_CAPABILITY_EPOCH")
+    if raw is None:
+        return 0
+    try:
+        return int(raw)
+    except ValueError:
+        return -1
+
+
+def _publish_upgrade_alias(
+    runtime_key: str,
+    payload: dict[str, Any],
+    *,
+    capable: bool,
+) -> None:
+    compatibility = "migrate" if capable else "fresh_task_required"
+    values = {
+        "port": int(payload["port"]),
+        "token": str(payload["token"]),
+        "pid": int(payload["pid"]),
+        "started_at": str(payload.get("started_at") or "unknown"),
+        "runtime_key": runtime_key,
+        "owner_runtime_key": mcp_broker.RUNTIME_KEY,
+        "compatibility": compatibility,
+    }
+    mcp_broker.publish_discovery(**values)
+    if not capable:
+        mcp_broker.publish_discovery(**values, legacy_path=True)
+
+
+def _alias_ready_owner(runtime_key: str, *, capable: bool) -> bool:
+    """Point a retained proxy key at the ready current owner."""
     deadline = time.monotonic() + mcp_broker._start_timeout()
     while time.monotonic() < deadline:
         payload = mcp_broker.read_discovery()
         if payload is not None and mcp_broker.probe_discovery(payload):
-            mcp_broker.publish_discovery(
-                port=int(payload["port"]),
-                token=str(payload["token"]),
-                pid=int(payload["pid"]),
-                started_at=str(payload.get("started_at") or "unknown"),
-                runtime_key=runtime_key,
-                owner_runtime_key=mcp_broker.RUNTIME_KEY,
-            )
+            _publish_upgrade_alias(runtime_key, payload, capable=capable)
             mcp_broker.emit_lifecycle(
                 "daemon_upgrade_alias_published",
                 requested_runtime_key=runtime_key,
                 owner_runtime_key=mcp_broker.RUNTIME_KEY,
+                compatibility=("migrate" if capable else "fresh_task_required"),
             )
             return True
         time.sleep(0.05)
@@ -112,11 +137,27 @@ if __name__ == "__main__":
             current_protocol=mcp_broker.PROTOCOL_VERSION,
         )
         raise SystemExit(1)
+    requested_capability = _requested_proxy_capability_epoch()
+    if requested_capability > mcp_broker.PROXY_CAPABILITY_EPOCH:
+        message = (
+            "Latch proxy capability is newer than this runtime. Reinstall Latch "
+            "and start a fresh task so the host launches a matching proxy."
+        )
+        mcp_broker.publish_start_failure(_REQUESTED_RUNTIME_KEY, message)
+        mcp_broker.emit_lifecycle(
+            "daemon_upgrade_incompatible",
+            requested_proxy_capability_epoch=requested_capability,
+            current_proxy_capability_epoch=mcp_broker.PROXY_CAPABILITY_EPOCH,
+        )
+        raise SystemExit(1)
+    requested_capable = requested_capability >= mcp_broker.PROXY_CAPABILITY_EPOCH
     _OWNER_FENCE = mcp_broker.acquire_owner_fence()
     if _OWNER_FENCE is None:
         if (
             _REQUESTED_RUNTIME_KEY != mcp_broker.RUNTIME_KEY
-            and _alias_ready_owner(_REQUESTED_RUNTIME_KEY)
+            and _alias_ready_owner(
+                _REQUESTED_RUNTIME_KEY, capable=requested_capable
+            )
         ):
             raise SystemExit(0)
         mcp_broker.emit_lifecycle(
@@ -372,6 +413,84 @@ async def _run_mcp_connection(
             pass
 
 
+_FRESH_TASK_MESSAGE = (
+    "This Latch proxy predates the shared-runtime capability epoch and cannot "
+    "safely join the current owner. Start a fresh task so the host launches the "
+    "updated proxy; the request was not executed."
+)
+
+
+async def _run_fresh_task_rejection(
+    stream: SocketStream,
+    initial: bytearray,
+    metadata: dict[str, Any],
+    state: DaemonState,
+) -> None:
+    """Complete initialize, then reject real work with an actionable error.
+
+    Pre-capability proxies discard an initialize error during reconnect. A
+    minimal successful initialize lets their replay finish so the deferred
+    request itself receives the bounded fresh-task error. No tool reaches
+    FastMCP, so unknown mutation outcomes remain impossible on this path.
+    """
+    connection_id = state.register(metadata)
+    buffer = initial
+    try:
+        while True:
+            line, buffer = await _read_line(
+                stream, buffer, limit=MAX_MCP_LINE_BYTES
+            )
+            try:
+                message = json.loads(line.decode("utf-8"))
+            except (UnicodeDecodeError, ValueError):
+                continue
+            if not isinstance(message, dict):
+                continue
+            request_id = message.get("id")
+            method = message.get("method")
+            state.touch()
+            if method == "initialize" and "id" in message:
+                params = message.get("params")
+                protocol_version = (
+                    params.get("protocolVersion")
+                    if isinstance(params, dict)
+                    else "2024-11-05"
+                )
+                response = {
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "result": {
+                        "protocolVersion": protocol_version,
+                        "capabilities": {},
+                        "serverInfo": {
+                            "name": "latch",
+                            "version": "fresh-task-required",
+                        },
+                    },
+                }
+                await stream.send(
+                    json.dumps(response, separators=(",", ":")).encode() + b"\n"
+                )
+            elif "id" in message:
+                response = {
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "error": {"code": -32002, "message": _FRESH_TASK_MESSAGE},
+                }
+                await stream.send(
+                    json.dumps(response, separators=(",", ":")).encode() + b"\n"
+                )
+                mcp_broker.emit_lifecycle(
+                    "proxy_upgrade_fresh_task_required",
+                    requested_runtime_key=metadata.get("runtime_key"),
+                    requested_proxy_capability_epoch=metadata.get(
+                        "proxy_capability_epoch", 0
+                    ),
+                )
+    finally:
+        state.unregister(connection_id)
+
+
 async def _send_session_message(
     stream: SocketStream,
     state: DaemonState,
@@ -425,6 +544,12 @@ async def _handle_connection(stream: SocketStream, state: DaemonState, token: st
         if op != "mcp":
             await stream.send(b'{"ok":false,"error":"unknown_operation"}\n')
             return
+        capability_epoch = metadata.get("proxy_capability_epoch")
+        if not isinstance(capability_epoch, int):
+            capability_epoch = 0
+        if capability_epoch < mcp_broker.PROXY_CAPABILITY_EPOCH:
+            await _run_fresh_task_rejection(stream, buffer, metadata, state)
+            return
         await _run_mcp_connection(stream, buffer, metadata, state)
     except (anyio.EndOfStream, anyio.ClosedResourceError, anyio.BrokenResourceError):
         return
@@ -473,19 +598,6 @@ async def _main_async() -> None:
     if host != "127.0.0.1":
         raise RuntimeError(f"shared MCP daemon bound unexpected host {host!r}")
 
-    if _REQUESTED_RUNTIME_KEY != mcp_broker.RUNTIME_KEY:
-        mcp_broker.publish_discovery(
-            port=int(port), token=token, pid=os.getpid(), started_at=started_at
-        )
-        mcp_broker.publish_discovery(
-            port=int(port),
-            token=token,
-            pid=os.getpid(),
-            started_at=started_at,
-            runtime_key=_REQUESTED_RUNTIME_KEY,
-            owner_runtime_key=mcp_broker.RUNTIME_KEY,
-        )
-
     initialized = False
     try:
         initial_cwd = os.environ.get("LATCH_MCP_INITIAL_PROJECT_CWD") or os.getcwd()
@@ -495,6 +607,20 @@ async def _main_async() -> None:
             mcp_broker.publish_discovery(
                 port=int(port), token=token, pid=os.getpid(), started_at=started_at
             )
+            if _REQUESTED_RUNTIME_KEY != mcp_broker.RUNTIME_KEY:
+                _publish_upgrade_alias(
+                    _REQUESTED_RUNTIME_KEY,
+                    {
+                        "port": port,
+                        "token": token,
+                        "pid": os.getpid(),
+                        "started_at": started_at,
+                    },
+                    capable=(
+                        _requested_proxy_capability_epoch()
+                        >= mcp_broker.PROXY_CAPABILITY_EPOCH
+                    ),
+                )
             mcp_broker.emit_lifecycle(
                 "daemon_started",
                 pid=os.getpid(),

@@ -639,6 +639,9 @@ def check_mcp_runtime_lifecycle() -> tuple[str, str, str]:
         lease_state = mcp_broker.proxy_lease_state(policy=policy)
         inventory = list(lease_state["live"])
         live = len(inventory)
+        legacy_incompatible = len(
+            lease_state.get("legacy_incompatible") or []
+        )
         summary = mcp_broker.lifecycle_summary(
             hours=24, lease_state=lease_state, policy=policy
         )
@@ -683,6 +686,7 @@ def check_mcp_runtime_lifecycle() -> tuple[str, str, str]:
                 "proxy_over_cap", "proxy_retired", "legacy_fallback",
                 "prompt_retrieval_degraded", "daemon_reconnect_failed",
                 "daemon_disconnect_unknown_outcome",
+                "proxy_upgrade_fresh_task_required",
             } and count
         )
         pressure.append(f"{warning_count} lifecycle event(s): {signals}")
@@ -699,6 +703,11 @@ def check_mcp_runtime_lifecycle() -> tuple[str, str, str]:
         pressure.append(
             f"{stale_leases} stale live lease(s), oldest at least "
             f"{float(summary.get('max_stale_lease_age_s') or 0.0):.1f}s"
+        )
+    if legacy_incompatible:
+        pressure.append(
+            f"{legacy_incompatible} pre-capability proxy lease(s) cannot join the "
+            "owner pool; start fresh tasks and close the old host contexts"
         )
     if discovery is not None and isinstance(discovery.get("error"), str):
         pressure.append(discovery["error"])
@@ -724,7 +733,7 @@ def check_mcp_runtime_lifecycle() -> tuple[str, str, str]:
         )
     owner = f"owner pid={discovery['pid']}" if discovery_live else "no active owner"
     return name, OK, (
-        f"{owner}; live leases={live}/{cap}; "
+        f"{owner}; owner-scoped live leases={live}/{cap}; "
         f"retire idle={policy['retire_idle_s']:.0f}s; stale after={policy['stale_s']:.0f}s; "
         f"24h high-water={high_water}"
         f"/{warn_at if warn_at is not None else 'unbounded'}; "

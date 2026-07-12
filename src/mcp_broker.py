@@ -24,6 +24,7 @@ import paths
 
 
 PROTOCOL_VERSION = 1
+PROXY_CAPABILITY_EPOCH = 1
 DISCOVERY_FILE = "mcp-daemon.json"
 START_LOCK_FILE = "mcp-daemon.start.lock"
 OWNER_FENCE_FILE = "mcp-daemon.owner.lock"
@@ -154,6 +155,16 @@ def proxy_lease_dir(runtime_key: str | None = None) -> Path:
     return path
 
 
+def legacy_discovery_path() -> Path:
+    """Discovery location used before the runtime-key registry existed."""
+    return runtime_dir() / DISCOVERY_FILE
+
+
+def legacy_proxy_lease_dir() -> Path:
+    """Lease location used by pre-registry proxies such as fa162bd."""
+    return runtime_dir() / "runtime" / PROXY_LEASE_DIR
+
+
 def _env_int(name: str, default: int, *, minimum: int = 0) -> int:
     try:
         return max(minimum, int(os.environ.get(name, str(default))))
@@ -183,42 +194,93 @@ def proxy_policy() -> dict[str, int | float]:
     }
 
 
-def write_proxy_lease(connection_id: str, payload: dict[str, Any]) -> Path:
-    path = proxy_lease_dir() / f"{connection_id}.json"
+def write_proxy_lease(
+    connection_id: str,
+    payload: dict[str, Any],
+    *,
+    runtime_key: str | None = None,
+) -> Path:
+    path = proxy_lease_dir(runtime_key) / f"{connection_id}.json"
     _atomic_json(path, payload)
     return path
 
 
-def remove_proxy_lease(connection_id: str, *, reason: str = "closed") -> None:
+def remove_proxy_lease(
+    connection_id: str,
+    *,
+    runtime_key: str | None = None,
+    reason: str = "closed",
+) -> None:
     try:
-        (proxy_lease_dir() / f"{connection_id}.json").unlink()
-        emit_lifecycle("proxy_closed", connection_id=connection_id, reason=reason)
+        (proxy_lease_dir(runtime_key) / f"{connection_id}.json").unlink()
+        emit_lifecycle(
+            "proxy_closed",
+            connection_id=connection_id,
+            reason=reason,
+            runtime_key=runtime_key or RUNTIME_KEY,
+        )
     except OSError:
         pass
 
 
+def _owner_alias_keys(owner_runtime_key: str) -> set[str]:
+    """Return registry keys currently published against one ready owner."""
+    keys = {owner_runtime_key}
+    registry = runtime_dir() / "runtime" / RUNTIME_REGISTRY_DIR
+    try:
+        paths_to_check = list(registry.glob(f"*/{DISCOVERY_FILE}"))
+    except OSError:
+        return keys
+    for path in paths_to_check:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if payload.get("owner_runtime_key") != owner_runtime_key:
+            continue
+        key = payload.get("runtime_key")
+        if isinstance(key, str):
+            keys.add(key)
+    return keys
+
+
+def _lease_paths(owner_runtime_key: str) -> list[tuple[Path, str]]:
+    paths: list[tuple[Path, str]] = []
+    for key in _owner_alias_keys(owner_runtime_key):
+        paths.extend((path, key) for path in proxy_lease_dir(key).glob("*.json"))
+    legacy_dir = legacy_proxy_lease_dir()
+    if legacy_dir.exists():
+        paths.extend((path, "legacy_pre_registry") for path in legacy_dir.glob("*.json"))
+    return paths
+
+
 def proxy_lease_state(
-    *, policy: dict[str, int | float] | None = None
+    *,
+    policy: dict[str, int | float] | None = None,
+    owner_runtime_key: str | None = None,
 ) -> dict[str, Any]:
-    """Return live capacity rows plus non-destructive stale diagnostics.
+    """Return one owner-scoped capacity pool plus legacy alias diagnostics.
 
     A live process may renew its lease after this scan reads an old heartbeat.
     Never unlink that live process's path: its next atomic write repairs the
-    lease.  Dead-process rows are safe to remove because connection ids are
-    process-unique.
+    lease. Dead-process rows are safe to remove because connection ids are
+    process-unique. Capability-epoch leases are deduplicated across aliases so
+    a crash between write-new/remove-old migration cannot consume two slots.
     """
-    rows: list[dict[str, Any]] = []
+    owner_runtime_key = owner_runtime_key or RUNTIME_KEY
+    capable_by_id: dict[str, dict[str, Any]] = {}
+    legacy_by_id: dict[str, dict[str, Any]] = {}
     stale_count = 0
     max_stale_age_s = 0.0
     policy = proxy_policy() if policy is None else policy
     stale_s = float(policy["stale_s"])
     now = time.time()
-    for path in proxy_lease_dir().glob("*.json"):
+    for path, source_scope in _lease_paths(owner_runtime_key):
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
-        if not isinstance(payload, dict) or payload.get("runtime_key") != RUNTIME_KEY:
+        if not isinstance(payload, dict):
             continue
         pid = payload.get("pid")
         if not isinstance(pid, int) or not _pid_alive(pid):
@@ -241,8 +303,31 @@ def proxy_lease_state(
             age = now - float(observed) if isinstance(observed, (int, float)) else stale_s
             max_stale_age_s = max(max_stale_age_s, age)
             continue
-        rows.append(payload)
+        connection_id = payload.get("connection_id")
+        if not isinstance(connection_id, str) or not connection_id:
+            continue
+        row = dict(payload)
+        row["lease_source_scope"] = source_scope
+        epoch = payload.get("proxy_capability_epoch")
+        capable = (
+            isinstance(epoch, int) and epoch >= PROXY_CAPABILITY_EPOCH
+        ) or (epoch is None and source_scope == owner_runtime_key)
+        target = capable_by_id if capable else legacy_by_id
+        previous = target.get(connection_id)
+        if previous is None or float(row.get("heartbeat_epoch") or 0.0) > float(
+            previous.get("heartbeat_epoch") or 0.0
+        ):
+            target[connection_id] = row
+    rows = list(capable_by_id.values())
+    legacy_rows = list(legacy_by_id.values())
     rows.sort(
+        key=lambda row: (
+            float(row.get("last_activity_epoch") or 0.0),
+            float(row.get("started_epoch") or 0.0),
+        ),
+        reverse=True,
+    )
+    legacy_rows.sort(
         key=lambda row: (
             float(row.get("last_activity_epoch") or 0.0),
             float(row.get("started_epoch") or 0.0),
@@ -251,13 +336,17 @@ def proxy_lease_state(
     )
     return {
         "live": rows,
+        "legacy_incompatible": legacy_rows,
+        "observed_live": rows + legacy_rows,
         "stale_count": stale_count,
         "max_stale_age_s": round(max_stale_age_s, 3),
+        "owner_runtime_key": owner_runtime_key,
+        "alias_runtime_keys": sorted(_owner_alias_keys(owner_runtime_key)),
     }
 
 
-def proxy_inventory() -> list[dict[str, Any]]:
-    return list(proxy_lease_state()["live"])
+def proxy_inventory(*, owner_runtime_key: str | None = None) -> list[dict[str, Any]]:
+    return list(proxy_lease_state(owner_runtime_key=owner_runtime_key)["live"])
 
 
 def _lifecycle_path(day: datetime | None = None) -> Path:
@@ -294,6 +383,12 @@ def lifecycle_summary(
     policy: dict[str, int | float] | None = None,
 ) -> dict[str, Any]:
     """Return bounded operational signals for status/doctor surfaces."""
+    policy = proxy_policy() if policy is None else policy
+    lease_state = (
+        proxy_lease_state(policy=policy) if lease_state is None else lease_state
+    )
+    visible_runtime_keys = set(lease_state.get("alias_runtime_keys") or [])
+    visible_runtime_keys.add(RUNTIME_KEY)
     cutoff = datetime.now(timezone.utc) - timedelta(hours=max(1, hours))
     counts: Counter[str] = Counter()
     warnings: list[dict[str, Any]] = []
@@ -309,6 +404,7 @@ def lifecycle_summary(
         "proxy_over_cap", "proxy_retired", "legacy_fallback",
         "prompt_retrieval_degraded", "daemon_reconnect_failed",
         "daemon_disconnect_unknown_outcome",
+        "proxy_upgrade_fresh_task_required",
     }
     for offset in range(0, max(2, hours // 24 + 2)):
         path = _lifecycle_path(datetime.now(timezone.utc) - timedelta(days=offset))
@@ -324,7 +420,7 @@ def lifecycle_summary(
                 continue
             if ts < cutoff:
                 continue
-            if row.get("runtime_key") != RUNTIME_KEY:
+            if row.get("runtime_key") not in visible_runtime_keys:
                 continue
             event = str(row.get("event") or "unknown")
             counts[event] += 1
@@ -361,10 +457,6 @@ def lifecycle_summary(
                     if row.get(key) is not None
                 })
     warnings.sort(key=lambda row: str(row.get("ts") or ""))
-    policy = proxy_policy() if policy is None else policy
-    lease_state = (
-        proxy_lease_state(policy=policy) if lease_state is None else lease_state
-    )
     inventory = list(lease_state.get("live") or [])
     cap = int(policy["cap"])
     proxy_high_water = max(proxy_high_water, len(inventory))
@@ -390,7 +482,11 @@ def lifecycle_summary(
         "current_live_leases": len(inventory),
         "current_stale_leases": int(lease_state.get("stale_count") or 0),
         "max_stale_lease_age_s": float(lease_state.get("max_stale_age_s") or 0.0),
-        "lease_scope": "runtime_key",
+        "legacy_incompatible_leases": len(
+            lease_state.get("legacy_incompatible") or []
+        ),
+        "observed_live_leases": len(lease_state.get("observed_live") or inventory),
+        "lease_scope": "owner_runtime_key",
         "currently_over_cap": currently_over_cap,
         "current_over_cap_duration_s": round(current_over_cap_duration_s, 3),
         "over_cap_duration_is_lower_bound": currently_over_cap,
@@ -644,6 +740,7 @@ def _spawn_daemon(project_cwd: str, *, start_reason: str) -> int:
     env["LATCH_MCP_DAEMON_PROCESS"] = "1"
     env["LATCH_MCP_RUNTIME_KEY"] = RUNTIME_KEY
     env["LATCH_MCP_PROTOCOL_VERSION"] = str(PROTOCOL_VERSION)
+    env["LATCH_MCP_PROXY_CAPABILITY_EPOCH"] = str(PROXY_CAPABILITY_EPOCH)
     env["LATCH_MCP_INITIAL_PROJECT_CWD"] = project_cwd
     env["LATCH_MCP_START_REASON"] = _start_reason(start_reason)
     env["LATCH_MCP_START_REQUEST_EPOCH"] = str(time.time())
@@ -791,19 +888,23 @@ def publish_discovery(
     started_at: str,
     runtime_key: str | None = None,
     owner_runtime_key: str | None = None,
+    compatibility: str = "migrate",
+    legacy_path: bool = False,
 ) -> Path:
     key = runtime_key or RUNTIME_KEY
     payload = {
         "protocol": PROTOCOL_VERSION,
         "runtime_key": key,
         "owner_runtime_key": owner_runtime_key or RUNTIME_KEY,
+        "required_proxy_capability_epoch": PROXY_CAPABILITY_EPOCH,
+        "compatibility": compatibility,
         "host": "127.0.0.1",
         "port": int(port),
         "token": token,
         "pid": int(pid),
         "started_at": started_at,
     }
-    path = discovery_path(key)
+    path = legacy_discovery_path() if legacy_path else discovery_path(key)
     _atomic_json(path, payload)
     return path
 
@@ -814,7 +915,8 @@ def remove_discovery_aliases_if_owner(*, pid: int, token: str) -> None:
     try:
         paths_to_check = list(registry.glob(f"*/{DISCOVERY_FILE}"))
     except OSError:
-        return
+        paths_to_check = []
+    paths_to_check.append(legacy_discovery_path())
     for path in paths_to_check:
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))

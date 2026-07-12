@@ -31,6 +31,10 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+        with:
+          # Historical-proxy regressions execute the exact reviewed 7bcb86d and
+          # fa162bd source snapshots, not hand-maintained approximations.
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
