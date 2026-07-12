@@ -259,11 +259,10 @@ def resolve_python(override: str | None) -> str:
 
 
 def _abs(p: str) -> str:
-    """Absolutize a path that exists; leave bare names (e.g. 'python3') alone
-    so PATH resolution still happens at runtime."""
-    path = Path(p)
+    """Absolutize an existing path without resolving a virtualenv symlink."""
+    path = Path(p).expanduser()
     if path.exists():
-        return str(path.resolve())
+        return str(path.absolute())
     return p
 
 

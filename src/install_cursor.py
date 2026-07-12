@@ -76,6 +76,16 @@ CURSOR_SKILL_NAMES = (
     "source-command-latch-tree",
     "source-command-unlatch",
 )
+
+
+def cursor_ide_enablement_guidance() -> str:
+    """Return the user-controlled IDE activation step CLI probes cannot prove."""
+    return (
+        "Cursor IDE action required: open Cursor Settings > Tools & MCP, select "
+        "this workspace, and enable latch. Expect '48 tools enabled'. A successful "
+        "'agent mcp list' or 'agent mcp list-tools latch' result is CLI-only and "
+        "does not prove the Cursor IDE workspace toggle is enabled."
+    )
 CURSOR_COMMAND_FOOTER = (
     "\n\n---\n\n"
     "Cursor boundary: this project-local command is a reusable prompt for "
@@ -839,6 +849,8 @@ def main(argv: list[str] | None = None) -> int:
         print("Dry run only - re-run without --dry-run to apply.")
     else:
         print("Done. Restart Cursor or run 'agent mcp list' so Cursor reloads the project wiring.")
+        if not args.skip_mcp:
+            print(cursor_ide_enablement_guidance())
         if not args.with_hooks:
             print("Cursor hooks were not installed; re-run with --with-hooks for session briefing, pre-edit gating, and activity context.")
         print("Cursor Agent CLI is the native model backend; pass --model-backend claude|codex only for an explicit compatibility override.")

@@ -15,6 +15,16 @@ from _common import log, read_hook_input  # noqa: E402
 from paths import is_disabled, is_in_compact, is_unlatched_mode  # noqa: E402
 
 
+def current_session_context(sid: str | None) -> str | None:
+    if not sid:
+        return None
+    return (
+        f"Latch Cursor current session id: `{sid}`. Managed current-session "
+        "workflows must pass this exact id to their wrapper; never reuse another "
+        "chat's id or scan Cursor history."
+    )
+
+
 def main() -> int:
     payload = read_hook_input()
     try:
@@ -28,7 +38,11 @@ def main() -> int:
             return 0
         prompt = cursor_gate_state.prompt_text(payload)
         cursor_gate_state.begin_prompt(cwd, sid, prompt)
-        print(json.dumps({"continue": True}))
+        response = {"continue": True}
+        context = current_session_context(sid)
+        if context:
+            response["additional_context"] = context
+        print(json.dumps(response))
     except Exception as e:
         log(f"cursor_before_submit failed: {e}")
         # Non-zero plus failClosed=true prevents a stale prior receipt from

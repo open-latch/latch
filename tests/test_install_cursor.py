@@ -215,6 +215,34 @@ def test_first_wire_notice_is_cursor_branded():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_cursor_ide_enablement_guidance_is_explicit_and_proof_honest():
+    text = ic.cursor_ide_enablement_guidance()
+    _assert("Cursor Settings > Tools & MCP" in text, text)
+    _assert("workspace" in text.lower() and "latch" in text, text)
+    _assert("48 tools enabled" in text, text)
+    _assert("agent mcp" in text and "does not prove" in text, text)
+    print("PASS cursor_ide_enablement_guidance_is_explicit_and_proof_honest")
+
+
+def test_current_session_workflows_use_prompt_time_id_handoff():
+    for path in (
+        ic.CURSOR_COMMANDS_SRC / "latch-seed.md",
+        ic.CURSOR_COMMANDS_SRC / "latch-compact.md",
+        ic.CURSOR_SKILLS_SRC / "source-command-latch-seed" / "SKILL.md",
+        ic.CURSOR_SKILLS_SRC / "source-command-latch-compact" / "SKILL.md",
+    ):
+        text = path.read_text(encoding="utf-8")
+        _assert("current prompt context" in text, path)
+        _assert("re-injected" in text and "beforeSubmitPrompt" in text, path)
+        _assert("required_permissions" in text and '["all"]' in text, path)
+        _assert("first Shell" in text and "one-shot" in text, path)
+        _assert("LATCH_PYTHON" in text and ".cursor/mcp.json" in text, path)
+        if "latch-seed" in str(path):
+            _assert("preview_digest" in text and "second model call" in text, path)
+            _assert("apply Shell call" in text and "first and only attempt" in text, path)
+    print("PASS current_session_workflows_use_prompt_time_id_handoff")
+
+
 def test_check_mode_verifies_mcp_and_agents():
     d = Path(tempfile.mkdtemp(prefix="latch-cursor-check-"))
     try:
@@ -609,6 +637,8 @@ if __name__ == "__main__":
     test_write_config_backs_up_existing()
     test_agents_sync_args_are_cursor_branded()
     test_first_wire_notice_is_cursor_branded()
+    test_cursor_ide_enablement_guidance_is_explicit_and_proof_honest()
+    test_current_session_workflows_use_prompt_time_id_handoff()
     test_check_mode_verifies_mcp_and_agents()
     test_cursor_commands_sync_status_and_remove()
     test_cursor_commands_refuse_user_owned_same_name_collision()

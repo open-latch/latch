@@ -71,6 +71,28 @@ def write_marker(
     return path
 
 
+def refresh_transcript_path(
+    project_path: str | os.PathLike | None,
+    session_id: str,
+    transcript_path: str,
+) -> Path:
+    """Fill a late Cursor transcript handoff without accepting path changes."""
+    sid = (session_id or "").strip()
+    tpath = (transcript_path or "").strip()
+    if not sid or not tpath:
+        raise ValueError("session_id and transcript_path are required")
+    existing = read_marker(project_path, session_id=sid)
+    if existing:
+        if existing.get("session_id") != sid:
+            raise ValueError("Cursor session marker identity mismatch")
+        current = existing.get("transcript_path")
+        if isinstance(current, str) and current.strip():
+            if current.strip() != tpath:
+                raise ValueError("Cursor transcript path changed within one session")
+            return marker_path(project_path)
+    return write_marker(project_path, sid, transcript_path=tpath)
+
+
 def read_marker(
     project_path: str | os.PathLike | None = None,
     session_id: str | None = None,

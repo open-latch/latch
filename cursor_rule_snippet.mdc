@@ -14,6 +14,11 @@ Use the project `latch` MCP server as the decision-continuity layer:
 
 - Before answering when project history, prior decisions, or rejected paths may
   matter, read latch with `latch_search`, `latch_recent`, or `latch_get`.
+- If the session brief is present but the Cursor IDE tool catalog has no latch
+  server, do not repeatedly call `latch_gate` or try to bypass `preToolUse`.
+  Ask the user to open Cursor Settings > Tools & MCP, select this workspace,
+  enable `latch`, confirm `48 tools enabled`, and then start a fresh Agent chat.
+  `agent mcp list` is CLI-only evidence and does not prove the IDE toggle.
 - Before committing to an implementation plan for a coding, build, add, fix,
   refactor, extend, or rebuild request, call `latch_gate` with the user's
   request verbatim.

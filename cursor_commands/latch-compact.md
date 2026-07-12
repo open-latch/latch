@@ -12,19 +12,34 @@ recorded together by the current Cursor `sessionStart` hook. It never searches
 Cursor databases, guesses the latest chat, or falls back to Claude/Codex
 transcripts.
 
-Read the exact `Latch Cursor session id` from the current SessionStart context
-and substitute it for `<CURSOR_SESSION_ID>` below. Do not use an id from another
-chat or omit the argument.
+Read the exact `Latch Cursor current session id` from the current prompt context;
+the `beforeSubmitPrompt` hook re-injected it from this chat's payload. Substitute
+it for `<CURSOR_SESSION_ID>` below. Do not use an id from another chat or omit
+the argument.
+
+Read the workspace `.cursor/mcp.json` and take the exact absolute `command`
+from `mcpServers.latch` as `<CURSOR_MCP_PYTHON>`. Set `LATCH_PYTHON` to
+that interpreter on the Shell call below. Do not fall back to a PATH
+`python3`: the MCP interpreter owns latch's native dependencies.
 
 Run the host-appropriate wrapper from the current project:
 
+On the first Shell call, request Cursor `required_permissions: ["all"]`.
+Compaction writes latch-owned budget/session/KB state outside the open
+workspace, so Cursor's normal sandbox cannot complete it. Do not try the
+sandboxed call first and then retry: the managed compact receipt is one-shot
+and is consumed by the first exact attempt. This permission request still uses
+Cursor's normal user-approval flow.
+
 ```bash
+LATCH_PYTHON="<CURSOR_MCP_PYTHON>" \
 LATCH_COMPACTOR_BACKEND=<CURSOR_MODEL_BACKEND> \
 LATCH_MODEL_BACKEND=<CURSOR_MODEL_BACKEND> \
 bash <KB_HOME>/bin/run_cursor_compact_now.sh "<CURSOR_SESSION_ID>"
 ```
 
 ```powershell
+$env:LATCH_PYTHON = "<CURSOR_MCP_PYTHON>"
 $env:LATCH_COMPACTOR_BACKEND = "<CURSOR_MODEL_BACKEND>"
 $env:LATCH_MODEL_BACKEND = "<CURSOR_MODEL_BACKEND>"
 & "<KB_HOME>/bin/run_cursor_compact_now.ps1" "<CURSOR_SESSION_ID>"

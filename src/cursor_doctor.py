@@ -212,7 +212,9 @@ def check_cursor_cli_mcp(
         "Cursor CLI MCP visibility",
         OK,
         f"{resolved} mcp list/list-tools {install_cursor.SERVER_NAME} reachable with "
-        + ", ".join(CRITICAL_MCP_TOOLS),
+        + ", ".join(CRITICAL_MCP_TOOLS)
+        + "; CLI-only proof: separately open Cursor Settings > Tools & MCP, "
+        "select this workspace, enable latch, and confirm '48 tools enabled'",
     )
 
 

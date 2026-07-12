@@ -354,7 +354,37 @@ def reset_session(project_path: str, sid: str | None) -> dict[str, Any]:
     return state
 
 
-def begin_prompt(project_path: str, sid: str | None, prompt: str) -> dict[str, Any]:
+def initialize_session(project_path: str, sid: str | None) -> dict[str, Any]:
+    """Create turn-zero state without clobbering a concurrently started prompt.
+
+    Cursor can launch ``sessionStart`` and ``beforeSubmitPrompt`` concurrently
+    for the first turn.  ``beforeSubmitPrompt`` is the authoritative receipt
+    invalidation boundary, so SessionStart must preserve any state already
+    written for the same conversation.
+    """
+    path = state_path(project_path, sid)
+    with _exclusive_state_lock(path, wait_s=2.0):
+        existing = read_state(project_path, sid)
+        if existing and existing.get("session_id") == sid:
+            return existing
+        state = {
+            "version": 1,
+            "session_id": sid,
+            "turn": 0,
+            "prompt_hash": None,
+            "gate_receipt": None,
+            "operation_intent": None,
+            "operation_receipt": None,
+            "pending_operation": None,
+            "updated_at": _now(),
+        }
+        _atomic_write(path, state)
+        return state
+
+
+def _begin_prompt_unlocked(
+    project_path: str, sid: str | None, prompt: str,
+) -> dict[str, Any]:
     previous = read_state(project_path, sid) or {}
     same_session = previous.get("session_id") == sid
     previous_turn = previous.get("turn", 0) if same_session else 0
@@ -379,6 +409,7 @@ def begin_prompt(project_path: str, sid: str | None, prompt: str) -> dict[str, A
             allowed = bool(
                 pending and pending.get("name") == name
                 and pending.get("stage") == "previewed"
+                and isinstance(pending.get("preview_digest"), str)
             )
         elif name == "latch-pm" and phase == "apply":
             allowed = bool(
@@ -408,6 +439,8 @@ def begin_prompt(project_path: str, sid: str | None, prompt: str) -> dict[str, A
             }
             if name == "latch-pm" and phase == "apply":
                 operation_receipt["candidate_digest"] = pending["candidate_digest"]
+            if name == "latch-seed" and phase == "apply":
+                operation_receipt["preview_digest"] = pending["preview_digest"]
 
     state = {
         "version": 1,
@@ -422,6 +455,12 @@ def begin_prompt(project_path: str, sid: str | None, prompt: str) -> dict[str, A
     }
     _atomic_write(state_path(project_path, sid), state)
     return state
+
+
+def begin_prompt(project_path: str, sid: str | None, prompt: str) -> dict[str, Any]:
+    path = state_path(project_path, sid)
+    with _exclusive_state_lock(path, wait_s=2.0):
+        return _begin_prompt_unlocked(project_path, sid, prompt)
 
 
 def record_gate(
@@ -616,6 +655,19 @@ def _parse_tool_identity(name: str) -> tuple[str | None, str | None, bool] | Non
             _normalized_tool_name(parts[2]),
             False,
         )
+    # Cursor IDE 3.10 emits direct MCP tool calls as ``MCP:<tool>`` in hook
+    # payloads.  The MCP namespace is explicit even though the configured
+    # server name is omitted, so accept only the latch/legacy tool families;
+    # every other colon-form MCP call remains non-latch and fail-closed.
+    if text.lower().startswith("mcp:"):
+        tool = _normalized_tool_name(text.split(":", 1)[1])
+        if not tool:
+            return None
+        if tool.startswith("latch"):
+            return "latch", tool, False
+        if tool.startswith("kb"):
+            return "claudekb", tool, False
+        return "other", tool, False
     # Cursor's observed generic dispatcher identity is exactly ``MCP``. Do not
     # let an arbitrary native tool name containing those letters claim the
     # generic transport contract.
@@ -781,6 +833,14 @@ def _trusted_launcher(value: str) -> bool:
     return candidate in trusted
 
 
+def _allowed_operation_env(name: str, value: str) -> bool:
+    if name in _OPERATION_ENV_NAMES:
+        return value in {"cursor", "claude", "codex"}
+    if name == "LATCH_PYTHON":
+        return _trusted_launcher(value)
+    return False
+
+
 def _operation_shell_argv(payload: dict[str, Any]) -> tuple[Path, list[str]] | None:
     raw_name = _normalized_tool_name(_tool_name(payload))
     if raw_name not in _SHELL_NAMES and "shell" not in raw_name and "terminal" not in raw_name:
@@ -798,11 +858,13 @@ def _operation_shell_argv(payload: dict[str, Any]) -> tuple[Path, list[str]] | N
     if len(segments) > 1:
         for segment in segments[:-1]:
             match = re.fullmatch(
-                r"\$env:([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(['\"]?)(cursor|claude|codex)\2",
+                r"\$env:([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(['\"]?)(.+?)\2",
                 segment,
                 re.IGNORECASE,
             )
-            if not match or match.group(1).upper() not in _OPERATION_ENV_NAMES:
+            if not match or not _allowed_operation_env(
+                match.group(1).upper(), match.group(3),
+            ):
                 return None
         text = segments[-1]
 
@@ -813,9 +875,9 @@ def _operation_shell_argv(payload: dict[str, Any]) -> tuple[Path, list[str]] | N
     parts = [_strip_quotes(part) for part in parts]
     if parts and parts[0] == "&":
         parts = parts[1:]
-    while parts and re.fullmatch(r"[A-Z_][A-Z0-9_]*=(cursor|claude|codex)", parts[0]):
-        name, _value = parts.pop(0).split("=", 1)
-        if name not in _OPERATION_ENV_NAMES:
+    while parts and re.fullmatch(r"[A-Z_][A-Z0-9_]*=.+", parts[0]):
+        name, value = parts.pop(0).split("=", 1)
+        if not _allowed_operation_env(name, value):
             return None
     if parts and (
         Path(parts[0]).name.lower() in _SHELL_LAUNCHERS
@@ -924,7 +986,9 @@ def _operation_tool_matches(
             "--format", "json",
         ]
         if phase == "apply":
-            expected += ["--apply", "--yes"]
+            expected += [
+                "--preview-digest", operation.get("preview_digest"), "--apply", "--yes",
+            ]
         return args == expected
     if name == "latch-gate-report":
         return (
@@ -962,21 +1026,28 @@ def _operation_tool_matches(
 
 
 @contextmanager
-def _exclusive_state_lock(path: Path):
+def _exclusive_state_lock(path: Path, *, wait_s: float = 0.0):
+    path.parent.mkdir(parents=True, exist_ok=True)
     lock = path.with_name(path.name + ".consume.lock")
-    try:
-        fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-    except FileExistsError:
+    deadline = time.monotonic() + max(0.0, wait_s)
+    while True:
         try:
-            stale = time.time() - lock.stat().st_mtime > 10
-        except OSError:
-            stale = False
-        if not stale:
-            raise RuntimeError("operation receipt is already being consumed")
-        try:
-            lock.unlink()
             fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-        except (FileExistsError, OSError):
+            break
+        except FileExistsError:
+            try:
+                stale = time.time() - lock.stat().st_mtime > 10
+            except OSError:
+                stale = False
+            if stale:
+                try:
+                    lock.unlink()
+                    continue
+                except (FileNotFoundError, OSError):
+                    pass
+            if time.monotonic() < deadline:
+                time.sleep(0.01)
+                continue
             raise RuntimeError("operation receipt is already being consumed") from None
     try:
         os.close(fd)
@@ -1064,6 +1135,8 @@ def _find_seed_preview(value: Any, depth: int = 0) -> dict[str, Any] | None:
             and value.get("apply") is False
             and isinstance(value.get("project"), str)
             and isinstance(value.get("candidates"), list)
+            and isinstance(value.get("preview_digest"), str)
+            and re.fullmatch(r"[0-9a-f]{64}", value.get("preview_digest"))
         ):
             return value
         for child in value.values():
@@ -1165,9 +1238,7 @@ def record_operation_success(
             if not isinstance(pending, dict) or pending.get("name") != "latch-seed" \
                     or pending.get("stage") != "preview":
                 return False, "no pending seed preview operation"
-            preview_digest = hashlib.sha256(json.dumps(
-                preview, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
-            ).encode("utf-8")).hexdigest()
+            preview_digest = preview["preview_digest"]
             state["pending_operation"] = {
                 "name": "latch-seed", "stage": "previewed",
                 "preview_digest": preview_digest, "age_turns": 0,

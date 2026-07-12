@@ -42,9 +42,20 @@ Run `agent login` first if Cursor Agent is not authenticated. Authentication
 does not approve project MCP servers: separately approve the `latch` server in
 Cursor when Cursor prompts. If `agent mcp list` reports `needs approval` or
 `not approved`, static wiring exists but live MCP/gate acceptance is still
-blocked. Do not invent an undocumented CLI approval command. Use
+blocked. Before testing chat, open **Cursor Settings > Tools & MCP**, select the
+current workspace, enable **latch**, confirm **48 tools enabled**, and start a
+fresh Agent chat. CLI `ready` and `agent mcp list-tools latch` output are
+CLI-only proof and do not establish that the IDE workspace toggle is enabled.
+Do not edit Cursor's private state or invent an undocumented CLI command to
+bypass this user trust action. Use
 `--model-backend claude` or `--model-backend codex` only to exercise an explicit
 compatibility backend instead of native Cursor.
+
+A one-time latch wiring repair after an engine upgrade may legitimately update
+`.cursor/mcp.json`. Cursor can revoke the workspace toggle when that file
+changes. When the SessionStart brief reports a repair, re-enable **latch** in
+**Cursor Settings > Tools & MCP**, reconfirm **48 tools enabled**, and start a
+fresh Agent chat. A second task must not rewrite current wiring.
 
 Expected files in the target project:
 
@@ -71,8 +82,11 @@ If `agent` is unavailable, the doctor reports a warning for the live CLI probe.
 That warning does not invalidate the static install proof. If `agent` is
 available but the server is unapproved, retain that as a separate user-action
 gap. If approval succeeds and `latch_gate` is still missing from `list-tools`,
-the install is not ready. Static doctor success alone is not live visible-gate,
-native-backend, plugin, or compaction acceptance.
+the install is not ready. If the IDE Agent reports that latch is unavailable
+despite a successful CLI probe, inspect the workspace toggle rather than
+repeatedly calling `latch_gate`: the gate cannot mint a receipt while its server
+is absent. Static doctor success alone is not live visible-gate, native-backend,
+plugin, or compaction acceptance.
 
 Project-local command prompts should be visible from Cursor's `/` command menu
 after reload. They are reusable prompts that call MCP tools or the checked-in
@@ -82,7 +96,8 @@ host-appropriate shell wrappers.
 
 From the hooked Cursor conversation, run `/latch-seed`. It must preview the
 exact current transcript before any write. Copy the exact session id surfaced
-by SessionStart. Confirm that the preview tool completed successfully and
+in the current prompt context by `beforeSubmitPrompt` (the same id originally
+recorded by SessionStart). Confirm that the preview tool completed successfully and
 returned JSON; a preToolUse authorization alone must not arm apply. After
 approving the preview, reply exactly `/latch-seed apply` before the generated
 command reruns with `--apply --yes`. The equivalent preview is:

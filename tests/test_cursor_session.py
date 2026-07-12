@@ -48,6 +48,28 @@ def test_cursor_session_markers_are_scoped_across_interleaved_conversations():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_late_transcript_refresh_fills_once_and_rejects_changes():
+    tmp = tempfile.mkdtemp(prefix="cursor-session-late-transcript-")
+    project_dir = paths.project_dir(tmp)
+    try:
+        cursor_session.write_marker(tmp, "conversation", transcript_path=None)
+        cursor_session.refresh_transcript_path(tmp, "conversation", "/tmp/current.jsonl")
+        marker = cursor_session.read_marker(tmp, session_id="conversation")
+        assert marker is not None
+        assert marker["transcript_path"] == "/tmp/current.jsonl"
+
+        cursor_session.refresh_transcript_path(tmp, "conversation", "/tmp/current.jsonl")
+        try:
+            cursor_session.refresh_transcript_path(tmp, "conversation", "/tmp/other.jsonl")
+        except ValueError as exc:
+            assert "changed within one session" in str(exc)
+        else:
+            raise AssertionError("expected a changed transcript path to fail closed")
+    finally:
+        shutil.rmtree(project_dir, ignore_errors=True)
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_cursor_session_marker_missing_or_invalid():
     tmp = tempfile.mkdtemp(prefix="cursor-session-marker-")
     project_dir = paths.project_dir(tmp)

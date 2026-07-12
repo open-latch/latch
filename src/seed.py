@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -23,6 +24,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 import codex_transcript  # noqa: E402
 import cursor_transcript  # noqa: E402
+import paths  # noqa: E402
 
 DEFAULT_LOOKBACK_DAYS = 14
 LOOKBACK_CHOICES = (5, 14, 30)
@@ -40,6 +42,7 @@ KB_HOME = Path(__file__).resolve().parent.parent
 SEED_INTRO = "Seed latch from prior work for immediate judgment value from latch."
 
 ROLE_LINE_RE = re.compile(r"^\[([A-Za-z0-9_?. -]+)\]\s*(.*)")
+CURSOR_USER_QUERY_RE = re.compile(r"<user_query>\s*(.*?)\s*</user_query>", re.DOTALL)
 USER_ROLES = {"user", "human"}
 WHITESPACE_RE = re.compile(r"\s+")
 
@@ -156,6 +159,10 @@ class SeedCandidate:
     llm_used: bool = False
 
 
+class CursorSeedPreviewError(RuntimeError):
+    pass
+
+
 @dataclass
 class SeedReportSection:
     key: str
@@ -224,6 +231,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument("--cursor-session-id",
                     help=("exact current Cursor session id surfaced by SessionStart; "
                           "required for marker-based --source cursor"))
+    ap.add_argument("--preview-digest",
+                    help=("exact digest returned by a Cursor seed preview; required "
+                          "with --source cursor --apply so apply uses the reviewed set"))
     return ap.parse_args(argv)
 
 
@@ -517,6 +527,10 @@ def read_cursor_transcript(path: Path) -> str:
         elif isinstance(message, str):
             content = message
         text = flatten_content(content)
+        if str(role).strip().lower() in USER_ROLES:
+            queries = [match.strip() for match in CURSOR_USER_QUERY_RE.findall(text)]
+            if queries:
+                text = "\n".join(query for query in queries if query)
         if text:
             lines.append(f"[{role}] {text}")
     if lines:
@@ -911,10 +925,15 @@ def seed_prompt(*, project_path: str, source: SeedSource) -> str:
         "candidate lists, or whether an assistant should mark a KB node verified. "
         "Do not infer private facts that are not stated. Decision-like candidates "
         "must preserve rejected-path rationale and reopen conditions when present. "
+        "For every candidate carrying the rejected_path signal, also return a "
+        "rejected_path field that names only the disallowed approach in affirmative "
+        "language, without 'do not', 'never', 'avoid', or the governing replacement. "
+        "Example: rejected_path='sandboxed preview first, followed by an elevated retry'. "
         "Return JSON only with this shape:\n"
         '{"seed_candidates":[{"kind":"workstream|decision|preference|fact|idea|open_question",'
         '"title":"short title","body":"evidence-backed markdown body",'
-        '"confidence":0.0,"signals":["decision","rejected_path"]}]}\n\n'
+        '"confidence":0.0,"signals":["decision","rejected_path"],'
+        '"rejected_path":"affirmative description of disallowed approach"}]}\n\n'
         f"Project path: {project_path}\n"
         f"Source: {source.id} {source.path}\n\n"
         "--- TRANSCRIPT ---\n"
@@ -964,16 +983,20 @@ def candidate_from_llm_item(item: Any, src: SeedSource) -> SeedCandidate | None:
     confidence = max(0.0, min(0.95, confidence))
     raw_signals = item.get("signals") if isinstance(item.get("signals"), list) else []
     signals = [str(s) for s in raw_signals if str(s).strip()]
+    rejected_path = clip(str(item.get("rejected_path") or "").strip(), 180)
+    if "rejected_path" in normalized_signals(signals) and not rejected_path:
+        signals = [signal for signal in signals if signal.strip().lower() != "rejected_path"]
     if "llm_seed" not in signals:
         signals.append("llm_seed")
     if high_confidence_agent_mistake(signals) and confidence < AGENT_MISTAKE_MIN_CONFIDENCE:
         return None
     if llm_candidate_skip_reason(kind=kind, title=title, body=body_text, signals=signals):
         return None
+    rejected_path_block = f"\n\nRejected path:\n> {rejected_path}" if rejected_path else ""
     body = (
         "Seed candidate from prior local agent history. Treat as low-authority "
         "staging evidence until reviewed/promoted.\n\n"
-        f"{body_text}\n\n"
+        f"{body_text}{rejected_path_block}\n\n"
         f"Signals: {', '.join(sorted(set(signals)))}\n\n"
         "Source evidence:\n"
         f"- {src.id} ({src.path})"
@@ -1116,9 +1139,10 @@ def normalized_signals(signals: list[str]) -> set[str]:
 
 def candidate_evidence_line(candidate: SeedCandidate) -> str:
     excerpt = ""
-    marker = "Excerpt:\n> "
-    if marker in candidate.body:
-        excerpt = candidate.body.split(marker, 1)[1].splitlines()[0]
+    for marker in ("Rejected path:\n> ", "Excerpt:\n> "):
+        if marker in candidate.body:
+            excerpt = candidate.body.split(marker, 1)[1].splitlines()[0]
+            break
     if excerpt:
         return clip(excerpt, 180)
     first_source = candidate.source_ids[0] if candidate.source_ids else "source"
@@ -1505,6 +1529,7 @@ def render_json(
         "catch_demo": (
             catch_demo_payload(demo) if (demo := catch_demo_candidate(candidates)) else None
         ),
+        "preview_digest": getattr(args, "preview_digest", None),
         "apply": bool(args.apply),
         "write_boundary": write_boundary_message(args),
         "candidates": [public_candidate_dict(c) for c in candidates],
@@ -1548,6 +1573,86 @@ def format_source_counts(sources: list[SeedSource]) -> str:
     return ", ".join(f"{agent}={count}" for agent, count in counts.items())
 
 
+def _cursor_seed_preview_path(project_path: str, session_id: str) -> Path:
+    sid_key = hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:24]
+    return paths.ensure_project_dir(project_path) / f"cursor_seed_preview.{sid_key}.json"
+
+
+def _cursor_seed_preview_digest(payload: dict[str, Any]) -> str:
+    canonical = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def write_cursor_seed_preview(
+    *,
+    project_path: str,
+    session_id: str,
+    sources: list[SeedSource],
+    candidates: list[SeedCandidate],
+    llm_estimate: int,
+) -> str:
+    """Cache the exact reviewed Cursor set without retaining transcript text."""
+    payload = {
+        "version": 1,
+        "project": str(Path(project_path).resolve()),
+        "session_id": session_id,
+        "sources": [
+            {**asdict(source), "text": ""}
+            for source in sources
+        ],
+        "candidates": [asdict(candidate) for candidate in candidates],
+        "llm_estimate": int(llm_estimate),
+    }
+    digest = _cursor_seed_preview_digest(payload)
+    body = {**payload, "preview_digest": digest}
+    path = _cursor_seed_preview_path(project_path, session_id)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(body, indent=2) + "\n", encoding="utf-8")
+    try:
+        tmp.chmod(0o600)
+    except OSError:
+        pass
+    os.replace(tmp, path)
+    return digest
+
+
+def load_cursor_seed_preview(
+    *, project_path: str, session_id: str, preview_digest: str,
+) -> tuple[list[SeedSource], list[SeedCandidate], int]:
+    """Load only the exact cached Cursor preview approved by digest."""
+    if not re.fullmatch(r"[0-9a-f]{64}", preview_digest or ""):
+        raise CursorSeedPreviewError("Cursor seed preview digest is missing or invalid")
+    path = _cursor_seed_preview_path(project_path, session_id)
+    try:
+        body = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise CursorSeedPreviewError("Cursor seed preview cache is missing or unreadable") from exc
+    if not isinstance(body, dict):
+        raise CursorSeedPreviewError("Cursor seed preview cache is malformed")
+    recorded_digest = body.pop("preview_digest", None)
+    if recorded_digest != preview_digest or _cursor_seed_preview_digest(body) != preview_digest:
+        raise CursorSeedPreviewError("Cursor seed preview digest does not match cached candidates")
+    if body.get("project") != str(Path(project_path).resolve()) \
+            or body.get("session_id") != session_id:
+        raise CursorSeedPreviewError("Cursor seed preview belongs to another project or session")
+    try:
+        sources = [SeedSource(**item) for item in body.get("sources", [])]
+        candidates = [SeedCandidate(**item) for item in body.get("candidates", [])]
+        estimate = int(body.get("llm_estimate", 0))
+    except (TypeError, ValueError) as exc:
+        raise CursorSeedPreviewError("Cursor seed preview candidates are malformed") from exc
+    return sources, candidates, estimate
+
+
+def remove_cursor_seed_preview(project_path: str, session_id: str) -> None:
+    try:
+        _cursor_seed_preview_path(project_path, session_id).unlink()
+    except FileNotFoundError:
+        pass
+
+
 def apply_candidates(candidates: list[SeedCandidate], *, project_path: str) -> list[int]:
     import heal  # noqa: WPS433
     import db  # noqa: WPS433
@@ -1587,44 +1692,74 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     prompt_choices(args)
     args.project = str(Path(args.project).resolve())
+    cached_cursor_apply = args.source == "cursor" and args.apply
+    if cached_cursor_apply:
+        if not args.cursor_session_id or not args.preview_digest:
+            print(
+                "Cursor seed apply requires --cursor-session-id and the exact "
+                "--preview-digest returned by the reviewed preview.",
+                file=sys.stderr,
+            )
+            return 2
+        try:
+            sources, candidates, llm_estimate = load_cursor_seed_preview(
+                project_path=args.project,
+                session_id=args.cursor_session_id,
+                preview_digest=args.preview_digest,
+            )
+        except CursorSeedPreviewError as exc:
+            print(f"Cursor seed apply unavailable: {exc}", file=sys.stderr)
+            return 2
+        args.llm_refinement_empty = False
+    else:
+        try:
+            sources = discover_sources(
+                source=args.source,
+                project_path=args.project,
+                lookback_days=args.lookback_days,
+                max_sessions=args.max_sessions,
+                claude_home=args.claude_home,
+                codex_home=args.codex_home,
+                cursor_transcripts=args.cursor_transcript,
+                cursor_session_id=args.cursor_session_id,
+                all_projects=args.all_projects,
+            )
+        except cursor_transcript.CursorTranscriptError as e:
+            print(f"Cursor seed source unavailable: {e}", file=sys.stderr)
+            return 2
+        llm_estimate = estimate_llm_calls(
+            len(sources),
+            calls_per_session=args.calls_per_session,
+            max_llm_calls=args.max_llm_calls,
+        ) if args.llm == "yes" else 0
 
-    try:
-        sources = discover_sources(
-            source=args.source,
-            project_path=args.project,
-            lookback_days=args.lookback_days,
-            max_sessions=args.max_sessions,
-            claude_home=args.claude_home,
-            codex_home=args.codex_home,
-            cursor_transcripts=args.cursor_transcript,
-            cursor_session_id=args.cursor_session_id,
-            all_projects=args.all_projects,
-        )
-    except cursor_transcript.CursorTranscriptError as e:
-        print(f"Cursor seed source unavailable: {e}", file=sys.stderr)
-        return 2
-    llm_estimate = estimate_llm_calls(
-        len(sources),
-        calls_per_session=args.calls_per_session,
-        max_llm_calls=args.max_llm_calls,
-    ) if args.llm == "yes" else 0
+        if not confirm_llm_budget(args, len(sources)):
+            print("Seed pass cancelled before any LLM calls.")
+            return 1
 
-    if not confirm_llm_budget(args, len(sources)):
-        print("Seed pass cancelled before any LLM calls.")
-        return 1
-
-    deterministic = deterministic_candidates(sources, max_candidates=args.max_candidates)
-    llm = []
-    if args.llm == "yes":
-        llm = llm_candidates(
-            sources,
-            project_path=args.project,
-            max_calls=args.max_llm_calls,
-            max_candidates=args.max_candidates,
-            backend=args.backend,
-        )
-    candidates, llm_refinement_empty = choose_seed_candidates(args, llm, deterministic)
-    args.llm_refinement_empty = llm_refinement_empty
+        deterministic = deterministic_candidates(sources, max_candidates=args.max_candidates)
+        llm = []
+        if args.llm == "yes":
+            llm = llm_candidates(
+                sources,
+                project_path=args.project,
+                max_calls=args.max_llm_calls,
+                max_candidates=args.max_candidates,
+                backend=args.backend,
+            )
+        candidates, llm_refinement_empty = choose_seed_candidates(args, llm, deterministic)
+        args.llm_refinement_empty = llm_refinement_empty
+        if args.source == "cursor":
+            if not args.cursor_session_id:
+                print("Cursor seed preview requires --cursor-session-id.", file=sys.stderr)
+                return 2
+            args.preview_digest = write_cursor_seed_preview(
+                project_path=args.project,
+                session_id=args.cursor_session_id,
+                sources=sources,
+                candidates=candidates,
+                llm_estimate=llm_estimate,
+            )
 
     output = render_json(args=args, sources=sources, candidates=candidates, llm_estimate=llm_estimate) \
         if args.format == "json" else render_text(
@@ -1644,6 +1779,8 @@ def main(argv: list[str] | None = None) -> int:
         print("Seed candidates were not written.")
         return 1
     inserted = apply_candidates(candidates, project_path=args.project)
+    if cached_cursor_apply and args.cursor_session_id:
+        remove_cursor_seed_preview(args.project, args.cursor_session_id)
     print(apply_success_message(inserted, candidates))
     return 0
 
