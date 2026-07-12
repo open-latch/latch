@@ -9,9 +9,9 @@ path.  These tests exercise the proxy resolver directly so Claude attribution
 and the Codex SessionStart-marker fallback are guarded on every OS, matching the
 coverage ``test_codex_session.py`` gives the Codex path.
 
-Note (deliberately not asserted here): the proxy resolver has no Cursor guard,
-unlike the server resolver.  That divergence is a tracked follow-up, not a
-behaviour these tests should pin as correct, so no Cursor case is encoded.
+Cursor is deliberately left unattributed because its reused MCP process does
+not carry a verified per-request conversation identity.  This must hold even
+when the Cursor install uses Codex model backends or stale Codex markers exist.
 """
 from __future__ import annotations
 
@@ -89,6 +89,28 @@ def test_resolve_session_unavailable_without_env_or_codex_adapter():
     print("PASS resolve_session_unavailable_without_env_or_codex_adapter")
 
 
+def test_resolve_session_leaves_cursor_mcp_calls_unattributed():
+    tmp = tempfile.mkdtemp(prefix="mcp_proxy_cursor_marker_")
+    project_dir = paths.project_dir(tmp)
+    try:
+        codex_session.write_marker(tmp, "stale-codex-thread")
+        with _clean_env(
+            LATCH_ADAPTER="cursor",
+            LATCH_MODEL_BACKEND="codex",
+            LATCH_GATE_BACKEND="codex",
+            CODEX_THREAD_ID="stale-backend-thread",
+            LATCH_SESSION_ID="stale-process-session",
+        ):
+            _assert(
+                mcp_proxy._resolve_session(tmp) == (None, "unavailable"),
+                "Cursor MCP calls must not inherit process ids or Codex markers",
+            )
+    finally:
+        shutil.rmtree(project_dir, ignore_errors=True)
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("PASS resolve_session_leaves_cursor_mcp_calls_unattributed")
+
+
 def test_resolve_session_reads_codex_marker_when_env_lacks_thread():
     tmp = tempfile.mkdtemp(prefix="mcp_proxy_marker_")
     project_dir = paths.project_dir(tmp)
@@ -128,6 +150,7 @@ if __name__ == "__main__":
     test_resolve_session_uses_claude_session_ahead_of_codex()
     test_resolve_session_falls_back_to_codex_thread_env()
     test_resolve_session_unavailable_without_env_or_codex_adapter()
+    test_resolve_session_leaves_cursor_mcp_calls_unattributed()
     test_resolve_session_reads_codex_marker_when_env_lacks_thread()
     test_resolve_session_reports_missing_codex_marker()
     print("\nAll mcp_proxy._resolve_session tests pass.")

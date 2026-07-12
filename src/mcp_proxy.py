@@ -46,6 +46,10 @@ def _is_codex_adapter_env() -> bool:
     return bool((os.environ.get("CODEX_HOME") or "").strip())
 
 
+def _is_cursor_adapter_env() -> bool:
+    return (os.environ.get("LATCH_ADAPTER") or "").strip().lower() == "cursor"
+
+
 def _same_path(left: str | os.PathLike, right: str | os.PathLike) -> bool:
     try:
         return Path(left).expanduser().resolve() == Path(right).expanduser().resolve()
@@ -54,6 +58,12 @@ def _same_path(left: str | os.PathLike, right: str | os.PathLike) -> bool:
 
 
 def _resolve_session(project_cwd: str) -> tuple[str | None, str]:
+    # Cursor reuses one MCP process across conversations without a verified
+    # per-request conversation id.  Never let process-level backend variables
+    # or a workspace Codex marker attribute those interleaved requests.
+    if _is_cursor_adapter_env():
+        return None, "unavailable"
+
     for name in SESSION_ENV_VARS:
         value = (os.environ.get(name) or "").strip()
         if value:

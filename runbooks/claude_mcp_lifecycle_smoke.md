@@ -4,9 +4,11 @@ Use this runbook to dogfood the shared-runtime lifecycle from a real **Claude
 Code** session: prove Claude is attributed correctly, that one heavy model owner
 is shared, that an idle-reclaimed daemon transparently reconnects on the next
 tool call, and that an over-cap idle proxy retires itself. This is the Claude
-counterpart to `cursor_gate_smoke.md`, and it closes the Claude reconnect/
-retirement dogfood blocker on PR #21 ("Share one Latch MCP runtime across agent
-sessions").
+counterpart to `cursor_gate_smoke.md`. Executing every step and retaining the
+listed transition evidence is intended to close the Claude reconnect/retirement
+dogfood blocker on PR #21 ("Share one Latch MCP runtime across agent sessions").
+The existence of this runbook is not itself a validation receipt or a claim that
+the blocker is closed.
 
 The runtime is host-agnostic — the same daemon/proxy serves Codex and Cursor —
 but this proof pins the **Claude** path end to end because Claude attribution is
@@ -59,7 +61,7 @@ From the hooked Claude Code session, call the MCP tool `latch_runtime_status`
   "connection": { "session_source": "env:CLAUDE_CODE_SESSION_ID", "session_id": "<this session>" },
   "daemon": { "session_sources": { "env:CLAUDE_CODE_SESSION_ID": 1 }, "active_connections": 1 },
   "embedding": { "model_loaded": true, "heavy_model_owner_count": 1 },
-  "proxy_pool": { "cap": 32, "live_leases": 1, "bounded": true }
+  "proxy_pool": { "cap": 1, "live_leases": 1, "bounded": true }
 }
 ```
 
