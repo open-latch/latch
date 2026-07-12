@@ -8,11 +8,14 @@ This adapter wires the local latch engine into Cursor's project surfaces:
 * ``.cursor/commands/*.md`` gets project-local Cursor command prompts for the
   latch workflows that are safe on Cursor today.
 * ``AGENTS.md`` gets the shared latch agent contract.
+* With ``--with-hooks``, ``.cursor/hooks.json`` gets merge-safe SessionStart
+  and postToolUse hooks for session provenance, KB briefing, and activity
+  context.
 
-It intentionally does not install Cursor hooks, native Cursor compaction,
-transcript discovery, or a native Cursor model backend. Cursor can use latch MCP
-tools through the project MCP config; model-backed gate calls continue to use
-the existing Claude/Codex backends when explicitly selected.
+It intentionally does not install native Cursor compaction, transcript-history
+discovery, pre-edit enforcement, or a native Cursor model backend. Cursor can
+use latch MCP tools through the project MCP config; model-backed gate calls
+continue to use the existing Claude/Codex backends when explicitly selected.
 """
 from __future__ import annotations
 
@@ -24,6 +27,7 @@ from pathlib import Path
 from typing import Any
 
 import agents_md_sync
+import cursor_hooks
 import cursor_rules_sync
 import install_engine
 
@@ -38,6 +42,7 @@ KB_HOME = Path(
 DEFAULT_MCP_PATH = Path(".cursor") / "mcp.json"
 DEFAULT_RULE_PATH = cursor_rules_sync.DEFAULT_RULE_PATH
 DEFAULT_COMMANDS_DIR = Path(".cursor") / "commands"
+DEFAULT_HOOKS_PATH = cursor_hooks.DEFAULT_HOOKS_PATH
 COMMANDS_SRC = KB_HOME / "commands"
 COMMAND_PLACEHOLDER = install_engine.COMMAND_PLACEHOLDER
 CURSOR_COMMAND_FILES = (
@@ -58,6 +63,14 @@ CURSOR_COMMAND_FOOTER = (
     "wrappers. It is not a Cursor hook, native Cursor model backend, Cursor "
     "transcript import, or native Cursor compaction integration.\n"
 )
+
+
+class CursorAssetCollisionError(RuntimeError):
+    """Raised before install would overwrite a user-owned Cursor asset."""
+
+
+class CursorConfigError(ValueError):
+    """Raised when active Cursor configuration cannot be merged safely."""
 
 
 def _forward_slash(value: str) -> str:
@@ -111,10 +124,18 @@ def merge_mcp_config(
     model_backend: str | None = None,
 ) -> tuple[str, list[str]]:
     obj = _json_object(existing, path=path)
-    servers = obj.get("mcpServers")
-    if not isinstance(servers, dict):
+    if "mcpServers" not in obj:
         servers = {}
         obj["mcpServers"] = servers
+    else:
+        servers = obj["mcpServers"]
+        if not isinstance(servers, dict):
+            raise CursorConfigError(
+                f"{path} has an incompatible mcpServers value "
+                f"({type(servers).__name__}); expected a JSON object. "
+                "Fix or move that value manually, then rerun the installer; "
+                "latch did not modify the file."
+            )
 
     desired = render_cursor_server(python_path, server_py, model_backend=model_backend)
     changes: list[str] = []
@@ -144,13 +165,16 @@ def mcp_status(
     if not path.exists():
         return False, f"Cursor MCP config missing: {path}"
     current = path.read_text(encoding="utf-8")
-    desired, changes = merge_mcp_config(
-        current,
-        python_path,
-        server_py,
-        path=path,
-        model_backend=model_backend,
-    )
+    try:
+        desired, changes = merge_mcp_config(
+            current,
+            python_path,
+            server_py,
+            path=path,
+            model_backend=model_backend,
+        )
+    except CursorConfigError as exc:
+        return False, f"Cursor MCP config unsafe to merge: {exc}"
     if desired == current and not changes:
         return True, f"Cursor MCP server installed in {path}"
     return False, f"Cursor MCP server missing or drifted in {path}"
@@ -200,9 +224,29 @@ def _is_latch_cursor_command_body(body: str) -> bool:
     )
 
 
+def _is_managed_cursor_command_body(body: str) -> bool:
+    """Use the installed footer as the strict ownership marker for updates."""
+    return "Cursor boundary: this project-local command is a reusable prompt" in body
+
+
 def sync_cursor_commands(commands_dir: Path = DEFAULT_COMMANDS_DIR, *, dry_run: bool = False) -> list[str]:
     if not COMMANDS_SRC.is_dir():
         return [f"no commands/ directory at {COMMANDS_SRC} - skipped"]
+    collisions: list[Path] = []
+    for name in CURSOR_COMMAND_FILES:
+        target = commands_dir / name
+        if not target.is_file():
+            continue
+        existing = _read_text(target)
+        desired = render_cursor_command(name)
+        if existing != desired and not _is_managed_cursor_command_body(existing):
+            collisions.append(target)
+    if collisions:
+        names = ", ".join(str(path) for path in collisions)
+        raise CursorAssetCollisionError(
+            "refusing to overwrite user-owned Cursor command(s): " + names
+            + "; move or rename the file(s), then rerun the installer"
+        )
     changes: list[str] = []
     if not dry_run:
         commands_dir.mkdir(parents=True, exist_ok=True)
@@ -353,6 +397,13 @@ def _check(args: argparse.Namespace, python_path: str, server_py: str) -> int:
         ))
     if not args.skip_commands:
         checks.append(cursor_commands_status(Path(args.commands_dir)))
+    if args.with_hooks:
+        checks.append(cursor_hooks.hooks_status(
+            Path(args.hooks_json),
+            python_path,
+            str(KB_HOME / "src" / "hooks" / "cursor_session_start.py"),
+            str(KB_HOME / "src" / "hooks" / "cursor_post_tool_use.py"),
+        ))
 
     failed = 0
     for ok, label in checks:
@@ -363,7 +414,7 @@ def _check(args: argparse.Namespace, python_path: str, server_py: str) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description="latch Cursor installer (MCP + Cursor Rules + Commands + AGENTS.md).")
+    ap = argparse.ArgumentParser(description="latch Cursor installer (MCP + Rules + Commands + AGENTS.md; optional hooks).")
     ap.add_argument("--python", help="interpreter to register for the MCP server")
     ap.add_argument("--mcp-json", default=str(DEFAULT_MCP_PATH),
                     help="Cursor MCP config path (default: .cursor/mcp.json)")
@@ -373,6 +424,10 @@ def main(argv: list[str] | None = None) -> int:
                     help="Cursor rule path (default: .cursor/rules/latch.mdc)")
     ap.add_argument("--commands-dir", default=str(DEFAULT_COMMANDS_DIR),
                     help="Cursor commands directory (default: .cursor/commands)")
+    ap.add_argument("--hooks-json", default=str(DEFAULT_HOOKS_PATH),
+                    help="Cursor hooks config path (default: .cursor/hooks.json)")
+    ap.add_argument("--with-hooks", action="store_true",
+                    help="install/check opt-in Cursor SessionStart and postToolUse hooks")
     ap.add_argument("--model-backend", choices=("claude", "codex"),
                     help="set LATCH_MODEL_BACKEND/LATCH_GATE_BACKEND to an existing backend")
     ap.add_argument("--skip-mcp", action="store_true", help="do not touch .cursor/mcp.json")
@@ -396,6 +451,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  MCP config   : {'skipped' if args.skip_mcp else args.mcp_json}")
     print(f"  Cursor rule  : {'skipped' if args.skip_rules else args.rules_mdc}")
     print(f"  Commands     : {'skipped' if args.skip_commands else args.commands_dir}")
+    print(f"  Hooks        : {args.hooks_json if args.with_hooks else 'skipped (pass --with-hooks)'}")
     print(f"  AGENTS.md    : {'skipped' if args.skip_agents else args.agents_md}")
     print(f"  model backend: {args.model_backend or 'engine default'}")
     print(f"  mode         : {'DRY-RUN (no writes)' if args.dry_run else 'apply'}\n")
@@ -403,13 +459,17 @@ def main(argv: list[str] | None = None) -> int:
     if not args.skip_mcp:
         mcp_path = Path(args.mcp_json)
         existing = mcp_path.read_text(encoding="utf-8") if mcp_path.exists() else ""
-        new_mcp, changes = merge_mcp_config(
-            existing,
-            python_path,
-            server_py,
-            path=mcp_path,
-            model_backend=args.model_backend,
-        )
+        try:
+            new_mcp, changes = merge_mcp_config(
+                existing,
+                python_path,
+                server_py,
+                path=mcp_path,
+                model_backend=args.model_backend,
+            )
+        except CursorConfigError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
         if changes:
             if not args.dry_run:
                 write_config(mcp_path, new_mcp)
@@ -441,17 +501,40 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"  [OK  ] Cursor rule {action}: {rules_path}")
 
     if not args.skip_commands:
-        changes = sync_cursor_commands(Path(args.commands_dir), dry_run=args.dry_run)
+        try:
+            changes = sync_cursor_commands(Path(args.commands_dir), dry_run=args.dry_run)
+        except CursorAssetCollisionError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
         if changes:
             _print_changes("Cursor commands", changes, dry_run=args.dry_run)
         else:
             print("  [OK  ] Cursor commands already have latch")
 
+    if args.with_hooks:
+        hooks_path = Path(args.hooks_json)
+        existing = hooks_path.read_text(encoding="utf-8") if hooks_path.exists() else ""
+        new_hooks, changes = cursor_hooks.merge_hooks(
+            existing,
+            python_path,
+            str(KB_HOME / "src" / "hooks" / "cursor_session_start.py"),
+            str(KB_HOME / "src" / "hooks" / "cursor_post_tool_use.py"),
+            path=hooks_path,
+        )
+        if changes:
+            if not args.dry_run:
+                cursor_hooks.write_hooks(hooks_path, new_hooks)
+            _print_changes("Cursor hooks", changes, dry_run=args.dry_run)
+        else:
+            print("  [OK  ] Cursor hooks already have latch")
+
     print()
     if args.dry_run:
         print("Dry run only - re-run without --dry-run to apply.")
     else:
-        print("Done. Restart Cursor or run 'agent mcp list' so Cursor reloads the MCP server, project rule, and commands.")
+        print("Done. Restart Cursor or run 'agent mcp list' so Cursor reloads the project wiring.")
+        if not args.with_hooks:
+            print("Cursor hooks were not installed; re-run with --with-hooks for session briefing and activity context.")
         print("Native Cursor-backed gate calls were not installed; pass --model-backend claude|codex to use an existing backend.")
     print()
     return 0

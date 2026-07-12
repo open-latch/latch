@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import agents_md_sync
+import cursor_hooks
 import cursor_rules_sync
 import install_cursor
 import install_engine
@@ -81,6 +82,18 @@ def check_cursor_rule(rules_path: Path) -> Check:
 def check_cursor_commands(commands_dir: Path) -> Check:
     ok, detail = install_cursor.cursor_commands_status(commands_dir)
     return Check("Cursor .cursor/commands latch commands", OK if ok else FAIL, detail)
+
+
+def check_cursor_hooks(
+    hooks_path: Path,
+    python_path: str,
+    session_start_py: str,
+    post_tool_use_py: str,
+) -> Check:
+    ok, detail = cursor_hooks.hooks_status(
+        hooks_path, python_path, session_start_py, post_tool_use_py
+    )
+    return Check("Cursor .cursor/hooks.json session/activity hooks", OK if ok else FAIL, detail)
 
 
 def check_mcp_launch_target(python_path: str, server_py: str) -> Check:
@@ -183,6 +196,8 @@ def run_all(
     skip_cli: bool = False,
     agent_bin: str | None = None,
     cli_timeout_s: float = 15.0,
+    with_hooks: bool = False,
+    hooks_path: Path = install_cursor.DEFAULT_HOOKS_PATH,
 ) -> list[Check]:
     checks = [
         check_cursor_config(config_path, python_path, server_py, model_backend=model_backend),
@@ -200,6 +215,13 @@ def run_all(
         checks.append(Check("Cursor .cursor/commands latch commands", WARN, "skipped (--skip-commands)"))
     else:
         checks.append(check_cursor_commands(commands_dir))
+    if with_hooks:
+        checks.append(check_cursor_hooks(
+            hooks_path,
+            python_path,
+            str(install_cursor.KB_HOME / "src" / "hooks" / "cursor_session_start.py"),
+            str(install_cursor.KB_HOME / "src" / "hooks" / "cursor_post_tool_use.py"),
+        ))
     if skip_cli:
         checks.append(Check("Cursor CLI MCP visibility", WARN, "skipped (--skip-cli)"))
     else:
@@ -233,6 +255,10 @@ def main(argv: list[str] | None = None) -> int:
                     help="Cursor rule path to check (default: .cursor/rules/latch.mdc)")
     ap.add_argument("--commands-dir", default=str(install_cursor.DEFAULT_COMMANDS_DIR),
                     help="Cursor commands directory to check (default: .cursor/commands)")
+    ap.add_argument("--hooks-json", default=str(install_cursor.DEFAULT_HOOKS_PATH),
+                    help="Cursor hooks path to check (default: .cursor/hooks.json)")
+    ap.add_argument("--with-hooks", action="store_true",
+                    help="require opt-in Cursor session/activity hooks")
     ap.add_argument("--model-backend", choices=("claude", "codex"),
                     help="expected existing backend env in .cursor/mcp.json")
     ap.add_argument("--agent-bin", help="Cursor CLI executable for live MCP probe")
@@ -265,6 +291,8 @@ def main(argv: list[str] | None = None) -> int:
         skip_cli=args.skip_cli,
         agent_bin=args.agent_bin,
         cli_timeout_s=args.cli_timeout,
+        with_hooks=args.with_hooks,
+        hooks_path=Path(args.hooks_json),
     )
 
     if args.json:

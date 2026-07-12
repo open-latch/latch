@@ -99,9 +99,11 @@ first-run mission.
   SessionStart, Codex backend defaults, and a manual compaction wrapper.
 - **Cursor adapter:** project-scoped MCP wiring through `.cursor/mcp.json`, a
   managed `.cursor/rules/latch.mdc` activation rule, project-local
-  `.cursor/commands` prompts, and the shared `AGENTS.md` contract. Native
-  Cursor-backed gate calls, hooks, Cursor transcript discovery, and native
-  Cursor compaction are deferred until a design-partner proof needs them.
+  `.cursor/commands` prompts, and the shared `AGENTS.md` contract. An opt-in
+  `.cursor/hooks.json` layer adds SessionStart KB briefing, a current-session
+  transcript handoff, and post-tool latch activity context. Native Cursor-backed gate
+  calls, transcript-history discovery, pre-edit enforcement, and native Cursor
+  compaction remain deferred.
 - **Claude Code + Codex together:** one shared local latch KB, so decisions and
   rejected paths captured through either agent can gate both.
 
@@ -216,27 +218,46 @@ The installer writes project-scoped `.cursor/mcp.json`,
 `.cursor/rules/latch.mdc`, and `.cursor/commands/*.md`, so it is safe to try
 from one repo without touching Claude Code or Codex config.
 
+Pass `--with-hooks` to opt into project-scoped `.cursor/hooks.json` wiring.
+The merge preserves unrelated Cursor hooks and installs:
+
+- `sessionStart`: records the current Cursor conversation/transcript pair for
+  direct hook activity and explicit current-session workflows, re-syncs an
+  already-managed `AGENTS.md`, and returns the KB brief through Cursor's native
+  `additional_context` field. Cursor's reused MCP process has no verified
+  per-request conversation id, so MCP structural rows remain unattributed
+  instead of inheriting another interleaved conversation's project marker.
+- `postToolUse`: recognizes latch `kb_activity` and gate `findings` in tool
+  results and returns a concise instruction to surface the receipt. Cursor has
+  no equivalent of Claude Code's deterministic user-only `systemMessage`
+  channel, so this is agent-context delivery backed by the `AGENTS.md`
+  foregrounding contract—not a claim that Cursor renders the line directly.
+
+The hooks fail open and do not block edits. They do not auto-compact or discover
+historical Cursor transcripts.
+
 If you want model-backed `latch_gate` calls from this Cursor adapter, point it
 at an existing backend with `--model-backend codex` or `--model-backend claude`.
 A native Cursor CLI backend is intentionally deferred until a design-partner
 install proves it is needed. Cursor adapter command prompts cover latch's
-supported manual workflows through MCP or shell wrappers. Cursor hooks, Cursor
-transcript discovery, and native Cursor compaction are not installed yet; use
-the shell wrappers or the Claude/Codex compaction surfaces for those paths.
+supported manual workflows through MCP or shell wrappers. Cursor transcript
+history and native Cursor compaction are not installed yet; use the shell
+wrappers or the Claude/Codex compaction surfaces for those paths.
 
 ```bash
 # From the project repo where Cursor should follow latch.
-/path/to/latch/bin/install_cursor.sh --yes --model-backend codex
-# Windows: C:\path\to\latch\bin\install_cursor.ps1 --yes --model-backend codex
+/path/to/latch/bin/install_cursor.sh --yes --with-hooks --model-backend codex
+# Windows: C:\path\to\latch\bin\install_cursor.ps1 --yes --with-hooks --model-backend codex
 
 # Verify any time.
-/path/to/latch/bin/install_cursor.sh --check --model-backend codex
-/path/to/latch/bin/latch_cursor_doctor.sh --model-backend codex
+/path/to/latch/bin/install_cursor.sh --check --with-hooks --model-backend codex
+/path/to/latch/bin/latch_cursor_doctor.sh --with-hooks --model-backend codex
 ```
 
-Restart Cursor or run `agent mcp list` after install so Cursor reloads the MCP
-server, project rule, and commands. The Cursor doctor treats a missing or unavailable
-Cursor CLI as a warning. Static config, launch-target, `AGENTS.md`, and Cursor
+Restart Cursor after installing hooks so it reloads `.cursor/hooks.json`; run
+`agent mcp list` to inspect the MCP server. The Cursor doctor treats a missing
+or unavailable Cursor CLI as a warning. Static config, launch-target,
+`AGENTS.md`, and Cursor
 rule/command drift are failures; when the CLI is available, missing critical
 MCP tools such as `latch_gate` are also failures.
 

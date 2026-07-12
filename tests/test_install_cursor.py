@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import agents_md_sync  # noqa: E402
 import cursor_rules_sync  # noqa: E402
+import cursor_hooks  # noqa: E402
 import install_engine  # noqa: E402
 import install_cursor as ic  # noqa: E402
 
@@ -100,6 +101,46 @@ def test_merge_mcp_config_idempotent():
     _assert(new2 == new1, "second merge should be byte-identical")
     _assert(changes2 == [], f"second merge should report no changes, got {changes2}")
     print("PASS merge_mcp_config_idempotent")
+
+
+def test_merge_mcp_config_rejects_present_non_object_mcpservers():
+    for value in (None, [], ["user-server"], "user-server", 7, True):
+        existing = json.dumps({"mcpServers": value, "setting": True}) + "\n"
+        try:
+            ic.merge_mcp_config(existing, "/PY", "/srv.py")
+        except ic.CursorConfigError as exc:
+            _assert("expected a JSON object" in str(exc), exc)
+            _assert("did not modify the file" in str(exc), exc)
+        else:
+            raise AssertionError(f"non-object mcpServers must fail closed: {value!r}")
+    print("PASS merge_mcp_config_rejects_present_non_object_mcpservers")
+
+
+def test_installer_preserves_non_object_mcpservers_byte_for_byte():
+    d = Path(tempfile.mkdtemp(prefix="latch-cursor-mcp-type-"))
+    try:
+        config = d / ".cursor" / "mcp.json"
+        config.parent.mkdir(parents=True)
+        original = b'{"mcpServers":[{"command":"user-owned"}],"setting":true}\n'
+        config.write_bytes(original)
+        common = [
+            "--mcp-json", str(config),
+            "--skip-agents", "--skip-rules", "--skip-commands", "--yes",
+        ]
+
+        _assert(ic.main(common) == 2, "apply must fail closed")
+        _assert(config.read_bytes() == original, "apply must preserve active bytes")
+        _assert(not config.with_suffix(".json.latchbak").exists(),
+                "a failed preflight must not create a misleading backup")
+
+        _assert(ic.main([*common, "--dry-run"]) == 2, "dry-run must report unsafe config")
+        _assert(config.read_bytes() == original, "dry-run must preserve active bytes")
+
+        _assert(ic.main([*common, "--check"]) == 1, "check must report unsafe config")
+        _assert(config.read_bytes() == original, "check must preserve active bytes")
+        print("PASS installer_preserves_non_object_mcpservers_byte_for_byte")
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
 
 
 def test_write_config_backs_up_existing():
@@ -228,6 +269,17 @@ def test_cursor_commands_sync_status_and_remove():
         ok, detail = ic.cursor_commands_status(commands)
         _assert(ok, detail)
 
+        gate.write_text(body + "\nmanaged drift\n", encoding="utf-8")
+        changes = ic.sync_cursor_commands(commands)
+        _assert(any("updated Cursor command latch-gate.md" in c for c in changes), changes)
+        _assert(gate.read_text(encoding="utf-8") == body,
+                "latch-owned command drift should be repaired")
+        _assert(gate.with_name("latch-gate.md.latchbak").read_text(encoding="utf-8").endswith(
+            "managed drift\n"
+        ), "latch-owned drift should retain a backup")
+        _assert(ic.sync_cursor_commands(commands) == [],
+                "repeated command install should be idempotent")
+
         custom = commands / "custom.md"
         custom.write_text("user command\n", encoding="utf-8")
         removed = ic.remove_cursor_commands(commands)
@@ -240,15 +292,84 @@ def test_cursor_commands_sync_status_and_remove():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_cursor_commands_refuse_user_owned_same_name_collision():
+    d = Path(tempfile.mkdtemp(prefix="latch-cursor-command-collision-"))
+    try:
+        commands = d / ".cursor" / "commands"
+        commands.mkdir(parents=True)
+        gate = commands / "latch-gate.md"
+        custom = b"user-owned gate command\n"
+        gate.write_bytes(custom)
+
+        try:
+            ic.sync_cursor_commands(commands)
+        except ic.CursorAssetCollisionError as exc:
+            _assert("refusing to overwrite user-owned Cursor command" in str(exc), exc)
+        else:
+            raise AssertionError("same-name user command must fail closed")
+
+        _assert(gate.read_bytes() == custom, "collision must preserve the user file byte-for-byte")
+        _assert(not gate.with_name("latch-gate.md.latchbak").exists(),
+                "fail-closed collision must not create a misleading backup")
+        _assert(not (commands / "latch-pm.md").exists(),
+                "collision preflight must happen before any command writes")
+
+        rc = ic.main([
+            "--skip-mcp", "--skip-agents", "--skip-rules",
+            "--commands-dir", str(commands),
+        ])
+        _assert(rc == 2, rc)
+        removed = ic.remove_cursor_commands(commands)
+        _assert(gate.read_bytes() == custom, "uninstall must preserve a collision-blocked user file")
+        _assert(any("looks user-owned" in row for row in removed), removed)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_with_hooks_installs_and_check_requires_hooks():
+    d = Path(tempfile.mkdtemp(prefix="latch-cursor-hooks-install-"))
+    try:
+        hooks = d / ".cursor" / "hooks.json"
+        rc = ic.main([
+            "--skip-mcp", "--skip-agents", "--skip-rules", "--skip-commands",
+            "--hooks-json", str(hooks), "--with-hooks", "--yes",
+        ])
+        _assert(rc == 0, rc)
+        ok, detail = cursor_hooks.hooks_status(
+            hooks,
+            install_engine.resolve_python(None),
+            str(ic.KB_HOME / "src" / "hooks" / "cursor_session_start.py"),
+            str(ic.KB_HOME / "src" / "hooks" / "cursor_post_tool_use.py"),
+        )
+        _assert(ok, detail)
+        rc = ic.main([
+            "--skip-mcp", "--skip-agents", "--skip-rules", "--skip-commands",
+            "--hooks-json", str(hooks), "--with-hooks", "--check",
+        ])
+        _assert(rc == 0, rc)
+        hooks.unlink()
+        rc = ic.main([
+            "--skip-mcp", "--skip-agents", "--skip-rules", "--skip-commands",
+            "--hooks-json", str(hooks), "--with-hooks", "--check",
+        ])
+        _assert(rc == 1, rc)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 if __name__ == "__main__":
     test_render_cursor_server_uses_cursor_mcp_shape()
     test_merge_mcp_config_preserves_unrelated_servers_and_settings()
     test_merge_mcp_config_replaces_existing_latch_only()
     test_merge_mcp_config_migrates_legacy_adapter_names()
     test_merge_mcp_config_idempotent()
+    test_merge_mcp_config_rejects_present_non_object_mcpservers()
+    test_installer_preserves_non_object_mcpservers_byte_for_byte()
     test_write_config_backs_up_existing()
     test_agents_sync_args_are_cursor_branded()
     test_first_wire_notice_is_cursor_branded()
     test_check_mode_verifies_mcp_and_agents()
     test_cursor_commands_sync_status_and_remove()
+    test_cursor_commands_refuse_user_owned_same_name_collision()
+    test_with_hooks_installs_and_check_requires_hooks()
     print("\nAll install_cursor tests pass.")

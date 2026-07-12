@@ -57,6 +57,10 @@ def _is_codex_adapter_env(env: Mapping[str, str]) -> bool:
     return any((env.get(name) or "").strip() for name in ("CODEX_THREAD_ID", "CODEX_HOME"))
 
 
+def _is_cursor_adapter_env(env: Mapping[str, str]) -> bool:
+    return (env.get("LATCH_ADAPTER") or "").strip().lower() == "cursor"
+
+
 def _resolve_project_session_id(
     env: Mapping[str, str] | None = None,
     project_cwd: str | os.PathLike | None = None,
@@ -70,6 +74,13 @@ def _resolve_project_session_id(
     structural logs (id=1091 / id=1108).
     """
     source = os.environ if env is None else env
+    # Cursor project hooks receive a conversation id, but calls into its reused
+    # MCP process do not carry a verified per-request conversation identity.
+    # A project marker is therefore only a current-transcript handoff for
+    # explicit seed/compact workflows, never provenance for MCP structural
+    # rows: two Cursor conversations can interleave in the same project.
+    if _is_cursor_adapter_env(source):
+        return None
     for name in SESSION_ID_ENV_VARS:
         value = (source.get(name) or "").strip()
         if value:
@@ -83,13 +94,21 @@ PROJECT_SESSION_ID = _resolve_project_session_id()
 
 
 def _project_session_id() -> str | None:
-    """Return a stable session id once one can be resolved.
+    """Return the current adapter session id.
 
     Codex may launch the MCP server without CODEX_THREAD_ID in its environment.
     In that case the SessionStart hook writes a project-scoped marker. Do not
     cache None: the hook can create the marker after this module imports.
+
+    Cursor can reuse one project MCP process across interleaved conversations,
+    and MCP calls do not carry a verified conversation id.  Never infer one
+    from the project's last SessionStart marker; unattributed is safer than a
+    false cross-conversation attribution.  Claude/Codex environment-derived
+    ids retain the existing stable process cache.
     """
     global PROJECT_SESSION_ID
+    if _is_cursor_adapter_env(os.environ):
+        return None
     if PROJECT_SESSION_ID:
         return PROJECT_SESSION_ID
     sid = _resolve_project_session_id()

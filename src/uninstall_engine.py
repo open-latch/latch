@@ -44,8 +44,9 @@ What it does NOT remove unless asked:
     (the repo + venv you delete by hand: ``rm -rf ${LATCH_HOME}``).
   * **Project-local Cursor wiring** is removed only when ``--cursor-project`` is
     supplied. That path removes latch-owned ``.cursor/mcp.json`` server entries,
-    ``.cursor/rules/latch.mdc``, ``.cursor/commands`` files, and the AGENTS.md
-    managed region for that project while preserving unrelated Cursor config.
+    ``.cursor/rules/latch.mdc``, ``.cursor/commands`` files, latch-owned
+    ``.cursor/hooks.json`` entries, and the AGENTS.md managed region for that
+    project while preserving unrelated Cursor config.
 
 Design notes (same as install_engine):
   * **Stdlib only** — runs under a bare/system Python; does not import the venv.
@@ -93,10 +94,11 @@ STALE_LEGACY_COMMANDS = ie.STALE_LEGACY_COMMANDS
 
 def _load_cursor_modules():
     import agents_md_sync
+    import cursor_hooks
     import cursor_rules_sync
     import install_cursor
 
-    return agents_md_sync, cursor_rules_sync, install_cursor
+    return agents_md_sync, cursor_hooks, cursor_rules_sync, install_cursor
 
 
 # --------------------------------------------------------------------------- #
@@ -293,7 +295,7 @@ def strip_claude_md(targets: list[str], dry_run: bool) -> list[str]:
 # --------------------------------------------------------------------------- #
 def strip_cursor_project(project: str, dry_run: bool) -> list[str]:
     changes: list[str] = []
-    agents_md_sync, cursor_rules_sync, install_cursor = _load_cursor_modules()
+    agents_md_sync, cursor_hooks, cursor_rules_sync, install_cursor = _load_cursor_modules()
     root = Path(project).expanduser().resolve()
 
     mcp_path = root / install_cursor.DEFAULT_MCP_PATH
@@ -329,6 +331,13 @@ def strip_cursor_project(project: str, dry_run: bool) -> list[str]:
     )
     changes.extend(f"{root}: {change}" for change in command_changes)
 
+    hooks_path = root / install_cursor.DEFAULT_HOOKS_PATH
+    try:
+        hook_changes = cursor_hooks.remove_hooks(hooks_path, dry_run=dry_run)
+    except SystemExit as e:
+        hook_changes = [f"invalid Cursor hooks config {hooks_path}: {e}"]
+    changes.extend(f"{root}: {change}" for change in hook_changes)
+
     agents_path = root / "AGENTS.md"
     if dry_run:
         status = agents_md_sync.evaluate(agents_path)
@@ -343,7 +352,7 @@ def strip_cursor_project(project: str, dry_run: bool) -> list[str]:
 
 
 def cursor_project_removed(project: str) -> list[tuple[bool, str]]:
-    agents_md_sync, cursor_rules_sync, install_cursor = _load_cursor_modules()
+    agents_md_sync, cursor_hooks, cursor_rules_sync, install_cursor = _load_cursor_modules()
     root = Path(project).expanduser().resolve()
     rows: list[tuple[bool, str]] = []
 
@@ -385,6 +394,27 @@ def cursor_project_removed(project: str) -> list[tuple[bool, str]]:
                            + ", ".join(leftover_commands)))
     else:
         rows.append((True, f"no latch Cursor commands in {commands_dir}"))
+
+    hooks_path = root / install_cursor.DEFAULT_HOOKS_PATH
+    try:
+        if hooks_path.exists():
+            hooks_obj = json.loads(hooks_path.read_text(encoding="utf-8"))
+            hook_events = hooks_obj.get("hooks", {}) if isinstance(hooks_obj, dict) else {}
+            leftover_hooks = [
+                entry
+                for entries in hook_events.values()
+                if isinstance(entries, list)
+                for entry in entries
+                if cursor_hooks._is_owned(entry)
+            ]
+        else:
+            leftover_hooks = []
+    except (OSError, json.JSONDecodeError):
+        leftover_hooks = ["unreadable"]
+    if leftover_hooks:
+        rows.append((False, f"latch Cursor hook(s) still present in {hooks_path}"))
+    else:
+        rows.append((True, f"no latch Cursor hooks in {hooks_path}"))
 
     agents_status = agents_md_sync.evaluate(root / "AGENTS.md")
     if agents_status in (agents_md_sync.OK, agents_md_sync.DRIFT):
@@ -493,7 +523,7 @@ def main(argv: list[str] | None = None) -> int:
                          "(repeatable)")
     ap.add_argument("--cursor-project", action="append", default=[], metavar="PATH",
                     help="also remove latch-owned Cursor wiring from this project "
-                         "(.cursor/mcp.json, .cursor/rules/latch.mdc, .cursor/commands, AGENTS.md)")
+                         "(.cursor/mcp.json, .cursor/rules/latch.mdc, .cursor/commands, .cursor/hooks.json, AGENTS.md)")
     ap.add_argument("--purge", action="store_true",
                     help="also delete KB data (projects/) and kill-switch files")
     ap.add_argument("--yes", "-y", action="store_true",
