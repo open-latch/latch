@@ -1681,6 +1681,11 @@ def kb_runtime_status() -> dict:
     lease_state = mcp_broker.proxy_lease_state(policy=policy)
     proxy_inventory = list(lease_state["live"])
     legacy_inventory = list(lease_state.get("legacy_incompatible") or [])
+    unassociated_inventory = list(
+        lease_state.get("unassociated_capable") or []
+    )
+    other_owner_inventory = list(lease_state.get("other_live_owner") or [])
+    observed_inventory = list(lease_state.get("observed_live") or [])
     return {
         "mode": "shared_daemon" if daemon is not None else "legacy_stdio",
         "process_pid": os.getpid(),
@@ -1692,7 +1697,12 @@ def kb_runtime_status() -> dict:
             **policy,
             "live_leases": len(proxy_inventory),
             "legacy_incompatible_leases": len(legacy_inventory),
-            "observed_live_leases": len(proxy_inventory) + len(legacy_inventory),
+            "unassociated_capable_leases": len(unassociated_inventory),
+            "other_live_owner_leases": len(other_owner_inventory),
+            "other_live_owner_count": len(
+                lease_state.get("other_owner_runtime_keys") or []
+            ),
+            "observed_live_leases": len(observed_inventory),
             "stale_leases": int(lease_state.get("stale_count") or 0),
             "max_stale_lease_age_s": float(
                 lease_state.get("max_stale_age_s") or 0.0
@@ -1701,6 +1711,9 @@ def kb_runtime_status() -> dict:
             "owner_runtime_key": lease_state.get("owner_runtime_key"),
             "alias_runtime_key_count": len(
                 lease_state.get("alias_runtime_keys") or []
+            ),
+            "unassociated_runtime_key_count": len(
+                lease_state.get("unassociated_runtime_keys") or []
             ),
             "bounded": bool(int(policy["cap"])),
         },

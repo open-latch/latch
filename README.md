@@ -485,7 +485,9 @@ heavyweight local MCP/model runtime across tasks and subagents instead of
 loading a separate embedding model in every stdio process. Separate named
 vaults retain separate owners. During an in-place compatible upgrade, retained
 capability-epoch old-key proxies are authenticated aliases to the single current
-owner and migrate into its one lease pool. Older proxies that cannot enforce
+owner and migrate into its one lease pool. Idle capable leases remain visible
+and count toward that pool even before reconnecting; leases served by another
+live blue/green owner remain a separate scope. Older proxies that cannot enforce
 that lifecycle contract fail visibly and require a fresh task. Ask
 the agent to call `latch_runtime_status` when diagnosing resource use; it
 reports the shared owner, active connections, proxy lease bound, attribution

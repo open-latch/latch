@@ -1,12 +1,12 @@
 # Bounded latch MCP runtime — issue 1465
 
 Status: public draft PR #21 on `mcp-resource-lifecycle`. Independent review of
-head `c5f9954` found that protocol-compatible aliases fragmented the proxy cap
-and that pre-registry proxies still timed out generically. The current
-remediation passes full local verification; live PR checks are the authority for
-the final pushed head's three-OS receipt. The PR remains intentionally draft
-pending independent merge-trust review and real Codex, Claude Code, and Cursor
-lifecycle dogfood.
+head `bd37296` found that idle historical keyed leases remained invisible until
+their proxies reconnected and created an alias. The current remediation makes
+lease observation registry-wide; live PR checks are the authority for the final
+pushed head's three-OS receipt. The PR remains intentionally draft pending
+independent merge-trust review and real Codex, Claude Code, and Cursor lifecycle
+dogfood.
 Measurements were collected on macOS 13.5, Apple Silicon, on 2026-07-10.
 
 ## Decision
@@ -132,6 +132,10 @@ sections.
   runtime key. Broker death or a slow-start timeout can launch a contender, but
   the contender exits before model loading; only the fenced owner may warm or
   publish normal discovery.
+- Capability epoch 2 includes registry-wide lease participation. Epoch 1 proved
+  transport and migration compatibility but did not observe idle, unaliased
+  historical keys, so it is rejected with the same bounded fresh-task path
+  rather than grandfathered under a capacity contract it cannot enforce.
 - Discovery and election locks live in a runtime-keyed registry beneath the
   pinned vault. Files are atomically replaced and mode 0600. The daemon binds
   only `127.0.0.1`; connections authenticate with a 256-bit random token.
@@ -200,15 +204,20 @@ visible rather than silently misattributed.
   compatible retained aliases participate in the same capacity and retirement
   decisions. Migration writes the new lease before removing the old, and scans
   deduplicate by connection ID if a process dies between those operations.
-  Every proxy updates only its
-  own lease and retires only itself. Lease identity is deliberately PID-only to
+  Lease observation scans the runtime registry once and classifies current-owner
+  aliases, other live blue/green owners, unassociated capable keys, incompatible
+  historical keys, the pre-registry directory, stale rows, and dead rows. A
+  capable lease whose owner has exited joins the current enforceable vault pool
+  before reconnect; a lease belonging to another live owner remains in that
+  owner's separate blue/green scope. Every proxy updates only its own lease and
+  retires only itself. Lease identity is deliberately PID-only to
   avoid a second OS-specific process-inspection subsystem in every lightweight
   proxy. PID reuse can therefore make a dead row look live until its heartbeat
   crosses the five-minute stale threshold. That is the accepted bound: after
   five minutes the row is excluded from capacity but preserved, because an
   observer cannot prove whether the original proxy was merely suspended. The
-  stale diagnostic can persist until that PID exits. Pre-capability alias and
-  pre-registry leases are excluded from the enforceable pool because those
+  stale diagnostic can persist until that PID exits. Epoch-1, pre-capability,
+  and pre-registry leases are excluded from the enforceable pool because those
   binaries cannot implement its retirement contract, but status and doctor
   count them explicitly and require fresh tasks instead of hiding them. Peers
   are never signaled or killed. Each capable lease
@@ -227,8 +236,9 @@ visible rather than silently misattributed.
 - daemon PID, runtime key, uptime, idle TTL, active connections, and in-flight
   requests;
 - current proxy PID, cwd, session ID, and attribution source;
-- owner-scoped proxy cap/idle/heartbeat policy, compatible alias count, capable
-  live/stale leases, and separately labeled incompatible legacy lease counts;
+- owner-scoped proxy cap/idle/heartbeat policy; compatible alias and
+  unassociated-key counts; capable, incompatible, other-live-owner, stale, and
+  observed-vault lease counts;
 - model-loaded state and embed-listener owner PID/port;
 - approximate peak RSS without exposing authentication tokens;
 - a bounded 24-hour lifecycle summary covering starts, idle exits, degraded
@@ -241,8 +251,9 @@ visible rather than silently misattributed.
   observations, not a fabricated host-global timestamp.
 
 `latch doctor` warns on recent lifecycle pressure, stale live leases, dead
-discovery, incompatible historical leases, and explicit legacy fallback. It
-also warns when 24-hour lease
+discovery, incompatible historical leases, capable leases awaiting migration,
+other live blue/green owner pools, and explicit legacy fallback. It also warns
+when 24-hour lease
 high-water reaches 75% of the live configured cap (24 at the default 32) or
 while current over-cap duration is non-zero. Lifecycle JSONL is transition-only:
 it records no prompt text, tool arguments, authentication tokens, or per-request
@@ -304,33 +315,34 @@ designed to absorb.
 
 ## Verification
 
-Latest blocker-remediation receipts: 57 focused lifecycle/doctor/Codex/embed
-tests and 940 hermetic tests passed locally after rebasing onto current main;
-changed-file Ruff, public-release
-hygiene, compilation, and `git diff --check` passed. Warm prompt-hook wall was
-96.8–139.3 ms. Fourteen clients used one owner at 0.97 s readiness and 8.01 ms
-embed p95; 32 used one owner at 1.61 s and 7.48 ms p95. These tails are
-observations, not hard upper bounds. Content fingerprinting adds only
-proxy-start work; it does not run per request or enter the prompt-hook embed
-path.
+Latest blocker-remediation receipts: 61 focused lifecycle/doctor/Codex/embed
+tests and 944 hermetic tests passed locally after rebasing onto current main;
+changed-file Ruff, public-release hygiene, compilation, and `git diff --check`
+passed. Warm prompt-hook wall was 107.8–157.9 ms. Fourteen clients used one
+owner at 0.97 s readiness and 7.28 ms embed p95; 32 used one owner at 1.68 s and
+6.42 ms p95. An eight-client comparison measured 7.49 ms shared versus 7.25 ms
+legacy p95, a 0.24 ms difference. These tails are observations, not hard upper
+bounds. Registry-wide lease classification is heartbeat/start-time filesystem
+work; it does not run per request or enter the prompt-hook embed path.
 
 The named deletion pass retained the four defensible boundaries—standard-library
 broker, stdio proxy, heavyweight owner, and cycle-free connection context—and
-added no module or dependency. The runtime core is now 2,284 physical / 2,013
-nonblank lines, 283 physical lines above `c5f9954`. The increase implements the
-capability handshake, legacy rejection session, owner-pool aggregation, and
-lease migration; no parallel capacity state machine or production fault seam
-was added. That size remains an explicit independent-review target rather than
-being presented as inherently minimal.
+added no module or dependency. The final lease change removes the repeated alias
+scan, the write-only lease `owner_runtime_key`, and the proxy indentation slop;
+classification remains one broker pass rather than another state machine. The
+runtime core is 2,341 physical / 2,070 nonblank lines, 340 physical lines above
+`c5f9954`. The 57-line increase over the reviewed core is the registry-wide
+classification and its explicit outputs; size remains an independent-review
+target rather than proof of minimality.
 
 The three-OS workflow runs the focused suite on macOS, Ubuntu, and Windows.
 Exact historical snapshot tests run when those objects exist in the checkout;
 the `fa162bd` end-to-end snapshot is also skipped on Windows because that old
 version's own `os.kill(pid, 0)` probe is destructive there. Every platform
-still runs the current daemon against both the keyed pre-capability and
-`fa162bd` root-discovery epoch-less wire contracts, so the compatibility
-behavior under review is cross-platform. Reviewers should use the live PR
-checks—not a copied run id—as the authority for the final pushed head.
+still runs the current daemon against keyed pre-capability, rejected epoch-1,
+and `fa162bd` root-discovery wire contracts, so the compatibility behavior
+under review is cross-platform. Reviewers should use the live PR checks—not a
+copied run id—as the authority for the final pushed head.
 
 The production-representative tests cover:
 
@@ -346,10 +358,13 @@ The production-representative tests cover:
 - retained-proxy recovery across an in-place compatible source upgrade;
 - lease migration and aggregate over-cap pressure across compatible old/new
   runtime keys;
+- idle historical keyed leases remaining visible before alias publication or
+  reconnect, plus unassociated capable leases joining the enforceable cap while
+  other live blue/green owners remain separate;
 - bounded fresh-task rejection through real `7bcb86d` and pre-registry
-  `fa162bd` proxy snapshots when those objects are available, plus both keyed
-  and `fa162bd` root-discovery epoch-less wire contracts on all three CI
-  operating systems;
+  `fa162bd` proxy snapshots when those objects are available, plus keyed
+  pre-capability, rejected epoch-1, and `fa162bd` root-discovery wire contracts
+  on all three CI operating systems;
 - no current or alias discovery publication before runtime initialization;
 - incompatible-protocol rejection before ownership fencing/heavy imports;
 - configured-cap-derived 75% doctor warnings and sustained pressure duration;

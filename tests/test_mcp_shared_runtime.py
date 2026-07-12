@@ -631,12 +631,13 @@ def test_fa162bd_pre_registry_proxy_requires_fresh_task_after_upgrade() -> None:
 
 
 @pytest.mark.parametrize(
-    "pre_registry",
-    (False, True),
-    ids=("keyed-pre-capability", "fa162bd-pre-registry"),
+    ("pre_registry", "capability_epoch"),
+    ((False, None), (False, 1), (True, None)),
+    ids=("keyed-pre-capability", "keyed-epoch-1", "fa162bd-pre-registry"),
 )
-def test_epochless_transport_receives_fresh_task_error_cross_platform(
+def test_historical_transport_receives_fresh_task_error_cross_platform(
     pre_registry: bool,
+    capability_epoch: int | None,
 ) -> None:
     """Exercise both historical discovery layouts and epoch-less wire contract."""
     kb_dir = _temp_vault()
@@ -651,7 +652,10 @@ def test_epochless_transport_receives_fresh_task_error_cross_platform(
         "CLAUDE_KB_IN_MAINTENANCE": "1",
         "PYTHONPATH": str(ROOT / "src"),
     })
-    env.pop("LATCH_MCP_PROXY_CAPABILITY_EPOCH", None)
+    if capability_epoch is None:
+        env.pop("LATCH_MCP_PROXY_CAPABILITY_EPOCH", None)
+    else:
+        env["LATCH_MCP_PROXY_CAPABILITY_EPOCH"] = str(capability_epoch)
     process = subprocess.Popen(
         [sys.executable, str(ROOT / "src" / "mcp_daemon.py")],
         env=env,
@@ -691,6 +695,8 @@ def test_epochless_transport_receives_fresh_task_error_cross_platform(
                 "project_cwd": str(ROOT),
                 "proxy_pid": os.getpid(),
             }
+            if capability_epoch is not None:
+                prelude["proxy_capability_epoch"] = capability_epoch
             stream.write(json.dumps(prelude).encode() + b"\n")
             stream.write(json.dumps({
                 "jsonrpc": "2.0",

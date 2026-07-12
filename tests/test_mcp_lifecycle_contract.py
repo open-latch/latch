@@ -162,6 +162,7 @@ def test_live_pid_with_stale_heartbeat_does_not_hold_proxy_capacity(
             "connection_id": "stale-live-pid",
             "pid": os.getpid(),
             "runtime_key": mcp_broker.RUNTIME_KEY,
+            "proxy_capability_epoch": mcp_broker.PROXY_CAPABILITY_EPOCH,
             "started_epoch": time.time() - 100,
             "last_activity_epoch": time.time() - 100,
             "heartbeat_epoch": time.time() - 100,
@@ -219,7 +220,6 @@ def test_proxy_cap_is_aggregated_across_capable_runtime_aliases(monkeypatch, tmp
                     "connection_id": f"lease-{index}",
                     "pid": os.getpid(),
                     "runtime_key": key,
-                    "owner_runtime_key": "runtime-v2",
                     "proxy_capability_epoch": mcp_broker.PROXY_CAPABILITY_EPOCH,
                     "started_epoch": now,
                     "last_activity_epoch": now,
@@ -291,7 +291,15 @@ def test_capable_proxy_lease_migrates_write_first_and_deduplicates(
         lease.migrate_scope("owner-v2")
         assert new_path.exists()
         assert not old_path.exists()
-        assert len(mcp_broker.proxy_lease_state()["live"]) == 1
+        migrated = json.loads(new_path.read_text(encoding="utf-8"))
+        duplicate = dict(migrated, heartbeat_epoch=migrated["heartbeat_epoch"] - 1)
+        mcp_broker.write_proxy_lease(
+            "migrating-proxy", duplicate, runtime_key="alias-v1"
+        )
+        mcp_broker.discovery_path("alias-v1").unlink()
+        state = mcp_broker.proxy_lease_state()
+        assert len(state["live"]) == 1
+        assert state["unassociated_capable"] == []
         lease.close()
     finally:
         mcp_broker.RUNTIME_KEY = original
@@ -337,6 +345,137 @@ def test_legacy_alias_and_pre_registry_leases_are_truthfully_reported(
         summary = mcp_broker.lifecycle_summary(hours=1, lease_state=state)
         assert summary["legacy_incompatible_leases"] == 2
         assert summary["observed_live_leases"] == 2
+    finally:
+        mcp_broker.RUNTIME_KEY = original
+
+
+def test_idle_historical_keyed_leases_are_visible_before_alias_or_reconnect(
+    monkeypatch, tmp_path
+):
+    """Reproduce the final review: 2 idle old leases plus 1 fresh lease."""
+    vault = tmp_path / "idle-historical-evidence"
+    monkeypatch.setattr(mcp_broker, "runtime_dir", lambda: vault)
+    original = mcp_broker.RUNTIME_KEY
+    now = time.time()
+    try:
+        mcp_broker.RUNTIME_KEY = "current-owner"
+        mcp_broker.publish_discovery(
+            port=2222,
+            token="current-token",
+            pid=os.getpid(),
+            started_at="ready",
+        )
+        mcp_broker.write_proxy_lease(
+            "current-proxy",
+            {
+                "connection_id": "current-proxy",
+                "pid": os.getpid(),
+                "runtime_key": "current-owner",
+                "proxy_capability_epoch": mcp_broker.PROXY_CAPABILITY_EPOCH,
+                "started_epoch": now,
+                "last_activity_epoch": now,
+                "heartbeat_epoch": now,
+            },
+        )
+        for index in range(2):
+            mcp_broker.write_proxy_lease(
+                f"historical-{index}",
+                {
+                    "connection_id": f"historical-{index}",
+                    "pid": os.getpid(),
+                    "runtime_key": "historical-key",
+                    "started_epoch": now,
+                    "last_activity_epoch": now,
+                    "heartbeat_epoch": now,
+                },
+                runtime_key="historical-key",
+            )
+
+        assert not mcp_broker.discovery_path("historical-key").exists()
+        state = mcp_broker.proxy_lease_state()
+        assert len(state["live"]) == 1
+        assert len(state["legacy_incompatible"]) == 2
+        assert len(state["observed_live"]) == 3
+        assert state["alias_runtime_keys"] == ["current-owner"]
+        assert state["unassociated_runtime_keys"] == ["historical-key"]
+        status = mcp_daemon.mcp_server.kb_runtime_status()["proxy_pool"]
+        assert status["live_leases"] == 1
+        assert status["legacy_incompatible_leases"] == 2
+        assert status["observed_live_leases"] == 3
+    finally:
+        mcp_broker.RUNTIME_KEY = original
+
+
+def test_unassociated_capable_leases_join_cap_but_other_live_owner_does_not(
+    monkeypatch, tmp_path
+):
+    vault = tmp_path / "registry-wide-cap"
+    monkeypatch.setattr(mcp_broker, "runtime_dir", lambda: vault)
+    monkeypatch.setenv("LATCH_MCP_PROXY_CAP", "1")
+    original = mcp_broker.RUNTIME_KEY
+    now = time.time()
+    try:
+        mcp_broker.RUNTIME_KEY = "current-owner"
+        for index, key in enumerate(("current-owner", "orphaned-capable")):
+            mcp_broker.write_proxy_lease(
+                f"pool-{index}",
+                {
+                    "connection_id": f"pool-{index}",
+                    "pid": os.getpid(),
+                    "runtime_key": key,
+                    "proxy_capability_epoch": mcp_broker.PROXY_CAPABILITY_EPOCH,
+                    "started_epoch": now,
+                    "last_activity_epoch": now,
+                    "heartbeat_epoch": now,
+                },
+                runtime_key=key,
+            )
+        mcp_broker.publish_discovery(
+            port=3333,
+            token="other-token",
+            pid=os.getpid(),
+            started_at="other-ready",
+            runtime_key="other-owner",
+            owner_runtime_key="other-owner",
+        )
+        other_discovery = mcp_broker.discovery_path("other-owner")
+        historical_discovery = json.loads(other_discovery.read_text(encoding="utf-8"))
+        historical_discovery.pop("owner_runtime_key")
+        mcp_broker._atomic_json(other_discovery, historical_discovery)
+        mcp_broker.write_proxy_lease(
+            "other-proxy",
+            {
+                "connection_id": "other-proxy",
+                "pid": os.getpid(),
+                "runtime_key": "other-owner",
+                "proxy_capability_epoch": mcp_broker.PROXY_CAPABILITY_EPOCH,
+                "started_epoch": now,
+                "last_activity_epoch": now,
+                "heartbeat_epoch": now,
+            },
+            runtime_key="other-owner",
+        )
+
+        state = mcp_broker.proxy_lease_state()
+        assert len(state["live"]) == 2
+        assert len(state["unassociated_capable"]) == 1
+        assert len(state["other_live_owner"]) == 1
+        assert len(state["observed_live"]) == 3
+        assert state["other_owner_runtime_keys"] == ["other-owner"]
+        summary = mcp_broker.lifecycle_summary(hours=1, lease_state=state)
+        assert summary["currently_over_cap"] is True
+        assert summary["unassociated_capable_leases"] == 1
+        assert summary["other_live_owner_leases"] == 1
+        retiring = mcp_proxy.ProxyLease({
+            "connection_id": "pool-0",
+            "proxy_pid": os.getpid(),
+            "runtime_key": "current-owner",
+            "proxy_capability_epoch": mcp_broker.PROXY_CAPABILITY_EPOCH,
+        })
+        retiring.last_activity_epoch = now - 301
+        retiring._write()
+        assert retiring.should_retire() is True
+        retiring.close()
     finally:
         mcp_broker.RUNTIME_KEY = original
 
@@ -427,6 +566,7 @@ def test_sustained_over_cap_duration_is_visible_from_live_leases(
                 "connection_id": f"live-{index}",
                 "pid": os.getpid(),
                 "runtime_key": mcp_broker.RUNTIME_KEY,
+                "proxy_capability_epoch": mcp_broker.PROXY_CAPABILITY_EPOCH,
                 "started_epoch": now - 100 + index,
                 "last_activity_epoch": now,
                 "heartbeat_epoch": now,

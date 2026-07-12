@@ -24,7 +24,7 @@ import paths
 
 
 PROTOCOL_VERSION = 1
-PROXY_CAPABILITY_EPOCH = 1
+PROXY_CAPABILITY_EPOCH = 2
 DISCOVERY_FILE = "mcp-daemon.json"
 START_LOCK_FILE = "mcp-daemon.start.lock"
 OWNER_FENCE_FILE = "mcp-daemon.owner.lock"
@@ -223,35 +223,65 @@ def remove_proxy_lease(
         pass
 
 
-def _owner_alias_keys(owner_runtime_key: str) -> set[str]:
-    """Return registry keys currently published against one ready owner."""
-    keys = {owner_runtime_key}
+def _registry_lease_sources(
+    owner_runtime_key: str,
+) -> tuple[list[tuple[Path, str, str]], set[str], set[str], set[str]]:
+    """Classify every registry lease directory in one filesystem pass.
+
+    Discovery associates a key with a live owner, but lease observation cannot
+    depend on that association: retained proxies keep heartbeating after their
+    owner exits and before they reconnect. PID liveness is the same bounded
+    identity signal used for leases, so no network probe enters heartbeat or
+    retirement paths.
+    """
+    sources: list[tuple[Path, str, str]] = []
+    alias_keys = {owner_runtime_key}
+    unassociated_keys: set[str] = set()
+    other_owner_keys: set[str] = set()
     registry = runtime_dir() / "runtime" / RUNTIME_REGISTRY_DIR
     try:
-        paths_to_check = list(registry.glob(f"*/{DISCOVERY_FILE}"))
+        key_dirs = [path for path in registry.iterdir() if path.is_dir()]
     except OSError:
-        return keys
-    for path in paths_to_check:
+        key_dirs = []
+    for key_dir in key_dirs:
+        key = key_dir.name
+        discovery: dict[str, Any] = {}
         try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
+            value = json.loads(
+                (key_dir / DISCOVERY_FILE).read_text(encoding="utf-8")
+            )
+            if isinstance(value, dict):
+                discovery = value
         except (OSError, ValueError):
-            continue
-        if payload.get("owner_runtime_key") != owner_runtime_key:
-            continue
-        key = payload.get("runtime_key")
-        if isinstance(key, str):
-            keys.add(key)
-    return keys
-
-
-def _lease_paths(owner_runtime_key: str) -> list[tuple[Path, str]]:
-    paths: list[tuple[Path, str]] = []
-    for key in _owner_alias_keys(owner_runtime_key):
-        paths.extend((path, key) for path in proxy_lease_dir(key).glob("*.json"))
+            pass
+        pid = discovery.get("pid")
+        discovery_live = isinstance(pid, int) and _pid_alive(pid)
+        declared_owner = discovery.get("owner_runtime_key")
+        if not isinstance(declared_owner, str) and discovery.get("runtime_key") == key:
+            declared_owner = key
+        if key == owner_runtime_key:
+            lease_class = "current_owner"
+        elif discovery_live and declared_owner == owner_runtime_key:
+            lease_class = "current_alias"
+            alias_keys.add(key)
+        elif discovery_live and isinstance(declared_owner, str):
+            lease_class = "other_live_owner"
+            other_owner_keys.add(declared_owner)
+        else:
+            lease_class = "unassociated"
+        lease_dir = key_dir / PROXY_LEASE_DIR
+        if lease_dir.exists():
+            lease_paths = list(lease_dir.glob("*.json"))
+            if lease_paths and lease_class == "unassociated":
+                unassociated_keys.add(key)
+            sources.extend((path, key, lease_class) for path in lease_paths)
     legacy_dir = legacy_proxy_lease_dir()
     if legacy_dir.exists():
-        paths.extend((path, "legacy_pre_registry") for path in legacy_dir.glob("*.json"))
-    return paths
+        sources.extend(
+            (path, "legacy_pre_registry", "pre_registry")
+            for path in legacy_dir.glob("*.json")
+        )
+    return sources, alias_keys, unassociated_keys, other_owner_keys
 
 
 def proxy_lease_state(
@@ -269,13 +299,19 @@ def proxy_lease_state(
     """
     owner_runtime_key = owner_runtime_key or RUNTIME_KEY
     capable_by_id: dict[str, dict[str, Any]] = {}
+    capable_class_by_id: dict[str, str] = {}
     legacy_by_id: dict[str, dict[str, Any]] = {}
+    other_owner_by_id: dict[str, dict[str, Any]] = {}
     stale_count = 0
     max_stale_age_s = 0.0
+    dead_removed = 0
     policy = proxy_policy() if policy is None else policy
     stale_s = float(policy["stale_s"])
     now = time.time()
-    for path, source_scope in _lease_paths(owner_runtime_key):
+    sources, alias_keys, unassociated_keys, other_owner_keys = (
+        _registry_lease_sources(owner_runtime_key)
+    )
+    for path, _source_key, lease_class in sources:
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -286,6 +322,7 @@ def proxy_lease_state(
         if not isinstance(pid, int) or not _pid_alive(pid):
             try:
                 path.unlink()
+                dead_removed += 1
             except OSError:
                 pass
             continue
@@ -307,41 +344,56 @@ def proxy_lease_state(
         if not isinstance(connection_id, str) or not connection_id:
             continue
         row = dict(payload)
-        row["lease_source_scope"] = source_scope
         epoch = payload.get("proxy_capability_epoch")
-        capable = (
-            isinstance(epoch, int) and epoch >= PROXY_CAPABILITY_EPOCH
-        ) or (epoch is None and source_scope == owner_runtime_key)
-        target = capable_by_id if capable else legacy_by_id
+        capable = isinstance(epoch, int) and epoch >= PROXY_CAPABILITY_EPOCH
+        if lease_class == "other_live_owner":
+            target = other_owner_by_id
+        else:
+            target = capable_by_id if capable else legacy_by_id
         previous = target.get(connection_id)
         if previous is None or float(row.get("heartbeat_epoch") or 0.0) > float(
             previous.get("heartbeat_epoch") or 0.0
         ):
             target[connection_id] = row
-    rows = list(capable_by_id.values())
-    legacy_rows = list(legacy_by_id.values())
-    rows.sort(
-        key=lambda row: (
-            float(row.get("last_activity_epoch") or 0.0),
-            float(row.get("started_epoch") or 0.0),
-        ),
-        reverse=True,
-    )
-    legacy_rows.sort(
-        key=lambda row: (
-            float(row.get("last_activity_epoch") or 0.0),
-            float(row.get("started_epoch") or 0.0),
-        ),
-        reverse=True,
-    )
+            if target is capable_by_id:
+                capable_class_by_id[connection_id] = lease_class
+    def sorted_rows(rows: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+        return sorted(
+            rows.values(),
+            key=lambda row: (
+                float(row.get("last_activity_epoch") or 0.0),
+                float(row.get("started_epoch") or 0.0),
+            ),
+            reverse=True,
+        )
+
+    rows = sorted_rows(capable_by_id)
+    legacy_rows = sorted_rows(legacy_by_id)
+    other_owner_rows = sorted_rows(other_owner_by_id)
+    observed_rows = sorted_rows({
+        **legacy_by_id,
+        **other_owner_by_id,
+        **capable_by_id,
+    })
+    unassociated_capable = [
+        row
+        for connection_id, row in capable_by_id.items()
+        if capable_class_by_id.get(connection_id) == "unassociated"
+    ]
     return {
         "live": rows,
         "legacy_incompatible": legacy_rows,
-        "observed_live": rows + legacy_rows,
+        "unassociated_capable": unassociated_capable,
+        "other_live_owner": other_owner_rows,
+        "observed_live": observed_rows,
         "stale_count": stale_count,
         "max_stale_age_s": round(max_stale_age_s, 3),
+        "dead_removed": dead_removed,
         "owner_runtime_key": owner_runtime_key,
-        "alias_runtime_keys": sorted(_owner_alias_keys(owner_runtime_key)),
+        "alias_runtime_keys": sorted(alias_keys),
+        "pool_runtime_keys": sorted(alias_keys | unassociated_keys),
+        "unassociated_runtime_keys": sorted(unassociated_keys),
+        "other_owner_runtime_keys": sorted(other_owner_keys),
     }
 
 
@@ -387,7 +439,7 @@ def lifecycle_summary(
     lease_state = (
         proxy_lease_state(policy=policy) if lease_state is None else lease_state
     )
-    visible_runtime_keys = set(lease_state.get("alias_runtime_keys") or [])
+    visible_runtime_keys = set(lease_state.get("pool_runtime_keys") or [])
     visible_runtime_keys.add(RUNTIME_KEY)
     cutoff = datetime.now(timezone.utc) - timedelta(hours=max(1, hours))
     counts: Counter[str] = Counter()
@@ -484,6 +536,12 @@ def lifecycle_summary(
         "max_stale_lease_age_s": float(lease_state.get("max_stale_age_s") or 0.0),
         "legacy_incompatible_leases": len(
             lease_state.get("legacy_incompatible") or []
+        ),
+        "unassociated_capable_leases": len(
+            lease_state.get("unassociated_capable") or []
+        ),
+        "other_live_owner_leases": len(
+            lease_state.get("other_live_owner") or []
         ),
         "observed_live_leases": len(lease_state.get("observed_live") or inventory),
         "lease_scope": "owner_runtime_key",

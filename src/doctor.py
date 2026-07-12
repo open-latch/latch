@@ -642,6 +642,11 @@ def check_mcp_runtime_lifecycle() -> tuple[str, str, str]:
         legacy_incompatible = len(
             lease_state.get("legacy_incompatible") or []
         )
+        unassociated_capable = len(
+            lease_state.get("unassociated_capable") or []
+        )
+        other_owner_leases = len(lease_state.get("other_live_owner") or [])
+        observed_live = len(lease_state.get("observed_live") or [])
         summary = mcp_broker.lifecycle_summary(
             hours=24, lease_state=lease_state, policy=policy
         )
@@ -709,6 +714,16 @@ def check_mcp_runtime_lifecycle() -> tuple[str, str, str]:
             f"{legacy_incompatible} pre-capability proxy lease(s) cannot join the "
             "owner pool; start fresh tasks and close the old host contexts"
         )
+    if unassociated_capable:
+        pressure.append(
+            f"{unassociated_capable} capable historical proxy lease(s) are included "
+            "in the owner cap but have not reconnected and migrated"
+        )
+    if other_owner_leases:
+        pressure.append(
+            f"{other_owner_leases} proxy lease(s) belong to another live "
+            "blue/green owner and remain a separate capacity scope"
+        )
     if discovery is not None and isinstance(discovery.get("error"), str):
         pressure.append(discovery["error"])
     elif discovery is not None and not discovery_live:
@@ -734,6 +749,7 @@ def check_mcp_runtime_lifecycle() -> tuple[str, str, str]:
     owner = f"owner pid={discovery['pid']}" if discovery_live else "no active owner"
     return name, OK, (
         f"{owner}; owner-scoped live leases={live}/{cap}; "
+        f"observed vault leases={observed_live}; "
         f"retire idle={policy['retire_idle_s']:.0f}s; stale after={policy['stale_s']:.0f}s; "
         f"24h high-water={high_water}"
         f"/{warn_at if warn_at is not None else 'unbounded'}; "

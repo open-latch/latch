@@ -436,6 +436,33 @@ def test_mcp_lifecycle_warns_on_current_stale_leases(monkeypatch):
     _assert("412.5s" in detail, detail)
 
 
+def test_mcp_lifecycle_warns_on_registry_wide_historical_pools(monkeypatch):
+    import mcp_broker
+
+    monkeypatch.setattr(mcp_broker, "lifecycle_summary", lambda **_kwargs: {
+        "warning_count": 0,
+        "counts": {},
+        "proxy_high_water": 3,
+    })
+    monkeypatch.setattr(mcp_broker, "proxy_policy", lambda: {
+        "cap": 32, "retire_idle_s": 300.0, "heartbeat_s": 30.0, "stale_s": 300.0,
+    })
+    monkeypatch.setattr(mcp_broker, "proxy_lease_state", lambda **_kwargs: {
+        "live": [{"connection_id": "current"}],
+        "legacy_incompatible": [{"connection_id": "old"}],
+        "unassociated_capable": [{"connection_id": "waiting"}],
+        "other_live_owner": [{"connection_id": "blue-green"}],
+        "observed_live": [{"connection_id": str(index)} for index in range(4)],
+    })
+    monkeypatch.setattr(mcp_broker, "read_discovery", lambda: {"pid": 123})
+    monkeypatch.setattr(mcp_broker, "probe_discovery", lambda *_args, **_kwargs: True)
+    _name, level, detail = doctor.check_mcp_runtime_lifecycle()
+    _assert(level == doctor.WARN, detail)
+    _assert("pre-capability proxy lease(s)" in detail, detail)
+    _assert("included in the owner cap" in detail, detail)
+    _assert("another live blue/green owner" in detail, detail)
+
+
 if __name__ == "__main__":
     test_mcp_wiring_accepts_legacy_alias()
     test_commands_missing_warns()

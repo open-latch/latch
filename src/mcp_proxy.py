@@ -195,11 +195,11 @@ class ProxyBridge:
                 "to issue a new operation; the proxy did not replay it.",
             )
         if self._pending:
-                mcp_broker.emit_lifecycle(
-                    "daemon_disconnect_unknown_outcome",
-                    pending_count=len(self._pending),
-                    reason=reason,
-                    runtime_key=self._lease.runtime_key,
+            mcp_broker.emit_lifecycle(
+                "daemon_disconnect_unknown_outcome",
+                pending_count=len(self._pending),
+                reason=reason,
+                runtime_key=self._lease.runtime_key,
             )
         self._pending.clear()
         if self._deferred:
@@ -422,7 +422,6 @@ class ProxyLease:
                 "connection_id": self.connection_id,
                 "pid": self.pid,
                 "runtime_key": self.runtime_key,
-                "owner_runtime_key": self.runtime_key,
                 "proxy_capability_epoch": self.proxy_capability_epoch,
                 "started_epoch": self.started_epoch,
                 "last_activity_epoch": self.last_activity_epoch,
