@@ -507,11 +507,25 @@ def managed_operation_intended(
 
 
 def _tool_name(payload: dict[str, Any]) -> str:
-    for key in _TOOL_NAME_KEYS:
-        value = payload.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    return ""
+    values, malformed = _tool_name_evidence(payload)
+    if malformed or not values:
+        return ""
+    parsed = [_parse_tool_identity(value) for value in values]
+    if any(identity is None for identity in parsed):
+        return ""
+    specific = {
+        (identity[0], identity[1])
+        for identity in parsed if identity is not None and not identity[2]
+    }
+    if len(specific) > 1:
+        return ""
+    if specific:
+        expected = next(iter(specific))
+        for value, identity in zip(values, parsed):
+            if identity is not None and not identity[2] \
+                    and (identity[0], identity[1]) == expected:
+                return value
+    return values[0]
 
 
 def _normalized_tool_name(name: str) -> str:
@@ -519,11 +533,13 @@ def _normalized_tool_name(name: str) -> str:
 
 
 def _tool_input(payload: dict[str, Any]) -> dict[str, Any]:
-    for key in _TOOL_INPUT_KEYS:
-        value = payload.get(key)
-        if isinstance(value, dict):
-            return value
-    return {}
+    values, malformed = _tool_input_evidence(payload)
+    if malformed or not values:
+        return {}
+    first = values[0]
+    if any(value != first for value in values[1:]):
+        return {}
+    return first
 
 
 def _tool_name_evidence(payload: dict[str, Any]) -> tuple[list[str], bool]:

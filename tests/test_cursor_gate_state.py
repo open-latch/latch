@@ -185,6 +185,11 @@ def test_mutation_classifier_is_conservative_and_keeps_gate_tools_available():
         {"tool_name": "latch_priority_retire", "tool_input": {}},
         {"tool_name": "latch_future_unknown", "tool_input": {}},
         {"tool_name": "SpreadsheetUpdate", "tool_input": {}},
+        {"tool_name": "Read", "toolName": "Write", "tool_input": {}},
+        {"tool_name": "Read", "toolName": "Shell",
+         "tool_input": {"command": "rm x"}},
+        {"tool_name": "Task", "tool_input": {"readonly": True},
+         "toolInput": {"readonly": False}},
         {},
     ]
     for payload in mutation_cases:
@@ -201,6 +206,8 @@ def test_mutation_classifier_is_conservative_and_keeps_gate_tools_available():
         }},
         {"tool_name": "latch_priority_list", "tool_input": {}},
         {"tool_name": "mcp__latch__latch_pm_preview", "tool_input": {}},
+        {"tool_name": "Read", "toolName": "read",
+         "tool_input": {"path": "x"}, "toolInput": {"path": "x"}},
     ]
     for payload in read_cases:
         assert cgs.mutation_capability(payload)[0] is False, payload
