@@ -7,6 +7,8 @@ import queue
 import sqlite3
 import shutil
 import signal
+import select
+import socket
 import subprocess
 import sys
 import tempfile
@@ -200,6 +202,119 @@ def _lifecycle_rows(kb_dir: Path) -> list[dict[str, Any]]:
     return rows
 
 
+def _discovery(kb_dir: Path) -> tuple[Path, dict[str, Any]]:
+    paths = list((kb_dir / "runtime" / "mcp-runtimes").glob("*/mcp-daemon.json"))
+    _assert(len(paths) == 1, f"expected one discovery document, got {paths}")
+    return paths[0], json.loads(paths[0].read_text(encoding="utf-8"))
+
+
+class ResponseDropRelay:
+    """Test-only TCP relay that drops one completed response at the transport."""
+
+    def __init__(self, upstream: dict[str, Any], *, drop_response_id: int):
+        self.upstream = dict(upstream)
+        self.drop_response_id = drop_response_id
+        self.dropped = threading.Event()
+        self._stop = threading.Event()
+        self._connections: set[socket.socket] = set()
+        self._lock = threading.Lock()
+        self._listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._listener.bind(("127.0.0.1", 0))
+        self._listener.listen()
+        self._listener.settimeout(0.2)
+        self.port = int(self._listener.getsockname()[1])
+        self._thread = threading.Thread(target=self._serve, daemon=True)
+        self._thread.start()
+
+    def _track(self, sock: socket.socket) -> None:
+        with self._lock:
+            self._connections.add(sock)
+
+    def _untrack(self, sock: socket.socket) -> None:
+        with self._lock:
+            self._connections.discard(sock)
+
+    @staticmethod
+    def _close(sock: socket.socket) -> None:
+        try:
+            sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+    def _serve(self) -> None:
+        while not self._stop.is_set():
+            try:
+                downstream, _address = self._listener.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                return
+            self._handle(downstream)
+
+    def _handle(self, downstream: socket.socket) -> None:
+        try:
+            upstream = socket.create_connection(
+                (self.upstream["host"], int(self.upstream["port"])), timeout=5
+            )
+            upstream.settimeout(None)
+        except OSError:
+            self._close(downstream)
+            return
+        self._track(downstream)
+        self._track(upstream)
+
+        buffer = bytearray()
+        try:
+            while True:
+                readable, _, _ = select.select([downstream, upstream], [], [], 0.2)
+                if downstream in readable:
+                    chunk = downstream.recv(65536)
+                    if not chunk:
+                        return
+                    upstream.sendall(chunk)
+                if upstream in readable:
+                    chunk = upstream.recv(65536)
+                    if not chunk:
+                        return
+                    buffer.extend(chunk)
+                    while b"\n" in buffer:
+                        raw, _, rest = buffer.partition(b"\n")
+                        buffer = bytearray(rest)
+                        try:
+                            message = json.loads(raw)
+                        except ValueError:
+                            message = {}
+                        if (
+                            not self.dropped.is_set()
+                            and message.get("id") == self.drop_response_id
+                            and ("result" in message or "error" in message)
+                        ):
+                            self.dropped.set()
+                            return
+                        downstream.sendall(raw + b"\n")
+        except OSError:
+            return
+        finally:
+            self._close(downstream)
+            self._close(upstream)
+            self._untrack(downstream)
+            self._untrack(upstream)
+
+    def close(self) -> None:
+        self._stop.set()
+        self._close(self._listener)
+        with self._lock:
+            connections = list(self._connections)
+        for sock in connections:
+            self._close(sock)
+        self._thread.join(timeout=2)
+
+
 def test_parallel_clients_share_one_heavy_owner_and_keep_context_isolated() -> None:
     kb_dir = _temp_vault()
     clients: list[McpClient] = []
@@ -223,6 +338,7 @@ def test_parallel_clients_share_one_heavy_owner_and_keep_context_isolated() -> N
         _assert(os.path.samefile(second["project_cwd"], project_b), str(second))
         _assert(first["embedding"]["heavy_model_owner_count"] == 1, str(first))
         _assert(second["embedding"]["listener"]["pid"] == first["process_pid"], str(second))
+        _assert(first["proxy_pool"]["scope"] == "runtime_key", str(first))
         _assert(first["daemon"]["peak_connections"] == 2, str(first))
         started = [row for row in _lifecycle_rows(kb_dir) if row.get("event") == "daemon_started"]
         _assert(bool(started), "daemon_started lifecycle event missing")
@@ -281,14 +397,17 @@ def test_owner_crash_restarts_on_next_call_without_replaying_inflight_work() -> 
 
 def test_committed_mutation_with_lost_response_is_not_replayed_or_called_retryable() -> None:
     kb_dir = _temp_vault()
+    bootstrap: McpClient | None = None
     client: McpClient | None = None
+    relay: ResponseDropRelay | None = None
     title = "post-commit response-loss sentinel"
     try:
-        client = McpClient(
-            kb_dir,
-            "unknown-outcome-session",
-            env_overrides={"LATCH_MCP_TEST_DROP_RESPONSE_ID_ONCE": "2"},
-        )
+        bootstrap = McpClient(kb_dir, "response-drop-bootstrap")
+        discovery_path, discovery = _discovery(kb_dir)
+        relay = ResponseDropRelay(discovery, drop_response_id=2)
+        discovery["port"] = relay.port
+        discovery_path.write_text(json.dumps(discovery) + "\n", encoding="utf-8")
+        client = McpClient(kb_dir, "unknown-outcome-session")
         try:
             client.call_tool(
                 "latch_insert",
@@ -304,6 +423,7 @@ def test_committed_mutation_with_lost_response_is_not_replayed_or_called_retryab
             _assert("outcome is unknown" in message, message)
             _assert("inspect current latch state" in message, message)
             _assert("retry" not in message, message)
+        _assert(relay.dropped.is_set(), "transport fixture did not drop response")
 
         def count_rows() -> int:
             conn = sqlite3.connect(kb_dir / "kb.db")
@@ -321,6 +441,10 @@ def test_committed_mutation_with_lost_response_is_not_replayed_or_called_retryab
     finally:
         if client is not None:
             client.close()
+        if bootstrap is not None:
+            bootstrap.close()
+        if relay is not None:
+            relay.close()
         _stop_daemon(kb_dir)
         shutil.rmtree(kb_dir, ignore_errors=True)
 

@@ -153,10 +153,6 @@ class ProxyBridge:
             sock.sendall(self._init_line)
             self._replaying = True
             self._replay_id = self._init_id
-            mcp_broker.emit_lifecycle(
-                "daemon_reconnect_succeeded",
-                connection_id=self.metadata["connection_id"],
-            )
 
     def _close_socket(self) -> None:
         sock, self._sock = self._sock, None
@@ -265,18 +261,20 @@ class ProxyBridge:
                 self._pending[message["id"]] = str(message.get("method") or "request")
             self._daemon_lost(str(exc))
 
-    def _finish_replay(self) -> None:
+    def _finish_replay(self) -> bool:
         self._replaying = False
         self._replay_id = None
         try:
             if self._initialized_line is not None:
                 assert self._sock is not None
                 self._sock.sendall(self._initialized_line)
-            deferred, self._deferred = self._deferred, []
-            for line in deferred:
+            while self._deferred:
+                line = self._deferred.pop(0)
                 self._forward(line)
+            return True
         except OSError as exc:
             self._daemon_lost(str(exc))
+            return False
 
     def _handle_daemon_line(self, line: bytes) -> None:
         self._lease.touch()
@@ -285,7 +283,11 @@ class ProxyBridge:
             if "error" in message:
                 self._daemon_lost("replayed initialize was rejected")
                 return
-            self._finish_replay()
+            if self._finish_replay():
+                mcp_broker.emit_lifecycle(
+                    "daemon_reconnect_succeeded",
+                    connection_id=self.metadata["connection_id"],
+                )
             return
 
         if "id" in message and ("result" in message or "error" in message):

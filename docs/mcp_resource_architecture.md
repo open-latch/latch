@@ -1,7 +1,10 @@
 # Bounded latch MCP runtime — issue 1465
 
-Status: public draft PR #21 on `mcp-resource-lifecycle`; intentionally not
-merge-ready pending independent review and cross-platform receipts.
+Status: public draft PR #21 on `mcp-resource-lifecycle`; cross-platform focused
+receipts are green for published head `d9ef85b`, while the subsequent local
+merge-blocker fixes still require a new three-OS CI run. The PR remains
+intentionally draft pending that receipt, independent merge-trust review, and
+real Codex, Claude Code, and Cursor lifecycle dogfood.
 Measurements were collected on macOS 13.5, Apple Silicon, on 2026-07-10.
 
 ## Decision
@@ -120,6 +123,10 @@ sections.
   ONNX and enters `mcp_proxy.py`. Existing installer/config paths do not change.
 - The first proxy acquires an atomic start lock and launches `mcp_daemon.py`.
   Concurrent proxies wait for the same owner.
+- Before heavyweight imports, the detached daemon acquires an OS-released
+  process-lifetime fence for its vault/runtime key. Broker death or a slow-start
+  timeout can launch a contender, but the contender exits before model loading;
+  only the fenced owner may warm and publish discovery.
 - Discovery and election locks live in a runtime-keyed registry beneath the
   pinned vault. Files are atomically replaced and mode 0600. The daemon binds
   only `127.0.0.1`; connections authenticate with a 256-bit random token.
@@ -165,12 +172,15 @@ visible rather than silently misattributed.
 - If the owner dies during a tool call, the proxy reports an unknown outcome
   and directs the caller to inspect current state before deciding on a new
   operation. It never automatically replays a potentially mutating call.
-- Proxy leases are individual files, not a contended shared registry. Every
-  proxy updates only its own lease and retires only itself. Live PIDs with
-  expired heartbeats are ignored and removed from capacity accounting; peers
-  are never signaled or killed. Each lease also persists when that proxy first
-  observed over-cap pressure, so runtime status can report the current
-  sustained duration without introducing a shared pressure registry.
+- Proxy leases are individual files scoped to the runtime key, not a contended
+  shared registry. The cap is therefore 32 per vault/runtime key; blue/green
+  versions do not retire one another's contexts. Every proxy updates only its
+  own lease and retires only itself. Live PIDs with expired heartbeats are
+  ignored for capacity but never unlinked by a racing observer; the owner can
+  atomically renew its lease. Peers are never signaled or killed. Each lease
+  also persists when that proxy first observed over-cap pressure, so runtime
+  status can report the current sustained duration without introducing a
+  shared pressure registry.
 - Default proxy policy: cap 32, five-minute minimum idle before over-cap
   retirement, 30-second heartbeat. Set `LATCH_MCP_PROXY_CAP=0` to disable the
   bound for diagnosis.
@@ -183,8 +193,8 @@ visible rather than silently misattributed.
 - daemon PID, runtime key, uptime, idle TTL, active connections, and in-flight
   requests;
 - current proxy PID, cwd, session ID, and attribution source;
-- proxy cap/idle/heartbeat policy and live lease count;
-- model-loaded state and embed-listener owner PID/port; and
+- per-runtime proxy cap/idle/heartbeat policy plus live and stale lease counts;
+- model-loaded state and embed-listener owner PID/port;
 - approximate peak RSS without exposing authentication tokens;
 - a bounded 24-hour lifecycle summary covering starts, idle exits, degraded
   prompts, stale/over-cap leases, retirements, reconnects, and failures;
@@ -194,11 +204,12 @@ visible rather than silently misattributed.
   current value is explicitly a lower bound from live proxies' first
   observations, not a fabricated host-global timestamp.
 
-`latch doctor` warns on recent lifecycle pressure and on explicit legacy
-fallback. It also warns when 24-hour lease high-water reaches 75% of the live
-configured cap (24 at the default 32) or while current over-cap duration is
-non-zero. Lifecycle JSONL is transition-only: it records no prompt text, tool
-arguments, authentication tokens, or per-request traffic.
+`latch doctor` warns on recent lifecycle pressure, stale live leases, dead
+discovery, and explicit legacy fallback. It also warns when 24-hour lease
+high-water reaches 75% of the live configured cap (24 at the default 32) or
+while current over-cap duration is non-zero. Lifecycle JSONL is transition-only:
+it records no prompt text, tool arguments, authentication tokens, or per-request
+traffic.
 
 Daemon reconnect success/failure is observable inside a retained proxy. A
 proxy that retires cannot prove that its host restarted the same task: the old

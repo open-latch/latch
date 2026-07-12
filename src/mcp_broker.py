@@ -18,7 +18,7 @@ import time
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 import paths
 
@@ -26,6 +26,7 @@ import paths
 PROTOCOL_VERSION = 1
 DISCOVERY_FILE = "mcp-daemon.json"
 START_LOCK_FILE = "mcp-daemon.start.lock"
+OWNER_FENCE_FILE = "mcp-daemon.owner.lock"
 EMBED_DISCOVERY_FILE = "embed.sock.json"
 LOG_FILE = "mcp-daemon.log"
 PROXY_LEASE_DIR = "mcp-proxies"
@@ -115,12 +116,17 @@ def start_lock_path(runtime_key: str | None = None) -> Path:
     return runtime_key_dir(runtime_key) / START_LOCK_FILE
 
 
+def owner_fence_path(runtime_key: str | None = None) -> Path:
+    return runtime_key_dir(runtime_key) / OWNER_FENCE_FILE
+
+
 def embed_discovery_path(runtime_key: str | None = None) -> Path:
     return runtime_key_dir(runtime_key) / EMBED_DISCOVERY_FILE
 
 
-def proxy_lease_dir() -> Path:
-    path = runtime_dir() / "runtime" / PROXY_LEASE_DIR
+def proxy_lease_dir(runtime_key: str | None = None) -> Path:
+    """Lease pool for one runtime fingerprint within the pinned vault."""
+    path = runtime_key_dir(runtime_key) / PROXY_LEASE_DIR
     path.mkdir(parents=True, exist_ok=True)
     try:
         os.chmod(path, 0o700)
@@ -172,20 +178,27 @@ def remove_proxy_lease(connection_id: str, *, reason: str = "closed") -> None:
         pass
 
 
-def proxy_inventory() -> list[dict[str, Any]]:
+def proxy_lease_state() -> dict[str, Any]:
+    """Return live capacity rows plus non-destructive stale diagnostics.
+
+    A live process may renew its lease after this scan reads an old heartbeat.
+    Never unlink that live process's path: its next atomic write repairs the
+    lease.  Dead-process rows are safe to remove because connection ids are
+    process-unique.
+    """
     rows: list[dict[str, Any]] = []
+    stale_count = 0
+    max_stale_age_s = 0.0
     stale_s = float(proxy_policy()["stale_s"])
     now = time.time()
     for path in proxy_lease_dir().glob("*.json"):
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
-            try:
-                path.unlink()
-            except OSError:
-                pass
             continue
-        pid = payload.get("pid") if isinstance(payload, dict) else None
+        if not isinstance(payload, dict) or payload.get("runtime_key") != RUNTIME_KEY:
+            continue
+        pid = payload.get("pid")
         if not isinstance(pid, int) or not _pid_alive(pid):
             try:
                 path.unlink()
@@ -194,18 +207,12 @@ def proxy_inventory() -> list[dict[str, Any]]:
             continue
         heartbeat = payload.get("heartbeat_epoch")
         if not isinstance(heartbeat, (int, float)) or now - float(heartbeat) > stale_s:
-            try:
-                path.unlink()
-            except OSError:
-                pass
-            emit_lifecycle(
-                "proxy_lease_stale",
-                connection_id=payload.get("connection_id"),
-                pid=pid,
-                heartbeat_age_s=(round(now - float(heartbeat), 3)
-                                 if isinstance(heartbeat, (int, float)) else None),
-                stale_after_s=stale_s,
+            stale_count += 1
+            observed = heartbeat if isinstance(heartbeat, (int, float)) else payload.get(
+                "started_epoch"
             )
+            age = now - float(observed) if isinstance(observed, (int, float)) else stale_s
+            max_stale_age_s = max(max_stale_age_s, age)
             continue
         rows.append(payload)
     rows.sort(
@@ -215,7 +222,15 @@ def proxy_inventory() -> list[dict[str, Any]]:
         ),
         reverse=True,
     )
-    return rows
+    return {
+        "live": rows,
+        "stale_count": stale_count,
+        "max_stale_age_s": round(max_stale_age_s, 3),
+    }
+
+
+def proxy_inventory() -> list[dict[str, Any]]:
+    return list(proxy_lease_state()["live"])
 
 
 def _lifecycle_path(day: datetime | None = None) -> Path:
@@ -246,7 +261,7 @@ def emit_lifecycle(event: str, **fields: Any) -> None:
 
 
 def lifecycle_summary(
-    *, hours: int = 24, inventory: list[dict[str, Any]] | None = None
+    *, hours: int = 24, lease_state: dict[str, Any] | None = None
 ) -> dict[str, Any]:
     """Return bounded operational signals for status/doctor surfaces."""
     cutoff = datetime.now(timezone.utc) - timedelta(hours=max(1, hours))
@@ -259,7 +274,8 @@ def lifecycle_summary(
     latest_daemon_start: dict[str, Any] | None = None
     latest_daemon_start_ts: datetime | None = None
     warning_events = {
-        "daemon_failed", "daemon_start_failed", "proxy_lease_stale",
+        "daemon_failed", "daemon_start_failed", "daemon_owner_conflict",
+        "proxy_lease_stale",
         "proxy_over_cap", "proxy_retired", "legacy_fallback",
         "prompt_retrieval_degraded", "daemon_reconnect_failed",
         "daemon_disconnect_unknown_outcome",
@@ -277,6 +293,8 @@ def lifecycle_summary(
             except (ValueError, KeyError, TypeError):
                 continue
             if ts < cutoff:
+                continue
+            if row.get("runtime_key") != RUNTIME_KEY:
                 continue
             event = str(row.get("event") or "unknown")
             counts[event] += 1
@@ -312,7 +330,9 @@ def lifecycle_summary(
                     )
                     if row.get(key) is not None
                 })
-    inventory = proxy_inventory() if inventory is None else inventory
+    warnings.sort(key=lambda row: str(row.get("ts") or ""))
+    lease_state = proxy_lease_state() if lease_state is None else lease_state
+    inventory = list(lease_state.get("live") or [])
     cap = int(proxy_policy()["cap"])
     proxy_high_water = max(proxy_high_water, len(inventory))
     currently_over_cap = cap > 0 and len(inventory) > cap
@@ -335,6 +355,9 @@ def lifecycle_summary(
         "max_peak_connections": max_peak_connections,
         "latest_daemon_start": latest_daemon_start,
         "current_live_leases": len(inventory),
+        "current_stale_leases": int(lease_state.get("stale_count") or 0),
+        "max_stale_lease_age_s": float(lease_state.get("max_stale_age_s") or 0.0),
+        "lease_scope": "runtime_key",
         "currently_over_cap": currently_over_cap,
         "current_over_cap_duration_s": round(current_over_cap_duration_s, 3),
         "over_cap_duration_is_lower_bound": currently_over_cap,
@@ -365,7 +388,7 @@ def _atomic_json(path: Path, payload: dict[str, Any], *, mode: int = 0o600) -> N
             pass
 
 
-def read_discovery(*, require_current: bool = True) -> dict[str, Any] | None:
+def read_discovery() -> dict[str, Any] | None:
     try:
         payload = json.loads(discovery_path().read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -374,7 +397,7 @@ def read_discovery(*, require_current: bool = True) -> dict[str, Any] | None:
         return None
     if payload.get("protocol") != PROTOCOL_VERSION:
         return None
-    if require_current and payload.get("runtime_key") != RUNTIME_KEY:
+    if payload.get("runtime_key") != RUNTIME_KEY:
         return None
     if payload.get("host") != "127.0.0.1":
         return None
@@ -437,7 +460,9 @@ def _send_prelude(sock: socket.socket, metadata: dict[str, Any], *, op: str) -> 
     sock.sendall(json.dumps(payload, separators=(",", ":")).encode("utf-8") + b"\n")
 
 
-def _probe(payload: dict[str, Any], timeout: float = DEFAULT_CONNECT_TIMEOUT_S) -> bool:
+def probe_discovery(
+    payload: dict[str, Any], timeout: float = DEFAULT_CONNECT_TIMEOUT_S
+) -> bool:
     try:
         with socket.create_connection(
             (payload["host"], int(payload["port"])), timeout=timeout
@@ -455,8 +480,36 @@ def _probe(payload: dict[str, Any], timeout: float = DEFAULT_CONNECT_TIMEOUT_S) 
             line = sock.makefile("rb").readline(4096)
             response = json.loads(line.decode("utf-8"))
             return bool(response.get("ok") and response.get("pid") == payload["pid"])
-    except (OSError, ValueError, KeyError):
+    except (OSError, ValueError, KeyError, AttributeError, TypeError):
         return False
+
+
+def acquire_owner_fence() -> BinaryIO | None:
+    """Acquire the process-lifetime fence for this vault/runtime key.
+
+    The OS releases the lock if a warming daemon or its broker dies, unlike a
+    PID file that can be stolen while the original daemon is still starting.
+    """
+    path = owner_fence_path()
+    handle = path.open("a+b")
+    try:
+        handle.seek(0, os.SEEK_END)
+        if handle.tell() == 0:
+            handle.write(b"\0")
+            handle.flush()
+        handle.seek(0)
+        if os.name == "nt":
+            import msvcrt
+
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return handle
+    except (OSError, BlockingIOError):
+        handle.close()
+        return None
 
 
 def _read_lock() -> dict[str, Any] | None:
@@ -567,7 +620,7 @@ def ensure_daemon(
     project_cwd: str, *, start_reason: str = "proxy_connect"
 ) -> dict[str, Any]:
     payload = read_discovery()
-    if payload is not None and _probe(payload):
+    if payload is not None and probe_discovery(payload):
         return payload
 
     deadline = time.monotonic() + _start_timeout()
@@ -575,11 +628,11 @@ def ensure_daemon(
     if acquired:
         try:
             payload = read_discovery()
-            if payload is None or not _probe(payload):
+            if payload is None or not probe_discovery(payload):
                 _spawn_daemon(project_cwd, start_reason=start_reason)
             while time.monotonic() < deadline:
                 payload = read_discovery()
-                if payload is not None and _probe(payload):
+                if payload is not None and probe_discovery(payload):
                     return payload
                 time.sleep(0.05)
         finally:
@@ -587,7 +640,7 @@ def ensure_daemon(
     else:
         while time.monotonic() < deadline:
             payload = read_discovery()
-            if payload is not None and _probe(payload):
+            if payload is not None and probe_discovery(payload):
                 return payload
             time.sleep(0.05)
 
@@ -599,7 +652,7 @@ def ensure_daemon(
 def request_daemon_start(project_cwd: str) -> bool:
     """Request a detached single-flight startup without blocking a hook."""
     payload = read_discovery()
-    if payload is not None and _probe(payload, timeout=0.02):
+    if payload is not None and probe_discovery(payload, timeout=0.02):
         return False
     env = os.environ.copy()
     env["LATCH_KB_DIR"] = str(runtime_dir())

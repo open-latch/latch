@@ -5,10 +5,12 @@ on:
     paths:
       - "src/mcp_*.py"
       - "src/embeddings.py"
+      - "src/codex_session.py"
       - "src/hooks/user_prompt_submit.py"
       - "src/doctor.py"
       - "tests/test_mcp_*.py"
       - "tests/test_doctor.py"
+      - "tests/test_codex_session.py"
       - "requirements.txt"
       - ".github/workflows/mcp-runtime-lifecycle.yml"
   workflow_dispatch:

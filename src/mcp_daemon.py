@@ -51,12 +51,23 @@ if (
     if _daemonize_posix():
         raise SystemExit(0)
 
+import mcp_broker  # noqa: E402
+
+
+_OWNER_FENCE = None
+if __name__ == "__main__":
+    _OWNER_FENCE = mcp_broker.acquire_owner_fence()
+    if _OWNER_FENCE is None:
+        mcp_broker.emit_lifecycle(
+            "daemon_owner_conflict", reason="runtime owner fence already held"
+        )
+        raise SystemExit(0)
+
 import anyio  # noqa: E402
 import mcp.types as mcp_types  # noqa: E402
 from anyio.abc import SocketAttribute, SocketStream  # noqa: E402
 from mcp.shared.message import SessionMessage  # noqa: E402
 
-import mcp_broker  # noqa: E402
 import mcp_runtime  # noqa: E402
 import mcp_server  # noqa: E402
 
@@ -64,7 +75,6 @@ import mcp_server  # noqa: E402
 DEFAULT_IDLE_TTL_S = 60 * 60.0
 MAX_PRELUDE_BYTES = 64 * 1024
 MAX_MCP_LINE_BYTES = 4 * 1024 * 1024
-_TEST_DROP_RESPONSE_USED = False
 
 
 def _utc_now() -> str:
@@ -90,23 +100,6 @@ def _cold_start_duration_ms() -> float:
         )
 
 
-def _drop_response_for_test(payload: dict[str, Any]) -> bool:
-    """Deterministic post-handler failure seam used by the integration test.
-
-    The response has already been produced (and a mutating handler committed)
-    when the writer sees it.  No production behavior changes unless the
-    explicitly test-scoped environment variable is set.
-    """
-    global _TEST_DROP_RESPONSE_USED
-    wanted = os.environ.get("LATCH_MCP_TEST_DROP_RESPONSE_ID_ONCE")
-    if _TEST_DROP_RESPONSE_USED or not wanted or "id" not in payload:
-        return False
-    if str(payload["id"]) != wanted:
-        return False
-    _TEST_DROP_RESPONSE_USED = True
-    return True
-
-
 class DaemonState:
     def __init__(self, *, started_at: str, idle_ttl_s: float):
         self.started_at = started_at
@@ -118,6 +111,11 @@ class DaemonState:
         self._pending: dict[str, set[str]] = {}
         self._accepted = 0
         self._peak_connections = 0
+        self._activity_generation = 0
+
+    def _mark_activity_locked(self) -> None:
+        self._last_activity = time.monotonic()
+        self._activity_generation += 1
 
     def register(self, metadata: dict[str, Any]) -> str:
         requested = metadata.get("connection_id")
@@ -127,14 +125,10 @@ class DaemonState:
             # accidental client retry from erasing an existing live session.
             if connection_id in self._connections:
                 connection_id = uuid.uuid4().hex
-            now = time.monotonic()
-            self._last_activity = now
+            self._mark_activity_locked()
             self._accepted += 1
             self._connections[connection_id] = {
-                "connected_at": _utc_now(),
-                "project_cwd": metadata.get("project_cwd"),
                 "session_source": metadata.get("session_source"),
-                "proxy_pid": metadata.get("proxy_pid"),
             }
             self._peak_connections = max(
                 self._peak_connections, len(self._connections)
@@ -144,53 +138,75 @@ class DaemonState:
 
     def unregister(self, connection_id: str) -> None:
         with self._lock:
-            self._last_activity = time.monotonic()
+            self._mark_activity_locked()
             self._connections.pop(connection_id, None)
             self._pending.pop(connection_id, None)
 
-    def touch(self, connection_id: str | None = None) -> None:
+    def touch(self) -> None:
         with self._lock:
-            now = time.monotonic()
-            self._last_activity = now
+            self._mark_activity_locked()
 
     def request_started(self, connection_id: str, request_id: Any) -> None:
         with self._lock:
-            now = time.monotonic()
-            self._last_activity = now
+            self._mark_activity_locked()
             self._pending.setdefault(connection_id, set()).add(repr(request_id))
 
     def request_finished(self, connection_id: str, request_id: Any) -> None:
         with self._lock:
-            self._last_activity = time.monotonic()
+            self._mark_activity_locked()
             self._pending.setdefault(connection_id, set()).discard(repr(request_id))
 
-    def should_reclaim(self) -> bool:
+    def idle_candidate(self) -> int | None:
         with self._lock:
             inflight = sum(len(items) for items in self._pending.values())
             idle = time.monotonic() - self._last_activity
-            return inflight == 0 and idle >= self.idle_ttl_s
+            return self._activity_generation if inflight == 0 and idle >= self.idle_ttl_s else None
+
+    def cancel_reclaim_if_unchanged(
+        self, generation: int, cancel_scope: Any
+    ) -> dict[str, Any] | None:
+        """Atomically revalidate idleness and trigger cancellation.
+
+        Activity between the first idle observation and this commit changes the
+        generation, so a newly started request cannot be reclaimed.
+        """
+        with self._lock:
+            now = time.monotonic()
+            inflight = sum(len(items) for items in self._pending.values())
+            idle = now - self._last_activity
+            if (
+                generation != self._activity_generation
+                or inflight != 0
+                or idle < self.idle_ttl_s
+            ):
+                return None
+            snapshot = self._snapshot_locked(now)
+            cancel_scope.cancel()
+            return snapshot
+
+    def _snapshot_locked(self, now: float) -> dict[str, Any]:
+        sources: dict[str, int] = {}
+        for item in self._connections.values():
+            source = str(item.get("session_source") or "unavailable")
+            sources[source] = sources.get(source, 0) + 1
+        return {
+            "mode": "shared_daemon",
+            "pid": os.getpid(),
+            "started_at": self.started_at,
+            "uptime_s": round(now - self._started_monotonic, 3),
+            "idle_ttl_s": self.idle_ttl_s,
+            "last_activity_age_s": round(now - self._last_activity, 3),
+            "active_connections": len(self._connections),
+            "peak_connections": self._peak_connections,
+            "inflight_requests": sum(len(items) for items in self._pending.values()),
+            "connections_accepted": self._accepted,
+            "session_sources": sources,
+            "runtime_key": mcp_broker.RUNTIME_KEY,
+        }
 
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
-            now = time.monotonic()
-            sources: dict[str, int] = {}
-            for item in self._connections.values():
-                source = str(item.get("session_source") or "unavailable")
-                sources[source] = sources.get(source, 0) + 1
-            return {
-                "mode": "shared_daemon",
-                "pid": os.getpid(),
-                "started_at": self.started_at,
-                "uptime_s": round(now - self._started_monotonic, 3),
-                "idle_ttl_s": self.idle_ttl_s,
-                "last_activity_age_s": round(now - self._last_activity, 3),
-                "active_connections": len(self._connections),
-                "peak_connections": self._peak_connections,
-                "inflight_requests": sum(len(items) for items in self._pending.values()),
-                "connections_accepted": self._accepted,
-                "session_sources": sources,
-                "runtime_key": mcp_broker.RUNTIME_KEY,
-            }
+            return self._snapshot_locked(time.monotonic())
 
 
 async def _read_line(
@@ -259,7 +275,7 @@ async def _run_mcp_connection(
                     if isinstance(payload, dict) and "method" in payload and "id" in payload:
                         state.request_started(connection_id, payload["id"])
                     else:
-                        state.touch(connection_id)
+                        state.touch()
                     await read_send.send(SessionMessage(message))
         except (anyio.EndOfStream, anyio.ClosedResourceError, anyio.BrokenResourceError):
             return
@@ -268,22 +284,9 @@ async def _run_mcp_connection(
         try:
             async with write_receive:
                 async for session_message in write_receive:
-                    payload = session_message.message.model_dump(
-                        by_alias=True, exclude_none=True
+                    await _send_session_message(
+                        stream, state, connection_id, session_message
                     )
-                    if isinstance(payload, dict) and "id" in payload and (
-                        "result" in payload or "error" in payload
-                    ):
-                        state.request_finished(connection_id, payload["id"])
-                    else:
-                        state.touch(connection_id)
-                    if isinstance(payload, dict) and _drop_response_for_test(payload):
-                        await stream.aclose()
-                        return
-                    line = session_message.message.model_dump_json(
-                        by_alias=True, exclude_none=True
-                    ).encode("utf-8")
-                    await stream.send(line + b"\n")
         except (anyio.ClosedResourceError, anyio.BrokenResourceError):
             return
 
@@ -300,6 +303,30 @@ async def _run_mcp_connection(
             await stream.aclose()
         except Exception:
             pass
+
+
+async def _send_session_message(
+    stream: SocketStream,
+    state: DaemonState,
+    connection_id: str,
+    session_message: SessionMessage,
+) -> None:
+    """Deliver first, then clear request state.
+
+    A failed transport send leaves the request pending until connection teardown,
+    preventing idle reclamation during the response-delivery window.
+    """
+    payload = session_message.message.model_dump(by_alias=True, exclude_none=True)
+    line = session_message.message.model_dump_json(
+        by_alias=True, exclude_none=True
+    ).encode("utf-8")
+    await stream.send(line + b"\n")
+    if isinstance(payload, dict) and "id" in payload and (
+        "result" in payload or "error" in payload
+    ):
+        state.request_finished(connection_id, payload["id"])
+    else:
+        state.touch()
 
 
 async def _handle_connection(stream: SocketStream, state: DaemonState, token: str) -> None:
@@ -344,8 +371,11 @@ async def _idle_monitor(state: DaemonState, cancel_scope: anyio.CancelScope) -> 
     interval = min(5.0, max(0.25, state.idle_ttl_s / 4.0))
     while True:
         await anyio.sleep(interval)
-        if state.should_reclaim():
-            snapshot = state.snapshot()
+        generation = state.idle_candidate()
+        if generation is not None:
+            snapshot = state.cancel_reclaim_if_unchanged(generation, cancel_scope)
+            if snapshot is None:
+                continue
             mcp_broker.emit_lifecycle(
                 "daemon_idle_exit",
                 reason="idle_ttl",
@@ -355,11 +385,15 @@ async def _idle_monitor(state: DaemonState, cancel_scope: anyio.CancelScope) -> 
                 peak_connections=snapshot["peak_connections"],
                 connections_accepted=snapshot["connections_accepted"],
             )
-            cancel_scope.cancel()
             return
 
 
 async def _main_async() -> None:
+    global _OWNER_FENCE
+    if _OWNER_FENCE is None:
+        _OWNER_FENCE = mcp_broker.acquire_owner_fence()
+        if _OWNER_FENCE is None:
+            raise RuntimeError("runtime owner fence already held")
     expected_key = os.environ.get("LATCH_MCP_RUNTIME_KEY")
     if expected_key and expected_key != mcp_broker.RUNTIME_KEY:
         raise RuntimeError("proxy and daemon runtime keys differ")
@@ -400,6 +434,7 @@ async def _main_async() -> None:
 
 
 def main() -> int:
+    global _OWNER_FENCE
     try:
         anyio.run(_main_async)
     except KeyboardInterrupt:
@@ -408,6 +443,10 @@ def main() -> int:
         mcp_broker.emit_lifecycle("daemon_failed", reason=str(exc))
         sys.stderr.write(f"[latch] shared MCP daemon failed: {exc}\n")
         return 1
+    finally:
+        if _OWNER_FENCE is not None:
+            _OWNER_FENCE.close()
+            _OWNER_FENCE = None
     return 0
 
 

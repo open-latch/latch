@@ -1677,7 +1677,8 @@ def kb_runtime_status() -> dict:
             }
     except (OSError, ValueError):
         pass
-    proxy_inventory = mcp_broker.proxy_inventory()
+    lease_state = mcp_broker.proxy_lease_state()
+    proxy_inventory = list(lease_state["live"])
     return {
         "mode": "shared_daemon" if daemon is not None else "legacy_stdio",
         "process_pid": os.getpid(),
@@ -1688,6 +1689,11 @@ def kb_runtime_status() -> dict:
         "proxy_pool": {
             **mcp_broker.proxy_policy(),
             "live_leases": len(proxy_inventory),
+            "stale_leases": int(lease_state.get("stale_count") or 0),
+            "max_stale_lease_age_s": float(
+                lease_state.get("max_stale_age_s") or 0.0
+            ),
+            "scope": "runtime_key",
             "bounded": bool(int(mcp_broker.proxy_policy()["cap"])),
         },
         "embedding": {
@@ -1697,7 +1703,7 @@ def kb_runtime_status() -> dict:
         },
         "process_peak_rss_bytes": _peak_rss_bytes(),
         "lifecycle": mcp_broker.lifecycle_summary(
-            hours=24, inventory=proxy_inventory
+            hours=24, lease_state=lease_state
         ),
         "recovery": (
             "Idle owners are reclaimed; the stdio proxy reconnects and replays MCP initialization. "

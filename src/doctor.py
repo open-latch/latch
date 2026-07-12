@@ -636,12 +636,15 @@ def check_mcp_runtime_lifecycle() -> tuple[str, str, str]:
         import mcp_broker
 
         policy = mcp_broker.proxy_policy()
-        inventory = mcp_broker.proxy_inventory()
+        lease_state = mcp_broker.proxy_lease_state()
+        inventory = list(lease_state["live"])
         live = len(inventory)
-        # Inventory cleanup may emit a stale-heartbeat event; summarize after
-        # the sweep so the same doctor run surfaces it.
-        summary = mcp_broker.lifecycle_summary(hours=24, inventory=inventory)
+        summary = mcp_broker.lifecycle_summary(hours=24, lease_state=lease_state)
         discovery = mcp_broker.read_discovery()
+        discovery_live = (
+            discovery is not None
+            and mcp_broker.probe_discovery(discovery, timeout=0.2)
+        )
     except Exception as exc:
         return name, WARN, f"could not inspect lifecycle state: {exc}"
 
@@ -651,6 +654,7 @@ def check_mcp_runtime_lifecycle() -> tuple[str, str, str]:
     high_water = int(summary.get("proxy_high_water") or 0)
     warn_at = _proxy_high_water_warn_at(cap)
     current_over_cap_s = float(summary.get("current_over_cap_duration_s") or 0.0)
+    stale_leases = int(summary.get("current_stale_leases") or 0)
     currently_over_cap = bool(summary.get("currently_over_cap")) or (
         cap > 0 and live > cap
     )
@@ -672,7 +676,8 @@ def check_mcp_runtime_lifecycle() -> tuple[str, str, str]:
         signals = ", ".join(
             f"{event}={count}" for event, count in counts.items()
             if event in {
-                "daemon_failed", "daemon_start_failed", "proxy_lease_stale",
+                "daemon_failed", "daemon_start_failed", "daemon_owner_conflict",
+                "proxy_lease_stale",
                 "proxy_over_cap", "proxy_retired", "legacy_fallback",
                 "prompt_retrieval_degraded", "daemon_reconnect_failed",
                 "daemon_disconnect_unknown_outcome",
@@ -687,6 +692,15 @@ def check_mcp_runtime_lifecycle() -> tuple[str, str, str]:
     if currently_over_cap:
         pressure.append(
             f"proxy pool is currently over cap for at least {current_over_cap_s:.1f}s"
+        )
+    if stale_leases:
+        pressure.append(
+            f"{stale_leases} stale live lease(s), oldest at least "
+            f"{float(summary.get('max_stale_lease_age_s') or 0.0):.1f}s"
+        )
+    if discovery is not None and not discovery_live:
+        pressure.append(
+            f"discovery points to unreachable owner pid={discovery['pid']}"
         )
     if pressure:
         retirement_boundary = ""
@@ -704,7 +718,7 @@ def check_mcp_runtime_lifecycle() -> tuple[str, str, str]:
             "Inspect latch_runtime_status lifecycle.recent_warnings and revisit "
             f"the lease/idle defaults if this persists.{retirement_boundary}"
         )
-    owner = f"owner pid={discovery['pid']}" if discovery else "no active owner"
+    owner = f"owner pid={discovery['pid']}" if discovery_live else "no active owner"
     return name, OK, (
         f"{owner}; live leases={live}/{cap}; "
         f"retire idle={policy['retire_idle_s']:.0f}s; stale after={policy['stale_s']:.0f}s; "
