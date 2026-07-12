@@ -877,7 +877,8 @@ def _find_seed_preview(value: Any, depth: int = 0) -> dict[str, Any] | None:
     value = _coerce_json(value)
     if isinstance(value, dict):
         if (
-            value.get("source") == "cursor"
+            value.get("ok") is True
+            and value.get("source") == "cursor"
             and value.get("apply") is False
             and isinstance(value.get("project"), str)
             and isinstance(value.get("candidates"), list)

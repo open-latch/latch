@@ -327,7 +327,7 @@ def test_seed_operation_requires_preview_then_explicit_apply():
         success = {
             **preview,
             "tool_output": json.dumps({
-                "source": "cursor", "apply": False,
+                "ok": True, "source": "cursor", "apply": False,
                 "project": str(Path(root).resolve()), "candidates": [],
             }),
         }
@@ -341,10 +341,10 @@ def test_seed_operation_requires_preview_then_explicit_apply():
             None,
             "not json",
             {"exit_code": 1, "stdout": json.dumps({
-                "source": "cursor", "apply": False,
+                "ok": True, "source": "cursor", "apply": False,
                 "project": str(Path(root).resolve()), "candidates": [],
             })},
-            {"source": "cursor", "apply": False,
+            {"ok": True, "source": "cursor", "apply": False,
              "project": str(Path(root) / "other-project"), "candidates": []},
         ):
             cgs.begin_prompt(root, sid, "/latch-seed")
