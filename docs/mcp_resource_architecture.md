@@ -303,8 +303,8 @@ designed to absorb.
 
 ## Verification
 
-Latest blocker-remediation receipts: 55 focused lifecycle/doctor/Codex/embed
-tests and 921 hermetic tests passed locally; changed-file Ruff, public-release
+Latest blocker-remediation receipts: 56 focused lifecycle/doctor/Codex/embed
+tests and 922 hermetic tests passed locally; changed-file Ruff, public-release
 hygiene, compilation, and `git diff --check` passed. Warm prompt-hook wall was
 108.5–135.5 ms. Fourteen clients used one owner at 1.03 s readiness and 10.33 ms
 embed p95; 32 used one owner at 1.73 s and 8.10 ms p95. The 14-client tail is
@@ -336,7 +336,8 @@ The production-representative tests cover:
 - lease migration and aggregate over-cap pressure across compatible old/new
   runtime keys;
 - bounded fresh-task rejection through real `7bcb86d` and pre-registry
-  `fa162bd` proxy snapshots;
+  `fa162bd` proxy snapshots on POSIX, plus the `fa162bd` root-discovery and
+  epoch-less wire contract on all three CI operating systems;
 - no current or alias discovery publication before runtime initialization;
 - incompatible-protocol rejection before ownership fencing/heavy imports;
 - configured-cap-derived 75% doctor warnings and sustained pressure duration;

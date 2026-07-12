@@ -17,6 +17,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parent.parent
 SERVER = ROOT / "src" / "mcp_server.py"
@@ -606,8 +608,94 @@ def test_pre_capability_registry_proxy_requires_fresh_task_after_upgrade() -> No
     _assert_historical_proxy_requires_fresh_task("7bcb86d")
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="fa162bd's own os.kill(pid, 0) probe is destructive on Windows",
+)
 def test_fa162bd_pre_registry_proxy_requires_fresh_task_after_upgrade() -> None:
     _assert_historical_proxy_requires_fresh_task("fa162bd")
+
+
+def test_pre_registry_transport_receives_fresh_task_error_cross_platform() -> None:
+    """Exercise fa162bd's root discovery and epoch-less wire contract."""
+    kb_dir = _temp_vault()
+    env = os.environ.copy()
+    env.update({
+        "LATCH_HOME": str(ROOT),
+        "LATCH_KB_DIR": str(kb_dir),
+        "LATCH_MCP_DAEMON_PROCESS": "1",
+        "LATCH_MCP_RUNTIME_KEY": "fa162bd-pre-registry",
+        "LATCH_MCP_INITIAL_PROJECT_CWD": str(ROOT),
+        "LATCH_MCP_DAEMON_IDLE_TTL_SEC": "60",
+        "CLAUDE_KB_IN_MAINTENANCE": "1",
+        "PYTHONPATH": str(ROOT / "src"),
+    })
+    env.pop("LATCH_MCP_PROXY_CAPABILITY_EPOCH", None)
+    process = subprocess.Popen(
+        [sys.executable, str(ROOT / "src" / "mcp_daemon.py")],
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        legacy_discovery = kb_dir / "mcp-daemon.json"
+        deadline = time.monotonic() + 15.0
+        while time.monotonic() < deadline and not legacy_discovery.exists():
+            if process.poll() is not None:
+                raise AssertionError(
+                    f"compatibility owner exited: {process.stderr.read().decode(errors='replace')}"
+                )
+            time.sleep(0.05)
+        _assert(legacy_discovery.exists(), "pre-registry discovery was not published")
+        payload = json.loads(legacy_discovery.read_text(encoding="utf-8"))
+        with socket.create_connection(
+            (payload["host"], int(payload["port"])), timeout=5.0
+        ) as sock:
+            stream = sock.makefile("rwb")
+            prelude = {
+                "op": "mcp",
+                "protocol": 1,
+                "token": payload["token"],
+                "runtime_key": "fa162bd-pre-registry",
+                "connection_id": "fa162bd-wire-contract",
+                "project_cwd": str(ROOT),
+                "proxy_pid": os.getpid(),
+            }
+            stream.write(json.dumps(prelude).encode() + b"\n")
+            stream.write(json.dumps({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-06-18",
+                    "capabilities": {},
+                    "clientInfo": {"name": "fa162bd", "version": "1"},
+                },
+            }).encode() + b"\n")
+            stream.flush()
+            initialized = json.loads(stream.readline())
+            _assert("result" in initialized, str(initialized))
+            stream.write(
+                b'{"jsonrpc":"2.0","method":"notifications/initialized"}\n'
+            )
+            stream.write(
+                b'{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}\n'
+            )
+            stream.flush()
+            rejected = json.loads(stream.readline())
+            message = str(rejected.get("error", {}).get("message", "")).lower()
+            _assert("start a fresh task" in message, str(rejected))
+            _assert("request was not executed" in message, str(rejected))
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=5.0)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5.0)
+        _stop_daemon(kb_dir)
+        shutil.rmtree(kb_dir, ignore_errors=True)
 
 
 def test_committed_mutation_with_lost_response_is_not_replayed_or_called_retryable() -> None:
