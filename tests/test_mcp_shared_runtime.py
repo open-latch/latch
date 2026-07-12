@@ -457,7 +457,6 @@ def test_retained_proxy_recovers_after_in_place_compatible_upgrade() -> None:
                 "LATCH_HOME": str(ROOT),
                 "PYTHONPATH": str(install_src),
                 "PYTHONDONTWRITEBYTECODE": "1",
-                "LATCH_MCP_DAEMON_START_TIMEOUT_SEC": "1",
             },
         )
         before = client.status()

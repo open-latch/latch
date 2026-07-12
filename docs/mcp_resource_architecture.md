@@ -176,10 +176,6 @@ visible rather than silently misattributed.
   to the current owner and its initialization is replayed there. A protocol-
   incompatible upgrade fails before fencing/heavy imports and tells the user to
   start a fresh task; it never degrades into a generic readiness timeout.
-  The compatibility alias exposes the fenced listener during warmup so a short-
-  timeout retained proxy can authenticate; MCP initialization is queued behind
-  the model-ready event. Normal same-key discovery is still published only
-  after warmup.
 - The prompt hook requests a single-flight background wake within its 250 ms
   wall. If the owner is not ready, it emits an explicit "not similarity-scored"
   receipt instead of falsely reporting a below-floor result.

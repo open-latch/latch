@@ -396,9 +396,7 @@ async def _send_session_message(
         state.touch()
 
 
-async def _handle_connection(
-    stream: SocketStream, state: DaemonState, token: str, ready: anyio.Event
-) -> None:
+async def _handle_connection(stream: SocketStream, state: DaemonState, token: str) -> None:
     buffer = bytearray()
     try:
         line, buffer = await _read_line(stream, buffer, limit=MAX_PRELUDE_BYTES)
@@ -427,7 +425,6 @@ async def _handle_connection(
         if op != "mcp":
             await stream.send(b'{"ok":false,"error":"unknown_operation"}\n')
             return
-        await ready.wait()
         await _run_mcp_connection(stream, buffer, metadata, state)
     except (anyio.EndOfStream, anyio.ClosedResourceError, anyio.BrokenResourceError):
         return
@@ -470,7 +467,6 @@ async def _main_async() -> None:
     started_at = _utc_now()
     token = secrets.token_hex(32)
     state = DaemonState(started_at=started_at, idle_ttl_s=_idle_ttl())
-    ready = anyio.Event()
     mcp_runtime.set_daemon_state(state)
     listener = await anyio.create_tcp_listener(local_host="127.0.0.1", local_port=0)
     host, port = listener.extra(SocketAttribute.local_address)
@@ -493,18 +489,9 @@ async def _main_async() -> None:
     initialized = False
     try:
         initial_cwd = os.environ.get("LATCH_MCP_INITIAL_PROJECT_CWD") or os.getcwd()
+        mcp_server.initialize_runtime(initial_cwd, start_embed_listener=True)
+        initialized = True
         async with anyio.create_task_group() as tg:
-            tg.start_soon(
-                listener.serve,
-                lambda stream: _handle_connection(stream, state, token, ready),
-            )
-            await anyio.to_thread.run_sync(
-                lambda: mcp_server.initialize_runtime(
-                    initial_cwd, start_embed_listener=True
-                )
-            )
-            initialized = True
-            ready.set()
             mcp_broker.publish_discovery(
                 port=int(port), token=token, pid=os.getpid(), started_at=started_at
             )
@@ -517,7 +504,7 @@ async def _main_async() -> None:
                 upgrade_alias=(_REQUESTED_RUNTIME_KEY != mcp_broker.RUNTIME_KEY),
             )
             tg.start_soon(_idle_monitor, state, tg.cancel_scope)
-            await anyio.sleep_forever()
+            await listener.serve(lambda stream: _handle_connection(stream, state, token))
     except Exception:
         if not initialized:
             mcp_broker.publish_start_failure(
