@@ -103,6 +103,46 @@ def test_merge_mcp_config_idempotent():
     print("PASS merge_mcp_config_idempotent")
 
 
+def test_merge_mcp_config_rejects_present_non_object_mcpservers():
+    for value in (None, [], ["user-server"], "user-server", 7, True):
+        existing = json.dumps({"mcpServers": value, "setting": True}) + "\n"
+        try:
+            ic.merge_mcp_config(existing, "/PY", "/srv.py")
+        except ic.CursorConfigError as exc:
+            _assert("expected a JSON object" in str(exc), exc)
+            _assert("did not modify the file" in str(exc), exc)
+        else:
+            raise AssertionError(f"non-object mcpServers must fail closed: {value!r}")
+    print("PASS merge_mcp_config_rejects_present_non_object_mcpservers")
+
+
+def test_installer_preserves_non_object_mcpservers_byte_for_byte():
+    d = Path(tempfile.mkdtemp(prefix="latch-cursor-mcp-type-"))
+    try:
+        config = d / ".cursor" / "mcp.json"
+        config.parent.mkdir(parents=True)
+        original = b'{"mcpServers":[{"command":"user-owned"}],"setting":true}\n'
+        config.write_bytes(original)
+        common = [
+            "--mcp-json", str(config),
+            "--skip-agents", "--skip-rules", "--skip-commands", "--yes",
+        ]
+
+        _assert(ic.main(common) == 2, "apply must fail closed")
+        _assert(config.read_bytes() == original, "apply must preserve active bytes")
+        _assert(not config.with_suffix(".json.latchbak").exists(),
+                "a failed preflight must not create a misleading backup")
+
+        _assert(ic.main([*common, "--dry-run"]) == 2, "dry-run must report unsafe config")
+        _assert(config.read_bytes() == original, "dry-run must preserve active bytes")
+
+        _assert(ic.main([*common, "--check"]) == 1, "check must report unsafe config")
+        _assert(config.read_bytes() == original, "check must preserve active bytes")
+        print("PASS installer_preserves_non_object_mcpservers_byte_for_byte")
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def test_write_config_backs_up_existing():
     d = Path(tempfile.mkdtemp(prefix="latch-cursor-config-"))
     try:
@@ -323,6 +363,8 @@ if __name__ == "__main__":
     test_merge_mcp_config_replaces_existing_latch_only()
     test_merge_mcp_config_migrates_legacy_adapter_names()
     test_merge_mcp_config_idempotent()
+    test_merge_mcp_config_rejects_present_non_object_mcpservers()
+    test_installer_preserves_non_object_mcpservers_byte_for_byte()
     test_write_config_backs_up_existing()
     test_agents_sync_args_are_cursor_branded()
     test_first_wire_notice_is_cursor_branded()

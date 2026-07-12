@@ -69,6 +69,10 @@ class CursorAssetCollisionError(RuntimeError):
     """Raised before install would overwrite a user-owned Cursor asset."""
 
 
+class CursorConfigError(ValueError):
+    """Raised when active Cursor configuration cannot be merged safely."""
+
+
 def _forward_slash(value: str) -> str:
     return value.replace("\\", "/")
 
@@ -120,10 +124,18 @@ def merge_mcp_config(
     model_backend: str | None = None,
 ) -> tuple[str, list[str]]:
     obj = _json_object(existing, path=path)
-    servers = obj.get("mcpServers")
-    if not isinstance(servers, dict):
+    if "mcpServers" not in obj:
         servers = {}
         obj["mcpServers"] = servers
+    else:
+        servers = obj["mcpServers"]
+        if not isinstance(servers, dict):
+            raise CursorConfigError(
+                f"{path} has an incompatible mcpServers value "
+                f"({type(servers).__name__}); expected a JSON object. "
+                "Fix or move that value manually, then rerun the installer; "
+                "latch did not modify the file."
+            )
 
     desired = render_cursor_server(python_path, server_py, model_backend=model_backend)
     changes: list[str] = []
@@ -153,13 +165,16 @@ def mcp_status(
     if not path.exists():
         return False, f"Cursor MCP config missing: {path}"
     current = path.read_text(encoding="utf-8")
-    desired, changes = merge_mcp_config(
-        current,
-        python_path,
-        server_py,
-        path=path,
-        model_backend=model_backend,
-    )
+    try:
+        desired, changes = merge_mcp_config(
+            current,
+            python_path,
+            server_py,
+            path=path,
+            model_backend=model_backend,
+        )
+    except CursorConfigError as exc:
+        return False, f"Cursor MCP config unsafe to merge: {exc}"
     if desired == current and not changes:
         return True, f"Cursor MCP server installed in {path}"
     return False, f"Cursor MCP server missing or drifted in {path}"
@@ -444,13 +459,17 @@ def main(argv: list[str] | None = None) -> int:
     if not args.skip_mcp:
         mcp_path = Path(args.mcp_json)
         existing = mcp_path.read_text(encoding="utf-8") if mcp_path.exists() else ""
-        new_mcp, changes = merge_mcp_config(
-            existing,
-            python_path,
-            server_py,
-            path=mcp_path,
-            model_backend=args.model_backend,
-        )
+        try:
+            new_mcp, changes = merge_mcp_config(
+                existing,
+                python_path,
+                server_py,
+                path=mcp_path,
+                model_backend=args.model_backend,
+            )
+        except CursorConfigError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
         if changes:
             if not args.dry_run:
                 write_config(mcp_path, new_mcp)
