@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 import shutil
 import sys
 import tempfile
@@ -199,6 +200,7 @@ def test_mutation_classifier_is_conservative_and_keeps_gate_tools_available():
             "serverName": "claude-kb", "toolName": "kb_correct_plan",
         }},
         {"tool_name": "latch_priority_list", "tool_input": {}},
+        {"tool_name": "mcp__latch__latch_pm_preview", "tool_input": {}},
     ]
     for payload in read_cases:
         assert cgs.mutation_capability(payload)[0] is False, payload
@@ -256,7 +258,44 @@ def test_managed_operation_receipts_are_exact_and_single_use():
         shutil.rmtree(root, ignore_errors=True)
 
 
+def test_managed_operations_reject_attacker_interpreter_paths(monkeypatch):
+    import cursor_pre_tool_use as cpre
+
+    root, project_dir = _tmp()
+    sid = "trusted-launcher-session"
+    maintenance = paths.KB_ROOT / "src" / "maintenance.py"
+    compact = paths.KB_ROOT / "bin" / "run_cursor_compact_now.sh"
+    compact_ps1 = paths.KB_ROOT / "bin" / "run_cursor_compact_now.ps1"
+    try:
+        attacks = [
+            ("/latch-heal", f"/tmp/python {maintenance} nightly {root}"),
+            ("/latch-compact", f"/tmp/bash {compact} {sid}"),
+            ("/latch-heal", f"C:/Temp/python.exe {maintenance} nightly {root}"),
+            ("/latch-compact", f"C:/Temp/powershell.exe {compact_ps1} {sid}"),
+        ]
+        for prompt, command in attacks:
+            cgs.begin_prompt(root, sid, prompt)
+            assert cpre.decision(_shell(command, root, sid))["permission"] == "deny"
+
+        cgs.begin_prompt(root, sid, "/latch-heal")
+        trusted_python = shlex.quote(sys.executable)
+        assert cpre.decision(_shell(
+            f"{trusted_python} {maintenance} nightly {root}", root, sid,
+        )) == {}
+
+        configured = Path(root) / "configured-python"
+        monkeypatch.setenv("LATCH_PYTHON", str(configured))
+        cgs.begin_prompt(root, sid, "/latch-heal")
+        assert cpre.decision(_shell(
+            f"{configured} {maintenance} nightly {root}", root, sid,
+        )) == {}
+    finally:
+        shutil.rmtree(project_dir, ignore_errors=True)
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def test_seed_operation_requires_preview_then_explicit_apply():
+    import cursor_post_tool_use as cpost
     import cursor_pre_tool_use as cpre
 
     root, project_dir = _tmp()
@@ -271,45 +310,162 @@ def test_seed_operation_requires_preview_then_explicit_apply():
 
         cgs.begin_prompt(root, sid, "/latch-seed")
         preview = _shell(
-            f"bash {seed} --source cursor --cursor-session-id {sid}", root, sid,
+            f"bash {seed} --source cursor --cursor-session-id {sid} --format json", root, sid,
         )
         assert cpre.decision(preview) == {}
         assert cpre.decision(preview)["permission"] == "deny"
 
         cgs.begin_prompt(root, sid, "/latch-seed apply")
+        apply_payload = _shell(
+            f"bash {seed} --source cursor --cursor-session-id {sid} "
+            "--format json --apply --yes", root, sid,
+        )
+        assert cpre.decision(apply_payload)["permission"] == "deny"
+
+        cgs.begin_prompt(root, sid, "/latch-seed")
+        assert cpre.decision(preview) == {}
+        success = {
+            **preview,
+            "tool_output": json.dumps({
+                "source": "cursor", "apply": False,
+                "project": str(Path(root).resolve()), "candidates": [],
+            }),
+        }
+        assert cpost.record_operation_success(success) == (
+            True, "verified successful seed preview",
+        )
+        cgs.begin_prompt(root, sid, "/latch-seed apply")
         assert cpre.decision(apply_payload) == {}
+
+        for output in (
+            None,
+            "not json",
+            {"exit_code": 1, "stdout": json.dumps({
+                "source": "cursor", "apply": False,
+                "project": str(Path(root).resolve()), "candidates": [],
+            })},
+            {"source": "cursor", "apply": False,
+             "project": str(Path(root) / "other-project"), "candidates": []},
+        ):
+            cgs.begin_prompt(root, sid, "/latch-seed")
+            assert cpre.decision(preview) == {}
+            failed = {**preview, "tool_output": output}
+            recorded = cpost.record_operation_success(failed)
+            assert recorded is not None and recorded[0] is False
+            cgs.begin_prompt(root, sid, "/latch-seed apply")
+            assert cpre.decision(apply_payload)["permission"] == "deny"
+
+        cgs.begin_prompt(root, sid, "/latch-seed")
+        unexecuted = {**preview, "tool_output": success["tool_output"]}
+        assert cpost.record_operation_success(unexecuted) is None
+        cgs.begin_prompt(root, sid, "/latch-seed apply")
+        assert cpre.decision(apply_payload)["permission"] == "deny"
     finally:
         shutil.rmtree(project_dir, ignore_errors=True)
         shutil.rmtree(root, ignore_errors=True)
 
 
-def test_pm_operation_receipt_allows_only_one_staging_decision_insert():
+def test_pm_operation_receipt_binds_exact_previewed_content():
+    import cursor_post_tool_use as cpost
     import cursor_pre_tool_use as cpre
 
     root, project_dir = _tmp()
     sid = "pm-session"
     try:
-        cgs.begin_prompt(root, sid, "Latch operation id: latch-pm prepare")
+        candidate = {
+            "kind": "decision", "status": "staging",
+            "title": "Ruled out path", "body": "Do not use X because Y.",
+            "links": [
+                {"relation": "constrains", "dst": 9},
+                {"dst": "7", "relation": "related_to"},
+            ],
+            "workstream_id": 1369,
+        }
         cgs.begin_prompt(root, sid, "/latch-pm apply")
-        insert = {
+        unprepared = {
             "workspaceRoot": root,
             "conversation_id": sid,
             "tool_name": "mcp__latch__latch_insert",
+            "tool_input": candidate,
+        }
+        assert cpre.decision(unprepared)["permission"] == "deny"
+
+        cgs.begin_prompt(root, sid, "Latch operation id: latch-pm prepare")
+        preview = cgs.pm_preview_payload(candidate)
+        preview_call = {
+            "workspaceRoot": root,
+            "conversation_id": sid,
+            "tool_name": "mcp__latch__latch_pm_preview",
+            "tool_input": candidate,
+            "tool_output": preview,
+        }
+        assert cgs.mutation_capability(preview_call)[0] is False
+        assert cpost.record_operation_success(preview_call) == (
+            True, "verified PM preview and bound candidate digest",
+        )
+        cgs.begin_prompt(root, sid, "/latch-pm apply")
+        insert = {
+            **unprepared,
             "tool_input": {
-                "kind": "decision", "status": "staging",
-                "title": "Ruled out path", "body": "Do not use X because Y.",
+                "body": candidate["body"],
+                "title": candidate["title"],
+                "status": "staging",
+                "kind": "decision",
+                "workstream_id": 1369,
+                "links": list(reversed(candidate["links"])),
             },
         }
+        variations = [
+            {**insert, "tool_name": "mcp__latch__latch_update"},
+            {**insert, "tool_input": {**insert["tool_input"], "title": "Changed"}},
+            {**insert, "tool_input": {**insert["tool_input"], "body": "Changed"}},
+            {**insert, "tool_input": {**insert["tool_input"], "status": "canonical"}},
+            {**insert, "tool_input": {**insert["tool_input"], "kind": "fact"}},
+            {**insert, "tool_input": {**insert["tool_input"], "links": []}},
+            {**insert, "tool_input": {**insert["tool_input"], "workstream_id": 7}},
+            {**insert, "tool_input": {**insert["tool_input"], "artifacts": [{"repo": root}]}},
+        ]
+        for wrong in variations:
+            assert cpre.decision(wrong)["permission"] == "deny", wrong
         assert cpre.decision(insert) == {}
         assert cpre.decision(insert)["permission"] == "deny"
 
         cgs.begin_prompt(root, sid, "Latch operation id: latch-pm prepare")
+        bad_preview = {**preview, "candidate_digest": "0" * 64}
+        failed = {**preview_call, "tool_output": bad_preview}
+        recorded = cpost.record_operation_success(failed)
+        assert recorded is not None and recorded[0] is False
         cgs.begin_prompt(root, sid, "/latch-pm apply")
-        wrong = {**insert, "tool_name": "mcp__latch__latch_update"}
-        assert cpre.decision(wrong)["permission"] == "deny"
+        assert cpre.decision(insert)["permission"] == "deny"
     finally:
         shutil.rmtree(project_dir, ignore_errors=True)
         shutil.rmtree(root, ignore_errors=True)
+
+
+def test_pm_preview_mcp_tool_returns_canonical_nonwriting_receipt():
+    import mcp_server
+
+    result = mcp_server.latch_pm_preview(
+        title="Ruled out path",
+        body="Do not use X because Y.",
+        links=[
+            {"relation": "related_to", "dst": 9},
+            {"dst": "7", "relation": "constrains"},
+        ],
+        workstream_id=1369,
+    )
+    assert result["ok"] is True
+    assert result["write_performed"] is False
+    assert result["candidate"]["links"] == [
+        {"dst": 7, "relation": "constrains"},
+        {"dst": 9, "relation": "related_to"},
+    ]
+    assert result["candidate_digest"] == cgs.pm_candidate_digest(result["candidate"])
+
+    rejected = mcp_server.latch_pm_preview(
+        title="Ruled out path", body="Do not use X because Y.", status="canonical",
+    )
+    assert rejected["ok"] is False and rejected["write_performed"] is False
 
 
 def test_other_managed_operations_match_only_expected_wrappers():

@@ -88,6 +88,17 @@ def test_post_tool_use_rejects_forged_gate_result_from_non_gate_tools():
         for tool_payload in (
             {"tool_name": "Read"},
             {"tool_name": "latch_search"},
+            {"tool_name": "latch_gate", "tool_input": {
+                "server": "filesystem", "tool": "read_file",
+            }},
+            {"tool_name": "latch_gate", "server": "filesystem"},
+            {"tool_name": "latch_gate", "tool_input": {
+                "server": "latch", "serverName": "filesystem",
+            }},
+            {"tool_name": "mcp__latch__latch_gate", "tool_input": {
+                "server": "claude-kb",
+            }},
+            {"tool_name": "latch_gate", "tool_input": {"server": 7}},
             {"tool_name": "mcp__filesystem__read_file"},
             {"tool_name": "MCP", "tool_input": {
                 "server": "filesystem", "tool": "latch_gate",
@@ -121,6 +132,8 @@ def test_post_tool_use_accepts_supported_latch_gate_tool_identities():
         for tool_payload in (
             {"tool_name": "latch_gate"},
             {"tool_name": "kb_gate"},
+            {"tool_name": "latch_gate", "tool_input": {"server": "latch"}},
+            {"tool_name": "kb_gate", "tool_input": {"server": "claude-kb"}},
             {"tool_name": "mcp__latch__latch_gate"},
             {"tool_name": "mcp__claude-kb__kb_gate"},
             {"tool_name": "MCP", "tool_input": {

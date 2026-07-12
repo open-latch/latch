@@ -29,6 +29,10 @@ Use the project `latch` MCP server as the decision-continuity layer:
   bound to the current Cursor session, prompt, expected tool, and exact argument
   shape. That narrow lane keeps compact/seed/maintenance workflows usable
   without treating them as coding requests or exempting arbitrary latch writes.
+- A preview attempt does not authorize apply. Only a matching successful
+  `postToolUse` result may advance preview state. `/latch-pm` must use the
+  read-only `latch_pm_preview` tool so the exact staging decision is displayed
+  and digest-bound before one matching `latch_insert` can run.
 - Free-form Shell commands are mutation-capable. Use Cursor's exact native read
   tools before the gate; a program name alone is not proof that its options are
   side-effect-free.

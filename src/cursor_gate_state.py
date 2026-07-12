@@ -12,8 +12,11 @@ import json
 import os
 import re
 import shlex
+import shutil
+import sys
 import time
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -50,6 +53,7 @@ _PRE_GATE_LATCH_ALLOWLIST = {
     "latchcorrectplan", "kbcorrectplan",
     "latchprioritylist", "kbprioritylist",
     "latchembed", "kbembed",
+    "latchpmpreview", "kbpmpreview",
 }
 _OPERATION_NAMES = {
     "latch-compact", "latch-seed", "latch-gate-report",
@@ -60,6 +64,14 @@ _OPERATION_MARKER_RE = re.compile(
     r"(?im)^\s*Latch operation id:\s*([a-z0-9-]+)"
     r"(?:\s+(preview|prepare|apply|run|inspect))?\s*$"
 )
+_TRANSPORT_IDENTITY_KEYS = {
+    "server", "server_name", "serverName",
+    "tool", "tool_name", "toolName", "name",
+}
+_PM_CANDIDATE_KEYS = {
+    "kind", "title", "body", "status", "links", "workstream_id",
+    "artifacts", "session_id",
+}
 
 
 def _session_key(sid: str | None) -> str:
@@ -168,6 +180,104 @@ def prompt_hash(prompt: str) -> str | None:
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
+def _normalize_pm_links(value: Any) -> list[dict[str, Any]]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError("PM links must be a list")
+    normalized: set[tuple[int, str]] = set()
+    for link in value:
+        if not isinstance(link, dict) or set(link) - {"dst", "relation"}:
+            raise ValueError("each PM link must contain only dst and relation")
+        dst = link.get("dst")
+        relation = link.get("relation")
+        if isinstance(dst, bool):
+            raise ValueError("PM link dst must be an integer node id")
+        try:
+            dst = int(dst)
+        except (TypeError, ValueError):
+            raise ValueError("PM link dst must be an integer node id") from None
+        if dst <= 0:
+            raise ValueError("PM link dst must be a positive node id")
+        if not isinstance(relation, str) or not relation or relation != relation.strip():
+            raise ValueError("PM link relation must be a non-empty normalized string")
+        normalized.add((dst, relation))
+    return [
+        {"dst": dst, "relation": relation}
+        for dst, relation in sorted(normalized, key=lambda item: (item[1], item[0]))
+    ]
+
+
+def canonical_pm_candidate(value: dict[str, Any]) -> dict[str, Any]:
+    """Canonicalize every field a one-shot PM insert is allowed to carry."""
+    if not isinstance(value, dict):
+        raise ValueError("PM candidate must be an object")
+    candidate_keys = set(value) - _TRANSPORT_IDENTITY_KEYS
+    unknown = candidate_keys - _PM_CANDIDATE_KEYS
+    if unknown:
+        raise ValueError(f"PM candidate has unsupported fields: {sorted(unknown)}")
+
+    kind = value.get("kind", "decision")
+    status = value.get("status", "staging")
+    title = value.get("title")
+    body = value.get("body")
+    if kind != "decision" or status != "staging":
+        raise ValueError("PM candidate must be a staging decision")
+    if not isinstance(title, str) or not title.strip():
+        raise ValueError("PM candidate title must be non-empty")
+    if not isinstance(body, str) or not body.strip():
+        raise ValueError("PM candidate body must be non-empty")
+
+    workstream_id = value.get("workstream_id")
+    if isinstance(workstream_id, bool):
+        raise ValueError("PM workstream_id must be an integer node id")
+    if workstream_id is not None:
+        try:
+            workstream_id = int(workstream_id)
+        except (TypeError, ValueError):
+            raise ValueError("PM workstream_id must be an integer node id") from None
+        if workstream_id <= 0:
+            raise ValueError("PM workstream_id must be a positive node id")
+
+    artifacts = value.get("artifacts")
+    session = value.get("session_id")
+    if artifacts not in (None, []):
+        raise ValueError("PM preview does not authorize artifact overrides")
+    if session not in (None, ""):
+        raise ValueError("PM preview does not authorize session overrides")
+
+    return {
+        "kind": kind,
+        "title": title,
+        "body": body,
+        "status": status,
+        "links": _normalize_pm_links(value.get("links")),
+        "workstream_id": workstream_id,
+        "artifacts": [],
+        "session_id": None,
+    }
+
+
+def pm_candidate_digest(value: dict[str, Any]) -> str:
+    candidate = canonical_pm_candidate(value)
+    encoded = json.dumps(
+        candidate, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+    )
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def pm_preview_payload(value: dict[str, Any]) -> dict[str, Any]:
+    candidate = canonical_pm_candidate(value)
+    return {
+        "ok": True,
+        "operation": "latch-pm",
+        "phase": "prepare",
+        "write_performed": False,
+        "candidate_digest": pm_candidate_digest(candidate),
+        "candidate": candidate,
+    }
+
+
 def _pending_operation(previous: dict[str, Any]) -> dict[str, Any] | None:
     pending = previous.get("pending_operation")
     if not isinstance(pending, dict) or pending.get("name") not in _OPERATION_NAMES:
@@ -259,7 +369,11 @@ def begin_prompt(project_path: str, sid: str | None, prompt: str) -> dict[str, A
                 and pending.get("stage") == "previewed"
             )
         elif name == "latch-pm" and phase == "apply":
-            allowed = bool(pending and pending.get("name") == name)
+            allowed = bool(
+                pending and pending.get("name") == name
+                and pending.get("stage") == "prepared"
+                and isinstance(pending.get("candidate_digest"), str)
+            )
         elif name == "unlatch" and phase == "confirm":
             allowed = bool(pending and pending.get("name") == name)
         if name == "latch-seed" and phase == "preview":
@@ -280,6 +394,8 @@ def begin_prompt(project_path: str, sid: str | None, prompt: str) -> dict[str, A
                 "consumed": False,
                 "recorded_at": _now(),
             }
+            if name == "latch-pm" and phase == "apply":
+                operation_receipt["candidate_digest"] = pending["candidate_digest"]
 
     state = {
         "version": 1,
@@ -375,6 +491,33 @@ def _tool_input(payload: dict[str, Any]) -> dict[str, Any]:
     return {}
 
 
+def _explicit_server_identity(payload: dict[str, Any]) -> tuple[str | None, bool]:
+    """Return one explicit server identity and whether the evidence conflicts."""
+    identities: list[str] = []
+    malformed = False
+    for container in (payload, _tool_input(payload)):
+        for key in ("server", "server_name", "serverName"):
+            if key not in container:
+                continue
+            value = container.get(key)
+            if not isinstance(value, str) or not value.strip():
+                malformed = True
+            else:
+                identities.append(_normalized_tool_name(value))
+    unique = set(identities)
+    if malformed or len(unique) > 1:
+        return None, True
+    return (next(iter(unique)) if unique else None), False
+
+
+def _tool_matches_server_family(tool: str, server: str) -> bool:
+    if server == "latch":
+        return tool.startswith("latch")
+    if server == "claudekb":
+        return tool.startswith("kb")
+    return False
+
+
 def _latch_tool_identity(payload: dict[str, Any], raw_name: str) -> str | None:
     """Return a normalized latch tool name, or None for a non-latch tool.
 
@@ -384,28 +527,38 @@ def _latch_tool_identity(payload: dict[str, Any], raw_name: str) -> str | None:
     """
     name = (raw_name or "").strip()
     normalized_name = _normalized_tool_name(name)
-    if normalized_name.startswith("latch") or normalized_name.startswith("kb"):
-        return normalized_name
-
     tool_input = _tool_input(payload)
-    server = ""
-    for key in ("server", "server_name", "serverName"):
-        value = tool_input.get(key)
-        if isinstance(value, str) and value.strip():
-            server = _normalized_tool_name(value)
-            break
+    explicit_server, conflict = _explicit_server_identity(payload)
+    if conflict or explicit_server is not None and explicit_server not in _LATCH_SERVER_NAMES:
+        return None
 
     if name.lower().startswith("mcp__"):
         parts = name.split("__")
-        if len(parts) >= 3 and _normalized_tool_name(parts[1]) in _LATCH_SERVER_NAMES:
-            return _normalized_tool_name(parts[-1])
+        if len(parts) < 3:
+            return None
+        qualified_server = _normalized_tool_name(parts[1])
+        qualified_tool = _normalized_tool_name(parts[-1])
+        if qualified_server not in _LATCH_SERVER_NAMES:
+            return None
+        if explicit_server is not None and explicit_server != qualified_server:
+            return None
+        if not _tool_matches_server_family(qualified_tool, qualified_server):
+            return None
+        return qualified_tool
 
-    if "mcp" not in normalized_name or server not in _LATCH_SERVER_NAMES:
+    if normalized_name.startswith("latch") or normalized_name.startswith("kb"):
+        if explicit_server is not None \
+                and not _tool_matches_server_family(normalized_name, explicit_server):
+            return None
+        return normalized_name
+
+    if "mcp" not in normalized_name or explicit_server not in _LATCH_SERVER_NAMES:
         return None
     for key in ("tool", "tool_name", "toolName", "name"):
         value = tool_input.get(key)
         if isinstance(value, str) and value.strip():
-            return _normalized_tool_name(value)
+            tool = _normalized_tool_name(value)
+            return tool if _tool_matches_server_family(tool, explicit_server) else None
     return "unknownlatchtool"
 
 
@@ -433,6 +586,40 @@ def _strip_quotes(value: str) -> str:
     if len(text) >= 2 and text[0] == text[-1] and text[0] in {"'", '"'}:
         return text[1:-1]
     return text
+
+
+_SHELL_LAUNCHERS = {
+    "bash", "sh", "pwsh", "pwsh.exe", "powershell", "powershell.exe",
+}
+_PYTHON_LAUNCHERS = {"python", "python3", "python.exe", "py", "py.exe"}
+
+
+def _resolved_executable(value: str) -> Path | None:
+    """Resolve an executable exactly as the hook's configured environment does."""
+    text = _strip_quotes(value)
+    if not text:
+        return None
+    has_path = Path(text).is_absolute() or "/" in text or "\\" in text
+    if has_path:
+        return Path(text).expanduser().resolve(strict=False)
+    located = shutil.which(text)
+    return Path(located).resolve(strict=False) if located else None
+
+
+def _trusted_launcher(value: str) -> bool:
+    candidate = _resolved_executable(value)
+    if candidate is None:
+        return False
+    trusted: set[Path] = {Path(sys.executable).resolve(strict=False)}
+    for env_name in ("LATCH_PYTHON", "CLAUDE_KB_PYTHON"):
+        configured = (os.environ.get(env_name) or "").strip()
+        if configured:
+            trusted.add(Path(configured).expanduser().resolve(strict=False))
+    for name in sorted(_SHELL_LAUNCHERS | _PYTHON_LAUNCHERS):
+        located = shutil.which(name)
+        if located:
+            trusted.add(Path(located).resolve(strict=False))
+    return candidate in trusted
 
 
 def _operation_shell_argv(payload: dict[str, Any]) -> tuple[Path, list[str]] | None:
@@ -471,17 +658,16 @@ def _operation_shell_argv(payload: dict[str, Any]) -> tuple[Path, list[str]] | N
         name, _value = parts.pop(0).split("=", 1)
         if name not in _OPERATION_ENV_NAMES:
             return None
-    if parts and Path(parts[0]).name.lower() in {
-        "bash", "sh", "pwsh", "pwsh.exe", "powershell", "powershell.exe",
-    }:
+    if parts and (
+        Path(parts[0]).name.lower() in _SHELL_LAUNCHERS
+        or Path(parts[0]).name.lower() in _PYTHON_LAUNCHERS
+        or _trusted_launcher(parts[0])
+    ):
+        if not _trusted_launcher(parts[0]):
+            return None
         parts = parts[1:]
     if not parts:
         return None
-
-    if Path(parts[0]).name.lower() in {"python", "python3", "python.exe", "py"}:
-        parts = parts[1:]
-        if not parts:
-            return None
     script = Path(parts[0]).expanduser().resolve(strict=False)
     try:
         script.resolve(strict=False).relative_to(paths.KB_ROOT.resolve(strict=False))
@@ -548,13 +734,13 @@ def _operation_tool_matches(
     if name == "latch-pm" and phase == "apply":
         latch_tool = _latch_tool_identity(payload, _tool_name(payload))
         tool_input = _tool_input(payload)
-        return (
-            latch_tool in {"latchinsert", "kbinsert"}
-            and tool_input.get("kind") == "decision"
-            and tool_input.get("status", "staging") == "staging"
-            and isinstance(tool_input.get("title"), str) and bool(tool_input["title"].strip())
-            and isinstance(tool_input.get("body"), str) and bool(tool_input["body"].strip())
-        )
+        if latch_tool not in {"latchinsert", "kbinsert"}:
+            return False
+        try:
+            digest = pm_candidate_digest(tool_input)
+        except ValueError:
+            return False
+        return digest == operation.get("candidate_digest")
 
     parsed = _operation_shell_argv(payload)
     if parsed is None:
@@ -576,6 +762,7 @@ def _operation_tool_matches(
             return False
         expected = [
             "--source", "cursor", "--cursor-session-id", operation.get("session_id"),
+            "--format", "json",
         ]
         if phase == "apply":
             expected += ["--apply", "--yes"]
@@ -615,15 +802,8 @@ def _operation_tool_matches(
     return False
 
 
-def consume_operation_authorization(
-    project_path: str,
-    sid: str | None,
-    payload: dict[str, Any],
-) -> tuple[bool, str]:
-    """Consume one exact operation-specific receipt, atomically and once."""
-    if not sid:
-        return False, "Cursor session identity was unavailable"
-    path = state_path(project_path, sid)
+@contextmanager
+def _exclusive_state_lock(path: Path):
     lock = path.with_name(path.name + ".consume.lock")
     try:
         fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
@@ -633,41 +813,222 @@ def consume_operation_authorization(
         except OSError:
             stale = False
         if not stale:
-            return False, "operation receipt is already being consumed"
+            raise RuntimeError("operation receipt is already being consumed")
         try:
             lock.unlink()
             fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         except (FileExistsError, OSError):
-            return False, "operation receipt is already being consumed"
+            raise RuntimeError("operation receipt is already being consumed") from None
     try:
         os.close(fd)
-        state = read_state(project_path, sid)
-        if not state or state.get("session_id") != sid:
-            return False, "no current Cursor operation state"
-        receipt = state.get("operation_receipt")
-        if not isinstance(receipt, dict) or receipt.get("consumed"):
-            return False, "no unconsumed operation receipt for this prompt"
-        if receipt.get("prompt_hash") != state.get("prompt_hash"):
-            return False, "operation receipt belongs to another prompt"
-        if not _operation_tool_matches(receipt, payload, project_path):
-            return False, "tool or arguments do not match the authorized latch operation"
-        receipt["consumed"] = True
-        receipt["consumed_at"] = _now()
-        name, phase = receipt.get("name"), receipt.get("phase")
-        if name == "latch-seed" and phase == "preview":
-            state["pending_operation"] = {"name": name, "stage": "previewed", "age_turns": 0}
-        elif name == "unlatch" and phase == "inspect":
-            state["pending_operation"] = {"name": name, "stage": "inspected", "age_turns": 0}
-        elif phase in {"apply", "confirm"} or name not in {"latch-seed", "unlatch"}:
-            state["pending_operation"] = None
-        state["updated_at"] = _now()
-        _atomic_write(path, state)
-        return True, f"authorized one {name} {phase} operation"
+        yield
     finally:
         try:
             lock.unlink()
         except FileNotFoundError:
             pass
+
+
+def _coerce_json(value: Any) -> Any:
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except (TypeError, ValueError):
+            return value
+    return value
+
+
+def _has_failure_signal(value: Any, depth: int = 0) -> bool:
+    if depth > 8:
+        return True
+    value = _coerce_json(value)
+    if not isinstance(value, (dict, list)):
+        return False
+    if isinstance(value, list):
+        return any(_has_failure_signal(item, depth + 1) for item in value)
+    if value.get("is_error") is True or value.get("isError") is True:
+        return True
+    if value.get("success") is False:
+        return True
+    for key in ("exit_code", "exitCode", "code"):
+        if key in value:
+            try:
+                if int(value[key]) != 0:
+                    return True
+            except (TypeError, ValueError):
+                return True
+    if str(value.get("status", "")).lower() in {"error", "failed", "failure"}:
+        return True
+    if value.get("error") not in (None, False, "", {}):
+        return True
+    wrapper_keys = (
+        "tool_output", "tool_response", "result_json", "result",
+        "stdout", "stderr", "content",
+    )
+    return any(
+        _has_failure_signal(value[key], depth + 1)
+        for key in wrapper_keys if key in value
+    )
+
+
+def _find_seed_preview(value: Any, depth: int = 0) -> dict[str, Any] | None:
+    if depth > 8:
+        return None
+    value = _coerce_json(value)
+    if isinstance(value, dict):
+        if (
+            value.get("source") == "cursor"
+            and value.get("apply") is False
+            and isinstance(value.get("project"), str)
+            and isinstance(value.get("candidates"), list)
+        ):
+            return value
+        for child in value.values():
+            found = _find_seed_preview(child, depth + 1)
+            if found is not None:
+                return found
+    elif isinstance(value, list):
+        for child in value:
+            found = _find_seed_preview(child, depth + 1)
+            if found is not None:
+                return found
+    return None
+
+
+def _find_pm_preview(value: Any, depth: int = 0) -> dict[str, Any] | None:
+    if depth > 8:
+        return None
+    value = _coerce_json(value)
+    if isinstance(value, dict):
+        if (
+            value.get("ok") is True
+            and value.get("operation") == "latch-pm"
+            and value.get("phase") == "prepare"
+            and value.get("write_performed") is False
+            and isinstance(value.get("candidate_digest"), str)
+            and isinstance(value.get("candidate"), dict)
+        ):
+            return value
+        for child in value.values():
+            found = _find_pm_preview(child, depth + 1)
+            if found is not None:
+                return found
+    elif isinstance(value, list):
+        for child in value:
+            found = _find_pm_preview(child, depth + 1)
+            if found is not None:
+                return found
+    return None
+
+
+def record_operation_success(
+    project_path: str,
+    sid: str | None,
+    payload: dict[str, Any],
+    tool_response: Any,
+) -> tuple[bool, str] | None:
+    """Advance preview/prepare state only from an exact successful tool result."""
+    if not sid:
+        return None
+    path = state_path(project_path, sid)
+    try:
+        with _exclusive_state_lock(path):
+            state = read_state(project_path, sid)
+            if not state or state.get("session_id") != sid:
+                return False, "no current Cursor operation state"
+            if _has_failure_signal(payload) or _has_failure_signal(tool_response):
+                return False, "managed operation tool reported failure"
+
+            latch_tool = _latch_tool_identity(payload, _tool_name(payload))
+            pending = state.get("pending_operation")
+            if latch_tool in {"latchpmpreview", "kbpmpreview"}:
+                if not isinstance(pending, dict) or pending.get("name") != "latch-pm" \
+                        or pending.get("stage") != "prepare":
+                    return False, "no pending PM prepare operation"
+                try:
+                    candidate = canonical_pm_candidate(_tool_input(payload))
+                except ValueError as exc:
+                    return False, str(exc)
+                preview = _find_pm_preview(tool_response)
+                digest = pm_candidate_digest(candidate)
+                if preview is None:
+                    return False, "PM preview result was missing or malformed"
+                try:
+                    returned = canonical_pm_candidate(preview["candidate"])
+                except ValueError:
+                    return False, "PM preview returned an invalid candidate"
+                if returned != candidate or preview.get("candidate_digest") != digest:
+                    return False, "PM preview result did not match the requested candidate"
+                state["pending_operation"] = {
+                    "name": "latch-pm", "stage": "prepared",
+                    "candidate_digest": digest, "age_turns": 0,
+                }
+                state["updated_at"] = _now()
+                _atomic_write(path, state)
+                return True, "verified PM preview and bound candidate digest"
+
+            receipt = state.get("operation_receipt")
+            if not isinstance(receipt, dict) or not receipt.get("consumed"):
+                return None
+            if receipt.get("name") != "latch-seed" or receipt.get("phase") != "preview":
+                return None
+            if receipt.get("prompt_hash") != state.get("prompt_hash"):
+                return False, "seed preview receipt belongs to another prompt"
+            if not _operation_tool_matches(receipt, payload, project_path):
+                return False, "seed preview tool or arguments did not match the receipt"
+            preview = _find_seed_preview(tool_response)
+            if preview is None or not _same_project(preview.get("project"), project_path):
+                return False, "seed preview result was missing, malformed, or for another project"
+            if not isinstance(pending, dict) or pending.get("name") != "latch-seed" \
+                    or pending.get("stage") != "preview":
+                return False, "no pending seed preview operation"
+            preview_digest = hashlib.sha256(json.dumps(
+                preview, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+            ).encode("utf-8")).hexdigest()
+            state["pending_operation"] = {
+                "name": "latch-seed", "stage": "previewed",
+                "preview_digest": preview_digest, "age_turns": 0,
+            }
+            state["updated_at"] = _now()
+            _atomic_write(path, state)
+            return True, "verified successful seed preview"
+    except RuntimeError as exc:
+        return False, str(exc)
+
+
+def consume_operation_authorization(
+    project_path: str,
+    sid: str | None,
+    payload: dict[str, Any],
+) -> tuple[bool, str]:
+    """Consume one exact operation-specific receipt, atomically and once."""
+    if not sid:
+        return False, "Cursor session identity was unavailable"
+    try:
+        path = state_path(project_path, sid)
+        with _exclusive_state_lock(path):
+            state = read_state(project_path, sid)
+            if not state or state.get("session_id") != sid:
+                return False, "no current Cursor operation state"
+            receipt = state.get("operation_receipt")
+            if not isinstance(receipt, dict) or receipt.get("consumed"):
+                return False, "no unconsumed operation receipt for this prompt"
+            if receipt.get("prompt_hash") != state.get("prompt_hash"):
+                return False, "operation receipt belongs to another prompt"
+            if not _operation_tool_matches(receipt, payload, project_path):
+                return False, "tool or arguments do not match the authorized latch operation"
+            receipt["consumed"] = True
+            receipt["consumed_at"] = _now()
+            name, phase = receipt.get("name"), receipt.get("phase")
+            if name == "unlatch" and phase == "inspect":
+                state["pending_operation"] = {"name": name, "stage": "inspected", "age_turns": 0}
+            elif phase in {"apply", "confirm"} or name not in {"latch-seed", "unlatch"}:
+                state["pending_operation"] = None
+            state["updated_at"] = _now()
+            _atomic_write(path, state)
+            return True, f"authorized one {name} {phase} operation"
+    except RuntimeError as exc:
+        return False, str(exc)
 
 
 def mutation_capability(payload: dict[str, Any]) -> tuple[bool, str]:

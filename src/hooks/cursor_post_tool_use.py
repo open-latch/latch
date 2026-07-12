@@ -82,16 +82,33 @@ def record_gate_receipt(payload: dict) -> tuple[bool, str] | None:
     )
 
 
+def record_operation_success(payload: dict) -> tuple[bool, str] | None:
+    if not isinstance(payload, dict):
+        return None
+    cwd = cursor_gate_state.project_cwd(payload)
+    sid = cursor_gate_state.session_id(payload, cwd)
+    return cursor_gate_state.record_operation_success(
+        cwd, sid, payload, cursor_tool_response(payload),
+    )
+
+
 def main() -> int:
     try:
         raw = sys.stdin.read() if not sys.stdin.isatty() else ""
         payload = json.loads(raw) if raw.strip() else {}
         msg = cursor_surface_message(payload)
         gate_record = record_gate_receipt(payload)
+        operation_record = record_operation_success(payload)
         if gate_record is not None and not gate_record[0]:
             mismatch = (
                 "Latch gate receipt was not armed: " + gate_record[1] + ". "
                 "Run latch_gate again with the current user request verbatim."
+            )
+            msg = f"{msg}\n\n{mismatch}" if msg else mismatch
+        if operation_record is not None and not operation_record[0]:
+            mismatch = (
+                "Latch managed-operation receipt was not advanced: "
+                + operation_record[1] + ". Rerun the preview before applying."
             )
             msg = f"{msg}\n\n{mismatch}" if msg else mismatch
         if msg:
