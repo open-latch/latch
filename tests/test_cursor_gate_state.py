@@ -471,6 +471,13 @@ def test_managed_operation_intent_never_falls_through_to_general_gate():
         assert denied["permission"] == "deny"
         assert "general latch_gate receipt cannot override" in denied["user_message"]
 
+        corrupt = cgs.read_state(root, sid)
+        assert corrupt is not None
+        corrupt["operation_intent"] = {"name": "unknown-operation"}
+        cgs._atomic_write(cgs.state_path(root, sid), corrupt)
+        assert cgs.managed_operation_intended(root, sid)[0]
+        assert cpre.decision(seed_apply)["permission"] == "deny"
+
         candidate = {
             "kind": "decision", "status": "staging",
             "title": "Approved", "body": "Approved body", "links": [],

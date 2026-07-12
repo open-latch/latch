@@ -493,14 +493,16 @@ def managed_operation_intended(
     if not state or not sid or state.get("session_id") != sid:
         return False, "no current Cursor operation state"
     intent = state.get("operation_intent")
-    if not isinstance(intent, dict):
+    if intent is None:
         return False, "current prompt is not a managed latch operation"
+    if not isinstance(intent, dict):
+        return True, "managed operation intent is malformed"
     if intent.get("session_id") != sid:
-        return False, "managed operation session mismatch"
+        return True, "managed operation session mismatch"
     if intent.get("prompt_hash") != state.get("prompt_hash"):
-        return False, "managed operation intent belongs to another prompt"
+        return True, "managed operation intent belongs to another prompt"
     if intent.get("name") not in _OPERATION_NAMES:
-        return False, "managed operation identity is invalid"
+        return True, "managed operation identity is invalid"
     return True, f"managed operation {intent.get('name')} {intent.get('phase')}"
 
 
