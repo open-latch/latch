@@ -54,6 +54,44 @@ jobs:
           tests/test_cursor_plugin.py
           tests/test_cursor_session.py
 
+  proof-packet-windows:
+    name: proof-packet-contract (windows-latest)
+    runs-on: windows-latest
+    steps:
+      - name: Check out proof history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Create a standard CRLF checkout
+        shell: pwsh
+        run: |
+          $target = Join-Path $env:RUNNER_TEMP "latch-proof-crlf"
+          git clone --no-local --no-checkout . $target
+          git -C $target config core.autocrlf true
+          git -C $target checkout --detach $env:GITHUB_SHA
+          $status = git -C $target status --porcelain=v1 --untracked-files=all
+          if ($LASTEXITCODE -ne 0 -or $status) {
+            throw "CRLF checkout is not clean: $status"
+          }
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements-ci.lock
+
+      - name: Install proof test dependencies
+        run: python -m pip install --require-hashes -r requirements-ci.lock
+
+      - name: Test proof packet through PowerShell
+        shell: pwsh
+        working-directory: ${{ runner.temp }}/latch-proof-crlf
+        run: |
+          python -m pytest -q tests/test_proof_packet.py
+          & .\bin\latch_proof_packet.ps1 --check
+
   cursor-cumulative-full-suite:
     name: cursor-cumulative-full-suite
     runs-on: ubuntu-latest
@@ -61,6 +99,10 @@ jobs:
     steps:
       - name: Check out cumulative PR head
         uses: actions/checkout@v4
+        with:
+          # Proof receipts bind to the tooling commit immediately before the
+          # generated-artifact commit, so the cumulative check needs history.
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5

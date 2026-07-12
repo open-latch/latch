@@ -555,6 +555,15 @@ bash bin/latch_seed_report_eval.sh
 See [benchmarks/README.md](./benchmarks/README.md) for fixture and JSON report
 details.
 
+For a two-minute external summary with an observed live gate receipt, sanitized
+eval results, baseline boundaries, and exact reproduction commands, see the
+[V1 public proof packet](./proof/README.md).
+
+Proof verification checks the tooling commit immediately before the generated
+artifacts. A GitHub merge ref adds another history level, so in a depth-1 clone
+run `git fetch --deepen=2` before `bash bin/latch_proof_packet.sh --check`.
+Repeat if the receipt source is still unavailable, or run `git fetch --unshallow`.
+
 ## License And Public Boundary
 
 The source code in this repository is licensed under the Apache License,
