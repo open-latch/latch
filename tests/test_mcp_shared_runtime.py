@@ -41,6 +41,7 @@ class McpClient:
         proxy_heartbeat: float | None = None,
         project_cwd: Path | None = None,
         env_overrides: dict[str, str] | None = None,
+        server_path: Path | None = None,
     ):
         env = os.environ.copy()
         env.update(
@@ -64,7 +65,7 @@ class McpClient:
         if env_overrides:
             env.update(env_overrides)
         self.process = subprocess.Popen(
-            [sys.executable, str(SERVER)],
+            [sys.executable, str(server_path or SERVER)],
             cwd=str(project_cwd or ROOT),
             env=env,
             stdin=subprocess.PIPE,
@@ -395,6 +396,99 @@ def test_owner_crash_restarts_on_next_call_without_replaying_inflight_work() -> 
         shutil.rmtree(kb_dir, ignore_errors=True)
 
 
+def test_retained_proxy_recovers_after_in_place_compatible_upgrade() -> None:
+    kb_dir = _temp_vault()
+    install = Path(tempfile.mkdtemp(prefix="latch-upgrade-install-"))
+    install_src = install / "src"
+    client: McpClient | None = None
+    try:
+        shutil.copytree(
+            ROOT / "src",
+            install_src,
+            ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+        )
+        env = os.environ.copy()
+        env.update({
+            "LATCH_HOME": str(ROOT),
+            "PYTHONPATH": str(install_src),
+            "PYTHONDONTWRITEBYTECODE": "1",
+        })
+
+        def runtime_key() -> str:
+            return subprocess.check_output(
+                [sys.executable, "-c", "import mcp_broker; print(mcp_broker.RUNTIME_KEY)"],
+                env=env,
+                text=True,
+                timeout=10.0,
+            ).strip()
+
+        current_key = runtime_key()
+        runtime_module = install_src / "mcp_runtime.py"
+        stat = runtime_module.stat()
+        os.utime(runtime_module, (stat.st_atime + 60, stat.st_mtime + 60))
+        _assert(runtime_key() == current_key, "runtime key changed from mtime only")
+
+        # Simulate the retained pre-handshake proxy reviewed at d9ef85b: it
+        # passes its runtime key but not an explicit protocol version.
+        broker_path = install_src / "mcp_broker.py"
+        broker_source = broker_path.read_text(encoding="utf-8")
+        protocol_line = '    env["LATCH_MCP_PROTOCOL_VERSION"] = str(PROTOCOL_VERSION)\n'
+        _assert(protocol_line in broker_source, "protocol handshake line moved")
+        broker_path.write_text(broker_source.replace(protocol_line, ""), encoding="utf-8")
+        old_key = runtime_key()
+        _assert(old_key != current_key, "test install did not produce an old runtime key")
+
+        client = McpClient(
+            kb_dir,
+            "in-place-upgrade-session",
+            server_path=install_src / "mcp_server.py",
+            env_overrides={
+                "LATCH_HOME": str(ROOT),
+                "PYTHONPATH": str(install_src),
+                "PYTHONDONTWRITEBYTECODE": "1",
+                "LATCH_MCP_DAEMON_START_TIMEOUT_SEC": "1",
+            },
+        )
+        before = client.status()
+        old_pid = before["process_pid"]
+        _assert(before["daemon"]["runtime_key"] == old_key, str(before))
+
+        # Replace the same live install path, then kill the old owner. The
+        # retained proxy still has old_key cached in memory and must be aliased
+        # to one owner started from the updated source.
+        shutil.copy2(ROOT / "src" / "mcp_broker.py", broker_path)
+        _assert(runtime_key() == current_key, "updated install key is not content-stable")
+        os.kill(old_pid, signal.SIGTERM)
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            try:
+                os.kill(old_pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.05)
+
+        after = client.status()
+        _assert(after["process_pid"] != old_pid, str(after))
+        _assert(after["daemon"]["runtime_key"] == current_key, str(after))
+        _assert(after["connection"]["runtime_key"] == old_key, str(after))
+        discoveries = list(
+            (kb_dir / "runtime" / "mcp-runtimes").glob("*/mcp-daemon.json")
+        )
+        owner_pids = {
+            int(json.loads(path.read_text(encoding="utf-8"))["pid"])
+            for path in discoveries
+        }
+        _assert(owner_pids == {after["process_pid"]}, str(owner_pids))
+        _assert(client.process.poll() is None, "retained proxy exited after upgrade")
+        print("PASS retained_proxy_recovers_after_in_place_compatible_upgrade")
+    finally:
+        if client is not None:
+            client.close()
+        _stop_daemon(kb_dir)
+        shutil.rmtree(kb_dir, ignore_errors=True)
+        shutil.rmtree(install, ignore_errors=True)
+
+
 def test_committed_mutation_with_lost_response_is_not_replayed_or_called_retryable() -> None:
     kb_dir = _temp_vault()
     bootstrap: McpClient | None = None
@@ -616,6 +710,7 @@ def test_over_cap_idle_proxy_retires_itself_without_killing_peers() -> None:
 if __name__ == "__main__":
     test_parallel_clients_share_one_heavy_owner_and_keep_context_isolated()
     test_owner_crash_restarts_on_next_call_without_replaying_inflight_work()
+    test_retained_proxy_recovers_after_in_place_compatible_upgrade()
     test_committed_mutation_with_lost_response_is_not_replayed_or_called_retryable()
     test_idle_owner_is_reclaimed_and_lazily_recreated()
     test_prompt_embed_activity_keeps_owner_warm()

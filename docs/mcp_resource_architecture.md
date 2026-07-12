@@ -1,8 +1,9 @@
 # Bounded latch MCP runtime — issue 1465
 
-Status: public draft PR #21 on `mcp-resource-lifecycle`; the merge-blocker fix
-series has green focused receipts on macOS, Ubuntu, and Windows. The PR remains
-intentionally draft pending independent merge-trust review and real Codex,
+Status: public draft PR #21 on `mcp-resource-lifecycle`. Independent review of
+head `7bcb86d` found retained-proxy upgrade recovery and CI-scope blockers. The
+remediation passes local verification; the PR remains intentionally draft
+pending new three-OS receipts, independent merge-trust review, and real Codex,
 Claude Code, and Cursor lifecycle dogfood.
 Measurements were collected on macOS 13.5, Apple Silicon, on 2026-07-10.
 
@@ -15,7 +16,7 @@ daemon.
 
 This gives latch two resource bounds:
 
-1. Heavyweight state is constant per vault/runtime key: one FastMCP registry,
+1. Heavyweight state is constant per vault/current runtime key: one FastMCP registry,
    one ONNX `InferenceSession`, one tokenizer, and one hook embed listener.
 2. Lightweight proxies use an LRU lease pool. The default cap is 32. A proxy
    retires itself only when the pool is over cap, it has been idle for five
@@ -122,17 +123,23 @@ sections.
   ONNX and enters `mcp_proxy.py`. Existing installer/config paths do not change.
 - The first proxy acquires an atomic start lock and launches `mcp_daemon.py`.
   Concurrent proxies wait for the same owner.
-- Before heavyweight imports, the detached daemon acquires an OS-released
-  process-lifetime fence for its vault/runtime key. Broker death or a slow-start
+- Before ownership fencing or heavyweight imports, the detached daemon checks
+  the proxy's protocol compatibility. An incompatible retained proxy receives
+  an actionable fresh-task failure. A compatible daemon then acquires an OS-released
+  process-lifetime fence for its vault/current runtime key. Broker death or a slow-start
   timeout can launch a contender, but the contender exits before model loading;
   only the fenced owner may warm and publish discovery.
 - Discovery and election locks live in a runtime-keyed registry beneath the
   pinned vault. Files are atomically replaced and mode 0600. The daemon binds
   only `127.0.0.1`; connections authenticate with a 256-bit random token.
-- A runtime key fingerprints the internal transport version, relevant source
-  files, model, and tokenizer. Upgrades are blue/green: new connections elect a
-  matching owner; old connections finish against the old owner, which later
-  leaves on idle TTL. Cleanup removes discovery only when PID and token still
+- A runtime key content-fingerprints the internal transport version, relevant
+  source and tokenizer/config files, plus model size. It deliberately excludes
+  mtimes, so identical trees have identical keys. The 90 MB model is not hashed
+  by every proxy; a same-size incompatible model replacement must bump the
+  protocol version. During an in-place compatible upgrade, retained old-key
+  proxies receive an authenticated discovery alias to the single current owner.
+  They do not create one heavyweight compatibility owner per historical key.
+  Cleanup scans aliases and removes only records whose PID and token still
   match, so an old owner cannot erase a newer owner's record.
 - POSIX startup double-forks before heavyweight imports and the proxy waits for
   the bootstrap child. This prevents reclaimed daemons becoming zombies under
@@ -165,6 +172,10 @@ visible rather than silently misattributed.
   a task that is still being used is not mistaken for an idle owner.
 - Proxies remain alive after daemon reclamation. On the next host message, they
   elect/reconnect to an owner and replay only MCP initialization.
+- After an in-place compatible upgrade, a retained proxy's old key is aliased
+  to the current owner and its initialization is replayed there. A protocol-
+  incompatible upgrade fails before fencing/heavy imports and tells the user to
+  start a fresh task; it never degrades into a generic readiness timeout.
 - The prompt hook requests a single-flight background wake within its 250 ms
   wall. If the owner is not ready, it emits an explicit "not similarity-scored"
   receipt instead of falsely reporting a below-floor result.
@@ -174,9 +185,14 @@ visible rather than silently misattributed.
 - Proxy leases are individual files scoped to the runtime key, not a contended
   shared registry. The cap is therefore 32 per vault/runtime key; blue/green
   versions do not retire one another's contexts. Every proxy updates only its
-  own lease and retires only itself. Live PIDs with expired heartbeats are
-  ignored for capacity but never unlinked by a racing observer; the owner can
-  atomically renew its lease. Peers are never signaled or killed. Each lease
+  own lease and retires only itself. Lease identity is deliberately PID-only to
+  avoid a second OS-specific process-inspection subsystem in every lightweight
+  proxy. PID reuse can therefore make a dead row look live until its heartbeat
+  crosses the five-minute stale threshold. That is the accepted bound: after
+  five minutes the row is excluded from capacity but preserved, because an
+  observer cannot prove whether the original proxy was merely suspended. The
+  stale diagnostic can persist until that PID exits. Peers are never signaled
+  or killed. Each lease
   also persists when that proxy first observed over-cap pressure, so runtime
   status can report the current sustained duration without introducing a
   shared pressure registry.
@@ -196,7 +212,8 @@ visible rather than silently misattributed.
 - model-loaded state and embed-listener owner PID/port;
 - approximate peak RSS without exposing authentication tokens;
 - a bounded 24-hour lifecycle summary covering starts, idle exits, degraded
-  prompts, stale/over-cap leases, retirements, reconnects, and failures;
+  prompts, stale/over-cap lease state, retirements, reconnects, incompatible
+  upgrades, and failures;
 - daemon start reason, cold-start duration, and peak concurrent connections;
   and
 - both completed retirement duration and the current over-cap duration. The
@@ -266,6 +283,15 @@ designed to absorb.
 
 ## Verification
 
+Latest blocker-remediation receipts: 50 focused lifecycle/doctor/Codex/embed
+tests and 916 hermetic tests passed locally; Ruff, public-release hygiene, and
+`git diff --check` passed. Warm prompt-hook wall was 106.5–110.0 ms. Fourteen
+clients used one owner at 0.94 s readiness and 7.64 ms embed p95; 32 used one
+owner at 1.56 s and 7.44 ms p95. An eight-client comparison measured 6.53 ms
+shared versus 5.58 ms legacy p95. Content fingerprinting increased isolated
+lightweight broker import median from 21.0 ms at `7bcb86d` to 27.2 ms, without
+changing per-request work or crossing startup/hook budgets.
+
 The production-representative tests cover:
 
 - concurrent clients sharing exactly one model owner;
@@ -276,7 +302,9 @@ The production-representative tests cover:
 - v1 → v2 → v1 blue/green discovery isolation;
 - a real post-commit/lost-response mutation with no replay or retry advice;
 - prompt-hook wake and truthful bounded degradation after idle exit;
-- live-PID stale-heartbeat lease cleanup;
+- stale-heartbeat capacity exclusion with an explicit five-minute PID-reuse bound;
+- retained-proxy recovery across an in-place compatible source upgrade;
+- incompatible-protocol rejection before ownership fencing/heavy imports;
 - configured-cap-derived 75% doctor warnings and sustained pressure duration;
 - startup reason/cold duration plus daemon peak-connection accounting;
 - LRU over-cap proxy self-retirement without killing peers; and
@@ -326,10 +354,11 @@ set `LATCH_MCP_ALLOW_LEGACY_FALLBACK=1` for an explicit temporary fallback;
 
 ## Remaining boundary
 
-One daemon is keyed per pinned vault and runtime version. Explicitly running
-many named vaults can therefore load several models. That is a deliberate
-isolation boundary for this prototype. If real multi-vault use makes this
-material, the next step is a host-wide pure-embedding service keyed by model
-fingerprint with a bounded LRU model cache; it should not be added before that
-usage exists, because the current single-vault architecture already removes the
-observed session/subagent multiplier.
+One heavyweight owner is keyed per pinned vault and current runtime fingerprint;
+compatible retained keys are discovery aliases, not additional model owners.
+Explicitly running many named vaults can still load several models. That is a
+deliberate isolation boundary. If real multi-vault use makes this material, the
+next step is a host-wide pure-embedding service keyed by model fingerprint with
+a bounded LRU model cache; it should not be added before that usage exists,
+because the current single-vault architecture already removes the observed
+session/subagent multiplier.

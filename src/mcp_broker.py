@@ -38,6 +38,7 @@ DEFAULT_PROXY_CAP = 32
 DEFAULT_PROXY_RETIRE_IDLE_S = 5 * 60.0
 DEFAULT_PROXY_HEARTBEAT_S = 30.0
 DEFAULT_PROXY_STALE_S = 5 * 60.0
+START_FAILURE_MAX_AGE_S = 60.0
 START_REASONS = frozenset({
     "proxy_start",
     "proxy_connect",
@@ -56,31 +57,44 @@ def _utc_now() -> str:
 
 
 def _runtime_key() -> str:
-    """Fingerprint protocol-sensitive code and the vendored model identity.
+    """Content-fingerprint protocol-sensitive code and model compatibility.
 
     A changed key causes a blue/green owner transition: new proxies start a new
     daemon while already-connected proxies can finish against the old one.  The
     old owner then leaves on its idle timeout.  This avoids killing unrelated
-    sessions during an upgrade.
+    sessions during an upgrade.  Source and tokenizer contents are small enough
+    to hash on every lightweight process start.  The 90 MB model is represented
+    by its size plus the versioned tokenizer/config contents so proxy startup
+    does not read gigabytes when many host contexts start together; replacing a
+    model with a same-size incompatible artifact requires a protocol bump.
     """
     root = Path(__file__).resolve().parent
-    files = (
+    content_files = (
         root / "mcp_broker.py",
         root / "mcp_proxy.py",
         root / "mcp_daemon.py",
         root / "mcp_server.py",
         root / "mcp_runtime.py",
-        paths.KB_ROOT / "vendor" / "model.onnx",
+        paths.KB_ROOT / "vendor" / "config.json",
         paths.KB_ROOT / "vendor" / "tokenizer.json",
+        paths.KB_ROOT / "vendor" / "tokenizer_config.json",
+        paths.KB_ROOT / "vendor" / "vocab.txt",
     )
     h = hashlib.sha256(f"protocol={PROTOCOL_VERSION}".encode())
-    for path in files:
+    for path in content_files:
+        h.update(f"\0{path.name}\0".encode())
         try:
-            st = path.stat()
-            identity = f"{path.name}:{st.st_size}:{st.st_mtime_ns}"
+            with path.open("rb") as source:
+                while chunk := source.read(1024 * 1024):
+                    h.update(chunk)
         except OSError:
-            identity = f"{path.name}:missing"
-        h.update(identity.encode())
+            h.update(b"missing")
+    model = paths.KB_ROOT / "vendor" / "model.onnx"
+    try:
+        model_size = model.stat().st_size
+    except OSError:
+        model_size = -1
+    h.update(f"\0model.onnx:size={model_size}".encode())
     return h.hexdigest()[:20]
 
 
@@ -99,6 +113,11 @@ def runtime_key_dir(runtime_key: str | None = None) -> Path:
     each other and elect two owners for the same runtime.
     """
     key = runtime_key or RUNTIME_KEY
+    if not key or len(key) > 64 or any(
+        character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"
+        for character in key
+    ):
+        raise ValueError("invalid MCP runtime key")
     path = runtime_dir() / "runtime" / RUNTIME_REGISTRY_DIR / key
     path.mkdir(parents=True, exist_ok=True)
     try:
@@ -178,7 +197,9 @@ def remove_proxy_lease(connection_id: str, *, reason: str = "closed") -> None:
         pass
 
 
-def proxy_lease_state() -> dict[str, Any]:
+def proxy_lease_state(
+    *, policy: dict[str, int | float] | None = None
+) -> dict[str, Any]:
     """Return live capacity rows plus non-destructive stale diagnostics.
 
     A live process may renew its lease after this scan reads an old heartbeat.
@@ -189,7 +210,8 @@ def proxy_lease_state() -> dict[str, Any]:
     rows: list[dict[str, Any]] = []
     stale_count = 0
     max_stale_age_s = 0.0
-    stale_s = float(proxy_policy()["stale_s"])
+    policy = proxy_policy() if policy is None else policy
+    stale_s = float(policy["stale_s"])
     now = time.time()
     for path in proxy_lease_dir().glob("*.json"):
         try:
@@ -206,7 +228,12 @@ def proxy_lease_state() -> dict[str, Any]:
                 pass
             continue
         heartbeat = payload.get("heartbeat_epoch")
-        if not isinstance(heartbeat, (int, float)) or now - float(heartbeat) > stale_s:
+        heartbeat_age = (
+            max(0.0, now - float(heartbeat))
+            if isinstance(heartbeat, (int, float))
+            else float("inf")
+        )
+        if heartbeat_age > stale_s:
             stale_count += 1
             observed = heartbeat if isinstance(heartbeat, (int, float)) else payload.get(
                 "started_epoch"
@@ -261,7 +288,10 @@ def emit_lifecycle(event: str, **fields: Any) -> None:
 
 
 def lifecycle_summary(
-    *, hours: int = 24, lease_state: dict[str, Any] | None = None
+    *,
+    hours: int = 24,
+    lease_state: dict[str, Any] | None = None,
+    policy: dict[str, int | float] | None = None,
 ) -> dict[str, Any]:
     """Return bounded operational signals for status/doctor surfaces."""
     cutoff = datetime.now(timezone.utc) - timedelta(hours=max(1, hours))
@@ -275,7 +305,7 @@ def lifecycle_summary(
     latest_daemon_start_ts: datetime | None = None
     warning_events = {
         "daemon_failed", "daemon_start_failed", "daemon_owner_conflict",
-        "proxy_lease_stale",
+        "daemon_upgrade_incompatible",
         "proxy_over_cap", "proxy_retired", "legacy_fallback",
         "prompt_retrieval_degraded", "daemon_reconnect_failed",
         "daemon_disconnect_unknown_outcome",
@@ -331,9 +361,12 @@ def lifecycle_summary(
                     if row.get(key) is not None
                 })
     warnings.sort(key=lambda row: str(row.get("ts") or ""))
-    lease_state = proxy_lease_state() if lease_state is None else lease_state
+    policy = proxy_policy() if policy is None else policy
+    lease_state = (
+        proxy_lease_state(policy=policy) if lease_state is None else lease_state
+    )
     inventory = list(lease_state.get("live") or [])
-    cap = int(proxy_policy()["cap"])
+    cap = int(policy["cap"])
     proxy_high_water = max(proxy_high_water, len(inventory))
     currently_over_cap = cap > 0 and len(inventory) > cap
     current_over_cap_duration_s = 0.0
@@ -388,16 +421,30 @@ def _atomic_json(path: Path, payload: dict[str, Any], *, mode: int = 0o600) -> N
             pass
 
 
-def read_discovery() -> dict[str, Any] | None:
+def read_discovery(runtime_key: str | None = None) -> dict[str, Any] | None:
+    key = runtime_key or RUNTIME_KEY
     try:
-        payload = json.loads(discovery_path().read_text(encoding="utf-8"))
+        payload = json.loads(discovery_path(key).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
     if not isinstance(payload, dict):
         return None
-    if payload.get("protocol") != PROTOCOL_VERSION:
+    if payload.get("runtime_key") != key:
         return None
-    if payload.get("runtime_key") != RUNTIME_KEY:
+    error = payload.get("error")
+    if isinstance(error, str):
+        try:
+            age = time.time() - float(payload["created_epoch"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        if 0 <= age <= START_FAILURE_MAX_AGE_S:
+            return payload
+        try:
+            discovery_path(key).unlink()
+        except OSError:
+            pass
+        return None
+    if payload.get("protocol") != PROTOCOL_VERSION:
         return None
     if payload.get("host") != "127.0.0.1":
         return None
@@ -433,9 +480,9 @@ def _pid_alive(pid: int) -> bool:
             close_handle.argtypes = [wintypes.HANDLE]
             close_handle.restype = wintypes.BOOL
 
-            handle = open_process(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+            handle = open_process(0x1000, False, pid)
             if not handle:
-                return ctypes.get_last_error() == 5  # ACCESS_DENIED means it exists.
+                return ctypes.get_last_error() == 5
             try:
                 exit_code = wintypes.DWORD()
                 return bool(get_exit_code(handle, ctypes.byref(exit_code))) and exit_code.value == 259
@@ -472,7 +519,7 @@ def probe_discovery(
                 sock,
                 {
                     "token": payload["token"],
-                    "runtime_key": RUNTIME_KEY,
+                    "runtime_key": payload["runtime_key"],
                     "proxy_pid": os.getpid(),
                 },
                 op="probe",
@@ -482,6 +529,24 @@ def probe_discovery(
             return bool(response.get("ok") and response.get("pid") == payload["pid"])
     except (OSError, ValueError, KeyError, AttributeError, TypeError):
         return False
+
+
+def publish_start_failure(runtime_key: str, message: str) -> Path:
+    """Publish a short-lived actionable startup failure for a retained proxy."""
+    path = discovery_path(runtime_key)
+    _atomic_json(path, {
+        "runtime_key": runtime_key,
+        "created_epoch": time.time(),
+        "error": message,
+    })
+    return path
+
+
+def _checked_discovery() -> dict[str, Any] | None:
+    payload = read_discovery()
+    if payload is not None and isinstance(payload.get("error"), str):
+        raise BrokerError(payload["error"])
+    return payload
 
 
 def acquire_owner_fence() -> BinaryIO | None:
@@ -578,6 +643,7 @@ def _spawn_daemon(project_cwd: str, *, start_reason: str) -> int:
     env["LATCH_KB_DIR"] = str(runtime_dir())
     env["LATCH_MCP_DAEMON_PROCESS"] = "1"
     env["LATCH_MCP_RUNTIME_KEY"] = RUNTIME_KEY
+    env["LATCH_MCP_PROTOCOL_VERSION"] = str(PROTOCOL_VERSION)
     env["LATCH_MCP_INITIAL_PROJECT_CWD"] = project_cwd
     env["LATCH_MCP_START_REASON"] = _start_reason(start_reason)
     env["LATCH_MCP_START_REQUEST_EPOCH"] = str(time.time())
@@ -619,7 +685,7 @@ def _spawn_daemon(project_cwd: str, *, start_reason: str) -> int:
 def ensure_daemon(
     project_cwd: str, *, start_reason: str = "proxy_connect"
 ) -> dict[str, Any]:
-    payload = read_discovery()
+    payload = _checked_discovery()
     if payload is not None and probe_discovery(payload):
         return payload
 
@@ -627,11 +693,11 @@ def ensure_daemon(
     acquired = _acquire_start_lock()
     if acquired:
         try:
-            payload = read_discovery()
+            payload = _checked_discovery()
             if payload is None or not probe_discovery(payload):
                 _spawn_daemon(project_cwd, start_reason=start_reason)
             while time.monotonic() < deadline:
-                payload = read_discovery()
+                payload = _checked_discovery()
                 if payload is not None and probe_discovery(payload):
                     return payload
                 time.sleep(0.05)
@@ -639,7 +705,7 @@ def ensure_daemon(
             _release_start_lock()
     else:
         while time.monotonic() < deadline:
-            payload = read_discovery()
+            payload = _checked_discovery()
             if payload is not None and probe_discovery(payload):
                 return payload
             time.sleep(0.05)
@@ -717,33 +783,50 @@ def connect_mcp(
     raise BrokerError(f"could not connect to shared latch MCP daemon: {last_error}")
 
 
-def publish_discovery(*, port: int, token: str, pid: int, started_at: str) -> Path:
+def publish_discovery(
+    *,
+    port: int,
+    token: str,
+    pid: int,
+    started_at: str,
+    runtime_key: str | None = None,
+    owner_runtime_key: str | None = None,
+) -> Path:
+    key = runtime_key or RUNTIME_KEY
     payload = {
         "protocol": PROTOCOL_VERSION,
-        "runtime_key": RUNTIME_KEY,
+        "runtime_key": key,
+        "owner_runtime_key": owner_runtime_key or RUNTIME_KEY,
         "host": "127.0.0.1",
         "port": int(port),
         "token": token,
         "pid": int(pid),
         "started_at": started_at,
     }
-    path = discovery_path()
+    path = discovery_path(key)
     _atomic_json(path, payload)
     return path
 
 
-def remove_discovery_if_owner(*, pid: int, token: str) -> None:
+def remove_discovery_aliases_if_owner(*, pid: int, token: str) -> None:
+    """Remove every runtime-key alias that still points to this exact owner."""
+    registry = runtime_dir() / "runtime" / RUNTIME_REGISTRY_DIR
     try:
-        payload = json.loads(discovery_path().read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        paths_to_check = list(registry.glob(f"*/{DISCOVERY_FILE}"))
+    except OSError:
         return
-    if payload.get("pid") == pid and secrets.compare_digest(
-        str(payload.get("token") or ""), token
-    ):
+    for path in paths_to_check:
         try:
-            discovery_path().unlink()
-        except OSError:
-            pass
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if payload.get("pid") == pid and secrets.compare_digest(
+            str(payload.get("token") or ""), token
+        ):
+            try:
+                path.unlink()
+            except OSError:
+                pass
 
 
 def remove_embed_discovery_if_owner(*, pid: int, token: str) -> None:

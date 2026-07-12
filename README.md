@@ -483,7 +483,9 @@ summary into the KB.
 Within each pinned vault and compatible runtime fingerprint, latch shares its
 heavyweight local MCP/model runtime across tasks and subagents instead of
 loading a separate embedding model in every stdio process. Separate named
-vaults or blue/green runtime versions intentionally retain separate owners. Ask
+vaults retain separate owners. During an in-place compatible upgrade, retained
+old-key proxies are authenticated aliases to the single current owner; an
+incompatible protocol change fails visibly and requires a fresh task. Ask
 the agent to call `latch_runtime_status` when diagnosing resource use; it
 reports the shared owner, active connections, proxy lease bound, attribution
 source, model-listener PID, startup/cold-start data, peak connections, and

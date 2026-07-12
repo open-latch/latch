@@ -636,10 +636,12 @@ def check_mcp_runtime_lifecycle() -> tuple[str, str, str]:
         import mcp_broker
 
         policy = mcp_broker.proxy_policy()
-        lease_state = mcp_broker.proxy_lease_state()
+        lease_state = mcp_broker.proxy_lease_state(policy=policy)
         inventory = list(lease_state["live"])
         live = len(inventory)
-        summary = mcp_broker.lifecycle_summary(hours=24, lease_state=lease_state)
+        summary = mcp_broker.lifecycle_summary(
+            hours=24, lease_state=lease_state, policy=policy
+        )
         discovery = mcp_broker.read_discovery()
         discovery_live = (
             discovery is not None
@@ -677,7 +679,7 @@ def check_mcp_runtime_lifecycle() -> tuple[str, str, str]:
             f"{event}={count}" for event, count in counts.items()
             if event in {
                 "daemon_failed", "daemon_start_failed", "daemon_owner_conflict",
-                "proxy_lease_stale",
+                "daemon_upgrade_incompatible",
                 "proxy_over_cap", "proxy_retired", "legacy_fallback",
                 "prompt_retrieval_degraded", "daemon_reconnect_failed",
                 "daemon_disconnect_unknown_outcome",
@@ -698,7 +700,9 @@ def check_mcp_runtime_lifecycle() -> tuple[str, str, str]:
             f"{stale_leases} stale live lease(s), oldest at least "
             f"{float(summary.get('max_stale_lease_age_s') or 0.0):.1f}s"
         )
-    if discovery is not None and not discovery_live:
+    if discovery is not None and isinstance(discovery.get("error"), str):
+        pressure.append(discovery["error"])
+    elif discovery is not None and not discovery_live:
         pressure.append(
             f"discovery points to unreachable owner pid={discovery['pid']}"
         )

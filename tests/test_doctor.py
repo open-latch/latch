@@ -291,7 +291,9 @@ def test_mcp_lifecycle_warns_on_recent_pressure(monkeypatch):
     monkeypatch.setattr(mcp_broker, "proxy_policy", lambda: {
         "cap": 32, "retire_idle_s": 300.0, "heartbeat_s": 30.0, "stale_s": 300.0,
     })
-    monkeypatch.setattr(mcp_broker, "proxy_lease_state", lambda: {"live": []})
+    monkeypatch.setattr(
+        mcp_broker, "proxy_lease_state", lambda **_kwargs: {"live": []}
+    )
     monkeypatch.setattr(mcp_broker, "read_discovery", lambda: None)
     _name, level, detail = doctor.check_mcp_runtime_lifecycle()
     _assert(level == doctor.WARN, f"recent pressure should WARN: {detail}")
@@ -312,7 +314,7 @@ def test_mcp_lifecycle_ok_names_operational_contract(monkeypatch):
     monkeypatch.setattr(
         mcp_broker,
         "proxy_lease_state",
-        lambda: {"live": [{"connection_id": "a"}]},
+            lambda **_kwargs: {"live": [{"connection_id": "a"}]},
     )
     monkeypatch.setattr(mcp_broker, "read_discovery", lambda: {"pid": 123})
     monkeypatch.setattr(mcp_broker, "probe_discovery", lambda *_args, **_kwargs: True)
@@ -335,7 +337,9 @@ def test_mcp_lifecycle_warns_at_configured_75_percent_high_water(monkeypatch):
     monkeypatch.setattr(mcp_broker, "proxy_policy", lambda: {
         "cap": 10, "retire_idle_s": 300.0, "heartbeat_s": 30.0, "stale_s": 300.0,
     })
-    monkeypatch.setattr(mcp_broker, "proxy_lease_state", lambda: {"live": []})
+    monkeypatch.setattr(
+        mcp_broker, "proxy_lease_state", lambda **_kwargs: {"live": []}
+    )
     monkeypatch.setattr(mcp_broker, "read_discovery", lambda: None)
     _name, level, detail = doctor.check_mcp_runtime_lifecycle()
     _assert(level == doctor.WARN, detail)
@@ -357,7 +361,9 @@ def test_mcp_lifecycle_warns_while_over_cap(monkeypatch):
     monkeypatch.setattr(mcp_broker, "proxy_policy", lambda: {
         "cap": 32, "retire_idle_s": 300.0, "heartbeat_s": 30.0, "stale_s": 300.0,
     })
-    monkeypatch.setattr(mcp_broker, "proxy_lease_state", lambda: {"live": []})
+    monkeypatch.setattr(
+        mcp_broker, "proxy_lease_state", lambda **_kwargs: {"live": []}
+    )
     monkeypatch.setattr(mcp_broker, "read_discovery", lambda: None)
     _name, level, detail = doctor.check_mcp_runtime_lifecycle()
     _assert(level == doctor.WARN, detail)
@@ -376,7 +382,9 @@ def test_mcp_lifecycle_retirement_warning_names_host_boundary(monkeypatch):
     monkeypatch.setattr(mcp_broker, "proxy_policy", lambda: {
         "cap": 32, "retire_idle_s": 300.0, "heartbeat_s": 30.0, "stale_s": 300.0,
     })
-    monkeypatch.setattr(mcp_broker, "proxy_lease_state", lambda: {"live": []})
+    monkeypatch.setattr(
+        mcp_broker, "proxy_lease_state", lambda **_kwargs: {"live": []}
+    )
     monkeypatch.setattr(mcp_broker, "read_discovery", lambda: None)
     _name, level, detail = doctor.check_mcp_runtime_lifecycle()
     _assert(level == doctor.WARN, detail)
@@ -395,7 +403,9 @@ def test_mcp_lifecycle_warns_on_dead_discovery(monkeypatch):
     monkeypatch.setattr(mcp_broker, "proxy_policy", lambda: {
         "cap": 32, "retire_idle_s": 300.0, "heartbeat_s": 30.0, "stale_s": 300.0,
     })
-    monkeypatch.setattr(mcp_broker, "proxy_lease_state", lambda: {"live": []})
+    monkeypatch.setattr(
+        mcp_broker, "proxy_lease_state", lambda **_kwargs: {"live": []}
+    )
     monkeypatch.setattr(mcp_broker, "read_discovery", lambda: {"pid": 999999})
     monkeypatch.setattr(mcp_broker, "probe_discovery", lambda *_args, **_kwargs: False)
     _name, level, detail = doctor.check_mcp_runtime_lifecycle()
@@ -416,7 +426,9 @@ def test_mcp_lifecycle_warns_on_current_stale_leases(monkeypatch):
     monkeypatch.setattr(mcp_broker, "proxy_policy", lambda: {
         "cap": 32, "retire_idle_s": 300.0, "heartbeat_s": 30.0, "stale_s": 300.0,
     })
-    monkeypatch.setattr(mcp_broker, "proxy_lease_state", lambda: {"live": []})
+    monkeypatch.setattr(
+        mcp_broker, "proxy_lease_state", lambda **_kwargs: {"live": []}
+    )
     monkeypatch.setattr(mcp_broker, "read_discovery", lambda: None)
     _name, level, detail = doctor.check_mcp_runtime_lifecycle()
     _assert(level == doctor.WARN, detail)

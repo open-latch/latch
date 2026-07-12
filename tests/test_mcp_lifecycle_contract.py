@@ -89,6 +89,67 @@ def test_daemon_owner_fence_survives_broker_death_and_releases_with_owner(
     fence.close()
 
 
+def test_incompatible_upgrade_fails_before_owner_fence_and_heavy_imports(
+    monkeypatch, tmp_path
+):
+    vault = tmp_path / "incompatible-upgrade"
+    site_dir = tmp_path / "site"
+    site_dir.mkdir()
+    (site_dir / "sitecustomize.py").write_text(
+        "import sys\n"
+        "class BlockHeavy:\n"
+        " def find_spec(self, fullname, path=None, target=None):\n"
+        "  if fullname.split('.')[0] in {'anyio','mcp','numpy','onnxruntime'}:\n"
+        "   raise RuntimeError('heavy import crossed upgrade preflight')\n"
+        "  return None\n"
+        "sys.meta_path.insert(0, BlockHeavy())\n",
+        encoding="utf-8",
+    )
+    requested_key = "retained-runtime-v1"
+    env = os.environ.copy()
+    env.update({
+        "LATCH_HOME": str(ROOT),
+        "LATCH_KB_DIR": str(vault),
+        "LATCH_MCP_RUNTIME_KEY": requested_key,
+        "LATCH_MCP_PROTOCOL_VERSION": "999",
+        "PYTHONPATH": os.pathsep.join((str(site_dir), str(ROOT / "src"))),
+    })
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "src" / "mcp_daemon.py")],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=5.0,
+    )
+    assert result.returncode == 1
+    marker = (
+        vault
+        / "runtime"
+        / "mcp-runtimes"
+        / requested_key
+        / mcp_broker.DISCOVERY_FILE
+    )
+    payload = json.loads(marker.read_text(encoding="utf-8"))
+    assert "Start a fresh task" in payload["error"]
+    current_key = mcp_broker.RUNTIME_KEY
+    monkeypatch.setattr(mcp_broker, "runtime_dir", lambda: vault)
+    monkeypatch.setattr(mcp_broker, "RUNTIME_KEY", requested_key)
+    try:
+        mcp_broker.ensure_daemon(str(ROOT))
+    except mcp_broker.BrokerError as exc:
+        assert "Start a fresh task" in str(exc)
+    else:
+        raise AssertionError("retained proxy did not receive actionable upgrade failure")
+    assert not (
+        vault
+        / "runtime"
+        / "mcp-runtimes"
+        / current_key
+        / mcp_broker.OWNER_FENCE_FILE
+    ).exists()
+    assert "heavy import crossed upgrade preflight" not in result.stderr
+
+
 def test_live_pid_with_stale_heartbeat_does_not_hold_proxy_capacity(
     monkeypatch, tmp_path
 ):

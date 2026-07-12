@@ -55,12 +55,79 @@ import mcp_broker  # noqa: E402
 
 
 _OWNER_FENCE = None
+_REQUESTED_RUNTIME_KEY = os.environ.get("LATCH_MCP_RUNTIME_KEY") or mcp_broker.RUNTIME_KEY
+
+
+def _requested_protocol_version() -> int:
+    raw = os.environ.get("LATCH_MCP_PROTOCOL_VERSION")
+    if raw is None:
+        # Proxies from before the explicit handshake all spoke protocol v1.
+        return 1
+    try:
+        return int(raw)
+    except ValueError:
+        return -1
+
+
+def _alias_ready_owner(runtime_key: str) -> bool:
+    """Point a retained compatible proxy key at the one current owner."""
+    deadline = time.monotonic() + mcp_broker._start_timeout()
+    while time.monotonic() < deadline:
+        payload = mcp_broker.read_discovery()
+        if payload is not None and mcp_broker.probe_discovery(payload):
+            mcp_broker.publish_discovery(
+                port=int(payload["port"]),
+                token=str(payload["token"]),
+                pid=int(payload["pid"]),
+                started_at=str(payload.get("started_at") or "unknown"),
+                runtime_key=runtime_key,
+                owner_runtime_key=mcp_broker.RUNTIME_KEY,
+            )
+            mcp_broker.emit_lifecycle(
+                "daemon_upgrade_alias_published",
+                requested_runtime_key=runtime_key,
+                owner_runtime_key=mcp_broker.RUNTIME_KEY,
+            )
+            return True
+        time.sleep(0.05)
+    return False
+
+
 if __name__ == "__main__":
+    try:
+        mcp_broker.runtime_key_dir(_REQUESTED_RUNTIME_KEY)
+    except ValueError as exc:
+        sys.stderr.write(f"[latch] invalid requested MCP runtime key: {exc}\n")
+        raise SystemExit(1)
+    requested_protocol = _requested_protocol_version()
+    if requested_protocol != mcp_broker.PROTOCOL_VERSION:
+        message = (
+            "Latch was upgraded across an incompatible MCP runtime protocol. "
+            "Start a fresh task so the host launches a compatible proxy."
+        )
+        mcp_broker.publish_start_failure(_REQUESTED_RUNTIME_KEY, message)
+        mcp_broker.emit_lifecycle(
+            "daemon_upgrade_incompatible",
+            requested_protocol=requested_protocol,
+            current_protocol=mcp_broker.PROTOCOL_VERSION,
+        )
+        raise SystemExit(1)
     _OWNER_FENCE = mcp_broker.acquire_owner_fence()
     if _OWNER_FENCE is None:
+        if (
+            _REQUESTED_RUNTIME_KEY != mcp_broker.RUNTIME_KEY
+            and _alias_ready_owner(_REQUESTED_RUNTIME_KEY)
+        ):
+            raise SystemExit(0)
         mcp_broker.emit_lifecycle(
             "daemon_owner_conflict", reason="runtime owner fence already held"
         )
+        if _REQUESTED_RUNTIME_KEY != mcp_broker.RUNTIME_KEY:
+            mcp_broker.publish_start_failure(
+                _REQUESTED_RUNTIME_KEY,
+                "Latch was upgraded, but the compatible shared runtime did not become "
+                "ready. Start a fresh task and run latch doctor if the problem persists.",
+            )
         raise SystemExit(0)
 
 import anyio  # noqa: E402
@@ -343,7 +410,10 @@ async def _handle_connection(stream: SocketStream, state: DaemonState, token: st
         if metadata.get("protocol") != mcp_broker.PROTOCOL_VERSION:
             await stream.send(b'{"ok":false,"error":"protocol_mismatch"}\n')
             return
-        if metadata.get("runtime_key") != mcp_broker.RUNTIME_KEY:
+        runtime_key = metadata.get("runtime_key")
+        # The private discovery token authenticates compatible aliases; the key
+        # remains connection attribution rather than a second security secret.
+        if not isinstance(runtime_key, str):
             await stream.send(b'{"ok":false,"error":"runtime_mismatch"}\n')
             return
         op = metadata.get("op")
@@ -394,10 +464,6 @@ async def _main_async() -> None:
         _OWNER_FENCE = mcp_broker.acquire_owner_fence()
         if _OWNER_FENCE is None:
             raise RuntimeError("runtime owner fence already held")
-    expected_key = os.environ.get("LATCH_MCP_RUNTIME_KEY")
-    if expected_key and expected_key != mcp_broker.RUNTIME_KEY:
-        raise RuntimeError("proxy and daemon runtime keys differ")
-
     started_at = _utc_now()
     token = secrets.token_hex(32)
     state = DaemonState(started_at=started_at, idle_ttl_s=_idle_ttl())
@@ -407,29 +473,55 @@ async def _main_async() -> None:
     if host != "127.0.0.1":
         raise RuntimeError(f"shared MCP daemon bound unexpected host {host!r}")
 
-    # Preserve current warm latency, but pay the model cost once per vault
-    # instead of once per host-created stdio process.
-    initial_cwd = os.environ.get("LATCH_MCP_INITIAL_PROJECT_CWD") or os.getcwd()
-    mcp_server.initialize_runtime(initial_cwd, start_embed_listener=True)
-    mcp_broker.publish_discovery(
-        port=int(port), token=token, pid=os.getpid(), started_at=started_at
-    )
-    mcp_broker.emit_lifecycle(
-        "daemon_started",
-        pid=os.getpid(),
-        reason=str(os.environ.get("LATCH_MCP_START_REASON") or "unknown"),
-        cold_start_duration_ms=_cold_start_duration_ms(),
-        idle_ttl_s=state.idle_ttl_s,
-    )
+    if _REQUESTED_RUNTIME_KEY != mcp_broker.RUNTIME_KEY:
+        mcp_broker.publish_discovery(
+            port=int(port), token=token, pid=os.getpid(), started_at=started_at
+        )
+        mcp_broker.publish_discovery(
+            port=int(port),
+            token=token,
+            pid=os.getpid(),
+            started_at=started_at,
+            runtime_key=_REQUESTED_RUNTIME_KEY,
+            owner_runtime_key=mcp_broker.RUNTIME_KEY,
+        )
 
+    initialized = False
     try:
+        # Publish the loopback listener before model warmup so a retained proxy
+        # can connect within its existing probe window; the probe is answered
+        # only after initialization completes and listener.serve() begins.
+        initial_cwd = os.environ.get("LATCH_MCP_INITIAL_PROJECT_CWD") or os.getcwd()
+        mcp_server.initialize_runtime(initial_cwd, start_embed_listener=True)
+        initialized = True
+        mcp_broker.publish_discovery(
+            port=int(port), token=token, pid=os.getpid(), started_at=started_at
+        )
+        mcp_broker.emit_lifecycle(
+            "daemon_started",
+            pid=os.getpid(),
+            reason=str(os.environ.get("LATCH_MCP_START_REASON") or "unknown"),
+            cold_start_duration_ms=_cold_start_duration_ms(),
+            idle_ttl_s=state.idle_ttl_s,
+            upgrade_alias=(_REQUESTED_RUNTIME_KEY != mcp_broker.RUNTIME_KEY),
+        )
         async with anyio.create_task_group() as tg:
             tg.start_soon(_idle_monitor, state, tg.cancel_scope)
             await listener.serve(lambda stream: _handle_connection(stream, state, token))
+    except Exception:
+        if not initialized:
+            mcp_broker.publish_start_failure(
+                _REQUESTED_RUNTIME_KEY,
+                "Latch upgraded but the compatible shared runtime failed to "
+                "initialize. Start a fresh task and run latch doctor for the "
+                "startup details.",
+            )
+        raise
     finally:
         mcp_runtime.set_daemon_state(None)
-        mcp_server.shutdown_runtime()
-        mcp_broker.remove_discovery_if_owner(pid=os.getpid(), token=token)
+        if initialized:
+            mcp_server.shutdown_runtime()
+        mcp_broker.remove_discovery_aliases_if_owner(pid=os.getpid(), token=token)
         await listener.aclose()
 
 

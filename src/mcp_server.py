@@ -1677,7 +1677,8 @@ def kb_runtime_status() -> dict:
             }
     except (OSError, ValueError):
         pass
-    lease_state = mcp_broker.proxy_lease_state()
+    policy = mcp_broker.proxy_policy()
+    lease_state = mcp_broker.proxy_lease_state(policy=policy)
     proxy_inventory = list(lease_state["live"])
     return {
         "mode": "shared_daemon" if daemon is not None else "legacy_stdio",
@@ -1687,14 +1688,14 @@ def kb_runtime_status() -> dict:
         "connection": connection,
         "daemon": daemon,
         "proxy_pool": {
-            **mcp_broker.proxy_policy(),
+            **policy,
             "live_leases": len(proxy_inventory),
             "stale_leases": int(lease_state.get("stale_count") or 0),
             "max_stale_lease_age_s": float(
                 lease_state.get("max_stale_age_s") or 0.0
             ),
             "scope": "runtime_key",
-            "bounded": bool(int(mcp_broker.proxy_policy()["cap"])),
+            "bounded": bool(int(policy["cap"])),
         },
         "embedding": {
             "model_loaded": embeddings.is_loaded(),
@@ -1703,7 +1704,7 @@ def kb_runtime_status() -> dict:
         },
         "process_peak_rss_bytes": _peak_rss_bytes(),
         "lifecycle": mcp_broker.lifecycle_summary(
-            hours=24, lease_state=lease_state
+            hours=24, lease_state=lease_state, policy=policy
         ),
         "recovery": (
             "Idle owners are reclaimed; the stdio proxy reconnects and replays MCP initialization. "
@@ -1717,7 +1718,7 @@ def kb_runtime_status() -> dict:
 def initialize_runtime(project_cwd: str, *, start_embed_listener: bool) -> None:
     """Initialize heavyweight process-owned services exactly once.
 
-    The shared daemon calls this before publishing readiness.  Legacy fallback
+    The shared daemon calls this before serving readiness probes. Legacy fallback
     calls the same path, preserving availability when broker startup fails.
     """
     global _RUNTIME_INITIALIZED
