@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 import sys
 from pathlib import Path
 
@@ -11,9 +10,10 @@ SRC = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(SRC))
 sys.path.insert(0, str(SRC / "hooks"))
 
-from _common import hook_field, log, read_hook_input, transcript_path  # noqa: E402
+from _common import log, read_hook_input, transcript_path  # noqa: E402
 
 import budget  # noqa: E402
+import cursor_gate_state  # noqa: E402
 import cursor_session  # noqa: E402
 import db  # noqa: E402
 from paths import is_disabled, is_in_compact, is_unlatched_mode  # noqa: E402
@@ -21,17 +21,11 @@ from session_start import _build_briefing, _build_unlatched_brief  # noqa: E402
 
 
 def cursor_project_cwd(payload: dict) -> str:
-    roots = payload.get("workspace_roots")
-    if isinstance(roots, list) and roots and isinstance(roots[0], str):
-        return roots[0]
-    return hook_field(
-        payload, "workspaceRoot", "cwd", "workingDirectory", "workdir",
-        default=os.getcwd(),
-    )
+    return cursor_gate_state.project_cwd(payload)
 
 
 def cursor_session_id(payload: dict) -> str | None:
-    return hook_field(payload, "conversation_id", "session_id", "sessionId", "id")
+    return cursor_gate_state.session_id(payload, cursor_project_cwd(payload))
 
 
 def emit_cursor_context(context: str) -> None:
@@ -64,6 +58,11 @@ def main() -> int:
     sid = cursor_session_id(payload)
     tpath = transcript_path(payload)
     surfaced_ids: list[int] = []
+
+    try:
+        cursor_gate_state.reset_session(cwd, sid)
+    except Exception as e:
+        log(f"cursor_session_start gate state reset failed: {e}")
 
     try:
         conn = db.connect(cwd)

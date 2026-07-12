@@ -26,6 +26,7 @@ from mcp.server.fastmcp import FastMCP  # noqa: E402
 import artifacts as artifact_store  # noqa: E402
 import capture_streams  # noqa: E402
 import codex_session  # noqa: E402
+import cursor_gate_state  # noqa: E402
 import db  # noqa: E402
 import embeddings  # noqa: E402
 import gate_report  # noqa: E402
@@ -620,6 +621,41 @@ def kb_gate_report(
         ],
     )
     return report
+
+
+@mcp.tool(name="latch_pm_preview")
+@mcp.tool(name="kb_pm_preview")
+def latch_pm_preview(
+    title: str,
+    body: str,
+    kind: str = "decision",
+    status: str = "staging",
+    links: list[dict] | None = None,
+    workstream_id: int | None = None,
+) -> dict:
+    """Render and digest an exact PM candidate without writing to the KB.
+
+    Cursor's PM workflow uses this read-only tool result as the displayed
+    preview. The postToolUse hook verifies this result against the structured
+    tool input before arming one content-bound latch_insert confirmation.
+    """
+    try:
+        return cursor_gate_state.pm_preview_payload({
+            "kind": kind,
+            "title": title,
+            "body": body,
+            "status": status,
+            "links": links,
+            "workstream_id": workstream_id,
+        })
+    except ValueError as exc:
+        return {
+            "ok": False,
+            "operation": "latch-pm",
+            "phase": "prepare",
+            "write_performed": False,
+            "error": str(exc),
+        }
 
 
 @mcp.tool(name="latch_insert")

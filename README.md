@@ -101,9 +101,9 @@ first-run mission.
   managed `.cursor/rules/latch.mdc` activation rule, project-local
   `.cursor/commands` prompts, and the shared `AGENTS.md` contract. An opt-in
   `.cursor/hooks.json` layer adds SessionStart KB briefing, a current-session
-  transcript handoff, and post-tool latch activity context. Native Cursor-backed gate
-  calls, transcript-history discovery, pre-edit enforcement, and native Cursor
-  compaction remain deferred.
+  transcript handoff, per-prompt pre-edit gate enforcement, and post-tool latch
+  activity context. Native Cursor-backed gate calls, transcript-history
+  discovery, and native Cursor compaction remain deferred.
 - **Claude Code + Codex together:** one shared local latch KB, so decisions and
   rejected paths captured through either agent can gate both.
 
@@ -227,14 +227,33 @@ The merge preserves unrelated Cursor hooks and installs:
   `additional_context` field. Cursor's reused MCP process has no verified
   per-request conversation id, so MCP structural rows remain unattributed
   instead of inheriting another interleaved conversation's project marker.
-- `postToolUse`: recognizes latch `kb_activity` and gate `findings` in tool
-  results and returns a concise instruction to surface the receipt. Cursor has
-  no equivalent of Claude Code's deterministic user-only `systemMessage`
-  channel, so this is agent-context delivery backed by the `AGENTS.md`
-  foregrounding contract—not a claim that Cursor renders the line directly.
+- `beforeSubmitPrompt`: fingerprints the current prompt without storing its
+  text, invalidates any prior gate receipt, and recognizes only explicit
+  managed latch operations for a separate one-shot operation lane.
+- `preToolUse`: denies mutation-capable tools until the current prompt has a
+  matching, usable `latch_gate` receipt. Exact native read tools remain
+  available; free-form Shell, unknown, and malformed payloads deny. Explicit
+  latch operations can consume one session/prompt/tool/argument-bound receipt
+  instead; preview/apply and confirmation workflows require a later explicit
+  operation confirmation and the receipt is single-use. Managed-operation
+  intent selects an exclusive lane: a missing, consumed, or mismatched narrow
+  receipt denies without falling through to ordinary `latch_gate` authorization.
+- `postToolUse`: recognizes latch `kb_activity` and gate `findings` in the
+  verified `latch_gate` tool result, arms the current prompt only when that gate
+  used the request verbatim and the outer tool result reports positive
+  completion rather than failure, cancellation, timeout, denial, or skip, and
+  returns a concise instruction to surface the receipt. Conflicting tool-name,
+  input-container, server, or nested-tool identities fail closed. Cursor
+  has no equivalent of Claude Code's deterministic user-only `systemMessage`
+  channel, so receipt visibility is agent-context delivery backed by the
+  `AGENTS.md` foregrounding contract—not a claim that Cursor renders the line
+  directly.
 
-The hooks fail open and do not block edits. They do not auto-compact or discover
-historical Cursor transcripts.
+Session/activity surfacing stays fail-open. Prompt invalidation and mutation
+enforcement use `failClosed: true`: hook errors, empty payloads, skipped gates,
+rephrased gate requests, and stale or cross-session receipts cannot authorize a
+mutation. Disabling or unlatching latch disables this enforcement as well. The
+hooks do not auto-compact or discover historical Cursor transcripts.
 
 If you want model-backed `latch_gate` calls from this Cursor adapter, point it
 at an existing backend with `--model-backend codex` or `--model-backend claude`.

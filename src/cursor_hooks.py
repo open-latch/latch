@@ -15,6 +15,8 @@ from codex_hooks import hook_command
 DEFAULT_HOOKS_PATH = Path(".cursor") / "hooks.json"
 OWNED_HOOK_BASENAMES = {
     "cursor_session_start.py",
+    "cursor_before_submit.py",
+    "cursor_pre_tool_use.py",
     "cursor_post_tool_use.py",
 }
 
@@ -44,12 +46,24 @@ def _is_owned(entry: Any) -> bool:
 def render_entries(
     python_path: str,
     session_start_py: str,
+    before_submit_py: str,
+    pre_tool_use_py: str,
     post_tool_use_py: str,
 ) -> dict[str, dict[str, Any]]:
     return {
         "sessionStart": {
             "command": hook_command(python_path, session_start_py),
             "timeout": 15,
+        },
+        "beforeSubmitPrompt": {
+            "command": hook_command(python_path, before_submit_py),
+            "failClosed": True,
+            "timeout": 5,
+        },
+        "preToolUse": {
+            "command": hook_command(python_path, pre_tool_use_py),
+            "failClosed": True,
+            "timeout": 5,
         },
         "postToolUse": {
             "command": hook_command(python_path, post_tool_use_py),
@@ -62,6 +76,8 @@ def merge_hooks(
     existing: str,
     python_path: str,
     session_start_py: str,
+    before_submit_py: str,
+    pre_tool_use_py: str,
     post_tool_use_py: str,
     *,
     path: Path = DEFAULT_HOOKS_PATH,
@@ -87,7 +103,10 @@ def merge_hooks(
         else:
             del hooks[event]
 
-    for event, entry in render_entries(python_path, session_start_py, post_tool_use_py).items():
+    for event, entry in render_entries(
+        python_path, session_start_py, before_submit_py, pre_tool_use_py,
+        post_tool_use_py,
+    ).items():
         entries = hooks.setdefault(event, [])
         if not isinstance(entries, list):
             raise SystemExit(f"error: {path} hooks.{event} must contain a JSON array.")
@@ -99,7 +118,7 @@ def merge_hooks(
     changes = []
     if removed:
         changes.append(f"removed {removed} stale latch-owned Cursor hook(s)")
-    changes.append("installed latch Cursor SessionStart and postToolUse hooks")
+    changes.append("installed latch Cursor session, gate-enforcement, and activity hooks")
     return new, changes
 
 
@@ -116,6 +135,8 @@ def hooks_status(
     path: Path,
     python_path: str,
     session_start_py: str,
+    before_submit_py: str,
+    pre_tool_use_py: str,
     post_tool_use_py: str,
 ) -> tuple[bool, str]:
     if not path.exists():
@@ -123,13 +144,14 @@ def hooks_status(
     try:
         current = path.read_text(encoding="utf-8")
         desired, changes = merge_hooks(
-            current, python_path, session_start_py, post_tool_use_py, path=path
+            current, python_path, session_start_py, before_submit_py,
+            pre_tool_use_py, post_tool_use_py, path=path
         )
     except (OSError, SystemExit) as e:
         return False, f"Cursor hooks unreadable: {e}"
     if desired == current and not changes:
-        return True, f"Cursor session/activity hooks installed in {path}"
-    return False, f"Cursor session/activity hooks missing or drifted in {path}"
+        return True, f"Cursor session/gate/activity hooks installed in {path}"
+    return False, f"Cursor session/gate/activity hooks missing or drifted in {path}"
 
 
 def remove_hooks(path: Path, *, dry_run: bool = False) -> list[str]:

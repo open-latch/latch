@@ -1,0 +1,20 @@
+The project rejected a background job queue because the application must remain single-process and operationally simple.
+Use the exact current session marker rather than guessing which historical conversation should provide provenance.
+An installer must preserve unrelated configuration, remain idempotent, and fail closed before overwriting user-owned files.
+The gate receipt belongs to one normalized prompt hash and cannot authorize a later request or another conversation.
+Cross-platform verification includes Linux, macOS, and Windows behavior without treating a narrow unit test as full acceptance.
+Decision continuity retains rejected alternatives, their rationale, scope, authority, and the conditions that would reopen them.
+A missing authentication token is an external acceptance boundary, while malformed JSON is a backend contract failure.
+The quick brown fox jumps over the lazy dog; punctuation, casing, and repeated terms exercise tokenizer boundaries.
+PowerShell paths use backslashes while portable manifests and generated command bodies normalize paths where required.
+Search results are similarity-ranked teasers, so readers fetch authoritative nodes and follow reconciliation banners.
+The native command runs in read-only Ask mode with JSON output and never enables force, yolo, or mutation flags.
+Manual compaction accepts only a proven conversation and transcript pair recorded by the current SessionStart hook.
+Seed reports remain preview-only until the user explicitly approves staging writes and sees the provenance receipt.
+Unknown future tools default to mutation-capable so a new write surface cannot silently bypass authorization.
+Concurrent marker updates use unique temporary files and atomic replacement to prevent torn or missing JSON state.
+Public release checks reject private paths, credentials, tokens, and other material that does not belong in the repository.
+The doctor distinguishes static wiring, live MCP visibility, model authentication, and current-session compact readiness.
+Uninstall removes latch-owned assets while preserving unrelated servers, hooks, commands, skills, and agent instructions.
+Claude, Codex, and Cursor share the same project judgment while retaining host-specific lifecycle and provenance boundaries.
+A clean checkout must reproduce the complete test result without depending on a private database from another machine.

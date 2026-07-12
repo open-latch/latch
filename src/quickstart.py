@@ -382,7 +382,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument("--cursor-model-backend", choices=("claude", "codex"),
                     help="existing backend for Cursor model-backed gate calls")
     ap.add_argument("--cursor-with-hooks", action="store_true",
-                    help="install and verify opt-in Cursor session/activity hooks")
+                    help="install and verify opt-in Cursor session/gate/activity hooks")
     ap.add_argument("--no-seed", action="store_true",
                     help="print the seed command but do not offer to run it")
     return ap.parse_args(argv)

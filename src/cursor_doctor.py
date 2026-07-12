@@ -88,12 +88,15 @@ def check_cursor_hooks(
     hooks_path: Path,
     python_path: str,
     session_start_py: str,
+    before_submit_py: str,
+    pre_tool_use_py: str,
     post_tool_use_py: str,
 ) -> Check:
     ok, detail = cursor_hooks.hooks_status(
-        hooks_path, python_path, session_start_py, post_tool_use_py
+        hooks_path, python_path, session_start_py, before_submit_py,
+        pre_tool_use_py, post_tool_use_py
     )
-    return Check("Cursor .cursor/hooks.json session/activity hooks", OK if ok else FAIL, detail)
+    return Check("Cursor .cursor/hooks.json session/gate/activity hooks", OK if ok else FAIL, detail)
 
 
 def check_mcp_launch_target(python_path: str, server_py: str) -> Check:
@@ -220,6 +223,8 @@ def run_all(
             hooks_path,
             python_path,
             str(install_cursor.KB_HOME / "src" / "hooks" / "cursor_session_start.py"),
+            str(install_cursor.KB_HOME / "src" / "hooks" / "cursor_before_submit.py"),
+            str(install_cursor.KB_HOME / "src" / "hooks" / "cursor_pre_tool_use.py"),
             str(install_cursor.KB_HOME / "src" / "hooks" / "cursor_post_tool_use.py"),
         ))
     if skip_cli:
@@ -258,7 +263,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--hooks-json", default=str(install_cursor.DEFAULT_HOOKS_PATH),
                     help="Cursor hooks path to check (default: .cursor/hooks.json)")
     ap.add_argument("--with-hooks", action="store_true",
-                    help="require opt-in Cursor session/activity hooks")
+                    help="require opt-in Cursor session/gate/activity hooks")
     ap.add_argument("--model-backend", choices=("claude", "codex"),
                     help="expected existing backend env in .cursor/mcp.json")
     ap.add_argument("--agent-bin", help="Cursor CLI executable for live MCP probe")

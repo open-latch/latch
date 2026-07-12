@@ -8,14 +8,13 @@ This adapter wires the local latch engine into Cursor's project surfaces:
 * ``.cursor/commands/*.md`` gets project-local Cursor command prompts for the
   latch workflows that are safe on Cursor today.
 * ``AGENTS.md`` gets the shared latch agent contract.
-* With ``--with-hooks``, ``.cursor/hooks.json`` gets merge-safe SessionStart
-  and postToolUse hooks for session provenance, KB briefing, and activity
-  context.
+* With ``--with-hooks``, ``.cursor/hooks.json`` gets merge-safe session,
+  per-prompt gate-enforcement, and activity hooks.
 
 It intentionally does not install native Cursor compaction, transcript-history
-discovery, pre-edit enforcement, or a native Cursor model backend. Cursor can
-use latch MCP tools through the project MCP config; model-backed gate calls
-continue to use the existing Claude/Codex backends when explicitly selected.
+discovery, or a native Cursor model backend. Cursor can use latch MCP tools
+through the project MCP config; model-backed gate calls continue to use the
+existing Claude/Codex backends when explicitly selected.
 """
 from __future__ import annotations
 
@@ -402,6 +401,8 @@ def _check(args: argparse.Namespace, python_path: str, server_py: str) -> int:
             Path(args.hooks_json),
             python_path,
             str(KB_HOME / "src" / "hooks" / "cursor_session_start.py"),
+            str(KB_HOME / "src" / "hooks" / "cursor_before_submit.py"),
+            str(KB_HOME / "src" / "hooks" / "cursor_pre_tool_use.py"),
             str(KB_HOME / "src" / "hooks" / "cursor_post_tool_use.py"),
         ))
 
@@ -427,7 +428,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--hooks-json", default=str(DEFAULT_HOOKS_PATH),
                     help="Cursor hooks config path (default: .cursor/hooks.json)")
     ap.add_argument("--with-hooks", action="store_true",
-                    help="install/check opt-in Cursor SessionStart and postToolUse hooks")
+                    help="install/check opt-in Cursor session, gate-enforcement, and activity hooks")
     ap.add_argument("--model-backend", choices=("claude", "codex"),
                     help="set LATCH_MODEL_BACKEND/LATCH_GATE_BACKEND to an existing backend")
     ap.add_argument("--skip-mcp", action="store_true", help="do not touch .cursor/mcp.json")
@@ -518,6 +519,8 @@ def main(argv: list[str] | None = None) -> int:
             existing,
             python_path,
             str(KB_HOME / "src" / "hooks" / "cursor_session_start.py"),
+            str(KB_HOME / "src" / "hooks" / "cursor_before_submit.py"),
+            str(KB_HOME / "src" / "hooks" / "cursor_pre_tool_use.py"),
             str(KB_HOME / "src" / "hooks" / "cursor_post_tool_use.py"),
             path=hooks_path,
         )
@@ -534,7 +537,7 @@ def main(argv: list[str] | None = None) -> int:
     else:
         print("Done. Restart Cursor or run 'agent mcp list' so Cursor reloads the project wiring.")
         if not args.with_hooks:
-            print("Cursor hooks were not installed; re-run with --with-hooks for session briefing and activity context.")
+            print("Cursor hooks were not installed; re-run with --with-hooks for session briefing, pre-edit gating, and activity context.")
         print("Native Cursor-backed gate calls were not installed; pass --model-backend claude|codex to use an existing backend.")
     print()
     return 0

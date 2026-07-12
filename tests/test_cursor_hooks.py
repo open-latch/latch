@@ -11,6 +11,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import cursor_hooks as ch  # noqa: E402
 
+HOOK_ARGS = (
+    "/repo/src/hooks/cursor_session_start.py",
+    "/repo/src/hooks/cursor_before_submit.py",
+    "/repo/src/hooks/cursor_pre_tool_use.py",
+    "/repo/src/hooks/cursor_post_tool_use.py",
+)
+
 
 def test_merge_preserves_unrelated_hooks_and_is_idempotent():
     existing = json.dumps({
@@ -21,16 +28,16 @@ def test_merge_preserves_unrelated_hooks_and_is_idempotent():
             "afterFileEdit": [{"command": "node format.js"}],
         },
     }, indent=2) + "\n"
-    new, changes = ch.merge_hooks(existing, "/py", "/repo/src/hooks/cursor_session_start.py",
-                                  "/repo/src/hooks/cursor_post_tool_use.py")
+    new, changes = ch.merge_hooks(existing, "/py", *HOOK_ARGS)
     obj = json.loads(new)
     assert changes
     assert obj["projectSetting"] is True
     assert obj["hooks"]["sessionStart"][1]["command"] == "node user-start.js"
     assert obj["hooks"]["afterFileEdit"] == [{"command": "node format.js"}]
     assert "matcher" not in obj["hooks"]["postToolUse"][0]
-    new2, changes2 = ch.merge_hooks(new, "/py", "/repo/src/hooks/cursor_session_start.py",
-                                    "/repo/src/hooks/cursor_post_tool_use.py")
+    assert obj["hooks"]["beforeSubmitPrompt"][0]["failClosed"] is True
+    assert obj["hooks"]["preToolUse"][0]["failClosed"] is True
+    new2, changes2 = ch.merge_hooks(new, "/py", *HOOK_ARGS)
     assert new2 == new
     assert changes2 == []
 
@@ -46,8 +53,8 @@ def test_merge_replaces_stale_owned_entries_across_events():
             ],
         },
     })
-    new, changes = ch.merge_hooks(existing, "/py", "/new/src/hooks/cursor_session_start.py",
-                                  "/new/src/hooks/cursor_post_tool_use.py")
+    new_args = tuple(path.replace("/repo/", "/new/") for path in HOOK_ARGS)
+    new, changes = ch.merge_hooks(existing, "/py", *new_args)
     obj = json.loads(new)
     assert "stop" not in obj["hooks"]
     assert obj["hooks"]["postToolUse"][1] == {"command": "user-hook"}
@@ -60,13 +67,11 @@ def test_write_status_and_remove_preserve_user_hooks():
         path = root / ".cursor" / "hooks.json"
         desired, _ = ch.merge_hooks(
             json.dumps({"version": 1, "hooks": {"stop": [{"command": "user-stop"}]}}),
-            "/py", "/repo/src/hooks/cursor_session_start.py",
-            "/repo/src/hooks/cursor_post_tool_use.py",
+            "/py", *HOOK_ARGS,
             path=path,
         )
         ch.write_hooks(path, desired)
-        ok, detail = ch.hooks_status(path, "/py", "/repo/src/hooks/cursor_session_start.py",
-                                     "/repo/src/hooks/cursor_post_tool_use.py")
+        ok, detail = ch.hooks_status(path, "/py", *HOOK_ARGS)
         assert ok, detail
         changes = ch.remove_hooks(path)
         assert changes
@@ -80,8 +85,7 @@ def test_write_status_and_remove_preserve_user_hooks():
 def test_rejects_malformed_or_unknown_version():
     for body in ("{bad", '{"version": 2}'):
         try:
-            ch.merge_hooks(body, "/py", "/repo/src/hooks/cursor_session_start.py",
-                           "/repo/src/hooks/cursor_post_tool_use.py")
+            ch.merge_hooks(body, "/py", *HOOK_ARGS)
         except SystemExit:
             pass
         else:
