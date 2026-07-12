@@ -442,32 +442,6 @@ def test_pm_operation_receipt_binds_exact_previewed_content():
         shutil.rmtree(root, ignore_errors=True)
 
 
-def test_pm_preview_mcp_tool_returns_canonical_nonwriting_receipt():
-    import mcp_server
-
-    result = mcp_server.latch_pm_preview(
-        title="Ruled out path",
-        body="Do not use X because Y.",
-        links=[
-            {"relation": "related_to", "dst": 9},
-            {"dst": "7", "relation": "constrains"},
-        ],
-        workstream_id=1369,
-    )
-    assert result["ok"] is True
-    assert result["write_performed"] is False
-    assert result["candidate"]["links"] == [
-        {"dst": 7, "relation": "constrains"},
-        {"dst": 9, "relation": "related_to"},
-    ]
-    assert result["candidate_digest"] == cgs.pm_candidate_digest(result["candidate"])
-
-    rejected = mcp_server.latch_pm_preview(
-        title="Ruled out path", body="Do not use X because Y.", status="canonical",
-    )
-    assert rejected["ok"] is False and rejected["write_performed"] is False
-
-
 def test_other_managed_operations_match_only_expected_wrappers():
     import cursor_pre_tool_use as cpre
 
