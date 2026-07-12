@@ -318,10 +318,11 @@ designed to absorb.
 Latest blocker-remediation receipts: 61 focused lifecycle/doctor/Codex/embed
 tests and 944 hermetic tests passed locally after rebasing onto current main;
 changed-file Ruff, public-release hygiene, compilation, and `git diff --check`
-passed. Warm prompt-hook wall was 107.8–157.9 ms. Fourteen clients used one
-owner at 0.97 s readiness and 7.28 ms embed p95; 32 used one owner at 1.68 s and
-6.42 ms p95. An eight-client comparison measured 7.49 ms shared versus 7.25 ms
-legacy p95, a 0.24 ms difference. These tails are observations, not hard upper
+passed. Warm prompt-hook wall was 93.5–141.2 ms. Fourteen clients used one
+owner at 0.96 s readiness and 8.80 ms embed p95; a repeated 32-client run used
+one owner at 1.59 s and 10.32 ms p95. A repeated eight-client comparison
+measured 8.26 ms shared versus 8.49 ms legacy p95. These tails are observations,
+not hard upper
 bounds. Registry-wide lease classification is heartbeat/start-time filesystem
 work; it does not run per request or enter the prompt-hook embed path.
 
