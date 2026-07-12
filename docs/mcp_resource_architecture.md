@@ -1,10 +1,9 @@
 # Bounded latch MCP runtime — issue 1465
 
-Status: public draft PR #21 on `mcp-resource-lifecycle`; cross-platform focused
-receipts are green for published head `d9ef85b`, while the subsequent local
-merge-blocker fixes still require a new three-OS CI run. The PR remains
-intentionally draft pending that receipt, independent merge-trust review, and
-real Codex, Claude Code, and Cursor lifecycle dogfood.
+Status: public draft PR #21 on `mcp-resource-lifecycle`; the merge-blocker fix
+series has green focused receipts on macOS, Ubuntu, and Windows. The PR remains
+intentionally draft pending independent merge-trust review and real Codex,
+Claude Code, and Cursor lifecycle dogfood.
 Measurements were collected on macOS 13.5, Apple Silicon, on 2026-07-10.
 
 ## Decision

@@ -11,6 +11,7 @@ on:
       - "tests/test_mcp_*.py"
       - "tests/test_doctor.py"
       - "tests/test_codex_session.py"
+      - "docs/mcp_resource_architecture.md"
       - "requirements.txt"
       - ".github/workflows/mcp-runtime-lifecycle.yml"
   workflow_dispatch:
