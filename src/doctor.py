@@ -74,10 +74,23 @@ import sys
 from pathlib import Path
 
 import install_engine
+import versioning
 
 MIN_PY = (3, 11)
 REQUIRED_MODULES = ["mcp", "onnxruntime", "tokenizers", "numpy", "sqlite_vec"]
 SRC_DIR = Path(__file__).resolve().parent
+
+
+def check_latch_version() -> tuple[str, str, str]:
+    info = versioning.payload()
+    commit = info.get("commit") or "unknown commit"
+    dirty = ", dirty checkout" if info.get("dirty") else ""
+    return (
+        "latch release",
+        OK,
+        f"{versioning.LATCH_VERSION} ({commit}{dirty}); supports KB schema "
+        f"{versioning.KB_SCHEMA_VERSION}; project wiring {versioning.WIRING_VERSION}",
+    )
 EMBED_DIM = 384
 
 OK, WARN, FAIL, SKIP = "OK", "WARN", "FAIL", "SKIP"
@@ -617,7 +630,10 @@ def check_kb_pin() -> tuple[str, str, str]:
 def run_all(skip_embed: bool, no_arch: bool, allow_old_py: bool,
             no_mcp: bool = False, no_commands: bool = False,
             no_pin: bool = False) -> list[tuple[str, str, str]]:
-    results: list[tuple[str, str, str]] = [check_python_version(allow_old_py)]
+    results: list[tuple[str, str, str]] = [
+        check_latch_version(),
+        check_python_version(allow_old_py),
+    ]
     if no_arch:
         results.append(("CPU architecture", SKIP, "skipped (--no-arch)"))
     else:
@@ -693,6 +709,9 @@ def main(argv: list[str] | None = None) -> int:
                       args.no_commands, args.no_pin)
     if args.json:
         payload = {
+            "latch_version": versioning.LATCH_VERSION,
+            "kb_schema_version": versioning.KB_SCHEMA_VERSION,
+            "wiring_version": versioning.WIRING_VERSION,
             "system": platform.system(),
             "machine": platform.machine(),
             "executable": sys.executable,

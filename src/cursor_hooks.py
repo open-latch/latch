@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from codex_hooks import hook_command
+from versioning import WIRING_VERSION
 
 DEFAULT_HOOKS_PATH = Path(".cursor") / "hooks.json"
 OWNED_HOOK_BASENAMES = {
@@ -52,21 +53,21 @@ def render_entries(
 ) -> dict[str, dict[str, Any]]:
     return {
         "sessionStart": {
-            "command": hook_command(python_path, session_start_py),
+            "command": hook_command(python_path, session_start_py) + f" --latch-wiring-version {WIRING_VERSION}",
             "timeout": 15,
         },
         "beforeSubmitPrompt": {
-            "command": hook_command(python_path, before_submit_py),
+            "command": hook_command(python_path, before_submit_py) + f" --latch-wiring-version {WIRING_VERSION}",
             "failClosed": True,
             "timeout": 5,
         },
         "preToolUse": {
-            "command": hook_command(python_path, pre_tool_use_py),
+            "command": hook_command(python_path, pre_tool_use_py) + f" --latch-wiring-version {WIRING_VERSION}",
             "failClosed": True,
             "timeout": 5,
         },
         "postToolUse": {
-            "command": hook_command(python_path, post_tool_use_py),
+            "command": hook_command(python_path, post_tool_use_py) + f" --latch-wiring-version {WIRING_VERSION}",
             "timeout": 5,
         },
     }

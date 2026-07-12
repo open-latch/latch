@@ -43,7 +43,9 @@ def test_auto_sync_agents_md_repairs_existing_managed_region():
         target = tmp / "AGENTS.md"
         ams.sync(target)
         target.write_text(
-            target.read_text(encoding="utf-8").replace("KB usage", "KB X"),
+            target.read_text(encoding="utf-8").replace(
+                "latch-wiring-version: 1", "latch-wiring-version: 0"
+            ).replace("KB usage", "KB X"),
             encoding="utf-8",
         )
         _assert(ams.evaluate(target) == ams.DRIFT, "tampered region -> DRIFT")

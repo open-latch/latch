@@ -95,11 +95,17 @@ def main() -> int:
     # visible in-session (it is otherwise silent — log-only). Behavior of the
     # sync itself is unchanged; it was previously called at the end of main().
     claude_md_action = _auto_sync_claude_md(cwd)
+    wiring_notice = _managed_doc_wiring_notice(
+        claude_md_action,
+        doc_name="CLAUDE.md",
+        manual_command=f"{KB_ROOT}/bin/install_claude_md.sh --yes",
+    )
 
     briefing = _build_briefing(
         cwd, orphan_count=orphan_count, budget_line=budget_line,
         surfaced_ids=surfaced_ids,
         claude_md_synced=(claude_md_action == "synced"),
+        wiring_notice=wiring_notice,
     )
 
     # Seed the active set with what the brief just put in front of the model,
@@ -186,14 +192,40 @@ def _auto_sync_claude_md(cwd: str) -> str | None:
     try:
         import claude_md_sync
         target = Path(cwd) / "CLAUDE.md"
-        action = claude_md_sync.sync(target, create=False)
+        action = claude_md_sync.sync_if_outdated(target)
         if action == "synced":
             log(f"claude_md auto-sync: re-synced managed region in {target} "
                 f"(backup: {target}.latchbak)")
         return action
     except Exception as e:
         log(f"claude_md auto-sync skipped: {e}")
-        return None
+        return "error"
+
+
+def _managed_doc_wiring_notice(
+    action: str | None,
+    *,
+    doc_name: str,
+    manual_command: str,
+    restart_required: bool = False,
+) -> str | None:
+    if action == "synced":
+        restart = " Restart or open a new task to reload host wiring." if restart_required else ""
+        return (
+            f"_↻ latch repaired older {doc_name} project wiring once (managed region "
+            f"only; user content was preserved; backup: `{doc_name}.latchbak`).{restart}_"
+        )
+    if action == "newer":
+        return (
+            f"_⚠ {doc_name} has newer latch project wiring than this engine. "
+            f"Latch did not downgrade it; update the engine or inspect with `{manual_command} --check`._"
+        )
+    if action in ("invalid", "error"):
+        return (
+            f"_⚠ latch could not safely repair {doc_name} project wiring. The session "
+            f"will continue; run `{manual_command}` manually._"
+        )
+    return None
 
 
 def _build_briefing(
@@ -203,6 +235,7 @@ def _build_briefing(
     surfaced_ids: list[int] | None = None,
     claude_md_synced: bool = False,
     synced_doc_name: str = "CLAUDE.md",
+    wiring_notice: str | None = None,
 ) -> str:
     """Build the SessionStart additionalContext brief.
 
@@ -284,7 +317,8 @@ def _build_briefing(
 
     if (not workstreams and not open_qs and not ideas and not latest_progress
             and not prio and not orphan_count and not budget_line and not n_drift
-            and not show_getting_started and not claude_md_synced):
+            and not show_getting_started and not claude_md_synced
+            and not wiring_notice):
         return ""
 
     parts = ["# latch — session brief\n"]
@@ -305,7 +339,9 @@ def _build_briefing(
             f"nightly sweep — run `bash bin/run_kb_drift.sh` (or read the latest "
             f"`drift-*.log`) to review and `latch_link`/fix._\n"
         )
-    if claude_md_synced:
+    if wiring_notice:
+        parts.append(wiring_notice + "\n")
+    elif claude_md_synced:
         parts.append(
             f"_↻ latch {synced_doc_name} was re-synced from an updated snippet this "
             "session (managed region only — content outside the markers is "

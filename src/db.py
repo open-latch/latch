@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Iterable, Sequence
 
 import log_utils
+import schema_version
 from paths import SCHEMA_PATH, db_path, ensure_project_dir
 
 
@@ -63,9 +64,28 @@ def connect(cwd: str | None = None) -> sqlite3.Connection:
     conn = sqlite3.connect(str(path), factory=_Connection)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
-    _load_vec(conn)
-    _ensure_schema(conn)
-    return conn
+    try:
+        had_nodes = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='nodes'"
+        ).fetchone() is not None
+        installed_schema = schema_version.ensure_supported(conn)
+        if had_nodes and installed_schema < schema_version.KB_SCHEMA_VERSION:
+            schema_version.backup_connection(
+                conn,
+                Path(path),
+                from_version=installed_schema,
+                to_version=schema_version.KB_SCHEMA_VERSION,
+            )
+        _load_vec(conn)
+        _ensure_schema(conn)
+        schema_version.stamp_current(
+            conn,
+            record_migration=(not had_nodes or installed_schema < schema_version.KB_SCHEMA_VERSION),
+        )
+        return conn
+    except Exception:
+        conn.close()
+        raise
 
 
 def _load_vec(conn: sqlite3.Connection) -> bool:

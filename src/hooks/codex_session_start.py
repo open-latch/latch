@@ -29,6 +29,7 @@ from session_start import (  # noqa: E402
     _build_unlatched_brief,
     _build_unlatched_system_message,
     _emit_session_start_context,
+    _managed_doc_wiring_notice,
 )
 
 
@@ -91,6 +92,11 @@ def main() -> int:
         budget_line = None
 
     agents_md_action = _auto_sync_agents_md(cwd)
+    wiring_notice = _managed_doc_wiring_notice(
+        agents_md_action,
+        doc_name="AGENTS.md",
+        manual_command=f"{SRC.parent}/bin/install_agents_md.sh --yes",
+    )
 
     briefing = _build_briefing(
         cwd,
@@ -99,6 +105,7 @@ def main() -> int:
         surfaced_ids=surfaced_ids,
         claude_md_synced=(agents_md_action == "synced"),
         synced_doc_name="AGENTS.md",
+        wiring_notice=wiring_notice,
     )
 
     if sid and surfaced_ids:
@@ -134,14 +141,14 @@ def _auto_sync_agents_md(cwd: str) -> str | None:
     try:
         import agents_md_sync
         target = Path(cwd) / "AGENTS.md"
-        action = agents_md_sync.sync(target, create=False)
+        action = agents_md_sync.sync_if_outdated(target)
         if action == "synced":
             log(f"agents_md auto-sync: re-synced managed region in {target} "
                 f"(backup: {target}.latchbak)")
         return action
     except Exception as e:
         log(f"agents_md auto-sync skipped: {e}")
-        return None
+        return "error"
 
 
 if __name__ == "__main__":

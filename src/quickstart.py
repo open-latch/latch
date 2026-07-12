@@ -17,6 +17,7 @@ import sys
 from typing import Callable, Mapping, Sequence
 
 import install_engine
+import versioning
 
 KB_HOME = Path(
     os.environ.get("LATCH_HOME")
@@ -433,6 +434,7 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     print("\nlatch guided quickstart")
+    print(f"  version      : {versioning.LATCH_VERSION} (wiring {versioning.WIRING_VERSION})")
     print(f"  KB_HOME      : {KB_HOME}")
     print(f"  project      : {project}")
     print(f"  interpreter  : {python_path}")

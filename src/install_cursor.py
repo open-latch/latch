@@ -30,6 +30,7 @@ import agents_md_sync
 import cursor_hooks
 import cursor_rules_sync
 import install_engine
+from versioning import LATCH_VERSION, WIRING_VERSION
 
 SERVER_NAME = "latch"
 LEGACY_SERVER_NAMES = ("claude-kb", "claudeKb")
@@ -80,6 +81,7 @@ CURSOR_COMMAND_FOOTER = (
     "Cursor boundary: this project-local command is a reusable prompt for "
     "Cursor Agent. It may ask Agent to call latch MCP tools or run latch shell "
     "wrappers. It never authorizes undocumented Cursor-history discovery.\n"
+    f"<!-- latch-wiring-version: {WIRING_VERSION} -->\n"
 )
 CURSOR_COMPACT_ASSETS = (
     Path("src") / "cursor_backend.py",
@@ -127,6 +129,7 @@ def _adapter_env(model_backend: str | None = None) -> dict[str, str]:
         "LATCH_GATE_BACKEND": backend,
         "LATCH_MAINTENANCE_BACKEND": backend,
         "LATCH_COMPACTOR_BACKEND": backend,
+        "LATCH_WIRING_VERSION": str(WIRING_VERSION),
     }
     return env
 
@@ -413,6 +416,7 @@ def render_cursor_skill(
         f"Cursor project-sync metadata: latch checkout `{home}`; shell-fallback "
         f"model backend `{backend}`. Plugin installs instead use "
         "`${CURSOR_PLUGIN_ROOT}` and native `cursor`.\n"
+        f"<!-- latch-wiring-version: {WIRING_VERSION} -->\n"
     )
     return body.rstrip() + footer
 
@@ -727,6 +731,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     print("\nlatch Cursor installer")
+    print(f"  version      : {LATCH_VERSION} (wiring {WIRING_VERSION})")
     print(f"  KB_HOME      : {KB_HOME}")
     print(f"  interpreter  : {python_path}")
     print(f"  MCP config   : {'skipped' if args.skip_mcp else args.mcp_json}")

@@ -72,6 +72,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import versioning
+
 SERVER_NAME = "latch"
 LEGACY_SERVER_NAMES = ("claude-kb",)
 ALL_SERVER_NAMES = (SERVER_NAME, *LEGACY_SERVER_NAMES)
@@ -758,6 +760,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     print(f"\nlatch engine installer")
+    print(f"  version     : {versioning.LATCH_VERSION} (KB schema {versioning.KB_SCHEMA_VERSION}; wiring {versioning.WIRING_VERSION})")
     print(f"  KB_HOME     : {KB_HOME}")
     print(f"  interpreter : {python_path}")
     print(f"  settings    : {SETTINGS_PATH}")

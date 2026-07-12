@@ -3,6 +3,8 @@ description: Latch decision-continuity gate for Cursor projects
 alwaysApply: true
 ---
 
+<!-- latch-wiring-version: {{WIRING_VERSION}} -->
+
 # latch Cursor activation
 
 This Cursor rule is managed by latch. Re-run `{{KB_HOME}}/bin/install_cursor.sh --yes`

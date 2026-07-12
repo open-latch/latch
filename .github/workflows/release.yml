@@ -1,0 +1,47 @@
+name: Publish stable release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  verify-and-publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Verify tag and release metadata
+        run: python src/versioning.py --check-tag "$GITHUB_REF_NAME"
+
+      - name: Install focused test runner
+        run: python -m pip install pytest
+
+      - name: Run public release hygiene
+        run: bash bin/latch_public_release_check.sh
+
+      - name: Run version, update, schema, and wiring tests
+        run: >-
+          python -m pytest -q
+          tests/test_versioning.py
+          tests/test_update_latch.py
+          tests/test_schema_version.py
+          tests/test_wiring_version.py
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh release create "$GITHUB_REF_NAME"
+          --verify-tag
+          --generate-notes
+          --title "Latch ${GITHUB_REF_NAME#v}"
