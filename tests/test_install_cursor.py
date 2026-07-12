@@ -290,8 +290,13 @@ def test_cursor_commands_sync_status_and_remove():
         _assert("Latch operation id: latch-compact run" in compact, compact)
         _assert("LATCH_COMPACTOR_BACKEND=cursor" in compact, compact)
         seed_command = (commands / "latch-seed.md").read_text(encoding="utf-8")
-        _assert("--source cursor" in seed_command and "Never add `--yes`" in seed_command,
+        _assert("--source cursor" in seed_command and "--format json" in seed_command
+                and "Never add `--yes`" in seed_command,
                 seed_command)
+        pm_command = (commands / "latch-pm.md").read_text(encoding="utf-8")
+        _assert("Latch operation id: latch-pm prepare" in pm_command, pm_command)
+        _assert("latch_pm_preview" in pm_command and "/latch-pm apply" in pm_command,
+                pm_command)
         ok, detail = ic.cursor_commands_status(commands)
         _assert(ok, detail)
 
@@ -387,7 +392,8 @@ def test_cursor_skills_sync_status_remove_and_plugin_manifest():
                 gate_body)
         seed_body = seed_skill.read_text(encoding="utf-8")
         _assert("Latch operation id: latch-seed preview" in seed_body, seed_body)
-        _assert("--cursor-session-id" in seed_body and "/latch-seed apply" in seed_body,
+        _assert("--cursor-session-id" in seed_body and "--format json" in seed_body
+                and "/latch-seed apply" in seed_body,
                 seed_body)
         compact_body = (skills / "source-command-latch-compact" / "SKILL.md").read_text(
             encoding="utf-8",
@@ -396,7 +402,8 @@ def test_cursor_skills_sync_status_remove_and_plugin_manifest():
         pm_body = (skills / "source-command-latch-pm" / "SKILL.md").read_text(
             encoding="utf-8",
         )
-        _assert("/latch-pm apply" in pm_body, pm_body)
+        _assert("latch_pm_preview" in pm_body and "/latch-pm apply" in pm_body, pm_body)
+        _assert("Do not substitute agent prose" in pm_body, pm_body)
         ok, detail = ic.cursor_skills_status(skills, model_backend="codex")
         _assert(ok, detail)
         ok, detail = ic.cursor_skills_status(skills, model_backend="cursor")

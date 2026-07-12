@@ -437,6 +437,7 @@ def test_llm_mode_blocks_deterministic_only_write_candidates():
     _assert("LLM-backed seed produced no writeable candidates" in out,
             f"report should explain the safe no-write boundary: {out}")
     payload = json.loads(seed.render_json(args=args, sources=[], candidates=chosen, llm_estimate=1))
+    _assert(payload["ok"] is True, payload)
     _assert(payload["llm_refinement_empty"] is True,
             f"json should expose the LLM-empty boundary: {payload}")
     print("PASS llm_mode_blocks_deterministic_only_write_candidates")

@@ -82,11 +82,13 @@ host-appropriate shell wrappers.
 
 From the hooked Cursor conversation, run `/latch-seed`. It must preview the
 exact current transcript before any write. Copy the exact session id surfaced
-by SessionStart. After approving the preview, reply exactly `/latch-seed apply`
-before the generated command reruns with `--apply --yes`. The equivalent preview is:
+by SessionStart. Confirm that the preview tool completed successfully and
+returned JSON; a preToolUse authorization alone must not arm apply. After
+approving the preview, reply exactly `/latch-seed apply` before the generated
+command reruns with `--apply --yes`. The equivalent preview is:
 
 ```bash
-/path/to/latch/bin/latch_seed.sh --source cursor --cursor-session-id SESSION_ID
+/path/to/latch/bin/latch_seed.sh --source cursor --cursor-session-id SESSION_ID --format json
 ```
 
 Running without an explicit session id and its matching per-session marker must
@@ -97,6 +99,12 @@ For older Claude/Codex sources, use `--source both` separately.
 Pick one concrete rejected path, governance rule, or prior agent mistake from
 the seed report. Good proof fuel names a forbidden approach and the accepted
 redirect.
+
+For `/latch-pm`, confirm that Cursor calls the read-only `latch_pm_preview`
+tool and displays its complete candidate/digest result before asking for
+`/latch-pm apply`. Change the title, body, status, kind, links, or workstream in
+a test apply and confirm the insert is denied; the exact previewed candidate
+must succeed only once. A prose-only preview is not acceptance evidence.
 
 For a no-history smoke, use the fixture path:
 

@@ -66,6 +66,13 @@ def test_cursor_plugin_skills_are_complete_nonconflicting_and_portable():
         assert "~/.cursor/projects" not in text
         assert "agent-transcripts" not in text
 
+        if name == "source-command-latch-seed":
+            assert "--format json" in text
+            assert "successful JSON result" in text
+        if name == "source-command-latch-pm":
+            assert "latch_pm_preview" in text
+            assert "Do not substitute agent prose" in text
+
         if name in {
             "source-command-latch-budget-approve",
             "source-command-latch-decay",

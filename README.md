@@ -250,8 +250,12 @@ The merge preserves unrelated Cursor hooks and installs:
   verified `latch_gate` tool result, arms the current prompt only when that gate
   used the request verbatim and the outer tool result reports positive
   completion rather than failure, cancellation, timeout, denial, or skip, and
-  returns a concise instruction to surface the receipt. Conflicting tool-name,
-  input-container, server, or nested-tool identities fail closed. Cursor
+  rejects conflicting tool-name, input-container, server, or nested-tool
+  identities. It advances seed preview state only after a matching
+  successful JSON result, and binds `/latch-pm` to the exact non-writing
+  `latch_pm_preview` candidate digest. Failed, malformed, missing, or
+  cross-session preview results cannot authorize apply. It also returns a
+  concise instruction to surface the receipt. Cursor
   has no equivalent of Claude Code's deterministic user-only `systemMessage`
   channel, so receipt visibility is agent-context delivery backed by the
   `AGENTS.md` foregrounding contract—not a claim that Cursor renders the line
@@ -276,9 +280,13 @@ opt-in SessionStart hook recorded an exact per-session conversation id and
 explicitly; latch never scans Cursor databases or guesses the most recent chat.
 
 The installed `/latch-seed` command is also current-session-only. It previews
-seed candidates from the exact marker/transcript pair, asks for approval, and
-only then accepts a separate `/latch-seed apply` confirmation and writes staging
-evidence. `--cursor-transcript PATH` is available for
+seed candidates as JSON from the exact marker/transcript pair. The preview
+attempt alone does not arm apply; a matching successful `postToolUse` result
+must be recorded before the separate `/latch-seed apply` confirmation can write
+staging evidence. `/latch-pm` similarly uses the read-only
+`latch_pm_preview` MCP result—not agent prose—to display and digest-bind every
+load-bearing decision field before one matching staging insert.
+`--cursor-transcript PATH` is available for
 a user-explicit file; latch never enumerates Cursor's private history folders.
 
 ```bash
@@ -348,7 +356,7 @@ find useful project judgment.
 From a hooked Cursor conversation, the native path is:
 
 ```bash
-/path/to/latch/bin/latch_seed.sh --source cursor --cursor-session-id SESSION_ID
+/path/to/latch/bin/latch_seed.sh --source cursor --cursor-session-id SESSION_ID --format json
 # Review first; only then rerun with --apply --yes.
 ```
 

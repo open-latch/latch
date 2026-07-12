@@ -1482,6 +1482,7 @@ def render_json(
 ) -> str:
     session_cap = args.max_sessions if args.max_sessions is not None else DEFAULT_MAX_SESSIONS
     payload = {
+        "ok": True,
         "intro": SEED_INTRO,
         "project": str(Path(args.project).resolve()),
         "source": args.source,
