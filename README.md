@@ -235,10 +235,14 @@ The merge preserves unrelated Cursor hooks and installs:
   available; free-form Shell, unknown, and malformed payloads deny. Explicit
   latch operations can consume one session/prompt/tool/argument-bound receipt
   instead; preview/apply and confirmation workflows require a later explicit
-  operation confirmation and the receipt is single-use.
+  operation confirmation and the receipt is single-use. Managed-operation
+  intent selects an exclusive lane: a missing, consumed, or mismatched narrow
+  receipt denies without falling through to ordinary `latch_gate` authorization.
 - `postToolUse`: recognizes latch `kb_activity` and gate `findings` in the
   verified `latch_gate` tool result, arms the current prompt only when that gate
-  used the request verbatim, and returns a concise instruction to surface the receipt. Cursor
+  used the request verbatim and the outer tool result reports no failure, and
+  returns a concise instruction to surface the receipt. Conflicting tool-name,
+  input-container, server, or nested-tool identities fail closed. Cursor
   has no equivalent of Claude Code's deterministic user-only `systemMessage`
   channel, so receipt visibility is agent-context delivery backed by the
   `AGENTS.md` foregrounding contract—not a claim that Cursor renders the line

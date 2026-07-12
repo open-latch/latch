@@ -132,8 +132,17 @@ negative cases; each mutation must remain denied:
 
 - call `latch_gate` with a rephrased request,
 - force a skipped/error gate result,
+- wrap an inner `OK` gate result in `isError=true`, `success=false`, or a
+  nonzero exit code,
+- combine contradictory tool aliases, input containers, servers, or nested
+  tool names,
 - submit a second prompt and try to reuse the prior receipt,
 - invoke a mutation hook with missing/invalid input.
+
+For an explicit latch slash workflow, also arm a normal `PROCEED` gate receipt
+and prove that it still cannot authorize a missing-preview seed apply, changed
+PM candidate, alternate launcher, script, project, or argument shape. Those
+operations use an exclusive narrow receipt lane.
 
 Retain the live proof under a dated directory outside the repo. Save Cursor
 version, doctor JSON, sanitized hooks config, before/after git status, the

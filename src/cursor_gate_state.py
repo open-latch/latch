@@ -72,6 +72,10 @@ _PM_CANDIDATE_KEYS = {
     "kind", "title", "body", "status", "links", "workstream_id",
     "artifacts", "session_id",
 }
+_TOOL_NAME_KEYS = ("tool_name", "toolName", "name")
+_TOOL_INPUT_KEYS = ("tool_input", "toolInput", "input")
+_SERVER_IDENTITY_KEYS = ("server", "server_name", "serverName")
+_NESTED_TOOL_KEYS = ("tool", "tool_name", "toolName", "name")
 
 
 def _session_key(sid: str | None) -> str:
@@ -341,6 +345,7 @@ def reset_session(project_path: str, sid: str | None) -> dict[str, Any]:
         "turn": 0,
         "prompt_hash": None,
         "gate_receipt": None,
+        "operation_intent": None,
         "operation_receipt": None,
         "pending_operation": None,
         "updated_at": _now(),
@@ -359,9 +364,16 @@ def begin_prompt(project_path: str, sid: str | None, prompt: str) -> dict[str, A
         turn = 1
     pending = _pending_operation(previous)
     invocation = _operation_invocation(prompt, pending)
+    operation_intent: dict[str, Any] | None = None
     operation_receipt: dict[str, Any] | None = None
     if invocation:
         name, phase, confirmation = invocation
+        operation_intent = {
+            "name": name,
+            "phase": phase,
+            "session_id": sid,
+            "prompt_hash": prompt_hash(prompt),
+        }
         allowed = True
         if name == "latch-seed" and phase == "apply":
             allowed = bool(
@@ -403,6 +415,7 @@ def begin_prompt(project_path: str, sid: str | None, prompt: str) -> dict[str, A
         "turn": turn,
         "prompt_hash": prompt_hash(prompt),
         "gate_receipt": None,
+        "operation_intent": operation_intent,
         "operation_receipt": operation_receipt,
         "pending_operation": pending,
         "updated_at": _now(),
@@ -471,8 +484,28 @@ def mutation_authorized(project_path: str, sid: str | None) -> tuple[bool, str]:
     return True, str(receipt["recommendation"])
 
 
+def managed_operation_intended(
+    project_path: str,
+    sid: str | None,
+) -> tuple[bool, str]:
+    """Return whether this prompt selected the exclusive managed-operation lane."""
+    state = read_state(project_path, sid)
+    if not state or not sid or state.get("session_id") != sid:
+        return False, "no current Cursor operation state"
+    intent = state.get("operation_intent")
+    if not isinstance(intent, dict):
+        return False, "current prompt is not a managed latch operation"
+    if intent.get("session_id") != sid:
+        return False, "managed operation session mismatch"
+    if intent.get("prompt_hash") != state.get("prompt_hash"):
+        return False, "managed operation intent belongs to another prompt"
+    if intent.get("name") not in _OPERATION_NAMES:
+        return False, "managed operation identity is invalid"
+    return True, f"managed operation {intent.get('name')} {intent.get('phase')}"
+
+
 def _tool_name(payload: dict[str, Any]) -> str:
-    for key in ("tool_name", "toolName", "name"):
+    for key in _TOOL_NAME_KEYS:
         value = payload.get(key)
         if isinstance(value, str) and value.strip():
             return value.strip()
@@ -484,19 +517,47 @@ def _normalized_tool_name(name: str) -> str:
 
 
 def _tool_input(payload: dict[str, Any]) -> dict[str, Any]:
-    for key in ("tool_input", "toolInput", "input"):
+    for key in _TOOL_INPUT_KEYS:
         value = payload.get(key)
         if isinstance(value, dict):
             return value
     return {}
 
 
+def _tool_name_evidence(payload: dict[str, Any]) -> tuple[list[str], bool]:
+    values: list[str] = []
+    malformed = False
+    for key in _TOOL_NAME_KEYS:
+        if key not in payload:
+            continue
+        value = payload.get(key)
+        if not isinstance(value, str) or not value.strip():
+            malformed = True
+        else:
+            values.append(value.strip())
+    return values, malformed
+
+
+def _tool_input_evidence(payload: dict[str, Any]) -> tuple[list[dict[str, Any]], bool]:
+    values: list[dict[str, Any]] = []
+    malformed = False
+    for key in _TOOL_INPUT_KEYS:
+        if key not in payload:
+            continue
+        value = payload.get(key)
+        if not isinstance(value, dict):
+            malformed = True
+        else:
+            values.append(value)
+    return values, malformed
+
+
 def _explicit_server_identity(payload: dict[str, Any]) -> tuple[str | None, bool]:
     """Return one explicit server identity and whether the evidence conflicts."""
     identities: list[str] = []
-    malformed = False
-    for container in (payload, _tool_input(payload)):
-        for key in ("server", "server_name", "serverName"):
+    tool_inputs, malformed = _tool_input_evidence(payload)
+    for container in (payload, *tool_inputs):
+        for key in _SERVER_IDENTITY_KEYS:
             if key not in container:
                 continue
             value = container.get(key)
@@ -504,6 +565,54 @@ def _explicit_server_identity(payload: dict[str, Any]) -> tuple[str | None, bool
                 malformed = True
             else:
                 identities.append(_normalized_tool_name(value))
+    unique = set(identities)
+    if malformed or len(unique) > 1:
+        return None, True
+    return (next(iter(unique)) if unique else None), False
+
+
+def _parse_tool_identity(name: str) -> tuple[str | None, str | None, bool] | None:
+    """Return ``(server, tool, generic_mcp)`` for one tool-name assertion."""
+    text = name.strip()
+    normalized = _normalized_tool_name(text)
+    if not normalized:
+        return None
+    if text.lower().startswith("mcp__"):
+        parts = text.split("__")
+        if len(parts) != 3 or not parts[1].strip() or not parts[2].strip():
+            return None
+        return (
+            _normalized_tool_name(parts[1]),
+            _normalized_tool_name(parts[2]),
+            False,
+        )
+    if "mcp" in normalized:
+        return None, None, True
+    if normalized.startswith("latch"):
+        return "latch", normalized, False
+    if normalized.startswith("kb"):
+        return "claudekb", normalized, False
+    return "other", normalized, False
+
+
+def _nested_tool_identity(
+    payload: dict[str, Any],
+) -> tuple[tuple[str | None, str] | None, bool]:
+    tool_inputs, malformed = _tool_input_evidence(payload)
+    identities: list[tuple[str | None, str]] = []
+    for container in tool_inputs:
+        for key in _NESTED_TOOL_KEYS:
+            if key not in container:
+                continue
+            value = container.get(key)
+            if not isinstance(value, str) or not value.strip():
+                malformed = True
+                continue
+            parsed = _parse_tool_identity(value)
+            if parsed is None or parsed[2] or parsed[1] is None:
+                malformed = True
+                continue
+            identities.append((parsed[0], parsed[1]))
     unique = set(identities)
     if malformed or len(unique) > 1:
         return None, True
@@ -525,41 +634,58 @@ def _latch_tool_identity(payload: dict[str, Any], raw_name: str) -> str | None:
     Parse only explicit latch/legacy server identities; never infer latch from
     an arbitrary non-latch tool whose name merely contains a familiar suffix.
     """
-    name = (raw_name or "").strip()
-    normalized_name = _normalized_tool_name(name)
-    tool_input = _tool_input(payload)
+    del raw_name  # Every alias is authoritative evidence; never select only one.
+    raw_names, malformed_names = _tool_name_evidence(payload)
+    if malformed_names or not raw_names:
+        return None
+    parsed_names = [_parse_tool_identity(name) for name in raw_names]
+    if any(parsed is None for parsed in parsed_names):
+        return None
+    generic_mcp = any(parsed[2] for parsed in parsed_names if parsed is not None)
+    raw_identities = {
+        (parsed[0], parsed[1])
+        for parsed in parsed_names if parsed is not None and not parsed[2]
+    }
+    if len(raw_identities) > 1:
+        return None
+    raw_identity = next(iter(raw_identities)) if raw_identities else None
+
     explicit_server, conflict = _explicit_server_identity(payload)
     if conflict or explicit_server is not None and explicit_server not in _LATCH_SERVER_NAMES:
         return None
-
-    if name.lower().startswith("mcp__"):
-        parts = name.split("__")
-        if len(parts) < 3:
-            return None
-        qualified_server = _normalized_tool_name(parts[1])
-        qualified_tool = _normalized_tool_name(parts[-1])
-        if qualified_server not in _LATCH_SERVER_NAMES:
-            return None
-        if explicit_server is not None and explicit_server != qualified_server:
-            return None
-        if not _tool_matches_server_family(qualified_tool, qualified_server):
-            return None
-        return qualified_tool
-
-    if normalized_name.startswith("latch") or normalized_name.startswith("kb"):
-        if explicit_server is not None \
-                and not _tool_matches_server_family(normalized_name, explicit_server):
-            return None
-        return normalized_name
-
-    if "mcp" not in normalized_name or explicit_server not in _LATCH_SERVER_NAMES:
+    nested_identity, nested_conflict = _nested_tool_identity(payload)
+    if nested_conflict:
         return None
-    for key in ("tool", "tool_name", "toolName", "name"):
-        value = tool_input.get(key)
-        if isinstance(value, str) and value.strip():
-            tool = _normalized_tool_name(value)
-            return tool if _tool_matches_server_family(tool, explicit_server) else None
-    return "unknownlatchtool"
+
+    server = raw_identity[0] if raw_identity else None
+    tool = raw_identity[1] if raw_identity else None
+    if server == "other":
+        return None
+    if nested_identity is not None:
+        nested_server, nested_tool = nested_identity
+        if nested_server == "other":
+            return None
+        if tool is not None and tool != nested_tool:
+            return None
+        if server is not None and nested_server is not None and server != nested_server:
+            return None
+        tool = tool or nested_tool
+        server = server or nested_server
+    if explicit_server is not None:
+        if server is not None and server != explicit_server:
+            return None
+        server = explicit_server
+    if raw_identity is None and not generic_mcp:
+        return None
+    if raw_identity is None and explicit_server is None:
+        return None
+    if server not in _LATCH_SERVER_NAMES:
+        return None
+    if tool is None:
+        return "unknownlatchtool"
+    if not _tool_matches_server_family(tool, server):
+        return None
+    return tool
 
 
 def is_latch_gate_tool(payload: dict[str, Any]) -> bool:
@@ -869,6 +995,11 @@ def _has_failure_signal(value: Any, depth: int = 0) -> bool:
         _has_failure_signal(value[key], depth + 1)
         for key in wrapper_keys if key in value
     )
+
+
+def has_failure_signal(value: Any) -> bool:
+    """Public fail-closed wrapper shared by gate and operation receipts."""
+    return _has_failure_signal(value)
 
 
 def _find_seed_preview(value: Any, depth: int = 0) -> dict[str, Any] | None:

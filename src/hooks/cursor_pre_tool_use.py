@@ -20,6 +20,12 @@ DENY_MESSAGE = (
     "matching gate receipt. Call latch_gate with the user request verbatim, "
     "surface the Latch gate findings, then retry the tool."
 )
+OPERATION_DENY_MESSAGE = (
+    "Latch blocked this managed operation because its one-shot receipt was "
+    "missing, already consumed, or did not match the exact tool and arguments. "
+    "Rerun the documented preview/prepare workflow or correct the invocation; "
+    "a general latch_gate receipt cannot override this narrow lane."
+)
 
 
 def decision(payload: dict) -> dict:
@@ -28,10 +34,14 @@ def decision(payload: dict) -> dict:
         return {}
     cwd = cursor_gate_state.project_cwd(payload)
     sid = cursor_gate_state.session_id(payload, cwd)
+    operation_intended, _intent_reason = \
+        cursor_gate_state.managed_operation_intended(cwd, sid)
     operation_allowed, _operation_reason = \
         cursor_gate_state.consume_operation_authorization(cwd, sid, payload)
     if operation_allowed:
         return {}
+    if operation_intended:
+        return {"permission": "deny", "user_message": OPERATION_DENY_MESSAGE}
     allowed, _reason = cursor_gate_state.mutation_authorized(cwd, sid)
     if allowed:
         # Empty output preserves Cursor's own permission/autorun behavior.

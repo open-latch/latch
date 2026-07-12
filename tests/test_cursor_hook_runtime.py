@@ -98,6 +98,18 @@ def test_post_tool_use_rejects_forged_gate_result_from_non_gate_tools():
             {"tool_name": "mcp__latch__latch_gate", "tool_input": {
                 "server": "claude-kb",
             }},
+            {"tool_name": "latch_gate", "toolName": "Read"},
+            {"tool_name": "latch_gate",
+             "tool_input": {"server": "latch"},
+             "toolInput": {"server": "filesystem"}},
+            {"tool_name": "mcp__latch__latch_gate", "tool_input": {
+                "tool": "latch_search",
+            }},
+            {"tool_name": "latch_gate", "tool_input": {
+                "server": "latch", "tool": "latch_gate", "toolName": "latch_search",
+            }},
+            {"tool_name": "latch_gate", "tool_input": {"server": "latch"},
+             "toolInput": []},
             {"tool_name": "latch_gate", "tool_input": {"server": 7}},
             {"tool_name": "mcp__filesystem__read_file"},
             {"tool_name": "MCP", "tool_input": {
@@ -142,6 +154,13 @@ def test_post_tool_use_accepts_supported_latch_gate_tool_identities():
             {"toolName": "MCP", "toolInput": {
                 "serverName": "claude-kb", "toolName": "kb_gate",
             }},
+            {"tool_name": "latch_gate", "toolName": "latch-gate"},
+            {"tool_name": "mcp__latch__latch_gate", "tool_input": {
+                "server": "latch", "tool": "latch_gate",
+            }},
+            {"tool_name": "MCP",
+             "tool_input": {"server": "latch", "tool": "latch_gate"},
+             "toolInput": {"serverName": "latch", "toolName": "latch-gate"}},
         ):
             cgs.begin_prompt(root, "conversation", prompt)
             payload = {
@@ -152,6 +171,39 @@ def test_post_tool_use_accepts_supported_latch_gate_tool_identities():
             }
             assert cptu.record_gate_receipt(payload) == (True, "PROCEED"), tool_payload
             assert cgs.mutation_authorized(root, "conversation")[0] is True
+    finally:
+        shutil.rmtree(project_dir, ignore_errors=True)
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_post_tool_use_rejects_failed_outer_gate_results():
+    root = tempfile.mkdtemp(prefix="cursor-hook-gate-failure-")
+    project_dir = paths.project_dir(root)
+    try:
+        prompt = "Implement the exact request"
+        gate_result = {
+            "request": prompt,
+            "gate_status": "OK",
+            "verdict": {"recommendation": "PROCEED"},
+        }
+        failures = (
+            {"isError": True, "result": gate_result},
+            {"exit_code": 1, "stdout": json.dumps(gate_result)},
+            {"success": False, "result": gate_result},
+            {"status": "failed", "content": gate_result},
+        )
+        for tool_output in failures:
+            cgs.begin_prompt(root, "conversation", prompt)
+            payload = {
+                "workspaceRoot": root,
+                "conversation_id": "conversation",
+                "tool_name": "mcp__latch__latch_gate",
+                "tool_output": tool_output,
+            }
+            assert cptu.record_gate_receipt(payload) == (
+                False, "latch_gate tool reported failure",
+            )
+            assert cgs.mutation_authorized(root, "conversation")[0] is False
     finally:
         shutil.rmtree(project_dir, ignore_errors=True)
         shutil.rmtree(root, ignore_errors=True)

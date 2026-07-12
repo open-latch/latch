@@ -22,9 +22,12 @@ Use the project `latch` MCP server as the decision-continuity layer:
 - If the gate is skipped, degraded, returns no recommendation, or was called
   with a rephrased request, say so and do not attempt a mutation while the
   opt-in gate hook is active. Resolve the gate or ask the user what to do.
-- If `preToolUse` denies a mutation for a missing current-prompt receipt, call
-  `latch_gate` with the current user request verbatim, surface the findings,
-  and then retry. Never work around or disable the hook silently.
+- If `preToolUse` denies an ordinary coding mutation for a missing current-
+  prompt receipt, call `latch_gate` with the current user request verbatim,
+  surface the findings, and then retry. A denial inside an explicit latch slash
+  workflow is different: rerun its documented preview/prepare step or correct
+  the exact invocation. A general gate receipt cannot override that narrow lane.
+  Never work around or disable the hook silently.
 - Explicit latch slash workflows use a separate one-shot operation receipt
   bound to the current Cursor session, prompt, expected tool, and exact argument
   shape. That narrow lane keeps compact/seed/maintenance workflows usable

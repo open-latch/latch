@@ -442,6 +442,80 @@ def test_pm_operation_receipt_binds_exact_previewed_content():
         shutil.rmtree(root, ignore_errors=True)
 
 
+def test_managed_operation_intent_never_falls_through_to_general_gate():
+    import cursor_post_tool_use as cpost
+    import cursor_pre_tool_use as cpre
+
+    root, project_dir = _tmp()
+    sid = "exclusive-operation-session"
+
+    def arm(prompt: str) -> None:
+        assert cgs.record_gate(
+            root, sid, request=prompt,
+            gate_status="OK", recommendation="PROCEED",
+        )[0]
+
+    try:
+        seed = paths.KB_ROOT / "bin" / "latch_seed.sh"
+        prompt = "/latch-seed apply"
+        state = cgs.begin_prompt(root, sid, prompt)
+        assert state["operation_intent"]["name"] == "latch-seed"
+        assert state["operation_receipt"] is None
+        assert cgs.managed_operation_intended(root, sid)[0]
+        arm(prompt)
+        seed_apply = _shell(
+            f"bash {seed} --source cursor --cursor-session-id {sid} "
+            "--format json --apply --yes", root, sid,
+        )
+        denied = cpre.decision(seed_apply)
+        assert denied["permission"] == "deny"
+        assert "general latch_gate receipt cannot override" in denied["user_message"]
+
+        candidate = {
+            "kind": "decision", "status": "staging",
+            "title": "Approved", "body": "Approved body", "links": [],
+        }
+        cgs.begin_prompt(root, sid, "Latch operation id: latch-pm prepare")
+        preview_call = {
+            "workspaceRoot": root,
+            "conversation_id": sid,
+            "tool_name": "mcp__latch__latch_pm_preview",
+            "tool_input": candidate,
+            "tool_output": cgs.pm_preview_payload(candidate),
+        }
+        assert cpost.record_operation_success(preview_call)[0]
+        prompt = "/latch-pm apply"
+        cgs.begin_prompt(root, sid, prompt)
+        arm(prompt)
+        changed = {
+            "workspaceRoot": root,
+            "conversation_id": sid,
+            "tool_name": "mcp__latch__latch_insert",
+            "tool_input": {**candidate, "body": "Changed body"},
+        }
+        assert cpre.decision(changed)["permission"] == "deny"
+
+        maintenance = paths.KB_ROOT / "src" / "maintenance.py"
+        prompt = "/latch-heal"
+        for command in (
+            f"/tmp/python {maintenance} nightly {root}",
+            f"python /tmp/maintenance.py nightly {root}",
+            f"python {maintenance} nightly {root} extra",
+        ):
+            cgs.begin_prompt(root, sid, prompt)
+            arm(prompt)
+            assert cpre.decision(_shell(command, root, sid))["permission"] == "deny"
+
+        cgs.begin_prompt(root, sid, prompt)
+        arm(prompt)
+        valid = _shell(f"python {maintenance} nightly {root}", root, sid)
+        assert cpre.decision(valid) == {}
+        assert cpre.decision(valid)["permission"] == "deny"
+    finally:
+        shutil.rmtree(project_dir, ignore_errors=True)
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def test_other_managed_operations_match_only_expected_wrappers():
     import cursor_pre_tool_use as cpre
 
