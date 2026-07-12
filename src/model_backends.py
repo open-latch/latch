@@ -14,8 +14,10 @@ import tempfile
 from pathlib import Path
 from typing import Iterable
 
+import cursor_backend
 
-SUPPORTED_BACKENDS = {"claude", "codex"}
+
+SUPPORTED_BACKENDS = {"claude", "codex", "cursor"}
 
 # Maintenance is launched from the MCP server environment, sometimes long after
 # the original user action. Prefer a maintenance-specific knob, then a generic
@@ -77,6 +79,8 @@ def invoke_prompt(
     claude_bin: str | None = None,
     codex_bin: str | None = None,
     codex_model_env: Iterable[str] = (),
+    cursor_bin: str | None = None,
+    cursor_model_env: Iterable[str] = (),
 ) -> ModelCallResult:
     try:
         resolved = resolve_backend(backend, env_names=env_names, default=default)
@@ -91,6 +95,15 @@ def invoke_prompt(
             codex_bin=codex_bin,
             model=first_env_value(codex_model_env),
         )
+    if resolved == "cursor":
+        text, error, timed_out = cursor_backend.invoke_prompt(
+            prompt,
+            timeout_s=timeout_s,
+            purpose=purpose,
+            agent_bin=cursor_bin,
+            model=first_env_value(cursor_model_env),
+        )
+        return ModelCallResult(text, error, timed_out, "cursor")
     return _invoke_claude(
         prompt,
         timeout_s=timeout_s,

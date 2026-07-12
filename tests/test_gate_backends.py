@@ -1,6 +1,7 @@
 """Unit tests for kb_gate model backend selection."""
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import sys
@@ -173,6 +174,49 @@ def test_codex_backend_does_not_call_claude_adversary():
     print("PASS codex_backend_does_not_call_claude_adversary")
 
 
+def test_cursor_backend_does_not_call_claude_or_codex_classifier():
+    d = _tmp()
+    project = d / "project"
+    old_response = os.environ.get("FAKE_CURSOR_RESPONSE")
+    old_args = os.environ.get("FAKE_CURSOR_ARGS")
+    old_stdin = os.environ.get("FAKE_CURSOR_STDIN")
+    old_cursor_bin = gate.cursor_backend.CURSOR_AGENT_BIN
+    try:
+        fake = _fake_exe(
+            d / "agent",
+            "printf '%s\\n' \"$@\" > \"$FAKE_CURSOR_ARGS\"\n"
+            "cat > \"$FAKE_CURSOR_STDIN\"\n"
+            "printf '%s\\n' \"$FAKE_CURSOR_RESPONSE\"\n",
+        )
+        os.environ["FAKE_CURSOR_RESPONSE"] = json.dumps({
+            "type": "result", "subtype": "success", "is_error": False,
+            "result": CLASSIFIER_JSON, "session_id": "cursor-backend",
+        })
+        os.environ["FAKE_CURSOR_ARGS"] = str(d / "args.txt")
+        os.environ["FAKE_CURSOR_STDIN"] = str(d / "stdin.txt")
+        raw, error, timed_out = gate._invoke_cursor_classifier_once(
+            "classify", timeout_s=2, cursor_bin=str(fake),
+        )
+        _assert(error is None and timed_out is False, error)
+        _assert(raw == CLASSIFIER_JSON, raw)
+        args = (d / "args.txt").read_text(encoding="utf-8").splitlines()
+        _assert("--mode" in args and "ask" in args, args)
+        _assert("--force" not in args, args)
+        gate.cursor_backend.CURSOR_AGENT_BIN = str(fake)
+        out = gate.classify_gate(
+            _chain(), project_path=str(project), backend="cursor", timeout_s=2,
+        )
+        _assert(out["recommendation"] == "PROCEED" and out["backend"] == "cursor", out)
+    finally:
+        gate.cursor_backend.CURSOR_AGENT_BIN = old_cursor_bin
+        _restore_env("FAKE_CURSOR_RESPONSE", old_response)
+        _restore_env("FAKE_CURSOR_ARGS", old_args)
+        _restore_env("FAKE_CURSOR_STDIN", old_stdin)
+        _cleanup_project(project)
+        shutil.rmtree(d, ignore_errors=True)
+    print("PASS cursor_backend_does_not_call_claude_or_codex_classifier")
+
+
 def test_adversary_structural_log_carries_backend():
     d = _tmp()
     project = d / "project"
@@ -205,5 +249,6 @@ if __name__ == "__main__":
     test_claude_backend_remains_supported()
     test_codex_backend_does_not_call_claude_classifier()
     test_codex_backend_does_not_call_claude_adversary()
+    test_cursor_backend_does_not_call_claude_or_codex_classifier()
     test_adversary_structural_log_carries_backend()
     print("\nAll gate_backends tests pass.")

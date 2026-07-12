@@ -31,10 +31,17 @@ def test_render_cursor_server_uses_cursor_mcp_shape():
     _assert(server["env"]["LATCH_ADAPTER"] == "cursor", server)
     _assert(server["env"]["LATCH_MODEL_BACKEND"] == "codex", server)
     _assert(server["env"]["LATCH_GATE_BACKEND"] == "codex", server)
+    _assert(server["env"]["LATCH_MAINTENANCE_BACKEND"] == "codex", server)
+    _assert(server["env"]["LATCH_COMPACTOR_BACKEND"] == "codex", server)
 
     default = ic.render_cursor_server("/PY", "/repo/src/mcp_server.py")
     _assert(default["type"] == "stdio", default)
-    _assert(default["env"] == {"LATCH_ADAPTER": "cursor"}, default)
+    _assert(default["env"]["LATCH_ADAPTER"] == "cursor", default)
+    for key in (
+        "LATCH_MODEL_BACKEND", "LATCH_GATE_BACKEND",
+        "LATCH_MAINTENANCE_BACKEND", "LATCH_COMPACTOR_BACKEND",
+    ):
+        _assert(default["env"][key] == "cursor", default)
     print("PASS render_cursor_server_uses_cursor_mcp_shape")
 
 
@@ -260,12 +267,19 @@ def test_cursor_commands_sync_status_and_remove():
         commands = d / ".cursor" / "commands"
         changes = ic.sync_cursor_commands(commands)
         _assert(any("Cursor command latch-gate.md" in c for c in changes), changes)
-        _assert(not (commands / "latch-compact.md").exists(),
-                "Cursor-native compaction command should not be installed")
+        _assert((commands / "latch-compact.md").exists(),
+                "Cursor-native compaction command should be installed")
         gate = commands / "latch-gate.md"
         body = gate.read_text(encoding="utf-8")
         _assert("<KB_HOME>" not in body, "Cursor commands should resolve KB_HOME")
         _assert("Cursor boundary" in body, "Cursor commands should state adapter boundary")
+        _assert("LATCH_GATE_BACKEND=cursor" in body,
+                "shell fallback should inherit the native Cursor backend")
+        compact = (commands / "latch-compact.md").read_text(encoding="utf-8")
+        _assert("run_cursor_compact_now" in compact and "fail-closed" in compact,
+                compact)
+        _assert("Latch operation id: latch-compact run" in compact, compact)
+        _assert("LATCH_COMPACTOR_BACKEND=cursor" in compact, compact)
         ok, detail = ic.cursor_commands_status(commands)
         _assert(ok, detail)
 
@@ -326,6 +340,25 @@ def test_cursor_commands_refuse_user_owned_same_name_collision():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_cursor_commands_render_selected_compatibility_backend():
+    d = Path(tempfile.mkdtemp(prefix="latch-cursor-commands-backend-"))
+    try:
+        commands = d / ".cursor" / "commands"
+        ic.sync_cursor_commands(commands, model_backend="codex")
+        gate = (commands / "latch-gate.md").read_text(encoding="utf-8")
+        _assert("LATCH_GATE_BACKEND=codex" in gate, gate)
+        _assert("Cursor shell-fallback backend: `codex`" in gate, gate)
+        compact = (commands / "latch-compact.md").read_text(encoding="utf-8")
+        _assert("LATCH_COMPACTOR_BACKEND=codex" in compact, compact)
+        _assert('$env:LATCH_COMPACTOR_BACKEND = "codex"' in compact, compact)
+        ok, detail = ic.cursor_commands_status(commands, model_backend="codex")
+        _assert(ok, detail)
+        ok, detail = ic.cursor_commands_status(commands, model_backend="cursor")
+        _assert(not ok and "drifted" in detail, detail)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def test_with_hooks_installs_and_check_requires_hooks():
     d = Path(tempfile.mkdtemp(prefix="latch-cursor-hooks-install-"))
     try:
@@ -373,5 +406,6 @@ if __name__ == "__main__":
     test_check_mode_verifies_mcp_and_agents()
     test_cursor_commands_sync_status_and_remove()
     test_cursor_commands_refuse_user_owned_same_name_collision()
+    test_cursor_commands_render_selected_compatibility_backend()
     test_with_hooks_installs_and_check_requires_hooks()
     print("\nAll install_cursor tests pass.")

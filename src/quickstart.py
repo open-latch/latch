@@ -379,8 +379,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                     help="skip post-install doctor/check commands")
     ap.add_argument("--full-codex-doctor", action="store_true",
                     help="include Codex compact/summarizer probes in the Codex doctor")
-    ap.add_argument("--cursor-model-backend", choices=("claude", "codex"),
-                    help="existing backend for Cursor model-backed gate calls")
+    ap.add_argument("--cursor-model-backend", choices=("cursor", "claude", "codex"),
+                    help="Cursor model backend (default: native Cursor Agent CLI)")
     ap.add_argument("--cursor-with-hooks", action="store_true",
                     help="install and verify opt-in Cursor session/gate/activity hooks")
     ap.add_argument("--no-seed", action="store_true",
@@ -436,7 +436,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  agents       : {', '.join(agents)}")
     print(f"  seed source  : {source}")
     if "cursor" in agents:
-        print(f"  Cursor backend: {args.cursor_model_backend or 'engine default'}")
+        print(f"  Cursor backend: {args.cursor_model_backend or 'cursor (native default)'}")
         print(f"  Cursor hooks  : {'enabled' if args.cursor_with_hooks else 'not installed'}")
     print(f"  last sessions: {args.last_sessions}")
     print(f"  mode         : {'DRY-RUN (no writes)' if args.dry_run else 'apply'}")

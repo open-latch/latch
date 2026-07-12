@@ -21,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 import artifacts  # noqa: E402
 import budget  # noqa: E402
 import codex_transcript  # noqa: E402
+import cursor_backend  # noqa: E402
 import db  # noqa: E402
 import embeddings  # noqa: E402
 import heal  # noqa: E402
@@ -39,7 +40,7 @@ CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 MAX_TRANSCRIPT_CHARS = 120_000  # truncate from the head; prefer recent turns
 REPAIR_RAW_OUTPUT_CHARS = 20_000
 REPAIR_TRANSCRIPT_CHARS = 40_000
-SUPPORTED_SUMMARIZER_BACKENDS = {"claude", "codex"}
+SUPPORTED_SUMMARIZER_BACKENDS = {"claude", "codex", "cursor"}
 
 COMPACT_PROMPT = """You are summarizing a coding-agent session for a per-project knowledge base.
 
@@ -423,8 +424,8 @@ def _invoke_summarizer(payload: dict, *, backend: str = "claude") -> dict | None
 def _repair_prompt(*, payload: dict, parse_err: str, raw_output: str) -> str:
     """Build a self-contained repair prompt.
 
-    Repair calls are separate `claude -p` / `codex exec` processes with no
-    session memory, so references to "the original request" are not enough.
+    Repair calls are separate Claude/Codex/Cursor processes with no session
+    memory, so references to "the original request" are not enough.
     Include the schema and a bounded slice of the original context so the
     repair model can either convert useful prose output into JSON or regenerate
     a valid compact when the first output was structurally empty.
@@ -478,6 +479,8 @@ def _invoke_summarizer_once(
     backend = _summarizer_backend(backend, default="claude")
     if backend == "codex":
         return _invoke_codex_once(user_msg, timeout_s=timeout_s or 600)
+    if backend == "cursor":
+        return _invoke_cursor_once(user_msg, timeout_s=timeout_s or 600)
     return _invoke_claude_once(user_msg, timeout_s=timeout_s or 180)
 
 
@@ -574,6 +577,24 @@ def _invoke_codex_once(
     if not final_text.strip():
         return None, "empty codex final message"
     return final_text, None
+
+
+def _invoke_cursor_once(
+    user_msg: str,
+    *,
+    timeout_s: float = 600,
+    cursor_bin: str | None = None,
+) -> tuple[str | None, str | None]:
+    """Run Cursor Agent in an isolated Ask-mode headless invocation."""
+    model = os.environ.get("LATCH_COMPACTOR_CURSOR_MODEL") or os.environ.get("CURSOR_COMPACTOR_MODEL")
+    text, error, _timed_out = cursor_backend.invoke_prompt(
+        user_msg,
+        timeout_s=timeout_s,
+        purpose="compactor",
+        agent_bin=cursor_bin,
+        model=model,
+    )
+    return text, error
 
 
 def _parse_json_envelope(raw: str) -> tuple[dict | None, str]:

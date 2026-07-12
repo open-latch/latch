@@ -12,8 +12,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import agents_md_sync
+import cursor_backend
 import cursor_hooks
 import cursor_rules_sync
+import cursor_transcript
 import install_cursor
 import install_engine
 
@@ -79,8 +81,10 @@ def check_cursor_rule(rules_path: Path) -> Check:
     )
 
 
-def check_cursor_commands(commands_dir: Path) -> Check:
-    ok, detail = install_cursor.cursor_commands_status(commands_dir)
+def check_cursor_commands(commands_dir: Path, *, model_backend: str | None = None) -> Check:
+    ok, detail = install_cursor.cursor_commands_status(
+        commands_dir, model_backend=model_backend,
+    )
     return Check("Cursor .cursor/commands latch commands", OK if ok else FAIL, detail)
 
 
@@ -134,6 +138,11 @@ def _missing_critical_tools(output: str) -> list[str]:
     return [tool for tool in CRITICAL_MCP_TOOLS if tool not in output]
 
 
+def _needs_mcp_approval(output: str) -> bool:
+    text = (output or "").lower()
+    return "needs approval" in text or "not been approved" in text or "not approved" in text
+
+
 def check_cursor_cli_mcp(
     *,
     agent_bin: str | None = None,
@@ -156,11 +165,27 @@ def check_cursor_cli_mcp(
             WARN,
             f"{resolved} mcp list exit {listed.returncode}: {_output_excerpt(listed)}",
         )
+    listed_output = (listed.stdout or "") + "\n" + (listed.stderr or "")
+    if _needs_mcp_approval(listed_output):
+        return Check(
+            "Cursor CLI MCP visibility",
+            WARN,
+            "latch is statically configured but still needs separate user-controlled "
+            f"MCP approval in Cursor: {_output_excerpt(listed)}",
+        )
 
     tools = _run_agent_mcp(resolved, ["mcp", "list-tools", install_cursor.SERVER_NAME], timeout_s)
     if isinstance(tools, str):
         return Check("Cursor CLI MCP visibility", WARN, tools)
     if tools.returncode != 0:
+        excerpt = _output_excerpt(tools)
+        if _needs_mcp_approval(excerpt):
+            return Check(
+                "Cursor CLI MCP visibility",
+                WARN,
+                "latch is statically configured but still needs separate user-controlled "
+                f"MCP approval in Cursor: {excerpt}",
+            )
         return Check(
             "Cursor CLI MCP visibility",
             WARN,
@@ -184,6 +209,67 @@ def check_cursor_cli_mcp(
     )
 
 
+def check_cursor_model_backend(
+    *,
+    backend: str | None,
+    agent_bin: str | None = None,
+    timeout_s: float = 60.0,
+) -> Check:
+    backend_name = backend or "cursor"
+    if backend_name != "cursor":
+        return Check(
+            "Cursor native model backend",
+            WARN,
+            f"compatibility backend {backend_name} selected; native Cursor probe skipped",
+        )
+    resolved = (
+        agent_bin or os.environ.get("CURSOR_AGENT_BIN")
+        or shutil.which("agent") or shutil.which("cursor-agent") or "agent"
+    )
+    if not _exists_or_on_path(resolved):
+        return Check("Cursor native model backend", FAIL, f"Cursor Agent CLI not found: {resolved}")
+    text, error, _timed_out = cursor_backend.invoke_prompt(
+        'Return only {"ok": true}.',
+        timeout_s=timeout_s,
+        purpose="Cursor backend probe",
+        agent_bin=resolved,
+    )
+    if text is None:
+        detail = error or "Cursor backend probe failed"
+        if "authentication required" in detail.lower() or "not logged in" in detail.lower():
+            detail = (
+                "Cursor Agent login is required for live native-backend acceptance; "
+                "static wiring alone is not sufficient: " + detail
+            )
+        return Check("Cursor native model backend", FAIL, detail)
+    try:
+        payload = json.loads(text.strip())
+    except json.JSONDecodeError as e:
+        return Check(
+            "Cursor native model backend", FAIL,
+            f"Cursor Agent CLI returned non-JSON probe text ({e}): {text[:300]}",
+        )
+    if not isinstance(payload, dict) or payload.get("ok") is not True:
+        return Check("Cursor native model backend", FAIL, f"unexpected probe result: {payload}")
+    return Check("Cursor native model backend", OK, f"{resolved} --print JSON Ask mode reachable")
+
+
+def check_cursor_compact_resolution(
+    *,
+    project_path: Path,
+    session_id: str | None = None,
+    transcript_path: str | None = None,
+    require: bool = False,
+) -> Check:
+    try:
+        sid, transcript = cursor_transcript.resolve_current(
+            str(project_path), session_id=session_id, transcript_path=transcript_path,
+        )
+    except cursor_transcript.CursorTranscriptError as e:
+        return Check("Cursor current-session compact", FAIL if require else WARN, str(e))
+    return Check("Cursor current-session compact", OK, f"{sid} -> {transcript}")
+
+
 def run_all(
     *,
     config_path: Path,
@@ -199,13 +285,26 @@ def run_all(
     skip_cli: bool = False,
     agent_bin: str | None = None,
     cli_timeout_s: float = 15.0,
+    backend_timeout_s: float = 60.0,
     with_hooks: bool = False,
     hooks_path: Path = install_cursor.DEFAULT_HOOKS_PATH,
+    project_path: Path = Path("."),
+    session_id: str | None = None,
+    transcript_path: str | None = None,
+    skip_backend: bool = False,
+    skip_compact: bool = False,
+    require_compact: bool = False,
 ) -> list[Check]:
     checks = [
         check_cursor_config(config_path, python_path, server_py, model_backend=model_backend),
         check_mcp_launch_target(python_path, server_py),
     ]
+    compact_assets_ok, compact_assets_detail = install_cursor.cursor_compact_assets_status()
+    checks.append(Check(
+        "Cursor native backend/compact assets",
+        OK if compact_assets_ok else FAIL,
+        compact_assets_detail,
+    ))
     if skip_agents:
         checks.append(Check("AGENTS.md managed region", WARN, "skipped (--skip-agents)"))
     else:
@@ -217,7 +316,7 @@ def run_all(
     if skip_commands:
         checks.append(Check("Cursor .cursor/commands latch commands", WARN, "skipped (--skip-commands)"))
     else:
-        checks.append(check_cursor_commands(commands_dir))
+        checks.append(check_cursor_commands(commands_dir, model_backend=model_backend))
     if with_hooks:
         checks.append(check_cursor_hooks(
             hooks_path,
@@ -231,6 +330,21 @@ def run_all(
         checks.append(Check("Cursor CLI MCP visibility", WARN, "skipped (--skip-cli)"))
     else:
         checks.append(check_cursor_cli_mcp(agent_bin=agent_bin, timeout_s=cli_timeout_s))
+    if skip_backend:
+        checks.append(Check("Cursor native model backend", WARN, "skipped (--skip-backend)"))
+    else:
+        checks.append(check_cursor_model_backend(
+            backend=model_backend, agent_bin=agent_bin, timeout_s=backend_timeout_s,
+        ))
+    if skip_compact:
+        checks.append(Check("Cursor current-session compact", WARN, "skipped (--skip-compact)"))
+    else:
+        checks.append(check_cursor_compact_resolution(
+            project_path=project_path,
+            session_id=session_id,
+            transcript_path=transcript_path,
+            require=require_compact,
+        ))
     return checks
 
 
@@ -264,11 +378,19 @@ def main(argv: list[str] | None = None) -> int:
                     help="Cursor hooks path to check (default: .cursor/hooks.json)")
     ap.add_argument("--with-hooks", action="store_true",
                     help="require opt-in Cursor session/gate/activity hooks")
-    ap.add_argument("--model-backend", choices=("claude", "codex"),
+    ap.add_argument("--model-backend", choices=("cursor", "claude", "codex"),
                     help="expected existing backend env in .cursor/mcp.json")
+    ap.add_argument("--project", default=os.getcwd(),
+                    help="project path for current-session compact resolution")
+    ap.add_argument("--session-id",
+                    help="optional Cursor session id; must match SessionStart marker")
+    ap.add_argument("--transcript",
+                    help="optional Cursor transcript path; must match SessionStart marker")
     ap.add_argument("--agent-bin", help="Cursor CLI executable for live MCP probe")
     ap.add_argument("--cli-timeout", type=float, default=15.0,
                     help="seconds to wait for each Cursor CLI MCP probe")
+    ap.add_argument("--backend-timeout", type=float, default=60.0,
+                    help="seconds to wait for the native Cursor backend probe")
     ap.add_argument("--skip-agents", action="store_true",
                     help="skip AGENTS.md managed-region check")
     ap.add_argument("--skip-rules", action="store_true",
@@ -277,6 +399,12 @@ def main(argv: list[str] | None = None) -> int:
                     help="skip Cursor commands check")
     ap.add_argument("--skip-cli", action="store_true",
                     help="skip Cursor agent mcp list/list-tools probe")
+    ap.add_argument("--skip-backend", action="store_true",
+                    help="skip native Cursor Agent CLI JSON probe")
+    ap.add_argument("--skip-compact", action="store_true",
+                    help="skip current-session transcript marker check")
+    ap.add_argument("--require-compact", action="store_true",
+                    help="treat missing current Cursor transcript marker as a failure")
     ap.add_argument("--json", action="store_true", help="emit machine-readable JSON")
     args = ap.parse_args(argv)
 
@@ -296,8 +424,15 @@ def main(argv: list[str] | None = None) -> int:
         skip_cli=args.skip_cli,
         agent_bin=args.agent_bin,
         cli_timeout_s=args.cli_timeout,
+        backend_timeout_s=args.backend_timeout,
         with_hooks=args.with_hooks,
         hooks_path=Path(args.hooks_json),
+        project_path=Path(args.project).expanduser().resolve(),
+        session_id=args.session_id,
+        transcript_path=args.transcript,
+        skip_backend=args.skip_backend,
+        skip_compact=args.skip_compact,
+        require_compact=args.require_compact,
     )
 
     if args.json:

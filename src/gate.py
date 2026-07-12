@@ -65,6 +65,7 @@ from typing import Iterable
 
 import budget
 import capture_streams
+import cursor_backend
 import db
 import log_utils
 import paths
@@ -523,7 +524,7 @@ CLASSIFIER_TIMEOUT_S = _env_int_any(
 )
 CLAUDE_BIN = os.environ.get("CLAUDE_BIN") or shutil.which("claude") or "claude"
 CODEX_BIN = os.environ.get("CODEX_BIN") or shutil.which("codex") or "codex"
-SUPPORTED_CLASSIFIER_BACKENDS = {"claude", "codex"}
+SUPPORTED_CLASSIFIER_BACKENDS = {"claude", "codex", "cursor"}
 # CREATE_NO_WINDOW: don't flash a console window per claude.cmd call when the
 # parent has no console. 0 on POSIX (no-op). See heal.py for the full rationale.
 CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
@@ -1041,6 +1042,10 @@ def _invoke_classifier_backend_once(
         return _invoke_codex_classifier_once(
             prompt, timeout_s=timeout_s, purpose=purpose,
         )
+    if backend == "cursor":
+        return _invoke_cursor_classifier_once(
+            prompt, timeout_s=timeout_s, purpose=purpose,
+        )
     return _invoke_claude_classifier_once(
         prompt, timeout_s=timeout_s, purpose=purpose,
     )
@@ -1136,6 +1141,24 @@ def _invoke_codex_classifier_once(
     if not final_text.strip():
         return None, "codex backend returned empty final message", False
     return final_text, None, False
+
+
+def _invoke_cursor_classifier_once(
+    prompt: str,
+    *,
+    timeout_s: int,
+    cursor_bin: str | None = None,
+    purpose: str = "classifier",
+) -> tuple[str | None, str | None, bool]:
+    """Run Cursor Agent headlessly in isolated read-only Ask mode."""
+    model = os.environ.get("LATCH_GATE_CURSOR_MODEL") or os.environ.get("CURSOR_GATE_MODEL")
+    return cursor_backend.invoke_prompt(
+        prompt,
+        timeout_s=timeout_s,
+        purpose=purpose,
+        agent_bin=cursor_bin,
+        model=model,
+    )
 
 
 def classify_gate(

@@ -44,8 +44,9 @@ Use the project `latch` MCP server as the decision-continuity layer:
 
 Treat `AGENTS.md` as the fuller shared latch contract for this project.
 
-Cursor adapter boundary: this install is MCP plus Cursor Rules plus `AGENTS.md`
-plus project-local `.cursor/commands` prompts. `--with-hooks` adds project-local
-session, current-prompt gate-enforcement, and activity hooks. It does not add a
-native Cursor model backend, Cursor transcript discovery, or native Cursor
-compaction.
+Cursor boundary: this install is MCP plus Cursor Rules plus `AGENTS.md` plus
+project-local `.cursor/commands` prompts. The Cursor Agent CLI is the native
+model backend. `--with-hooks` adds project-local session, current-prompt
+gate-enforcement, and activity hooks, and enables fail-closed current-session
+manual compaction when Cursor provides the exact `transcript_path`. Latch never
+discovers or guesses historical Cursor transcripts.

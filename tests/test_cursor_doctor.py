@@ -66,6 +66,8 @@ def test_json_mode_reports_malformed_cursor_config():
             rc = cd.main([
                 "--json",
                 "--skip-cli",
+                "--skip-backend",
+                "--skip-compact",
                 "--skip-commands",
                 "--python", sys.executable,
                 "--mcp-json", str(config),
@@ -174,6 +176,19 @@ def test_check_cursor_cli_mcp_ok_and_failure():
         )
         warn = cd.check_cursor_cli_mcp(agent_bin=str(fail_agent), timeout_s=1)
         _assert(warn.level == cd.WARN and "exit 2" in warn.detail, warn)
+
+        approval_agent = _fake_exe(
+            d / "agent-approval",
+            "if [ \"$1 $2\" = \"mcp list\" ]; then\n"
+            "  printf '%s\\n' 'latch: not loaded (needs approval)'\n"
+            "  exit 0\n"
+            "fi\n"
+            "printf '%s\\n' 'MCP server latch has not been approved' >&2\n"
+            "exit 1\n",
+        )
+        approval = cd.check_cursor_cli_mcp(agent_bin=str(approval_agent), timeout_s=1)
+        _assert(approval.level == cd.WARN, approval)
+        _assert("user-controlled MCP approval" in approval.detail, approval)
     finally:
         if old_args is None:
             os.environ.pop("FAKE_CURSOR_AGENT_ARGS", None)
@@ -228,8 +243,14 @@ def test_run_all_static_and_cli_checks():
             server_py=str(server),
             agent_bin=str(agent),
             cli_timeout_s=1,
+            skip_backend=True,
+            skip_compact=True,
         )
-        _assert([c.level for c in checks] == [cd.OK, cd.OK, cd.OK, cd.OK, cd.OK, cd.OK], checks)
+        _assert(
+            [c.level for c in checks]
+            == [cd.OK, cd.OK, cd.OK, cd.OK, cd.OK, cd.OK, cd.OK, cd.WARN, cd.WARN],
+            checks,
+        )
     finally:
         shutil.rmtree(d, ignore_errors=True)
     print("PASS run_all_static_and_cli_checks")
@@ -265,10 +286,50 @@ def test_run_all_requires_hooks_when_requested():
             commands_dir=commands, python_path=sys.executable,
             server_py=str(server), skip_cli=True, with_hooks=True,
             hooks_path=hooks,
+            skip_backend=True, skip_compact=True,
         )
         hook_check = next(c for c in checks if "hooks.json" in c.name)
         _assert(hook_check.level == cd.OK, hook_check)
     finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_cursor_native_backend_probe_ok_and_auth_failure():
+    d = _tmp()
+    old_response = os.environ.get("FAKE_CURSOR_RESPONSE")
+    try:
+        ok_agent = _fake_exe(
+            d / "agent-ok",
+            "cat >/dev/null\n"
+            "printf '%s\\n' \"$FAKE_CURSOR_RESPONSE\"\n",
+        )
+        os.environ["FAKE_CURSOR_RESPONSE"] = json.dumps({
+            "type": "result", "subtype": "success", "is_error": False,
+            "result": '{"ok": true}', "session_id": "probe",
+        })
+        ok = cd.check_cursor_model_backend(
+            backend="cursor", agent_bin=str(ok_agent), timeout_s=2,
+        )
+        _assert(ok.level == cd.OK, ok)
+
+        fail_agent = _fake_exe(
+            d / "agent-fail",
+            "cat >/dev/null\necho 'Authentication required. Please run agent login.' >&2\nexit 1\n",
+        )
+        failed = cd.check_cursor_model_backend(
+            backend="cursor", agent_bin=str(fail_agent), timeout_s=2,
+        )
+        _assert(failed.level == cd.FAIL and "login is required" in failed.detail, failed)
+        _assert("static wiring alone is not sufficient" in failed.detail, failed)
+
+        compatibility = cd.check_cursor_model_backend(backend="codex")
+        _assert(compatibility.level == cd.WARN and "compatibility" in compatibility.detail,
+                compatibility)
+    finally:
+        if old_response is None:
+            os.environ.pop("FAKE_CURSOR_RESPONSE", None)
+        else:
+            os.environ["FAKE_CURSOR_RESPONSE"] = old_response
         shutil.rmtree(d, ignore_errors=True)
 
 
@@ -284,4 +345,5 @@ if __name__ == "__main__":
     test_check_cursor_cli_mcp_fails_when_critical_tools_missing()
     test_run_all_static_and_cli_checks()
     test_run_all_requires_hooks_when_requested()
+    test_cursor_native_backend_probe_ok_and_auth_failure()
     print("\nAll cursor_doctor tests pass.")
