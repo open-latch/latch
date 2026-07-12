@@ -121,14 +121,14 @@ def repair_project(project: str | Path) -> RepairResult:
         if agents_state in (agents_md_sync.NEWER, agents_md_sync.INVALID):
             raise RuntimeError(f"AGENTS.md wiring is {agents_state}; refusing repair")
         python_path, server_py, backend = _server_details(mcp_path)
-        missing_commands = [name for name in install_cursor.CURSOR_COMMAND_FILES if not (commands_dir / name).is_file()]
-        missing_skills = [name for name in install_cursor.CURSOR_SKILL_NAMES if not (skills_dir / name / "SKILL.md").is_file()]
-        if missing_commands or missing_skills:
-            raise RuntimeError("one or more previously managed Cursor command/skill files are missing")
         for name in install_cursor.CURSOR_COMMAND_FILES:
-            _assert_no_newer_surface(commands_dir / name)
+            target = commands_dir / name
+            if target.is_file():
+                _assert_no_newer_surface(target)
         for name in install_cursor.CURSOR_SKILL_NAMES:
-            _assert_no_newer_surface(skills_dir / name / "SKILL.md")
+            target = skills_dir / name / "SKILL.md"
+            if target.is_file():
+                _assert_no_newer_surface(target)
         mcp_obj = json.loads(mcp_path.read_text(encoding="utf-8"))
         mcp_env = mcp_obj["mcpServers"]["latch"].get("env", {})
         embedded = mcp_env.get("LATCH_WIRING_VERSION") if isinstance(mcp_env, dict) else None

@@ -50,6 +50,16 @@ def ensure_supported(conn: sqlite3.Connection) -> int:
     return installed
 
 
+def read_database(db_file: Path) -> int:
+    """Read schema metadata through a read-only SQLite connection."""
+    uri = db_file.expanduser().resolve().as_uri() + "?mode=ro"
+    conn = sqlite3.connect(uri, uri=True)
+    try:
+        return read(conn)
+    finally:
+        conn.close()
+
+
 def backup_connection(
     conn: sqlite3.Connection,
     db_file: Path,

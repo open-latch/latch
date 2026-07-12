@@ -20,8 +20,14 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Verify tag and release metadata
-        run: python src/versioning.py --check-tag "$GITHUB_REF_NAME"
+      - name: Verify stable tag and release metadata
+        shell: bash
+        run: |
+          if [[ ! "$GITHUB_REF_NAME" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "Stable releases require an exact vMAJOR.MINOR.PATCH tag; prerelease/build tags are not published by this workflow." >&2
+            exit 1
+          fi
+          python src/versioning.py --check-tag "$GITHUB_REF_NAME"
 
       - name: Install focused test runner
         run: python -m pip install pytest

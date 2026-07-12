@@ -71,10 +71,35 @@ def latest_remote_tag(output: str) -> str | None:
     return max(tags, key=_version_key) if tags else None
 
 
+def _stable_release_from_payload(data: object, *, requested: str | None) -> str | None:
+    releases = data if isinstance(data, list) else [data]
+    stable: list[str] = []
+    for release in releases:
+        if not isinstance(release, dict):
+            continue
+        if release.get("draft") or release.get("prerelease"):
+            continue
+        found = release.get("tag_name")
+        if not isinstance(found, str):
+            continue
+        try:
+            _version_key(found)
+        except ValueError:
+            continue
+        if requested is not None and found == requested:
+            return found
+        stable.append(found)
+    return max(stable, key=_version_key) if requested is None and stable else None
+
+
 def published_release_tag(tag: str | None = None) -> str | None:
-    suffix = "latest" if tag is None else "tags/" + urllib.parse.quote(tag, safe="")
+    suffix = (
+        "?per_page=100"
+        if tag is None
+        else "/tags/" + urllib.parse.quote(tag, safe="")
+    )
     request = urllib.request.Request(
-        f"https://api.github.com/repos/open-latch/latch/releases/{suffix}",
+        f"https://api.github.com/repos/open-latch/latch/releases{suffix}",
         headers={"Accept": "application/vnd.github+json", "User-Agent": "latch-updater"},
     )
     try:
@@ -86,14 +111,7 @@ def published_release_tag(tag: str | None = None) -> str | None:
         raise UpdateError(f"GitHub release lookup failed with HTTP {exc.code}") from exc
     except (OSError, ValueError) as exc:
         raise UpdateError(f"GitHub release lookup failed: {exc}") from exc
-    found = data.get("tag_name") if isinstance(data, dict) else None
-    if not isinstance(found, str):
-        raise UpdateError("GitHub release response has no tag_name")
-    try:
-        _version_key(found)
-    except ValueError as exc:
-        raise UpdateError(f"published release tag is not stable SemVer: {found!r}") from exc
-    return found
+    return _stable_release_from_payload(data, requested=tag)
 
 
 def discover_kbs() -> list[Path]:
@@ -118,6 +136,24 @@ def _target_schema(tag: str) -> int:
     except ValueError as exc:
         raise UpdateError(f"{tag} has invalid KB_SCHEMA_VERSION") from exc
     return value
+
+
+def _kb_update_plan(
+    paths: list[Path], target_schema: int
+) -> tuple[dict[Path, int], list[Path]]:
+    versions: dict[Path, int] = {}
+    for path in paths:
+        try:
+            installed = schema_version.read_database(path)
+        except Exception as exc:
+            raise UpdateError(f"cannot read KB schema metadata from {path}: {exc}") from exc
+        versions[path] = installed
+        if installed > target_schema:
+            raise UpdateError(
+                f"refusing target KB schema {target_schema}: {path} already uses newer schema "
+                f"{installed}; update to a compatible latch release"
+            )
+    return versions, [path for path, installed in versions.items() if installed < target_schema]
 
 
 def _dependency_command() -> list[str]:
@@ -202,13 +238,14 @@ def apply_update(tag: str, *, dry_run: bool) -> dict[str, object]:
     target_schema = _target_schema(tag)
     if target_schema < KB_SCHEMA_VERSION:
         raise UpdateError("target release supports an older KB schema; refusing downgrade")
-    kbs = discover_kbs() if target_schema > KB_SCHEMA_VERSION else []
+    kb_versions, kbs = _kb_update_plan(discover_kbs(), target_schema)
     plan = {
         "from_version": LATCH_VERSION,
         "to_version": release_version,
         "target": tag,
         "schema_from": KB_SCHEMA_VERSION,
         "schema_to": target_schema,
+        "discovered_kb_schemas": {str(path): version for path, version in kb_versions.items()},
         "kb_backups_required": [str(path) for path in kbs],
     }
     if dry_run:
@@ -216,7 +253,7 @@ def apply_update(tag: str, *, dry_run: bool) -> dict[str, object]:
 
     backups = [
         schema_version.backup_database(
-            path, to_version=target_schema
+            path, from_version=kb_versions[path], to_version=target_schema
         )
         for path in kbs
     ]

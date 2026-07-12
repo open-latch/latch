@@ -20,6 +20,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 SEMVER_RE = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:[-+][0-9A-Za-z.-]+)?$")
+STABLE_SEMVER_RE = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
 
 
 def _read(name: str) -> str:
@@ -78,6 +79,11 @@ def payload() -> dict[str, object]:
 
 
 def check_tag(tag: str) -> tuple[bool, str]:
+    if not STABLE_SEMVER_RE.fullmatch(LATCH_VERSION):
+        return False, (
+            f"VERSION {LATCH_VERSION} is not stable SemVer; stable releases require "
+            "MAJOR.MINOR.PATCH with no prerelease or build suffix"
+        )
     expected = f"v{LATCH_VERSION}"
     if tag == expected:
         return True, f"tag {tag} matches VERSION {LATCH_VERSION}"

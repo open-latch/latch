@@ -128,7 +128,7 @@ def test_cursor_bundle_repairs_once_and_preserves_unrelated_content(tmp_path):
     }
 
 
-def test_cursor_unmanaged_newer_and_failed_repair_boundaries(tmp_path):
+def test_cursor_unmanaged_newer_and_collision_boundaries(tmp_path):
     unmanaged = tmp_path / "unmanaged"
     unmanaged.mkdir()
     assert cursor_wiring.repair_project(unmanaged).action == "unmanaged"
@@ -142,16 +142,34 @@ def test_cursor_unmanaged_newer_and_failed_repair_boundaries(tmp_path):
     assert cursor_wiring.repair_project(newer).action == "newer"
     assert before == {p.relative_to(newer): p.read_bytes() for p in newer.rglob("*") if p.is_file()}
 
-    broken = tmp_path / "broken"
-    broken.mkdir()
-    _install_cursor_bundle(broken, with_hooks=False)
-    _downgrade_cursor_bundle(broken)
-    (broken / ".cursor" / "commands" / "latch-gate.md").unlink()
-    result = cursor_wiring.repair_project(broken)
+    collision = tmp_path / "collision"
+    collision.mkdir()
+    _install_cursor_bundle(collision, with_hooks=False)
+    _downgrade_cursor_bundle(collision)
+    user_file = collision / ".cursor" / "commands" / "latch-gate.md"
+    user_file.write_text("user-owned command\n", encoding="utf-8")
+    result = cursor_wiring.repair_project(collision)
     assert result.action == "error"
-    assert "run `" in (result.notice or "")
-    assert "install_cursor.py" in (result.notice or "")
-    assert cursor_rules_sync.wiring_state(broken / ".cursor" / "rules" / "latch.mdc") == cursor_rules_sync.OLDER
+    assert "user-owned" in (result.notice or "")
+    assert user_file.read_text(encoding="utf-8") == "user-owned command\n"
+    assert cursor_rules_sync.wiring_state(collision / ".cursor" / "rules" / "latch.mdc") == cursor_rules_sync.OLDER
+
+
+def test_cursor_additive_bundle_assets_are_installed_safely(tmp_path):
+    _install_cursor_bundle(tmp_path, with_hooks=False)
+    _downgrade_cursor_bundle(tmp_path)
+    command = tmp_path / ".cursor" / "commands" / "latch-gate.md"
+    skill = tmp_path / ".cursor" / "skills" / "source-command-latch-gate" / "SKILL.md"
+    command.unlink()
+    skill.unlink()
+
+    result = cursor_wiring.repair_project(tmp_path)
+    assert result.action == "synced"
+    assert command.is_file()
+    assert skill.is_file()
+    assert "latch-wiring-version: 1" in command.read_text(encoding="utf-8")
+    assert "latch-wiring-version: 1" in skill.read_text(encoding="utf-8")
+    assert cursor_rules_sync.wiring_state(tmp_path / ".cursor" / "rules" / "latch.mdc") == cursor_rules_sync.CURRENT
 
 
 def test_cursor_without_hooks_uses_mcp_startup_fallback(tmp_path, monkeypatch):
