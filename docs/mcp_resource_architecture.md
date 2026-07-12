@@ -3,9 +3,10 @@
 Status: public draft PR #21 on `mcp-resource-lifecycle`. Independent review of
 head `c5f9954` found that protocol-compatible aliases fragmented the proxy cap
 and that pre-registry proxies still timed out generically. The current
-remediation passes full local and three-OS verification; the PR remains
-intentionally draft pending independent merge-trust review and real Codex,
-Claude Code, and Cursor lifecycle dogfood.
+remediation passes full local verification; live PR checks are the authority for
+the final pushed head's three-OS receipt. The PR remains intentionally draft
+pending independent merge-trust review and real Codex, Claude Code, and Cursor
+lifecycle dogfood.
 Measurements were collected on macOS 13.5, Apple Silicon, on 2026-07-10.
 
 ## Decision
@@ -304,13 +305,14 @@ designed to absorb.
 ## Verification
 
 Latest blocker-remediation receipts: 56 focused lifecycle/doctor/Codex/embed
-tests and 922 hermetic tests passed locally; changed-file Ruff, public-release
+tests and 939 hermetic tests passed locally after rebasing onto current main;
+changed-file Ruff, public-release
 hygiene, compilation, and `git diff --check` passed. Warm prompt-hook wall was
-108.5–135.5 ms. Fourteen clients used one owner at 1.03 s readiness and 10.33 ms
-embed p95; 32 used one owner at 1.73 s and 8.10 ms p95. The 14-client tail is
-reported as an observation, not a hard upper bound. Content fingerprinting
-adds only proxy-start work; it does not run per request or enter the prompt-hook
-embed path.
+96.8–139.3 ms. Fourteen clients used one owner at 0.97 s readiness and 8.01 ms
+embed p95; 32 used one owner at 1.61 s and 7.48 ms p95. These tails are
+observations, not hard upper bounds. Content fingerprinting adds only
+proxy-start work; it does not run per request or enter the prompt-hook embed
+path.
 
 The named deletion pass retained the four defensible boundaries—standard-library
 broker, stdio proxy, heavyweight owner, and cycle-free connection context—and
@@ -321,12 +323,13 @@ lease migration; no parallel capacity state machine or production fault seam
 was added. That size remains an explicit independent-review target rather than
 being presented as inherently minimal.
 
-Exact-head Actions run `29208472883` passed the focused suite on macOS and
-Ubuntu (56 passed each) and Windows (55 passed, one intentional skip). The skip
-is only the end-to-end `fa162bd` snapshot because that historical version's own
-`os.kill(pid, 0)` probe is destructive on Windows. Windows still runs and
-passes the current daemon against `fa162bd`'s root-discovery and epoch-less wire
-contract, so the compatibility behavior under review remains cross-platform.
+The three-OS workflow runs the focused suite on macOS, Ubuntu, and Windows. On
+Windows, the one intentional skip is only the end-to-end `fa162bd` snapshot
+because that historical version's own `os.kill(pid, 0)` probe is destructive
+there. Windows still runs the current daemon against `fa162bd`'s root-discovery
+and epoch-less wire contract, so the compatibility behavior under review is
+cross-platform. Reviewers should use the live PR checks—not a copied run id—as
+the authority for the final pushed head.
 
 The production-representative tests cover:
 
