@@ -1,0 +1,132 @@
+{
+  "live_demo": {
+    "backend": "codex",
+    "better_next_action": "Implement email sending through the app's single-process inline task runner and document that it is not intended for durable production background delivery.",
+    "captured_at_utc": "2026-07-13T01:38:28Z",
+    "demo_kind": "synthetic_no_history_fixture",
+    "evidence_nodes": [
+      {
+        "id": 1,
+        "kind": "decision",
+        "status": "canonical",
+        "title": "No background job queue for the no-history demo app"
+      }
+    ],
+    "fixture": {
+      "label": "Synthetic no-history fixture",
+      "seeded_decision_id": 1,
+      "seeded_decision_title": "No background job queue for the no-history demo app",
+      "source": "generated public fixture file GOVERNANCE.md",
+      "used_personal_history": false
+    },
+    "no_edit_proof": {
+      "command": "git status --porcelain=v1 --untracked-files=all",
+      "status_after_clean": true,
+      "status_before_clean": true,
+      "status_entry_count_after": 0,
+      "status_entry_count_before": 0,
+      "unchanged": true
+    },
+    "observed": true,
+    "recommendation": "MODIFY",
+    "request": "Implement email sending by adding a Redis-backed background job queue.",
+    "risk_if_proceed": "Adding Redis and a worker process would violate the install-light, easy-to-inspect demo-app constraint and repeat the rejected Redis queue path.",
+    "source_commit": "1700ac9776cd098cba262428e79cd1b2e60ba1c4",
+    "summary": "Email sending can proceed, but not by adding a Redis-backed background job queue. The canonical decision (id=1) explicitly rejects a background job queue and the Redis-backed queue path for this no-history demo app, while allowing a single-process inline task runner with documented limits."
+  },
+  "reproduction": {
+    "check_packet": "bash bin/latch_proof_packet.sh --check",
+    "recapture_live_demo": "bash bin/latch_proof_packet.sh --capture-live --backend codex",
+    "seed_report_eval": "bash bin/latch_seed_report_eval.sh",
+    "wedge_eval": "bash bin/latch_eval.sh"
+  },
+  "schema_version": 2,
+  "seed_report_eval": {
+    "boundary": "This deterministic fixture eval grades seed-report capture and filtering; it is not a live transcript-quality benchmark.",
+    "candidate_count": 10,
+    "catch_demo": true,
+    "checks": 16,
+    "failed": 0,
+    "model_calls": 0,
+    "ok": true,
+    "pass_rate": 1.0,
+    "passed": 16,
+    "section_counts": {
+      "agent_alignment_check": 2,
+      "continuity_notes": 1,
+      "decisions_and_rejected_paths": 4,
+      "patterns_and_preferences": 2,
+      "where_left_off": 1
+    },
+    "synthetic_candidate_probe": {
+      "accepted": 2,
+      "considered": 6,
+      "filtered": 4
+    }
+  },
+  "source_commit": "1700ac9776cd098cba262428e79cd1b2e60ba1c4",
+  "tested_runtime_manifest_sha256": "b7edba8370dc9fa446d15e501e6a047c2618e01b701e33880c8b13f6f486c0bc",
+  "thesis": "Latch preserves project judgment and can surface a rejected path before an agent changes files.",
+  "wedge_v1": {
+    "baseline_boundary": "memory_like is an internal active-search-only ablation. It is not a benchmark of any third-party memory product.",
+    "cases": 8,
+    "failed": 0,
+    "latch_full_vs_memory_like": {
+      "baseline_mode": "memory_like",
+      "baseline_only_wins": 0,
+      "both_fail": 0,
+      "both_pass": 4,
+      "net_wins": 4,
+      "pass_rate_delta": 0.5,
+      "primary_mode": "latch_full",
+      "primary_only_wins": 4
+    },
+    "memory_like_definition": "memory-like baseline: active hybrid search only, no stale nodes and no graph traversal",
+    "modes": {
+      "active_seed_graph": {
+        "cases": 8,
+        "failed": 0,
+        "pass_rate": 1.0,
+        "passed": 8,
+        "required_retrieval_rate": 1.0,
+        "supporting_phrase_rate": 1.0
+      },
+      "latch_full": {
+        "cases": 8,
+        "failed": 0,
+        "pass_rate": 1.0,
+        "passed": 8,
+        "required_retrieval_rate": 1.0,
+        "supporting_phrase_rate": 1.0
+      },
+      "memory_like": {
+        "cases": 8,
+        "failed": 4,
+        "pass_rate": 0.5,
+        "passed": 4,
+        "required_retrieval_rate": 0.7058823529411765,
+        "supporting_phrase_rate": 0.7222222222222222
+      },
+      "stale_search": {
+        "cases": 8,
+        "failed": 1,
+        "pass_rate": 0.875,
+        "passed": 7,
+        "required_retrieval_rate": 0.8823529411764706,
+        "supporting_phrase_rate": 0.8333333333333334
+      }
+    },
+    "ok": true,
+    "passed": 8
+  },
+  "what_this_does_not_prove": [
+    "The synthetic no-history demo is not evidence about a particular user's project history.",
+    "The internal memory_like ablation does not measure any third-party memory product.",
+    "The small fixture suites are proof instruments, not broad claims about every repository or model."
+  ],
+  "what_this_proves": [
+    "A live model-backed gate can cite a canonical rejected path and redirect a violating request before repository edits.",
+    "The deterministic wedge suite distinguishes full decision-evidence assembly from its active-search-only ablation.",
+    "The deterministic seed-report fixture suite exercises structured capture, filtering, and catch-demo selection."
+  ]
+}
