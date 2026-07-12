@@ -3,9 +3,9 @@
 Status: public draft PR #21 on `mcp-resource-lifecycle`. Independent review of
 head `c5f9954` found that protocol-compatible aliases fragmented the proxy cap
 and that pre-registry proxies still timed out generically. The current
-remediation passes full local verification; the PR remains intentionally
-draft pending three-OS receipts, independent merge-trust review, and
-real Codex, Claude Code, and Cursor lifecycle dogfood.
+remediation passes full local and three-OS verification; the PR remains
+intentionally draft pending independent merge-trust review and real Codex,
+Claude Code, and Cursor lifecycle dogfood.
 Measurements were collected on macOS 13.5, Apple Silicon, on 2026-07-10.
 
 ## Decision
@@ -320,6 +320,13 @@ capability handshake, legacy rejection session, owner-pool aggregation, and
 lease migration; no parallel capacity state machine or production fault seam
 was added. That size remains an explicit independent-review target rather than
 being presented as inherently minimal.
+
+Exact-head Actions run `29208472883` passed the focused suite on macOS and
+Ubuntu (56 passed each) and Windows (55 passed, one intentional skip). The skip
+is only the end-to-end `fa162bd` snapshot because that historical version's own
+`os.kill(pid, 0)` probe is destructive on Windows. Windows still runs and
+passes the current daemon against `fa162bd`'s root-discovery and epoch-less wire
+contract, so the compatibility behavior under review remains cross-platform.
 
 The production-representative tests cover:
 
