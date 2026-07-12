@@ -517,10 +517,22 @@ def _tool_name(payload: dict[str, Any]) -> str:
         (identity[0], identity[1])
         for identity in parsed if identity is not None and not identity[2]
     }
+    generic_mcp = any(identity[2] for identity in parsed if identity is not None)
     if len(specific) > 1:
         return ""
     if specific:
         expected = next(iter(specific))
+        if generic_mcp:
+            expected_server, expected_tool = expected
+            explicit_server, server_conflict = _explicit_server_identity(payload)
+            nested_identity, nested_conflict = _nested_tool_identity(payload)
+            if expected_server == "other" or server_conflict or nested_conflict \
+                    or explicit_server != expected_server or nested_identity is None:
+                return ""
+            nested_server, nested_tool = nested_identity
+            if nested_tool != expected_tool \
+                    or nested_server not in {expected_server, "other"}:
+                return ""
         for value, identity in zip(values, parsed):
             if identity is not None and not identity[2] \
                     and (identity[0], identity[1]) == expected:
@@ -604,7 +616,10 @@ def _parse_tool_identity(name: str) -> tuple[str | None, str | None, bool] | Non
             _normalized_tool_name(parts[2]),
             False,
         )
-    if "mcp" in normalized:
+    # Cursor's observed generic dispatcher identity is exactly ``MCP``. Do not
+    # let an arbitrary native tool name containing those letters claim the
+    # generic transport contract.
+    if normalized == "mcp":
         return None, None, True
     if normalized.startswith("latch"):
         return "latch", normalized, False
@@ -992,7 +1007,16 @@ def _has_failure_signal(value: Any, depth: int = 0) -> bool:
         return any(_has_failure_signal(item, depth + 1) for item in value)
     if value.get("is_error") is True or value.get("isError") is True:
         return True
-    if value.get("success") is False:
+    for key in ("success", "ok", "completed", "done"):
+        if key in value and value.get(key) is not True:
+            return True
+    negative_flags = (
+        "cancelled", "canceled", "is_cancelled", "isCanceled",
+        "timed_out", "timedOut", "timeout", "denied", "rejected",
+        "aborted", "interrupted", "skipped", "expired",
+        "was_cancelled", "wasCancelled",
+    )
+    if any(value.get(key) is True for key in negative_flags):
         return True
     for key in ("exit_code", "exitCode", "code"):
         if key in value:
@@ -1001,7 +1025,16 @@ def _has_failure_signal(value: Any, depth: int = 0) -> bool:
                     return True
             except (TypeError, ValueError):
                 return True
-    if str(value.get("status", "")).lower() in {"error", "failed", "failure"}:
+    negative_statuses = {
+        "error", "failed", "failure", "cancelled", "canceled",
+        "timeout", "timedout", "timed_out", "denied", "rejected",
+        "aborted", "interrupted", "skipped", "expired", "incomplete",
+        "notrun", "not_run",
+    }
+    for key in ("status", "state", "outcome", "reason", "stop_reason", "stopReason"):
+        if str(value.get(key, "")).strip().lower() in negative_statuses:
+            return True
+    if str(value.get("permission", "")).strip().lower() in {"deny", "denied", "reject"}:
         return True
     if value.get("error") not in (None, False, "", {}):
         return True

@@ -240,7 +240,8 @@ The merge preserves unrelated Cursor hooks and installs:
   receipt denies without falling through to ordinary `latch_gate` authorization.
 - `postToolUse`: recognizes latch `kb_activity` and gate `findings` in the
   verified `latch_gate` tool result, arms the current prompt only when that gate
-  used the request verbatim and the outer tool result reports no failure, and
+  used the request verbatim and the outer tool result reports positive
+  completion rather than failure, cancellation, timeout, denial, or skip, and
   returns a concise instruction to surface the receipt. Conflicting tool-name,
   input-container, server, or nested-tool identities fail closed. Cursor
   has no equivalent of Claude Code's deterministic user-only `systemMessage`

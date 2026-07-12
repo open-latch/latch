@@ -133,9 +133,10 @@ negative cases; each mutation must remain denied:
 - call `latch_gate` with a rephrased request,
 - force a skipped/error gate result,
 - wrap an inner `OK` gate result in `isError=true`, `success=false`, or a
-  nonzero exit code,
+  nonzero exit code, or in cancellation, timeout, denial, skip, or negative
+  `ok`/completion state,
 - combine contradictory tool aliases, input containers, servers, or nested
-  tool names,
+  tool names, including a native `Read` alias mixed with generic `MCP` evidence,
 - submit a second prompt and try to reuse the prior receipt,
 - invoke a mutation hook with missing/invalid input.
 

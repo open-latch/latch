@@ -191,6 +191,15 @@ def test_post_tool_use_rejects_failed_outer_gate_results():
             {"exit_code": 1, "stdout": json.dumps(gate_result)},
             {"success": False, "result": gate_result},
             {"status": "failed", "content": gate_result},
+            {"status": "cancelled", "result": gate_result},
+            {"status": "timeout", "result": gate_result},
+            {"ok": False, "result": gate_result},
+            {"cancelled": True, "result": gate_result},
+            {"state": "denied", "result": gate_result},
+            {"timedOut": True, "result": gate_result},
+            {"status": "skipped", "result": gate_result},
+            {"ok": 0, "result": gate_result},
+            {"permission": "deny", "result": gate_result},
         )
         for tool_output in failures:
             cgs.begin_prompt(root, "conversation", prompt)

@@ -190,6 +190,12 @@ def test_mutation_classifier_is_conservative_and_keeps_gate_tools_available():
          "tool_input": {"command": "rm x"}},
         {"tool_name": "Task", "tool_input": {"readonly": True},
          "toolInput": {"readonly": False}},
+        {"tool_name": "Read", "toolName": "MCP",
+         "toolInput": {"server": "latch", "tool": "latch_insert"}},
+        {"tool_name": "Read", "toolName": "MCP",
+         "toolInput": {"server": "filesystem", "tool": "write_file"}},
+        {"tool_name": "evil_mcp",
+         "toolInput": {"server": "latch", "tool": "latch_search"}},
         {},
     ]
     for payload in mutation_cases:
@@ -208,6 +214,10 @@ def test_mutation_classifier_is_conservative_and_keeps_gate_tools_available():
         {"tool_name": "mcp__latch__latch_pm_preview", "tool_input": {}},
         {"tool_name": "Read", "toolName": "read",
          "tool_input": {"path": "x"}, "toolInput": {"path": "x"}},
+        {"tool_name": "latch_search", "toolName": "MCP",
+         "toolInput": {"server": "latch", "tool": "latch_search"}},
+        {"tool_name": "mcp__latch__latch_search", "toolName": "MCP",
+         "toolInput": {"server": "latch", "tool": "latch_search"}},
     ]
     for payload in read_cases:
         assert cgs.mutation_capability(payload)[0] is False, payload
@@ -353,6 +363,12 @@ def test_seed_operation_requires_preview_then_explicit_apply():
             })},
             {"ok": True, "source": "cursor", "apply": False,
              "project": str(Path(root) / "other-project"), "candidates": []},
+            {"status": "cancelled", "result": json.loads(success["tool_output"])},
+            {"status": "timeout", "result": json.loads(success["tool_output"])},
+            {"ok": False, "result": json.loads(success["tool_output"])},
+            {"cancelled": True, "result": json.loads(success["tool_output"])},
+            {"status": "skipped", "result": json.loads(success["tool_output"])},
+            {"ok": 0, "result": json.loads(success["tool_output"])},
         ):
             cgs.begin_prompt(root, sid, "/latch-seed")
             assert cpre.decision(preview) == {}
@@ -444,6 +460,21 @@ def test_pm_operation_receipt_binds_exact_previewed_content():
         assert recorded is not None and recorded[0] is False
         cgs.begin_prompt(root, sid, "/latch-pm apply")
         assert cpre.decision(insert)["permission"] == "deny"
+
+        for wrapper in (
+            {"status": "cancelled", "result": preview},
+            {"status": "timeout", "result": preview},
+            {"ok": False, "result": preview},
+            {"cancelled": True, "result": preview},
+            {"status": "skipped", "result": preview},
+            {"ok": 0, "result": preview},
+        ):
+            cgs.begin_prompt(root, sid, "Latch operation id: latch-pm prepare")
+            failed = {**preview_call, "tool_output": wrapper}
+            recorded = cpost.record_operation_success(failed)
+            assert recorded is not None and recorded[0] is False
+            cgs.begin_prompt(root, sid, "/latch-pm apply")
+            assert cpre.decision(insert)["permission"] == "deny"
     finally:
         shutil.rmtree(project_dir, ignore_errors=True)
         shutil.rmtree(root, ignore_errors=True)
