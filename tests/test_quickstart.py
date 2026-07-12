@@ -122,6 +122,8 @@ def test_seed_source_follows_agents_by_default():
             "All-agent quickstart should seed both supported transcript sources")
     _assert(qs.seed_source_for_agents(("claude",), "both") == "both",
             "Explicit seed source should win")
+    _assert(qs.seed_source_for_agents(("cursor",), "cursor") == "cursor",
+            "Explicit Cursor-origin seed source should win")
     print("PASS seed_source_follows_agents_by_default")
 
 

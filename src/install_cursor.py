@@ -7,6 +7,8 @@ This adapter wires the local latch engine into Cursor's project surfaces:
 * ``.cursor/rules/latch.mdc`` gets the Cursor-native activation rule.
 * ``.cursor/commands/*.md`` gets project-local Cursor command prompts for the
   latch workflows that are safe on Cursor today.
+* ``.cursor/skills/*/SKILL.md`` gets Cursor-native workflow skills. The same
+  source skills are distributable through ``.cursor-plugin/plugin.json``.
 * ``AGENTS.md`` gets the shared latch agent contract.
 * With ``--with-hooks``, ``.cursor/hooks.json`` gets merge-safe session,
   per-prompt gate-enforcement, and activity hooks.
@@ -40,9 +42,12 @@ KB_HOME = Path(
 DEFAULT_MCP_PATH = Path(".cursor") / "mcp.json"
 DEFAULT_RULE_PATH = cursor_rules_sync.DEFAULT_RULE_PATH
 DEFAULT_COMMANDS_DIR = Path(".cursor") / "commands"
+DEFAULT_SKILLS_DIR = Path(".cursor") / "skills"
 DEFAULT_HOOKS_PATH = cursor_hooks.DEFAULT_HOOKS_PATH
 COMMANDS_SRC = KB_HOME / "commands"
 CURSOR_COMMANDS_SRC = KB_HOME / "cursor_commands"
+CURSOR_SKILLS_SRC = KB_HOME / "cursor_skills"
+CURSOR_PLUGIN_MANIFEST = KB_HOME / ".cursor-plugin" / "plugin.json"
 COMMAND_PLACEHOLDER = install_engine.COMMAND_PLACEHOLDER
 CURSOR_BACKEND_PLACEHOLDER = "<CURSOR_MODEL_BACKEND>"
 CURSOR_COMMAND_FILES = (
@@ -53,10 +58,23 @@ CURSOR_COMMAND_FILES = (
     "latch-gate-report.md",
     "latch-heal.md",
     "latch-pm.md",
+    "latch-seed.md",
     "latch-tree.md",
     "unlatch.md",
 )
 UNSUPPORTED_CURSOR_COMMAND_FILES: tuple[str, ...] = ()
+CURSOR_SKILL_NAMES = (
+    "source-command-latch-budget-approve",
+    "source-command-latch-compact",
+    "source-command-latch-decay",
+    "source-command-latch-gate",
+    "source-command-latch-gate-report",
+    "source-command-latch-heal",
+    "source-command-latch-pm",
+    "source-command-latch-seed",
+    "source-command-latch-tree",
+    "source-command-unlatch",
+)
 CURSOR_COMMAND_FOOTER = (
     "\n\n---\n\n"
     "Cursor boundary: this project-local command is a reusable prompt for "
@@ -240,7 +258,7 @@ def render_cursor_command(
 def _read_text(path: Path) -> str:
     try:
         return path.read_text(encoding="utf-8")
-    except OSError:
+    except (OSError, UnicodeError):
         return ""
 
 
@@ -258,6 +276,38 @@ def _is_managed_cursor_command_body(body: str) -> bool:
     return "Cursor boundary: this project-local command is a reusable prompt" in body
 
 
+def cursor_command_collisions(
+    commands_dir: Path,
+    *,
+    model_backend: str | None = None,
+) -> list[Path]:
+    if commands_dir.is_symlink() or (commands_dir.exists() and not commands_dir.is_dir()):
+        return [commands_dir]
+    collisions: list[Path] = []
+    for name in CURSOR_COMMAND_FILES:
+        target = commands_dir / name
+        if not target.exists() and not target.is_symlink():
+            continue
+        if target.is_symlink() or not target.is_file():
+            collisions.append(target)
+            continue
+        existing = _read_text(target)
+        desired = render_cursor_command(name, model_backend=model_backend)
+        if existing != desired and not _is_managed_cursor_command_body(existing):
+            collisions.append(target)
+    return collisions
+
+
+def _raise_command_collisions(collisions: list[Path]) -> None:
+    if not collisions:
+        return
+    names = ", ".join(str(path) for path in collisions)
+    raise CursorAssetCollisionError(
+        "refusing to overwrite user-owned Cursor command(s): " + names
+        + "; move or rename the file(s), then rerun the installer"
+    )
+
+
 def sync_cursor_commands(
     commands_dir: Path = DEFAULT_COMMANDS_DIR,
     *,
@@ -266,21 +316,9 @@ def sync_cursor_commands(
 ) -> list[str]:
     if not COMMANDS_SRC.is_dir():
         return [f"no commands/ directory at {COMMANDS_SRC} - skipped"]
-    collisions: list[Path] = []
-    for name in CURSOR_COMMAND_FILES:
-        target = commands_dir / name
-        if not target.is_file():
-            continue
-        existing = _read_text(target)
-        desired = render_cursor_command(name, model_backend=model_backend)
-        if existing != desired and not _is_managed_cursor_command_body(existing):
-            collisions.append(target)
-    if collisions:
-        names = ", ".join(str(path) for path in collisions)
-        raise CursorAssetCollisionError(
-            "refusing to overwrite user-owned Cursor command(s): " + names
-            + "; move or rename the file(s), then rerun the installer"
-        )
+    _raise_command_collisions(cursor_command_collisions(
+        commands_dir, model_backend=model_backend,
+    ))
     changes: list[str] = []
     if not dry_run:
         commands_dir.mkdir(parents=True, exist_ok=True)
@@ -352,6 +390,144 @@ def cursor_commands_status(
     return True, f"Cursor commands installed in {commands_dir} ({len(CURSOR_COMMAND_FILES)} workflows)"
 
 
+def render_cursor_skill(
+    name: str,
+    kb_home: str | None = None,
+    *,
+    model_backend: str | None = None,
+) -> str:
+    if name not in CURSOR_SKILL_NAMES:
+        raise ValueError(f"unsupported Cursor skill: {name}")
+    src = CURSOR_SKILLS_SRC / name / "SKILL.md"
+    if not src.is_file():
+        raise FileNotFoundError(src)
+    home = kb_home if kb_home is not None else str(KB_HOME).replace("\\", "/")
+    backend = model_backend or "cursor"
+    body = (
+        src.read_text(encoding="utf-8")
+        .replace(COMMAND_PLACEHOLDER, home)
+        .replace(CURSOR_BACKEND_PLACEHOLDER, backend)
+    )
+    footer = (
+        "\n\n---\n\n"
+        f"Cursor project-sync metadata: latch checkout `{home}`; shell-fallback "
+        f"model backend `{backend}`. Plugin installs instead use "
+        "`${CURSOR_PLUGIN_ROOT}` and native `cursor`.\n"
+    )
+    return body.rstrip() + footer
+
+
+def _is_latch_cursor_skill_body(body: str) -> bool:
+    return "Latch Cursor skill boundary:" in body
+
+
+def cursor_skill_collisions(
+    skills_dir: Path,
+    *,
+    model_backend: str | None = None,
+) -> list[Path]:
+    if skills_dir.is_symlink() or (skills_dir.exists() and not skills_dir.is_dir()):
+        return [skills_dir]
+    collisions: list[Path] = []
+    for name in CURSOR_SKILL_NAMES:
+        skill_dir = skills_dir / name
+        target = skill_dir / "SKILL.md"
+        if skill_dir.is_symlink() or (skill_dir.exists() and not skill_dir.is_dir()):
+            collisions.append(skill_dir)
+            continue
+        if not target.exists() and not target.is_symlink():
+            continue
+        if target.is_symlink() or not target.is_file():
+            collisions.append(target)
+            continue
+        existing = _read_text(target)
+        desired = render_cursor_skill(name, model_backend=model_backend)
+        if existing != desired and not _is_latch_cursor_skill_body(existing):
+            collisions.append(target)
+    return collisions
+
+
+def _raise_skill_collisions(collisions: list[Path]) -> None:
+    if not collisions:
+        return
+    names = ", ".join(str(path) for path in collisions)
+    raise CursorAssetCollisionError(
+        "refusing to overwrite user-owned Cursor skill(s): " + names
+        + "; move or rename the skill(s), then rerun the installer"
+    )
+
+
+def sync_cursor_skills(
+    skills_dir: Path = DEFAULT_SKILLS_DIR,
+    *,
+    dry_run: bool = False,
+    model_backend: str | None = None,
+) -> list[str]:
+    if not CURSOR_SKILLS_SRC.is_dir():
+        return [f"no cursor_skills/ directory at {CURSOR_SKILLS_SRC} - skipped"]
+    _raise_skill_collisions(cursor_skill_collisions(
+        skills_dir, model_backend=model_backend,
+    ))
+    changes: list[str] = []
+    for name in CURSOR_SKILL_NAMES:
+        desired = render_cursor_skill(name, model_backend=model_backend)
+        target = skills_dir / name / "SKILL.md"
+        existing = _read_text(target)
+        if existing == desired:
+            continue
+        action = "updated" if target.exists() else "installed"
+        if not dry_run:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if target.exists():
+                target.with_name(target.name + ".latchbak").write_text(existing, encoding="utf-8")
+            target.write_text(desired, encoding="utf-8")
+        changes.append(f"{action} Cursor skill {name}")
+    return changes
+
+
+def cursor_skills_status(
+    skills_dir: Path = DEFAULT_SKILLS_DIR,
+    *,
+    model_backend: str | None = None,
+) -> tuple[bool, str]:
+    missing: list[str] = []
+    drifted: list[str] = []
+    for name in CURSOR_SKILL_NAMES:
+        target = skills_dir / name / "SKILL.md"
+        if not target.is_file():
+            missing.append(name)
+        elif _read_text(target) != render_cursor_skill(name, model_backend=model_backend):
+            drifted.append(name)
+    problems: list[str] = []
+    if missing:
+        problems.append(f"missing {', '.join(missing[:3])}{'...' if len(missing) > 3 else ''}")
+    if drifted:
+        problems.append(f"drifted {', '.join(drifted[:3])}{'...' if len(drifted) > 3 else ''}")
+    if problems:
+        return False, f"Cursor skills missing or drifted in {skills_dir}: " + "; ".join(problems)
+    return True, f"Cursor skills installed in {skills_dir} ({len(CURSOR_SKILL_NAMES)} workflows)"
+
+
+def cursor_plugin_status() -> tuple[bool, str]:
+    if not CURSOR_PLUGIN_MANIFEST.is_file():
+        return False, f"Cursor plugin manifest missing: {CURSOR_PLUGIN_MANIFEST}"
+    try:
+        manifest = json.loads(CURSOR_PLUGIN_MANIFEST.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as e:
+        return False, f"Cursor plugin manifest is invalid: {e}"
+    if not isinstance(manifest, dict) or manifest.get("name") != "latch":
+        return False, "Cursor plugin manifest must define name=latch"
+    if manifest.get("skills") != "./cursor_skills/":
+        return False, "Cursor plugin manifest must expose ./cursor_skills/"
+    missing = [
+        name for name in CURSOR_SKILL_NAMES
+        if not (CURSOR_SKILLS_SRC / name / "SKILL.md").is_file()
+    ]
+    if missing:
+        return False, "Cursor plugin skill assets missing: " + ", ".join(missing)
+    return True, f"Cursor plugin manifest and {len(CURSOR_SKILL_NAMES)} skill assets present"
+
+
 def cursor_compact_assets_status() -> tuple[bool, str]:
     missing = [str(path) for path in CURSOR_COMPACT_ASSETS if not (KB_HOME / path).is_file()]
     if missing:
@@ -405,6 +581,34 @@ def remove_cursor_commands(commands_dir: Path = DEFAULT_COMMANDS_DIR, *, dry_run
     return changes
 
 
+def remove_cursor_skills(skills_dir: Path = DEFAULT_SKILLS_DIR, *, dry_run: bool = False) -> list[str]:
+    changes: list[str] = []
+    for name in CURSOR_SKILL_NAMES:
+        target = skills_dir / name / "SKILL.md"
+        if not target.is_file():
+            continue
+        body = _read_text(target)
+        if not _is_latch_cursor_skill_body(body):
+            changes.append(f"skipped Cursor skill {name} (looks user-owned)")
+            continue
+        if dry_run:
+            changes.append(f"would remove Cursor skill {name}")
+            continue
+        known = {
+            render_cursor_skill(name, model_backend=backend)
+            for backend in ("cursor", "claude", "codex")
+        }
+        if body not in known:
+            target.with_name(target.name + ".latchbak").write_text(body, encoding="utf-8")
+        target.unlink()
+        try:
+            target.parent.rmdir()
+        except OSError:
+            pass
+        changes.append(f"removed Cursor skill {name}")
+    return changes
+
+
 def _agents_sync_args(agents_md: str, *, yes: bool) -> list[str]:
     args: list[str] = []
     if yes:
@@ -446,6 +650,10 @@ def _check(args: argparse.Namespace, python_path: str, server_py: str) -> int:
         checks.append(cursor_commands_status(
             Path(args.commands_dir), model_backend=args.model_backend,
         ))
+    if not args.skip_skills:
+        checks.append(cursor_skills_status(
+            Path(args.skills_dir), model_backend=args.model_backend,
+        ))
     if args.with_hooks:
         checks.append(cursor_hooks.hooks_status(
             Path(args.hooks_json),
@@ -456,6 +664,7 @@ def _check(args: argparse.Namespace, python_path: str, server_py: str) -> int:
             str(KB_HOME / "src" / "hooks" / "cursor_post_tool_use.py"),
         ))
     checks.append(cursor_compact_assets_status())
+    checks.append(cursor_plugin_status())
 
     failed = 0
     for ok, label in checks:
@@ -466,7 +675,7 @@ def _check(args: argparse.Namespace, python_path: str, server_py: str) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description="latch Cursor installer (MCP + Rules + Commands + AGENTS.md; optional hooks).")
+    ap = argparse.ArgumentParser(description="latch Cursor installer (MCP + Rules + Commands + Skills + AGENTS.md; optional hooks).")
     ap.add_argument("--python", help="interpreter to register for the MCP server")
     ap.add_argument("--mcp-json", default=str(DEFAULT_MCP_PATH),
                     help="Cursor MCP config path (default: .cursor/mcp.json)")
@@ -476,6 +685,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="Cursor rule path (default: .cursor/rules/latch.mdc)")
     ap.add_argument("--commands-dir", default=str(DEFAULT_COMMANDS_DIR),
                     help="Cursor commands directory (default: .cursor/commands)")
+    ap.add_argument("--skills-dir", default=str(DEFAULT_SKILLS_DIR),
+                    help="Cursor skills directory (default: .cursor/skills)")
     ap.add_argument("--hooks-json", default=str(DEFAULT_HOOKS_PATH),
                     help="Cursor hooks config path (default: .cursor/hooks.json)")
     ap.add_argument("--with-hooks", action="store_true",
@@ -486,6 +697,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--skip-agents", action="store_true", help="do not touch AGENTS.md")
     ap.add_argument("--skip-rules", action="store_true", help="do not touch Cursor Rules")
     ap.add_argument("--skip-commands", action="store_true", help="do not touch .cursor/commands")
+    ap.add_argument("--skip-skills", action="store_true", help="do not touch .cursor/skills")
     ap.add_argument("--yes", "-y", action="store_true", help="confirm first-time AGENTS.md wiring")
     ap.add_argument("--dry-run", action="store_true", help="print what would change")
     ap.add_argument("--check", action="store_true", help="verify wiring only")
@@ -497,12 +709,30 @@ def main(argv: list[str] | None = None) -> int:
     if args.check:
         return _check(args, python_path, server_py)
 
+    # Asset ownership is a transaction precondition. Check every requested
+    # command and skill before touching MCP, AGENTS.md, rules, hooks, or any
+    # other managed asset so a late same-name collision cannot leave a partial
+    # install behind.
+    try:
+        if not args.skip_commands:
+            _raise_command_collisions(cursor_command_collisions(
+                Path(args.commands_dir), model_backend=args.model_backend,
+            ))
+        if not args.skip_skills:
+            _raise_skill_collisions(cursor_skill_collisions(
+                Path(args.skills_dir), model_backend=args.model_backend,
+            ))
+    except CursorAssetCollisionError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
     print("\nlatch Cursor installer")
     print(f"  KB_HOME      : {KB_HOME}")
     print(f"  interpreter  : {python_path}")
     print(f"  MCP config   : {'skipped' if args.skip_mcp else args.mcp_json}")
     print(f"  Cursor rule  : {'skipped' if args.skip_rules else args.rules_mdc}")
     print(f"  Commands     : {'skipped' if args.skip_commands else args.commands_dir}")
+    print(f"  Skills       : {'skipped' if args.skip_skills else args.skills_dir}")
     print(f"  Hooks        : {args.hooks_json if args.with_hooks else 'skipped (pass --with-hooks)'}")
     print(f"  AGENTS.md    : {'skipped' if args.skip_agents else args.agents_md}")
     print(f"  model backend: {args.model_backend or 'cursor (native default)'}")
@@ -565,6 +795,20 @@ def main(argv: list[str] | None = None) -> int:
             _print_changes("Cursor commands", changes, dry_run=args.dry_run)
         else:
             print("  [OK  ] Cursor commands already have latch")
+
+    if not args.skip_skills:
+        try:
+            changes = sync_cursor_skills(
+                Path(args.skills_dir), dry_run=args.dry_run,
+                model_backend=args.model_backend,
+            )
+        except CursorAssetCollisionError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        if changes:
+            _print_changes("Cursor skills", changes, dry_run=args.dry_run)
+        else:
+            print("  [OK  ] Cursor skills already have latch")
 
     if args.with_hooks:
         hooks_path = Path(args.hooks_json)

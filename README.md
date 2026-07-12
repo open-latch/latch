@@ -99,13 +99,16 @@ first-run mission.
   SessionStart, Codex backend defaults, and a manual compaction wrapper.
 - **Cursor:** project-scoped MCP wiring through `.cursor/mcp.json`, a
   managed `.cursor/rules/latch.mdc` activation rule, project-local
-  `.cursor/commands` prompts, and the shared `AGENTS.md` contract. An opt-in
+  `.cursor/commands` prompts, project-local `.cursor/skills`, and the shared
+  `AGENTS.md` contract. A checked-in Cursor plugin manifest distributes the
+  same skills without duplicating runtime wiring. An opt-in
   `.cursor/hooks.json` layer adds SessionStart KB briefing, a current-session
   transcript handoff, per-prompt pre-edit gate enforcement, and post-tool latch
   activity context. The Cursor Agent CLI is the native model backend for gate,
-  maintenance, and compaction calls. Manual compaction accepts only the current
-  SessionStart-provided conversation/transcript pair; historical transcript
-  discovery remains deliberately unsupported.
+  maintenance, seed, and compaction calls. Compaction and default Cursor
+  seeding accept the current SessionStart-provided conversation/transcript pair;
+  seeding can also accept a user-explicit path. Historical transcript discovery
+  remains deliberately unsupported.
 - **Claude Code + Codex together:** one shared local latch KB, so decisions and
   rejected paths captured through either agent can gate both.
 
@@ -154,9 +157,10 @@ non-interactive runs, choose explicitly:
 The quickstart delegates to the existing installers, syncs the project behavior
 contract, runs doctor/check commands, then moves directly into seed-first setup.
 It disables the per-installer seed prompts so there is one seed handoff at the
-end. Seed source still uses local Claude/Codex transcripts (`claude`, `codex`,
-or `both`); Cursor-origin seeding is a separate capability from current-session
-manual compaction and is not installed yet.
+end. The initial quickstart defaults to available Claude/Codex history because
+no Cursor conversation exists yet. After opening a hooked Cursor conversation,
+run `/latch-seed` or select `--seed-source cursor`; it uses only the exact
+current hook-provided transcript.
 
 One latch clone can serve many repos. Run the quickstart script again from each
 project repo where you want the agent behavior contract. The manual steps below
@@ -213,13 +217,14 @@ you want Codex to use latch:
 Restart Codex or start a new Codex thread after install so `config.toml`,
 `hooks.json`, and `AGENTS.md` reload.
 
-### Cursor Adapter
+### Cursor
 
 Cursor uses the same local latch MCP server, a Cursor-native activation rule,
-project-local command prompts, and the shared `AGENTS.md` behavior contract.
+project-local commands and skills, and the shared `AGENTS.md` behavior contract.
 The installer writes project-scoped `.cursor/mcp.json`,
-`.cursor/rules/latch.mdc`, and `.cursor/commands/*.md`, so it is safe to try
-from one repo without touching Claude Code or Codex config.
+`.cursor/rules/latch.mdc`, `.cursor/commands/*.md`, and
+`.cursor/skills/*/SKILL.md`, so it is safe to try from one repo without touching
+Claude Code or Codex config.
 
 Pass `--with-hooks` to opt into project-scoped `.cursor/hooks.json` wiring.
 The merge preserves unrelated Cursor hooks and installs:
@@ -245,8 +250,12 @@ The merge preserves unrelated Cursor hooks and installs:
   verified `latch_gate` tool result, arms the current prompt only when that gate
   used the request verbatim and the outer tool result reports positive
   completion rather than failure, cancellation, timeout, denial, or skip, and
-  returns a concise instruction to surface the receipt. Conflicting tool-name,
-  input-container, server, or nested-tool identities fail closed. Cursor
+  rejects conflicting tool-name, input-container, server, or nested-tool
+  identities. It advances seed preview state only after a matching
+  successful JSON result, and binds `/latch-pm` to the exact non-writing
+  `latch_pm_preview` candidate digest. Failed, malformed, missing, or
+  cross-session preview results cannot authorize apply. It also returns a
+  concise instruction to surface the receipt. Cursor
   has no equivalent of Claude Code's deterministic user-only `systemMessage`
   channel, so receipt visibility is agent-context delivery backed by the
   `AGENTS.md` foregrounding contract—not a claim that Cursor renders the line
@@ -266,9 +275,19 @@ overrides remain available with `--model-backend codex` or
 
 The installed `/latch-compact` command and `run_cursor_compact_now` wrappers
 compact only the current conversation. Resolution fails closed unless the
-opt-in SessionStart hook recorded an exact conversation id and
-`transcript_path` pair; latch never scans Cursor databases or guesses the most
-recent chat.
+opt-in SessionStart hook recorded an exact per-session conversation id and
+`transcript_path` pair and the wrapper receives that surfaced session id
+explicitly; latch never scans Cursor databases or guesses the most recent chat.
+
+The installed `/latch-seed` command is also current-session-only. It previews
+seed candidates as JSON from the exact marker/transcript pair. The preview
+attempt alone does not arm apply; a matching successful `postToolUse` result
+must be recorded before the separate `/latch-seed apply` confirmation can write
+staging evidence. `/latch-pm` similarly uses the read-only
+`latch_pm_preview` MCP result—not agent prose—to display and digest-bind every
+load-bearing decision field before one matching staging insert.
+`--cursor-transcript PATH` is available for
+a user-explicit file; latch never enumerates Cursor's private history folders.
 
 ```bash
 # From the project repo where Cursor should follow latch.
@@ -299,6 +318,14 @@ with `--require-compact` during live acceptance. Static doctor success is not a
 substitute for authenticated MCP, visible-gate, plugin, backend, or compaction
 acceptance receipts.
 
+The repo also ships `.cursor-plugin/plugin.json` for Cursor's local/marketplace
+plugin flow. The plugin deliberately exposes workflow skills only; MCP, hooks,
+rules, and project commands remain installer-owned so they cannot double-fire.
+To test the plugin skills locally, launch `agent --plugin-dir /path/to/latch` or
+place the checkout at `~/.cursor/plugins/local/latch`. If you use plugin skills,
+run the project installer/doctor with `--skip-skills` to avoid loading duplicate
+skill names.
+
 For the narrow proof path, see
 [`runbooks/cursor_gate_smoke.md`](./runbooks/cursor_gate_smoke.md).
 
@@ -319,9 +346,19 @@ The quickstart prints a review-and-apply seed command like this:
 # Windows: C:\path\to\latch\bin\latch_seed.ps1 --source both --last-sessions 20 --apply
 ```
 
-Use `--source claude`, `--source codex`, or `--source both`. Keep the default
-small and focused; increase `--last-sessions N` only when the first report does
-not find useful project judgment.
+Use `--source claude`, `--source codex`, `--source cursor`, `--source both`
+(Claude+Codex), or `--source all`. Cursor source resolution is intentionally
+narrow: it uses the per-session marker named by `--cursor-session-id` or a path
+supplied explicitly with `--cursor-transcript`; it never scans Cursor history. Keep the default small
+and focused; increase `--last-sessions N` only when the first report does not
+find useful project judgment.
+
+From a hooked Cursor conversation, the native path is:
+
+```bash
+/path/to/latch/bin/latch_seed.sh --source cursor --cursor-session-id SESSION_ID --format json
+# Review first; only then rerun with --apply --yes.
+```
 
 `--apply` is still review-first. The seed pass may use LLM calls, shows a
 structured report, and writes only the staging candidates you approve at the
@@ -392,7 +429,7 @@ At natural stopping points, capture the session:
 - Claude Code: run `/latch-compact`.
 - Codex: run `/path/to/latch/bin/run_codex_compact_now.sh`.
 - Cursor: run `/latch-compact` or
-  `/path/to/latch/bin/run_cursor_compact_now.sh` from the current hooked
+  `/path/to/latch/bin/run_cursor_compact_now.sh SESSION_ID` from the current hooked
   conversation (`run_cursor_compact_now.ps1` on Windows).
 
 Compaction is user-initiated because it spends a model call and writes a durable
@@ -449,7 +486,7 @@ context, repo access, or other installed tools.
 ```bash
 bash bin/uninstall.sh --dry-run
 bash bin/uninstall.sh
-# Also remove latch-owned Cursor wiring from the current project:
+# Also remove latch-owned Cursor wiring, commands, and skills from the current project:
 bash bin/uninstall.sh --dry-run --cursor-only --cursor-project "$PWD"
 bash bin/uninstall.sh --yes --cursor-only --cursor-project "$PWD"
 ```

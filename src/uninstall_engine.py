@@ -46,7 +46,7 @@ What it does NOT remove unless asked:
     supplied. Pass ``--cursor-only`` to leave the global Claude Code engine
     wiring untouched. That path removes latch-owned ``.cursor/mcp.json`` server entries,
     ``.cursor/rules/latch.mdc``, ``.cursor/commands`` files, latch-owned
-    ``.cursor/hooks.json`` entries, and the AGENTS.md managed region for that
+    ``.cursor/skills`` files, ``.cursor/hooks.json`` entries, and the AGENTS.md managed region for that
     project while preserving unrelated Cursor config.
 
 Design notes (same as install_engine):
@@ -334,6 +334,12 @@ def strip_cursor_project(project: str, dry_run: bool) -> list[str]:
     )
     changes.extend(f"{root}: {change}" for change in command_changes)
 
+    skill_changes = install_cursor.remove_cursor_skills(
+        root / install_cursor.DEFAULT_SKILLS_DIR,
+        dry_run=dry_run,
+    )
+    changes.extend(f"{root}: {change}" for change in skill_changes)
+
     hooks_path = root / install_cursor.DEFAULT_HOOKS_PATH
     try:
         hook_changes = cursor_hooks.remove_hooks(hooks_path, dry_run=dry_run)
@@ -397,6 +403,20 @@ def cursor_project_removed(project: str) -> list[tuple[bool, str]]:
                            + ", ".join(leftover_commands)))
     else:
         rows.append((True, f"no latch Cursor commands in {commands_dir}"))
+
+    skills_dir = root / install_cursor.DEFAULT_SKILLS_DIR
+    leftover_skills = []
+    for name in install_cursor.CURSOR_SKILL_NAMES:
+        path = skills_dir / name / "SKILL.md"
+        if path.is_file() and install_cursor._is_latch_cursor_skill_body(
+            path.read_text(encoding="utf-8", errors="replace")
+        ):
+            leftover_skills.append(name)
+    if leftover_skills:
+        rows.append((False, f"Cursor latch skill(s) still present in {skills_dir}: "
+                           + ", ".join(leftover_skills)))
+    else:
+        rows.append((True, f"no latch Cursor skills in {skills_dir}"))
 
     hooks_path = root / install_cursor.DEFAULT_HOOKS_PATH
     try:
@@ -535,7 +555,7 @@ def main(argv: list[str] | None = None) -> int:
                          "(repeatable)")
     ap.add_argument("--cursor-project", action="append", default=[], metavar="PATH",
                     help="also remove latch-owned Cursor wiring from this project "
-                         "(.cursor/mcp.json, .cursor/rules/latch.mdc, .cursor/commands, .cursor/hooks.json, AGENTS.md)")
+                         "(.cursor/mcp.json, .cursor/rules/latch.mdc, .cursor/commands, .cursor/skills, .cursor/hooks.json, AGENTS.md)")
     ap.add_argument("--cursor-only", action="store_true",
                     help="remove/check only --cursor-project wiring; preserve global Claude Code wiring")
     ap.add_argument("--purge", action="store_true",

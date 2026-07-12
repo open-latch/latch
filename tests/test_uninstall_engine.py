@@ -114,8 +114,12 @@ def test_strip_cursor_project_removes_latch_owned_wiring_only():
         mcp.write_text(body, encoding="utf-8")
         cursor_rules_sync.sync(root / ".cursor" / "rules" / "latch.mdc")
         ic.sync_cursor_commands(root / ".cursor" / "commands")
+        ic.sync_cursor_skills(root / ".cursor" / "skills")
         user_command = root / ".cursor" / "commands" / "mine.md"
         user_command.write_text("user-owned command\n", encoding="utf-8")
+        user_skill = root / ".cursor" / "skills" / "mine" / "SKILL.md"
+        user_skill.parent.mkdir(parents=True)
+        user_skill.write_text("---\nname: mine\ndescription: user owned\n---\n", encoding="utf-8")
         hooks_path = root / ".cursor" / "hooks.json"
         hooks_body, _ = cursor_hooks.merge_hooks(
             json.dumps({
@@ -136,6 +140,7 @@ def test_strip_cursor_project_removes_latch_owned_wiring_only():
         _assert(any("removed Cursor MCP server latch" in c for c in changes), changes)
         _assert(any("removed Cursor rule" in c for c in changes), changes)
         _assert(any("removed Cursor command latch-gate.md" in c for c in changes), changes)
+        _assert(any("removed Cursor skill source-command-latch-gate" in c for c in changes), changes)
         _assert(any("latch-owned Cursor hook" in c for c in changes), changes)
         _assert(any("stripped managed region" in c for c in changes), changes)
 
@@ -143,6 +148,7 @@ def test_strip_cursor_project_removes_latch_owned_wiring_only():
         _assert("latch" not in remaining.get("mcpServers", {}), remaining)
         _assert("other" in remaining.get("mcpServers", {}), remaining)
         _assert(user_command.exists(), "user-owned Cursor command should survive")
+        _assert(user_skill.exists(), "user-owned Cursor skill should survive")
         remaining_hooks = json.loads(hooks_path.read_text(encoding="utf-8"))
         _assert(remaining_hooks["hooks"] == {"stop": [{"command": "user-stop"}]},
                 remaining_hooks)

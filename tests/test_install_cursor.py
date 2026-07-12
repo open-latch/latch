@@ -196,6 +196,7 @@ def test_first_wire_notice_is_cursor_branded():
                 "--agents-md", str(d / "AGENTS.md"),
                 "--rules-mdc", str(rule),
                 "--commands-dir", str(d / ".cursor" / "commands"),
+                "--skills-dir", str(d / ".cursor" / "skills"),
                 "--yes",
             ])
         text = out.getvalue()
@@ -207,6 +208,8 @@ def test_first_wire_notice_is_cursor_branded():
                 "Cursor rule should be installed by default")
         _assert((d / ".cursor" / "commands" / "latch-gate.md").is_file(),
                 "Cursor command prompts should be installed by default")
+        _assert((d / ".cursor" / "skills" / "source-command-latch-gate" / "SKILL.md").is_file(),
+                "Cursor skills should be installed by default")
         print("PASS first_wire_notice_is_cursor_branded")
     finally:
         shutil.rmtree(d, ignore_errors=True)
@@ -226,6 +229,7 @@ def test_check_mode_verifies_mcp_and_agents():
         agents_md_sync.sync(agents, create=True)
         cursor_rules_sync.sync(rule)
         ic.sync_cursor_commands(d / ".cursor" / "commands")
+        ic.sync_cursor_skills(d / ".cursor" / "skills")
 
         rc = ic.main([
             "--python", sys.executable,
@@ -233,6 +237,7 @@ def test_check_mode_verifies_mcp_and_agents():
             "--agents-md", str(agents),
             "--rules-mdc", str(rule),
             "--commands-dir", str(d / ".cursor" / "commands"),
+            "--skills-dir", str(d / ".cursor" / "skills"),
             "--check",
         ])
         _assert(rc == 0, f"expected check success, got {rc}")
@@ -243,6 +248,7 @@ def test_check_mode_verifies_mcp_and_agents():
             "--agents-md", str(agents),
             "--rules-mdc", str(rule),
             "--commands-dir", str(d / ".cursor" / "commands"),
+            "--skills-dir", str(d / ".cursor" / "skills"),
             "--check",
         ])
         _assert(rc == 1, f"expected check failure for missing config, got {rc}")
@@ -253,6 +259,7 @@ def test_check_mode_verifies_mcp_and_agents():
             "--agents-md", str(agents),
             "--rules-mdc", str(d / "missing-rule.mdc"),
             "--commands-dir", str(d / ".cursor" / "commands"),
+            "--skills-dir", str(d / ".cursor" / "skills"),
             "--check",
         ])
         _assert(rc == 1, f"expected check failure for missing rule, got {rc}")
@@ -269,6 +276,8 @@ def test_cursor_commands_sync_status_and_remove():
         _assert(any("Cursor command latch-gate.md" in c for c in changes), changes)
         _assert((commands / "latch-compact.md").exists(),
                 "Cursor-native compaction command should be installed")
+        _assert((commands / "latch-seed.md").exists(),
+                "Cursor-origin seed command should be installed")
         gate = commands / "latch-gate.md"
         body = gate.read_text(encoding="utf-8")
         _assert("<KB_HOME>" not in body, "Cursor commands should resolve KB_HOME")
@@ -280,6 +289,14 @@ def test_cursor_commands_sync_status_and_remove():
                 compact)
         _assert("Latch operation id: latch-compact run" in compact, compact)
         _assert("LATCH_COMPACTOR_BACKEND=cursor" in compact, compact)
+        seed_command = (commands / "latch-seed.md").read_text(encoding="utf-8")
+        _assert("--source cursor" in seed_command and "--format json" in seed_command
+                and "Never add `--yes`" in seed_command,
+                seed_command)
+        pm_command = (commands / "latch-pm.md").read_text(encoding="utf-8")
+        _assert("Latch operation id: latch-pm prepare" in pm_command, pm_command)
+        _assert("latch_pm_preview" in pm_command and "/latch-pm apply" in pm_command,
+                pm_command)
         ok, detail = ic.cursor_commands_status(commands)
         _assert(ok, detail)
 
@@ -359,12 +376,201 @@ def test_cursor_commands_render_selected_compatibility_backend():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_cursor_skills_sync_status_remove_and_plugin_manifest():
+    d = Path(tempfile.mkdtemp(prefix="latch-cursor-skills-"))
+    try:
+        skills = d / ".cursor" / "skills"
+        changes = ic.sync_cursor_skills(skills, model_backend="codex")
+        _assert(len(changes) == len(ic.CURSOR_SKILL_NAMES), changes)
+        gate = skills / "source-command-latch-gate" / "SKILL.md"
+        seed_skill = skills / "source-command-latch-seed" / "SKILL.md"
+        _assert(gate.is_file() and seed_skill.is_file(), changes)
+        gate_body = gate.read_text(encoding="utf-8")
+        _assert("<KB_HOME>" not in gate_body and "<CURSOR_MODEL_BACKEND>" not in gate_body,
+                gate_body)
+        _assert("codex" in gate_body and "Latch Cursor skill boundary:" in gate_body,
+                gate_body)
+        seed_body = seed_skill.read_text(encoding="utf-8")
+        _assert("Latch operation id: latch-seed preview" in seed_body, seed_body)
+        _assert("--cursor-session-id" in seed_body and "--format json" in seed_body
+                and "/latch-seed apply" in seed_body,
+                seed_body)
+        compact_body = (skills / "source-command-latch-compact" / "SKILL.md").read_text(
+            encoding="utf-8",
+        )
+        _assert("Latch operation id: latch-compact run" in compact_body, compact_body)
+        pm_body = (skills / "source-command-latch-pm" / "SKILL.md").read_text(
+            encoding="utf-8",
+        )
+        _assert("latch_pm_preview" in pm_body and "/latch-pm apply" in pm_body, pm_body)
+        _assert("Do not substitute agent prose" in pm_body, pm_body)
+        ok, detail = ic.cursor_skills_status(skills, model_backend="codex")
+        _assert(ok, detail)
+        ok, detail = ic.cursor_skills_status(skills, model_backend="cursor")
+        _assert(not ok and "drifted" in detail, detail)
+        plugin_ok, plugin_detail = ic.cursor_plugin_status()
+        _assert(plugin_ok, plugin_detail)
+
+        gate.write_text(gate_body + "\nmanaged drift\n", encoding="utf-8")
+        changes = ic.sync_cursor_skills(skills, model_backend="codex")
+        _assert(any("updated Cursor skill source-command-latch-gate" in row for row in changes),
+                changes)
+        _assert(gate.read_text(encoding="utf-8") == gate_body,
+                "latch-owned skill drift should be repaired")
+        _assert(gate.with_name("SKILL.md.latchbak").read_text(encoding="utf-8").endswith(
+            "managed drift\n"
+        ), "latch-owned skill drift should retain a backup")
+        _assert(ic.sync_cursor_skills(skills, model_backend="codex") == [],
+                "repeated skill install should be idempotent")
+
+        custom = skills / "custom-skill" / "SKILL.md"
+        custom.parent.mkdir(parents=True)
+        custom.write_text("---\nname: custom-skill\ndescription: user owned\n---\n", encoding="utf-8")
+        removed = ic.remove_cursor_skills(skills)
+        _assert(any("removed Cursor skill source-command-latch-gate" in row for row in removed),
+                removed)
+        _assert(custom.is_file(), "uninstall should preserve unrelated Cursor skills")
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_cursor_skills_refuse_user_owned_same_name_collision():
+    d = Path(tempfile.mkdtemp(prefix="latch-cursor-skill-collision-"))
+    try:
+        skills = d / ".cursor" / "skills"
+        gate = skills / "source-command-latch-gate" / "SKILL.md"
+        gate.parent.mkdir(parents=True)
+        custom = b"---\nname: source-command-latch-gate\ndescription: user owned\n---\n"
+        gate.write_bytes(custom)
+
+        try:
+            ic.sync_cursor_skills(skills)
+        except ic.CursorAssetCollisionError as exc:
+            _assert("refusing to overwrite user-owned Cursor skill" in str(exc), exc)
+        else:
+            raise AssertionError("same-name user skill must fail closed")
+
+        _assert(gate.read_bytes() == custom, "collision must preserve the user skill byte-for-byte")
+        _assert(not gate.with_name("SKILL.md.latchbak").exists(),
+                "fail-closed collision must not create a misleading backup")
+        _assert(not (skills / "source-command-latch-seed").exists(),
+                "collision preflight must happen before any skill writes")
+
+        rc = ic.main([
+            "--skip-mcp", "--skip-agents", "--skip-rules", "--skip-commands",
+            "--skills-dir", str(skills),
+        ])
+        _assert(rc == 2, rc)
+        removed = ic.remove_cursor_skills(skills)
+        _assert(gate.read_bytes() == custom, "uninstall must preserve a collision-blocked user skill")
+        _assert(any("looks user-owned" in row for row in removed), removed)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_asset_collision_preflight_prevents_any_partial_install():
+    collision_cases = (
+        ("command-file", "command", "file"),
+        ("command-directory", "command", "directory"),
+        ("command-dangling-symlink", "command", "dangling-symlink"),
+        ("skill-file", "skill", "file"),
+        ("skill-directory", "skill", "directory"),
+        ("skill-dangling-symlink", "skill", "dangling-symlink"),
+    )
+    for case_name, collision_kind, path_kind in collision_cases:
+        d = Path(tempfile.mkdtemp(prefix=f"latch-cursor-{collision_kind}-transaction-"))
+        try:
+            cursor = d / ".cursor"
+            commands = cursor / "commands"
+            skills = cursor / "skills"
+            if collision_kind == "command":
+                collision = commands / "latch-gate.md"
+                payload = b"user command bytes\x00\xff"
+            else:
+                collision = skills / "source-command-latch-gate" / "SKILL.md"
+                payload = b"---\nname: source-command-latch-gate\ndescription: user skill\n---\n"
+            collision.parent.mkdir(parents=True)
+            outside_target = d / "outside" / f"{case_name}.md"
+            if path_kind == "file":
+                collision.write_bytes(payload)
+            elif path_kind == "directory":
+                collision.mkdir()
+            else:
+                collision.symlink_to(outside_target)
+
+            rc = ic.main([
+                "--mcp-json", str(cursor / "mcp.json"),
+                "--agents-md", str(d / "AGENTS.md"),
+                "--rules-mdc", str(cursor / "rules" / "latch.mdc"),
+                "--commands-dir", str(commands),
+                "--skills-dir", str(skills),
+                "--hooks-json", str(cursor / "hooks.json"),
+                "--with-hooks", "--yes",
+            ])
+            _assert(rc == 2, (case_name, rc))
+            if path_kind == "file":
+                _assert(collision.read_bytes() == payload, case_name)
+            elif path_kind == "directory":
+                _assert(collision.is_dir(), case_name)
+            else:
+                _assert(collision.is_symlink(), case_name)
+                _assert(not outside_target.exists(), case_name)
+            _assert(not (cursor / "mcp.json").exists(), case_name)
+            _assert(not (d / "AGENTS.md").exists(), case_name)
+            _assert(not (cursor / "rules" / "latch.mdc").exists(), case_name)
+            _assert(not (cursor / "hooks.json").exists(), case_name)
+            if collision_kind == "skill":
+                _assert(not commands.exists(), "command assets must not precede skill preflight")
+            else:
+                _assert(not skills.exists(), "skill assets must not follow command collision")
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+
+def test_asset_directory_symlink_preflight_prevents_any_partial_install():
+    for asset_kind in ("commands", "skills"):
+        for target_kind in ("existing", "dangling"):
+            d = Path(tempfile.mkdtemp(
+                prefix=f"latch-cursor-{asset_kind}-{target_kind}-parent-symlink-",
+            ))
+            outside = Path(tempfile.mkdtemp(prefix="latch-cursor-outside-assets-"))
+            try:
+                cursor = d / ".cursor"
+                cursor.mkdir(parents=True)
+                commands = cursor / "commands"
+                skills = cursor / "skills"
+                asset_dir = commands if asset_kind == "commands" else skills
+                symlink_target = outside if target_kind == "existing" else outside / "missing"
+                asset_dir.symlink_to(symlink_target, target_is_directory=True)
+
+                rc = ic.main([
+                    "--mcp-json", str(cursor / "mcp.json"),
+                    "--agents-md", str(d / "AGENTS.md"),
+                    "--rules-mdc", str(cursor / "rules" / "latch.mdc"),
+                    "--commands-dir", str(commands),
+                    "--skills-dir", str(skills),
+                    "--hooks-json", str(cursor / "hooks.json"),
+                    "--with-hooks", "--yes",
+                ])
+                _assert(rc == 2, (asset_kind, target_kind, rc))
+                _assert(asset_dir.is_symlink(), (asset_kind, target_kind))
+                _assert(not (outside / "latch-gate.md").exists(), asset_kind)
+                _assert(not (outside / "source-command-latch-gate").exists(), asset_kind)
+                _assert(not (cursor / "mcp.json").exists(), asset_kind)
+                _assert(not (d / "AGENTS.md").exists(), asset_kind)
+                _assert(not (cursor / "rules" / "latch.mdc").exists(), asset_kind)
+                _assert(not (cursor / "hooks.json").exists(), asset_kind)
+            finally:
+                shutil.rmtree(d, ignore_errors=True)
+                shutil.rmtree(outside, ignore_errors=True)
+
+
 def test_with_hooks_installs_and_check_requires_hooks():
     d = Path(tempfile.mkdtemp(prefix="latch-cursor-hooks-install-"))
     try:
         hooks = d / ".cursor" / "hooks.json"
         rc = ic.main([
-            "--skip-mcp", "--skip-agents", "--skip-rules", "--skip-commands",
+            "--skip-mcp", "--skip-agents", "--skip-rules", "--skip-commands", "--skip-skills",
             "--hooks-json", str(hooks), "--with-hooks", "--yes",
         ])
         _assert(rc == 0, rc)
@@ -378,13 +584,13 @@ def test_with_hooks_installs_and_check_requires_hooks():
         )
         _assert(ok, detail)
         rc = ic.main([
-            "--skip-mcp", "--skip-agents", "--skip-rules", "--skip-commands",
+            "--skip-mcp", "--skip-agents", "--skip-rules", "--skip-commands", "--skip-skills",
             "--hooks-json", str(hooks), "--with-hooks", "--check",
         ])
         _assert(rc == 0, rc)
         hooks.unlink()
         rc = ic.main([
-            "--skip-mcp", "--skip-agents", "--skip-rules", "--skip-commands",
+            "--skip-mcp", "--skip-agents", "--skip-rules", "--skip-commands", "--skip-skills",
             "--hooks-json", str(hooks), "--with-hooks", "--check",
         ])
         _assert(rc == 1, rc)
@@ -407,5 +613,7 @@ if __name__ == "__main__":
     test_cursor_commands_sync_status_and_remove()
     test_cursor_commands_refuse_user_owned_same_name_collision()
     test_cursor_commands_render_selected_compatibility_backend()
+    test_cursor_skills_sync_status_remove_and_plugin_manifest()
+    test_cursor_skills_refuse_user_owned_same_name_collision()
     test_with_hooks_installs_and_check_requires_hooks()
     print("\nAll install_cursor tests pass.")

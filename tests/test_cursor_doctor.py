@@ -69,6 +69,7 @@ def test_json_mode_reports_malformed_cursor_config():
                 "--skip-backend",
                 "--skip-compact",
                 "--skip-commands",
+                "--skip-skills",
                 "--python", sys.executable,
                 "--mcp-json", str(config),
                 "--agents-md", str(agents),
@@ -127,6 +128,22 @@ def test_check_cursor_commands_status():
     finally:
         shutil.rmtree(d, ignore_errors=True)
     print("PASS check_cursor_commands_status")
+
+
+def test_check_cursor_skills_status():
+    d = _tmp()
+    try:
+        skills = d / ".cursor" / "skills"
+        ic.sync_cursor_skills(skills)
+        ok = cd.check_cursor_skills(skills)
+        _assert(ok.level == cd.OK, ok)
+        (skills / "source-command-latch-gate" / "SKILL.md").write_text(
+            "custom\n", encoding="utf-8",
+        )
+        bad = cd.check_cursor_skills(skills)
+        _assert(bad.level == cd.FAIL and "drifted" in bad.detail, bad)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
 
 
 def test_check_mcp_launch_target():
@@ -229,6 +246,8 @@ def test_run_all_static_and_cli_checks():
         cursor_rules_sync.sync(rule)
         commands = d / ".cursor" / "commands"
         ic.sync_cursor_commands(commands)
+        skills = d / ".cursor" / "skills"
+        ic.sync_cursor_skills(skills)
         agent = _fake_exe(
             d / "agent",
             "printf '%s\\n' 'latch_search latch_get latch_recent latch_gate'\n",
@@ -239,6 +258,7 @@ def test_run_all_static_and_cli_checks():
             agents_path=agents,
             rules_path=rule,
             commands_dir=commands,
+            skills_dir=skills,
             python_path=sys.executable,
             server_py=str(server),
             agent_bin=str(agent),
@@ -248,7 +268,7 @@ def test_run_all_static_and_cli_checks():
         )
         _assert(
             [c.level for c in checks]
-            == [cd.OK, cd.OK, cd.OK, cd.OK, cd.OK, cd.OK, cd.OK, cd.WARN, cd.WARN],
+            == [cd.OK, cd.OK, cd.OK, cd.OK, cd.OK, cd.OK, cd.OK, cd.OK, cd.OK, cd.WARN, cd.WARN],
             checks,
         )
     finally:
@@ -271,6 +291,8 @@ def test_run_all_requires_hooks_when_requested():
         cursor_rules_sync.sync(rule)
         commands = d / ".cursor" / "commands"
         ic.sync_cursor_commands(commands)
+        skills = d / ".cursor" / "skills"
+        ic.sync_cursor_skills(skills)
         hooks = d / ".cursor" / "hooks.json"
         hooks_body, _ = cursor_hooks.merge_hooks(
             "", sys.executable,
@@ -283,7 +305,7 @@ def test_run_all_requires_hooks_when_requested():
         cursor_hooks.write_hooks(hooks, hooks_body)
         checks = cd.run_all(
             config_path=config, agents_path=agents, rules_path=rule,
-            commands_dir=commands, python_path=sys.executable,
+            commands_dir=commands, skills_dir=skills, python_path=sys.executable,
             server_py=str(server), skip_cli=True, with_hooks=True,
             hooks_path=hooks,
             skip_backend=True, skip_compact=True,
@@ -339,6 +361,7 @@ if __name__ == "__main__":
     test_check_agents_md_status()
     test_check_cursor_rule_status()
     test_check_cursor_commands_status()
+    test_check_cursor_skills_status()
     test_check_mcp_launch_target()
     test_check_cursor_cli_mcp_warns_when_missing()
     test_check_cursor_cli_mcp_ok_and_failure()

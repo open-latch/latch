@@ -369,8 +369,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument("--project", default=os.getcwd(),
                     help="project repo to wire and seed (default: cwd)")
     ap.add_argument("--python", help="interpreter to register for latch")
-    ap.add_argument("--seed-source", choices=("auto", "claude", "codex", "both"), default="auto",
-                    help="transcript source for seed setup (default follows --agents)")
+    ap.add_argument("--seed-source",
+                    choices=("auto", "claude", "codex", "cursor", "both", "all"),
+                    default="auto",
+                    help=("transcript source for seed setup (default follows --agents; "
+                          "Cursor requires a current SessionStart marker)"))
     ap.add_argument("--last-sessions", type=int, default=20,
                     help="recent sessions to scan during seed setup (default: 20)")
     ap.add_argument("--dry-run", action="store_true",
