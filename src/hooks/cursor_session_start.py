@@ -15,6 +15,7 @@ from _common import log, read_hook_input, transcript_path  # noqa: E402
 import budget  # noqa: E402
 import cursor_gate_state  # noqa: E402
 import cursor_session  # noqa: E402
+import cursor_wiring  # noqa: E402
 import db  # noqa: E402
 from paths import is_disabled, is_in_compact, is_unlatched_mode  # noqa: E402
 from session_start import _build_briefing, _build_unlatched_brief  # noqa: E402
@@ -33,19 +34,6 @@ def emit_cursor_context(context: str) -> None:
         print(json.dumps({"additional_context": context}))
 
 
-def _auto_sync_agents_md(cwd: str) -> str | None:
-    try:
-        import agents_md_sync
-        target = Path(cwd) / "AGENTS.md"
-        action = agents_md_sync.sync(target, create=False)
-        if action == "synced":
-            log(f"cursor agents_md auto-sync: re-synced managed region in {target}")
-        return action
-    except Exception as e:
-        log(f"cursor agents_md auto-sync skipped: {e}")
-        return None
-
-
 def main() -> int:
     if is_in_compact() or is_disabled():
         return 0
@@ -58,6 +46,16 @@ def main() -> int:
     sid = cursor_session_id(payload)
     tpath = transcript_path(payload)
     surfaced_ids: list[int] = []
+
+    try:
+        wiring_result = cursor_wiring.repair_project(cwd)
+    except Exception as e:
+        log(f"cursor project wiring check failed: {e}")
+        wiring_result = cursor_wiring.RepairResult(
+            "error",
+            "_⚠ latch could not check Cursor project wiring. This task will continue; "
+            "rerun the latch Cursor installer manually._",
+        )
 
     try:
         cursor_gate_state.reset_session(cwd, sid)
@@ -86,14 +84,14 @@ def main() -> int:
         log(f"cursor_session_start budget brief_line failed: {e}")
         budget_line = None
 
-    agents_md_action = _auto_sync_agents_md(cwd)
     briefing = _build_briefing(
         cwd,
         orphan_count=orphan_count,
         budget_line=budget_line,
         surfaced_ids=surfaced_ids,
-        claude_md_synced=(agents_md_action == "synced"),
+        claude_md_synced=False,
         synced_doc_name="AGENTS.md",
+        wiring_notice=wiring_result.notice,
     )
 
     if sid and surfaced_ids:

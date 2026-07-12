@@ -19,6 +19,8 @@ OK = mds.OK
 DRIFT = mds.DRIFT
 MISSING = mds.MISSING
 ABSENT = mds.ABSENT
+NEWER = mds.NEWER
+INVALID = mds.INVALID
 
 SPEC = mds.ManagedDocSpec(
     target_name="AGENTS.md",
@@ -75,6 +77,29 @@ def sync(target: Path, kb_home: str | None = None, *, create: bool = True) -> st
             target.write_text(before + block + after, encoding="utf-8")
             return "synced"
     return mds.sync(target, SPEC, home, create=create)
+
+
+def wiring_state(target: Path) -> str:
+    if not target.is_file():
+        return ABSENT
+    state = mds.wiring_state(target, SPEC)
+    if state == mds.MISSING:
+        content = target.read_text(encoding="utf-8")
+        if mds.extract_region(content, LEGACY_SPEC) is not None:
+            return mds.LEGACY
+    return state
+
+
+def sync_if_outdated(target: Path, kb_home: str | None = None) -> str:
+    home = kb_home if kb_home is not None else _kb_home_str()
+    state = wiring_state(target)
+    if state == mds.CURRENT:
+        return "unchanged"
+    if state in (ABSENT, mds.MISSING):
+        return "skipped"
+    if state in (NEWER, INVALID):
+        return state
+    return sync(target, home, create=False)
 
 
 def unsync(target: Path, *, backup: bool = True) -> str:
@@ -178,6 +203,10 @@ def main(argv: list[str] | None = None) -> int:
                 return 0
 
     action = sync(target, create=True)
+    if action in (NEWER, INVALID):
+        print(f"refused: {target} wiring is {action}; update latch before retrying",
+              file=sys.stderr)
+        return 1
     if action in ("synced", "appended"):
         print(f"{action} managed region in {target} (backup: {target}.latchbak)")
     elif action == "created":

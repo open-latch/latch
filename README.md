@@ -166,6 +166,51 @@ One latch clone can serve many repos. Run the quickstart script again from each
 project repo where you want the agent behavior contract. The manual steps below
 are the underlying commands when you need to debug or drive one surface by hand.
 
+## Versions and updates
+
+Stable latch builds use immutable `vX.Y.Z` Git tags and matching GitHub
+Releases. The moving `main` branch is development code, not the update channel.
+Latch keeps three versions separate:
+
+- `LATCH_VERSION` (`VERSION`) identifies the user-facing release.
+- `KB_SCHEMA_VERSION` controls local SQLite compatibility.
+- `WIRING_VERSION` changes only when copied project integration files change.
+
+Show the installed versions and source commit without using the network:
+
+```bash
+bash bin/latch_version.sh          # Windows: .\bin\latch_version.ps1
+bash bin/latch_version.sh --json
+```
+
+Check for a stable update without changing anything, preview it, then apply it
+explicitly:
+
+```bash
+bash bin/latch_update.sh --check
+bash bin/latch_update.sh --dry-run
+bash bin/latch_update.sh --yes
+```
+
+The updater only operates on a clean official `open-latch/latch` Git clone on
+`main` or an existing release checkout. It refuses modified files, development
+branches, forks, and ambiguous origins. It installs an exact release tag,
+refreshes dependencies, and refreshes existing Claude command copies. A schema
+upgrade backs up every discovered local KB before source changes. Latch refuses
+to open a KB written by a newer schema rather than guessing or downgrading it.
+
+There is no global registry of projects using latch. Already-wired projects
+carry a small wiring version inside their existing latch-owned marker. On the
+next SessionStart, Claude, Codex, and hooked Cursor perform a local marker-only
+comparison. Matching wiring is silent and write-free; older or legacy wiring is
+repaired once with a receipt and backup; newer wiring is never downgraded.
+Unmanaged repositories remain untouched. Cursor without hooks performs the same
+check when its already-installed project MCP server starts. Restart the relevant
+agent or open a new task when a receipt says hooks or MCP configuration changed.
+
+Release tags are forward updates. Restoring code across a KB schema change also
+requires restoring the corresponding `kb.db.bak.schema-*` backup.
+
 ### Claude Code
 
 Install and open Claude Code once before applying latch; the installer

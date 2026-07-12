@@ -8,13 +8,24 @@ markers, CLI wording, and first-wire prompt.
 from __future__ import annotations
 
 import sys
+import re
 from dataclasses import dataclass
 from pathlib import Path
+
+from versioning import WIRING_VERSION
 
 OK = "ok"
 DRIFT = "drift"
 MISSING = "missing"
 ABSENT = "absent"
+LEGACY = "legacy"
+OLDER = "older"
+CURRENT = "current"
+NEWER = "newer"
+INVALID = "invalid"
+
+WIRING_MARKER_PREFIX = "<!-- latch-wiring-version:"
+_WIRING_RE = re.compile(r"<!--\s*latch-wiring-version:\s*([^\s>]+)\s*-->")
 
 
 @dataclass(frozen=True)
@@ -39,7 +50,8 @@ def render_contract(spec: ManagedDocSpec, kb_home: str) -> str:
         text = text.replace(spec.source_doc_name, spec.target_name)
     if spec.installer_name != "install_claude_md":
         text = text.replace("install_claude_md", spec.installer_name)
-    return _norm(text).strip("\n")
+    contract = _norm(text).strip("\n")
+    return f"{WIRING_MARKER_PREFIX} {WIRING_VERSION} -->\n{contract}"
 
 
 def extract_region(content: str, spec: ManagedDocSpec) -> str | None:
@@ -52,13 +64,53 @@ def extract_region(content: str, spec: ManagedDocSpec) -> str | None:
     return after.split(spec.end_mark, 1)[0].strip("\n")
 
 
+def wiring_state(target: Path, spec: ManagedDocSpec) -> str:
+    """Read only the managed marker state used by SessionStart hot paths.
+
+    Missing latch markers never opt a project into repair. A managed region
+    created before wiring versions is legacy version 0 and upgrades once.
+    """
+    if not target.is_file():
+        return ABSENT
+    region = extract_region(target.read_text(encoding="utf-8"), spec)
+    if region is None:
+        return MISSING
+    match = _WIRING_RE.search(region)
+    if match is None:
+        return LEGACY
+    try:
+        installed = int(match.group(1))
+    except ValueError:
+        return INVALID
+    if installed < WIRING_VERSION:
+        return OLDER
+    if installed > WIRING_VERSION:
+        return NEWER
+    return CURRENT
+
+
 def evaluate(target: Path, spec: ManagedDocSpec, kb_home: str) -> str:
     if not target.is_file():
         return ABSENT
     region = extract_region(target.read_text(encoding="utf-8"), spec)
     if region is None:
         return MISSING
+    state = wiring_state(target, spec)
+    if state in (NEWER, INVALID):
+        return state
     return OK if region == render_contract(spec, kb_home) else DRIFT
+
+
+def sync_if_outdated(target: Path, spec: ManagedDocSpec, kb_home: str) -> str:
+    """Negligible SessionStart check plus one-time repair when version changed."""
+    state = wiring_state(target, spec)
+    if state == CURRENT:
+        return "unchanged"
+    if state in (ABSENT, MISSING):
+        return "skipped"
+    if state in (NEWER, INVALID):
+        return state
+    return sync(target, spec, kb_home, create=False)
 
 
 def sync(
@@ -74,6 +126,9 @@ def sync(
 
     if status == OK:
         return "unchanged"
+
+    if status in (NEWER, INVALID):
+        return status
 
     if status == ABSENT:
         if not create:

@@ -18,6 +18,7 @@ from pathlib import Path
 import agents_md_sync
 import codex_hooks
 import install_engine
+import versioning
 
 SERVER_NAME = "latch"
 LEGACY_SERVER_NAMES = ("claude-kb",)
@@ -203,6 +204,7 @@ def main(argv: list[str] | None = None) -> int:
         new_hooks, hook_changes = codex_hooks.merge_hooks(existing_hooks, python_path, hook_py)
 
     print("\nlatch Codex installer")
+    print(f"  version      : {versioning.LATCH_VERSION} (wiring {versioning.WIRING_VERSION})")
     print(f"  KB_HOME    : {KB_HOME}")
     print(f"  interpreter: {python_path}")
     print(f"  config     : {config_path}")

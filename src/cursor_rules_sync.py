@@ -8,10 +8,12 @@ and backs up any drift before overwriting it.
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from pathlib import Path
 
 import managed_doc_sync as mds
+from versioning import WIRING_VERSION
 
 KB_HOME = Path(__file__).resolve().parent.parent
 SNIPPET_PATH = KB_HOME / "cursor_rule_snippet.mdc"
@@ -20,6 +22,12 @@ DEFAULT_RULE_PATH = Path(".cursor") / "rules" / "latch.mdc"
 OK = mds.OK
 DRIFT = mds.DRIFT
 ABSENT = mds.ABSENT
+LEGACY = mds.LEGACY
+OLDER = mds.OLDER
+CURRENT = mds.CURRENT
+NEWER = mds.NEWER
+INVALID = mds.INVALID
+_WIRING_RE = re.compile(r"<!--\s*latch-wiring-version:\s*([^\s>]+)\s*-->")
 
 
 def _norm(text: str) -> str:
@@ -33,12 +41,34 @@ def _kb_home_str() -> str:
 def render_rule(kb_home: str | None = None) -> str:
     home = kb_home if kb_home is not None else _kb_home_str()
     text = SNIPPET_PATH.read_text(encoding="utf-8")
-    return _norm(text.replace("{{KB_HOME}}", home))
+    return _norm(
+        text.replace("{{KB_HOME}}", home).replace("{{WIRING_VERSION}}", str(WIRING_VERSION))
+    )
+
+
+def wiring_state(target: Path) -> str:
+    if not target.is_file():
+        return ABSENT
+    match = _WIRING_RE.search(target.read_text(encoding="utf-8"))
+    if match is None:
+        return LEGACY
+    try:
+        installed = int(match.group(1))
+    except ValueError:
+        return INVALID
+    if installed < WIRING_VERSION:
+        return OLDER
+    if installed > WIRING_VERSION:
+        return NEWER
+    return CURRENT
 
 
 def evaluate(target: Path, kb_home: str | None = None) -> str:
     if not target.is_file():
         return ABSENT
+    state = wiring_state(target)
+    if state in (NEWER, INVALID):
+        return state
     return OK if _norm(target.read_text(encoding="utf-8")) == render_rule(kb_home) else DRIFT
 
 
@@ -46,6 +76,8 @@ def sync(target: Path, kb_home: str | None = None, *, create: bool = True) -> st
     status = evaluate(target, kb_home)
     if status == OK:
         return "unchanged"
+    if status in (NEWER, INVALID):
+        return status
     if status == ABSENT and not create:
         return "skipped"
 
@@ -106,6 +138,10 @@ def main(argv: list[str] | None = None) -> int:
         return 1 if action == DRIFT else 0
 
     action = sync(target)
+    if action in (NEWER, INVALID):
+        print(f"refused: {target} wiring is {action}; update latch before retrying",
+              file=sys.stderr)
+        return 1
     if action == "synced":
         print(f"synced {target} (backup: {target}.latchbak)")
     elif action == "created":

@@ -33,6 +33,8 @@ OK = mds.OK            # region present and matches the snippet
 DRIFT = mds.DRIFT      # region present but differs from the snippet
 MISSING = mds.MISSING  # file exists but has no managed region
 ABSENT = mds.ABSENT    # file does not exist
+NEWER = mds.NEWER      # managed region was written by a newer latch engine
+INVALID = mds.INVALID  # managed marker exists but is not parseable
 
 SPEC = mds.ManagedDocSpec(
     target_name="CLAUDE.md",
@@ -83,6 +85,15 @@ def sync(target: Path, kb_home: str | None = None, *, create: bool = True) -> st
     """
     home = kb_home if kb_home is not None else _kb_home_str()
     return mds.sync(target, SPEC, home, create=create)
+
+
+def wiring_state(target: Path) -> str:
+    return mds.wiring_state(target, SPEC)
+
+
+def sync_if_outdated(target: Path, kb_home: str | None = None) -> str:
+    home = kb_home if kb_home is not None else _kb_home_str()
+    return mds.sync_if_outdated(target, SPEC, home)
 
 
 def unsync(target: Path, *, backup: bool = True) -> str:
@@ -200,6 +211,10 @@ def main(argv: list[str] | None = None) -> int:
                 return 0
 
     action = sync(target, create=True)
+    if action in (NEWER, INVALID):
+        print(f"refused: {target} wiring is {action}; update latch before retrying",
+              file=sys.stderr)
+        return 1
     if action in ("synced", "appended"):
         print(f"{action} managed region in {target} (backup: {target}.latchbak)")
     elif action == "created":

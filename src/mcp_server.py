@@ -1553,6 +1553,17 @@ def kb_embed(text: str) -> dict | list[float]:
 
 
 if __name__ == "__main__":
+    if os.environ.get("LATCH_ADAPTER") == "cursor":
+        try:
+            import cursor_wiring
+            _wiring_result = cursor_wiring.repair_from_mcp_startup()
+            if _wiring_result.notice:
+                sys.stderr.write("[latch] " + _wiring_result.notice.strip("_") + "\n")
+        except Exception as e:
+            sys.stderr.write(
+                "[latch] Cursor wiring check failed; session will continue. "
+                f"Rerun bin/install_cursor manually ({e}).\n"
+            )
     if not paths.is_unlatched_mode():
         _start_embed_listener(PROJECT_CWD)
         # Synchronous warm-up: load the embedder on the main thread before
