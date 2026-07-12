@@ -316,7 +316,7 @@ designed to absorb.
 ## Verification
 
 Latest blocker-remediation receipts: 61 focused lifecycle/doctor/Codex/embed
-tests and 944 hermetic tests passed locally after rebasing onto current main;
+tests and 993 hermetic tests passed locally after rebasing onto current main;
 changed-file Ruff, public-release hygiene, compilation, and `git diff --check`
 passed. Warm prompt-hook wall was 93.5–141.2 ms. Fourteen clients used one
 owner at 0.96 s readiness and 8.80 ms embed p95; a repeated 32-client run used
