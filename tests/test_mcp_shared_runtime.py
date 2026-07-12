@@ -400,6 +400,7 @@ def test_retained_proxy_recovers_after_in_place_compatible_upgrade() -> None:
     kb_dir = _temp_vault()
     install = Path(tempfile.mkdtemp(prefix="latch-upgrade-install-"))
     install_src = install / "src"
+    bootstrap: McpClient | None = None
     client: McpClient | None = None
     try:
         shutil.copytree(
@@ -438,6 +439,16 @@ def test_retained_proxy_recovers_after_in_place_compatible_upgrade() -> None:
         old_key = runtime_key()
         _assert(old_key != current_key, "test install did not produce an old runtime key")
 
+        bootstrap = McpClient(
+            kb_dir,
+            "in-place-upgrade-bootstrap",
+            server_path=install_src / "mcp_server.py",
+            env_overrides={
+                "LATCH_HOME": str(ROOT),
+                "PYTHONPATH": str(install_src),
+                "PYTHONDONTWRITEBYTECODE": "1",
+            },
+        )
         client = McpClient(
             kb_dir,
             "in-place-upgrade-session",
@@ -484,6 +495,8 @@ def test_retained_proxy_recovers_after_in_place_compatible_upgrade() -> None:
     finally:
         if client is not None:
             client.close()
+        if bootstrap is not None:
+            bootstrap.close()
         _stop_daemon(kb_dir)
         shutil.rmtree(kb_dir, ignore_errors=True)
         shutil.rmtree(install, ignore_errors=True)
