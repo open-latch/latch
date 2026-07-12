@@ -128,7 +128,7 @@ sections.
   an actionable fresh-task failure. A compatible daemon then acquires an OS-released
   process-lifetime fence for its vault/current runtime key. Broker death or a slow-start
   timeout can launch a contender, but the contender exits before model loading;
-  only the fenced owner may warm and publish discovery.
+  only the fenced owner may warm or publish normal discovery.
 - Discovery and election locks live in a runtime-keyed registry beneath the
   pinned vault. Files are atomically replaced and mode 0600. The daemon binds
   only `127.0.0.1`; connections authenticate with a 256-bit random token.
@@ -176,6 +176,10 @@ visible rather than silently misattributed.
   to the current owner and its initialization is replayed there. A protocol-
   incompatible upgrade fails before fencing/heavy imports and tells the user to
   start a fresh task; it never degrades into a generic readiness timeout.
+  The compatibility alias exposes the fenced listener during warmup so a short-
+  timeout retained proxy can authenticate; MCP initialization is queued behind
+  the model-ready event. Normal same-key discovery is still published only
+  after warmup.
 - The prompt hook requests a single-flight background wake within its 250 ms
   wall. If the owner is not ready, it emits an explicit "not similarity-scored"
   receipt instead of falsely reporting a below-floor result.
