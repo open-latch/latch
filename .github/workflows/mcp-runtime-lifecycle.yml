@@ -48,4 +48,6 @@ jobs:
           tests/test_mcp_shared_runtime.py
           tests/test_doctor.py
           tests/test_codex_session.py
+          tests/test_mcp_session_id.py
+          tests/test_mcp_proxy_session.py
           tests/test_embed_daemon.py
