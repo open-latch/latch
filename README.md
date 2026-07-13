@@ -109,8 +109,8 @@ first-run mission.
   seeding accept the current SessionStart-provided conversation/transcript pair;
   seeding can also accept a user-explicit path. Historical transcript discovery
   remains deliberately unsupported.
-- **Claude Code + Codex together:** one shared local latch KB, so decisions and
-  rejected paths captured through either agent can gate both.
+- **Claude Code + Codex + Cursor together:** one shared local latch KB, so decisions and
+  rejected paths captured through either agent can gate all of them.
 
 ## Guided Quickstart
 
