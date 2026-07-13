@@ -4,8 +4,10 @@ are exercised by the README verify flow; this covers the new pure-logic check
 (presence + <KB_HOME>-resolved, WARN-not-FAIL like the MCP-wiring check)."""
 from __future__ import annotations
 
+import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -145,10 +147,6 @@ def test_commands_stale_legacy_warns():
         restore()
 
 
-import json
-import sqlite3
-
-
 def _setup_kb(kbs, *, file_pin=None, env_pin=None):
     """Build a temp CLAUDE_KB_HOME with projects/<name>/kb.db holding `kbs`
     ({name: node_count}). Optionally write kb_location.json (file_pin -> name)
@@ -283,6 +281,188 @@ def test_powershell_example_uses_kebab_flag():
     print("PASS powershell_example_uses_kebab_flag")
 
 
+def test_mcp_lifecycle_warns_on_recent_pressure(monkeypatch):
+    import mcp_broker
+
+    monkeypatch.setattr(mcp_broker, "lifecycle_summary", lambda **_kwargs: {
+        "warning_count": 3,
+        "counts": {"proxy_over_cap": 2, "prompt_retrieval_degraded": 1},
+    })
+    monkeypatch.setattr(mcp_broker, "proxy_policy", lambda: {
+        "cap": 32, "retire_idle_s": 300.0, "heartbeat_s": 30.0, "stale_s": 300.0,
+    })
+    monkeypatch.setattr(
+        mcp_broker, "proxy_lease_state", lambda **_kwargs: {"live": []}
+    )
+    monkeypatch.setattr(mcp_broker, "read_discovery", lambda: None)
+    _name, level, detail = doctor.check_mcp_runtime_lifecycle()
+    _assert(level == doctor.WARN, f"recent pressure should WARN: {detail}")
+    _assert("proxy_over_cap=2" in detail, detail)
+    _assert("prompt_retrieval_degraded=1" in detail, detail)
+
+
+def test_mcp_lifecycle_ok_names_operational_contract(monkeypatch):
+    import mcp_broker
+
+    monkeypatch.delenv("LATCH_MCP_ALLOW_LEGACY_FALLBACK", raising=False)
+    monkeypatch.setattr(mcp_broker, "lifecycle_summary", lambda **_kwargs: {
+        "warning_count": 0, "counts": {},
+    })
+    monkeypatch.setattr(mcp_broker, "proxy_policy", lambda: {
+        "cap": 32, "retire_idle_s": 300.0, "heartbeat_s": 30.0, "stale_s": 300.0,
+    })
+    monkeypatch.setattr(
+        mcp_broker,
+        "proxy_lease_state",
+            lambda **_kwargs: {"live": [{"connection_id": "a"}]},
+    )
+    monkeypatch.setattr(mcp_broker, "read_discovery", lambda: {"pid": 123})
+    monkeypatch.setattr(mcp_broker, "probe_discovery", lambda *_args, **_kwargs: True)
+    _name, level, detail = doctor.check_mcp_runtime_lifecycle()
+    _assert(level == doctor.OK, detail)
+    _assert("live leases=1/32" in detail and "retire idle=300s" in detail, detail)
+
+
+def test_mcp_lifecycle_warns_at_configured_75_percent_high_water(monkeypatch):
+    import mcp_broker
+
+    monkeypatch.delenv("LATCH_MCP_ALLOW_LEGACY_FALLBACK", raising=False)
+    monkeypatch.delenv("LATCH_MCP_FORCE_LEGACY", raising=False)
+    monkeypatch.setattr(mcp_broker, "lifecycle_summary", lambda **_kwargs: {
+        "warning_count": 0,
+        "counts": {},
+        "proxy_high_water": 8,
+        "current_over_cap_duration_s": 0,
+    })
+    monkeypatch.setattr(mcp_broker, "proxy_policy", lambda: {
+        "cap": 10, "retire_idle_s": 300.0, "heartbeat_s": 30.0, "stale_s": 300.0,
+    })
+    monkeypatch.setattr(
+        mcp_broker, "proxy_lease_state", lambda **_kwargs: {"live": []}
+    )
+    monkeypatch.setattr(mcp_broker, "read_discovery", lambda: None)
+    _name, level, detail = doctor.check_mcp_runtime_lifecycle()
+    _assert(level == doctor.WARN, detail)
+    _assert("75% review threshold 8/10" in detail, detail)
+    _assert(doctor._proxy_high_water_warn_at(32) == 24, "default threshold must be 24")
+    _assert(doctor._proxy_high_water_warn_at(0) is None, "unbounded cap must not warn")
+
+
+def test_mcp_lifecycle_warns_while_over_cap(monkeypatch):
+    import mcp_broker
+
+    monkeypatch.setattr(mcp_broker, "lifecycle_summary", lambda **_kwargs: {
+        "warning_count": 0,
+        "counts": {},
+        "proxy_high_water": 5,
+        "currently_over_cap": True,
+        "current_over_cap_duration_s": 42.5,
+    })
+    monkeypatch.setattr(mcp_broker, "proxy_policy", lambda: {
+        "cap": 32, "retire_idle_s": 300.0, "heartbeat_s": 30.0, "stale_s": 300.0,
+    })
+    monkeypatch.setattr(
+        mcp_broker, "proxy_lease_state", lambda **_kwargs: {"live": []}
+    )
+    monkeypatch.setattr(mcp_broker, "read_discovery", lambda: None)
+    _name, level, detail = doctor.check_mcp_runtime_lifecycle()
+    _assert(level == doctor.WARN, detail)
+    _assert("currently over cap for at least 42.5s" in detail, detail)
+
+
+def test_mcp_lifecycle_retirement_warning_names_host_boundary(monkeypatch):
+    import mcp_broker
+
+    monkeypatch.setattr(mcp_broker, "lifecycle_summary", lambda **_kwargs: {
+        "warning_count": 1,
+        "counts": {"proxy_retired": 1},
+        "proxy_high_water": 33,
+        "current_over_cap_duration_s": 0,
+    })
+    monkeypatch.setattr(mcp_broker, "proxy_policy", lambda: {
+        "cap": 32, "retire_idle_s": 300.0, "heartbeat_s": 30.0, "stale_s": 300.0,
+    })
+    monkeypatch.setattr(
+        mcp_broker, "proxy_lease_state", lambda **_kwargs: {"live": []}
+    )
+    monkeypatch.setattr(mcp_broker, "read_discovery", lambda: None)
+    _name, level, detail = doctor.check_mcp_runtime_lifecycle()
+    _assert(level == doctor.WARN, detail)
+    _assert("cannot prove same-task host restart" in detail, detail)
+    _assert("confirm reconnect or start a fresh task" in detail, detail)
+
+
+def test_mcp_lifecycle_warns_on_dead_discovery(monkeypatch):
+    import mcp_broker
+
+    monkeypatch.setattr(mcp_broker, "lifecycle_summary", lambda **_kwargs: {
+        "warning_count": 0,
+        "counts": {},
+        "proxy_high_water": 0,
+    })
+    monkeypatch.setattr(mcp_broker, "proxy_policy", lambda: {
+        "cap": 32, "retire_idle_s": 300.0, "heartbeat_s": 30.0, "stale_s": 300.0,
+    })
+    monkeypatch.setattr(
+        mcp_broker, "proxy_lease_state", lambda **_kwargs: {"live": []}
+    )
+    monkeypatch.setattr(mcp_broker, "read_discovery", lambda: {"pid": 999999})
+    monkeypatch.setattr(mcp_broker, "probe_discovery", lambda *_args, **_kwargs: False)
+    _name, level, detail = doctor.check_mcp_runtime_lifecycle()
+    _assert(level == doctor.WARN, detail)
+    _assert("unreachable owner pid=999999" in detail, detail)
+
+
+def test_mcp_lifecycle_warns_on_current_stale_leases(monkeypatch):
+    import mcp_broker
+
+    monkeypatch.setattr(mcp_broker, "lifecycle_summary", lambda **_kwargs: {
+        "warning_count": 0,
+        "counts": {},
+        "proxy_high_water": 2,
+        "current_stale_leases": 2,
+        "max_stale_lease_age_s": 412.5,
+    })
+    monkeypatch.setattr(mcp_broker, "proxy_policy", lambda: {
+        "cap": 32, "retire_idle_s": 300.0, "heartbeat_s": 30.0, "stale_s": 300.0,
+    })
+    monkeypatch.setattr(
+        mcp_broker, "proxy_lease_state", lambda **_kwargs: {"live": []}
+    )
+    monkeypatch.setattr(mcp_broker, "read_discovery", lambda: None)
+    _name, level, detail = doctor.check_mcp_runtime_lifecycle()
+    _assert(level == doctor.WARN, detail)
+    _assert("2 stale live lease(s)" in detail, detail)
+    _assert("412.5s" in detail, detail)
+
+
+def test_mcp_lifecycle_warns_on_registry_wide_historical_pools(monkeypatch):
+    import mcp_broker
+
+    monkeypatch.setattr(mcp_broker, "lifecycle_summary", lambda **_kwargs: {
+        "warning_count": 0,
+        "counts": {},
+        "proxy_high_water": 3,
+    })
+    monkeypatch.setattr(mcp_broker, "proxy_policy", lambda: {
+        "cap": 32, "retire_idle_s": 300.0, "heartbeat_s": 30.0, "stale_s": 300.0,
+    })
+    monkeypatch.setattr(mcp_broker, "proxy_lease_state", lambda **_kwargs: {
+        "live": [{"connection_id": "current"}],
+        "legacy_incompatible": [{"connection_id": "old"}],
+        "unassociated_capable": [{"connection_id": "waiting"}],
+        "other_live_owner": [{"connection_id": "blue-green"}],
+        "observed_live": [{"connection_id": str(index)} for index in range(4)],
+    })
+    monkeypatch.setattr(mcp_broker, "read_discovery", lambda: {"pid": 123})
+    monkeypatch.setattr(mcp_broker, "probe_discovery", lambda *_args, **_kwargs: True)
+    _name, level, detail = doctor.check_mcp_runtime_lifecycle()
+    _assert(level == doctor.WARN, detail)
+    _assert("pre-capability proxy lease(s)" in detail, detail)
+    _assert("included in the owner cap" in detail, detail)
+    _assert("another live blue/green owner" in detail, detail)
+
+
 if __name__ == "__main__":
     test_mcp_wiring_accepts_legacy_alias()
     test_commands_missing_warns()
@@ -296,4 +476,5 @@ if __name__ == "__main__":
     test_unpinned_single_warns()
     test_pinned_with_legacy_dirs_warns()
     test_powershell_example_uses_kebab_flag()
+    # pytest supplies monkeypatch to the two lifecycle tests above.
     print("\nAll doctor tests pass.")

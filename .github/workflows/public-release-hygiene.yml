@@ -90,7 +90,9 @@ jobs:
         working-directory: ${{ runner.temp }}/latch-proof-crlf
         run: |
           python -m pytest -q tests/test_proof_packet.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & .\bin\latch_proof_packet.ps1 --check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   cursor-cumulative-full-suite:
     name: cursor-cumulative-full-suite

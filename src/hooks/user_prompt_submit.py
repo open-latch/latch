@@ -27,12 +27,14 @@ import re
 import sys
 import time
 from datetime import datetime, timezone
-from pathlib import Path
 
 from _common import hook_field, log, project_cwd, read_hook_input, session_id
 
-from paths import UNLATCHED_MESSAGE, is_disabled, is_in_compact, is_unlatched_mode, project_dir
+import mcp_broker
+from paths import UNLATCHED_MESSAGE, is_disabled, is_in_compact, is_unlatched_mode
 
+
+_PROCESS_STARTED = time.perf_counter()
 
 TOP_K = 5
 MAX_INJECT = 5
@@ -48,6 +50,10 @@ DEPTH_KEYWORDS = re.compile(
     re.IGNORECASE,
 )
 HARD_BUDGET_MS = 250
+# Windows process/DLL startup is materially slower than POSIX on the supported
+# hosts. Reserve it from the user-visible wall instead of letting the in-hook
+# retrieval deadline consume the entire 250 ms contract.
+SUBPROCESS_BUDGET_RESERVE_MS = 125 if os.name == "nt" else 25
 LOG_STREAM = "retrieve"
 
 np = None
@@ -56,25 +62,41 @@ embeddings = None
 log_utils = None
 profiles = None
 search = None
+_LIGHT_RUNTIME_LOADED = False
 _RUNTIME_LOADED = False
 
 
+def _load_log_runtime() -> None:
+    global log_utils
+    if log_utils is None:
+        import log_utils as _log_utils
+        log_utils = _log_utils
+
+
+def _load_light_runtime() -> None:
+    global db, log_utils, profiles, _LIGHT_RUNTIME_LOADED
+    if _LIGHT_RUNTIME_LOADED:
+        return
+    import db as _db
+    import profiles as _profiles
+
+    _load_log_runtime()
+    db = _db
+    profiles = _profiles
+    _LIGHT_RUNTIME_LOADED = True
+
+
 def _load_runtime() -> None:
-    global np, db, embeddings, log_utils, profiles, search, _RUNTIME_LOADED
+    global np, embeddings, search, _RUNTIME_LOADED
     if _RUNTIME_LOADED:
         return
+    _load_light_runtime()
     import numpy as _np
-    import db as _db
     import embeddings as _embeddings
-    import log_utils as _log_utils
-    import profiles as _profiles
     import search as _search
 
     np = _np
-    db = _db
     embeddings = _embeddings
-    log_utils = _log_utils
-    profiles = _profiles
     search = _search
     _RUNTIME_LOADED = True
 
@@ -112,7 +134,6 @@ def main() -> int:
         return 0
     if is_disabled() or is_in_compact():
         return 0
-    _load_runtime()
     payload = read_hook_input()
     sid = session_id(payload)
     cwd = project_cwd(payload)
@@ -124,6 +145,42 @@ def main() -> int:
         and "kb_priority" not in prompt.lower()
         and "latch_priority" not in prompt.lower()
     )
+
+    # On the ordinary post-idle path, return before DB/profile resolution. A
+    # Windows sqlite-vec DLL load can exceed the entire visible hook budget,
+    # while there is no vector to retrieve with until the owner is warm anyway.
+    if (
+        sid
+        and prompt
+        and len(prompt.split()) >= MIN_PROMPT_WORDS
+        and mcp_broker.read_discovery() is None
+    ):
+        log_entry = {
+            "mission_control": False,
+            "ts": _now(),
+            "sid": sid,
+            "prompt_hash": _phash(prompt),
+            "prompt_words": len(prompt.split()),
+            "cwd": cwd,
+            "correction_signal": correction_signal,
+            "guideline_signal": guideline_signal,
+            "cite_nudge": 0,
+            "skip": "embed_daemon_unavailable",
+        }
+        log_entry["daemon_wake_requested"] = mcp_broker.request_daemon_start(cwd)
+        mcp_broker.emit_lifecycle(
+            "prompt_retrieval_degraded",
+            reason="embed_daemon_unavailable",
+            wake_requested=bool(log_entry["daemon_wake_requested"]),
+        )
+        _write_log(cwd, log_entry)
+        context = _format_runtime_unavailable()
+        nudge = _extra_nudges(correction_signal, guideline_signal)
+        if nudge:
+            context = nudge + "\n\n" + context
+        _print_context(context)
+        return 0
+
     mc_directive = _mission_control_directive(cwd, prompt)
     # Slice 3-B: surface the advisory cite-correction nudge queued by last turn's
     # Stop-hook detector (mission-control actors only; marker is 0 for everyone
@@ -166,7 +223,12 @@ def main() -> int:
 
     t0 = time.perf_counter()
     try:
-        injected = _retrieve_and_inject(cwd, sid, prompt, log_entry)
+        injected = _retrieve_and_inject(
+            cwd, sid, prompt, log_entry,
+            deadline=_PROCESS_STARTED + (
+                HARD_BUDGET_MS - SUBPROCESS_BUDGET_RESERVE_MS
+            ) / 1000.0,
+        )
     except Exception as e:
         log_entry["error"] = f"{type(e).__name__}: {e}"
         _write_log(cwd, log_entry)
@@ -183,7 +245,10 @@ def main() -> int:
 
     _write_log(cwd, log_entry)
 
-    context = _format_injection(injected) if injected else _format_no_hits()
+    if log_entry.get("skip") == "embed_daemon_unavailable":
+        context = _format_runtime_unavailable()
+    else:
+        context = _format_injection(injected) if injected else _format_no_hits()
     # Include mc_directive + cite_directive on the main path too — previously
     # dropped here, so the mission-control standing contract only surfaced on the
     # short-prompt / no-session early-outs. Both are '' for non-mission-control.
@@ -204,7 +269,9 @@ def _print_context(context: str) -> None:
     print(json.dumps(out))
 
 
-def _retrieve_and_inject(cwd: str, sid: str, prompt: str, log_entry: dict) -> list[dict]:
+def _retrieve_and_inject(
+    cwd: str, sid: str, prompt: str, log_entry: dict, *, deadline: float | None = None,
+) -> list[dict]:
     _load_runtime()
     conn = db.connect(cwd)
     try:
@@ -221,9 +288,15 @@ def _retrieve_and_inject(cwd: str, sid: str, prompt: str, log_entry: dict) -> li
         # subprocess, so falling through to it would blow HARD_BUDGET_MS
         # by ~80x. If the daemon is unreachable or still warming, skip
         # retrieval for this turn rather than block the user's prompt.
-        qvec = embeddings.embed_remote(prompt, cwd)
+        deadline = deadline or (time.perf_counter() + HARD_BUDGET_MS / 1000.0)
+        qvec = _embed_with_bounded_wake(prompt, cwd, deadline, log_entry)
         if qvec is None:
             log_entry["skip"] = "embed_daemon_unavailable"
+            mcp_broker.emit_lifecycle(
+                "prompt_retrieval_degraded",
+                reason="embed_daemon_unavailable",
+                wake_requested=bool(log_entry.get("daemon_wake_requested")),
+            )
             return []
         qblob = embeddings.to_blob(qvec)
 
@@ -262,6 +335,33 @@ def _retrieve_and_inject(cwd: str, sid: str, prompt: str, log_entry: dict) -> li
         return injected
     finally:
         conn.close()
+
+
+def _embed_with_bounded_wake(prompt: str, cwd: str, deadline: float, log_entry: dict):
+    """Use the warm owner or request one without exceeding the hook wall."""
+    remaining = deadline - time.perf_counter()
+    if remaining <= 0:
+        log_entry["daemon_wake_requested"] = mcp_broker.request_daemon_start(cwd)
+        return None
+
+    # Only call the embed endpoint when the MCP owner has published readiness;
+    # its embed listener appears before model pre-warm completes.
+    if mcp_broker.read_discovery() is not None:
+        qvec = embeddings.embed_remote(prompt, cwd, timeout=max(0.005, min(0.05, remaining)))
+        if qvec is not None:
+            return qvec
+
+    log_entry["daemon_wake_requested"] = mcp_broker.request_daemon_start(cwd)
+    # Poll the tiny discovery file, not the warming embed endpoint. Reserve a
+    # small tail for one bounded embed RPC if startup completes in time.
+    while time.perf_counter() < deadline - 0.06:
+        if mcp_broker.read_discovery() is not None:
+            remaining = deadline - time.perf_counter()
+            return embeddings.embed_remote(
+                prompt, cwd, timeout=max(0.005, min(0.05, remaining))
+            )
+        time.sleep(0.01)
+    return None
 
 
 def _vector_path(
@@ -406,6 +506,16 @@ def _format_no_hits() -> str:
     )
 
 
+def _format_runtime_unavailable() -> str:
+    return (
+        "## KB auto-retrieval temporarily unavailable\n\n"
+        "The shared latch runtime was idle, starting, or unreachable, so this "
+        "prompt was **not similarity-scored**. This is not a below-threshold "
+        "result. Latch requested a background wake; actively query "
+        "(`latch_search` / `latch_get` / `latch_recent`) before responding."
+    )
+
+
 def _format_correction_nudge() -> str:
     return (
         "## ⚠ Possible KB correction signal\n\n"
@@ -444,7 +554,7 @@ def _mission_control_directive(cwd: str, prompt: str) -> str:
     / trust-and-go). Fail-open: any error -> '' so the hook never breaks the
     user's prompt. The Tier-2 enforcement surface for 'blocking by contract' —
     latch has no interceptor (KB id=1398)."""
-    _load_runtime()
+    _load_light_runtime()
     try:
         conn = db.connect(cwd)
         try:
@@ -460,7 +570,7 @@ def _take_cite_nudge(cwd: str, sid: str) -> int:
     """Read + reset the pending cite-nudge marker for this session (Slice 3-B).
     Fail-open: any error -> 0 so the hook never breaks the user's prompt. Cheap:
     a single indexed read, and a write only when a nudge was actually queued."""
-    _load_runtime()
+    _load_light_runtime()
     try:
         conn = db.connect(cwd)
         try:
@@ -508,7 +618,7 @@ def _write_log(cwd: str, entry: dict) -> None:
     explicit kwarg. Both keys end up in the row — readers should prefer
     `session_id` going forward.
     """
-    _load_runtime()
+    _load_log_runtime()
     try:
         log_utils.emit_event(
             LOG_STREAM, entry,

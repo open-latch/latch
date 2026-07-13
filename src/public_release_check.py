@@ -20,6 +20,7 @@ ROOT_MARKDOWN_ALLOW = {
 
 DOCS_MARKDOWN_ALLOW = {
     "docs/first_run_mission.md",
+    "docs/mcp_resource_architecture.md",
 }
 
 GUARD_IMPLEMENTATION_FILES = {
@@ -95,7 +96,14 @@ def check_path_policy(paths: list[str]) -> list[Finding]:
             continue
         if is_markdown(path):
             if path.startswith("docs/") and path not in DOCS_MARKDOWN_ALLOW:
-                findings.append(Finding(path, 0, "unapproved docs markdown", "only docs/first_run_mission.md is public-release approved"))
+                findings.append(
+                    Finding(
+                        path,
+                        0,
+                        "unapproved docs markdown",
+                        "docs markdown must be explicitly public-release approved",
+                    )
+                )
             if "/" not in path and path not in ROOT_MARKDOWN_ALLOW and BLOCKED_DOC_NAME.search(path):
                 findings.append(Finding(path, 0, "strategy-like markdown filename", path))
             if BLOCKED_DOC_NAME.search(Path(path).name):

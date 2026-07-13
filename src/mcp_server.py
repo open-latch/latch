@@ -1,11 +1,10 @@
-"""MCP server exposing the KB to Claude Code as inline tools.
+"""Latch's MCP tool registry and heavyweight runtime.
 
-Spawned per session by Claude Code in the project CWD; the project KB is
-resolved from os.getcwd() at startup.
-
-Also runs an embed listener on a loopback TCP port so per-prompt hooks
-(separate subprocesses) can reuse this process's pre-loaded
-SentenceTransformer instead of paying the ~15s torch cold-load each call.
+Configured hosts still execute this path, but normal execution dispatches to a
+small stdio proxy before importing FastMCP, NumPy, ONNX Runtime, or tokenizers.
+One shared daemon imports this module, serves multiple logical MCP sessions,
+and owns the warm embed listener/model.  ``LATCH_MCP_LEGACY=1`` preserves the
+old one-process-per-stdio-session fallback.
 """
 from __future__ import annotations
 
@@ -15,11 +14,41 @@ import secrets
 import socket
 import sys
 import threading
+import atexit
 from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).parent))
+
+
+def _repair_cursor_wiring_from_mcp_startup() -> None:
+    """Repair older managed Cursor wiring before either runtime entrypoint."""
+    if os.environ.get("LATCH_ADAPTER") != "cursor":
+        return
+    try:
+        import cursor_wiring
+
+        result = cursor_wiring.repair_from_mcp_startup()
+        if result.notice:
+            sys.stderr.write("[latch] " + result.notice.strip("_") + "\n")
+    except Exception as exc:
+        sys.stderr.write(
+            "[latch] Cursor wiring check failed; session will continue. "
+            f"Rerun bin/install_cursor manually ({exc}).\n"
+        )
+
+
+# Existing installs already launch this path.  Intercept execution before any
+# MCP/NumPy/ONNX imports so each host context stays a small stdio proxy.  Imports
+# of this module (tests and the shared daemon) still expose the tool registry.
+if __name__ == "__main__":
+    _repair_cursor_wiring_from_mcp_startup()
+    if not os.environ.get("LATCH_MCP_LEGACY"):
+        from mcp_proxy import main as _proxy_main  # noqa: E402
+
+        raise SystemExit(_proxy_main())
 
 from mcp.server.fastmcp import FastMCP  # noqa: E402
 
@@ -32,6 +61,8 @@ import embeddings  # noqa: E402
 import gate_report  # noqa: E402
 import heal  # noqa: E402
 import lockfile  # noqa: E402
+import mcp_broker  # noqa: E402
+import mcp_runtime  # noqa: E402
 import paths  # noqa: E402
 import project_direction  # noqa: E402
 import priorities  # noqa: E402
@@ -44,6 +75,9 @@ import verify  # noqa: E402
 
 mcp = FastMCP("latch")
 PROJECT_CWD = os.getcwd()
+_RUNTIME_INIT_LOCK = threading.Lock()
+_RUNTIME_INITIALIZED = False
+_EMBED_OWNER: tuple[socket.socket, int, str] | None = None
 SESSION_ID_ENV_VARS = (
     "LATCH_SESSION_ID",
     "CLAUDE_CODE_SESSION_ID",
@@ -94,6 +128,11 @@ def _resolve_project_session_id(
 PROJECT_SESSION_ID = _resolve_project_session_id()
 
 
+def _project_cwd() -> str:
+    context = mcp_runtime.current_connection()
+    return context.project_cwd if context is not None else PROJECT_CWD
+
+
 def _project_session_id() -> str | None:
     """Return the current adapter session id.
 
@@ -107,6 +146,11 @@ def _project_session_id() -> str | None:
     false cross-conversation attribution.  Claude/Codex environment-derived
     ids retain the existing stable process cache.
     """
+    context = mcp_runtime.current_connection()
+    if context is not None:
+        # None is meaningful here: the proxy deliberately refused a mismatched
+        # project-scoped Codex marker instead of misattributing this connection.
+        return context.session_id
     global PROJECT_SESSION_ID
     if _is_cursor_adapter_env(os.environ):
         return None
@@ -142,7 +186,7 @@ def _log_compact(
     try:
         entry = {
             "ts": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
-            "project": PROJECT_CWD,
+            "project": _project_cwd(),
             "tool": tool,
             "row_count": row_count,
             "total_bytes": total_bytes,
@@ -150,7 +194,7 @@ def _log_compact(
             "safety_net_triggered": safety_net_triggered,
             "excerpt_strategy": excerpt_strategy,
         }
-        path = paths.project_dir(PROJECT_CWD) / COMPACT_LOG_FILE_NAME
+        path = paths.project_dir(_project_cwd()) / COMPACT_LOG_FILE_NAME
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(entry, default=str) + "\n")
@@ -261,7 +305,7 @@ def _stamp_list_activity(rows: list[dict], activity: dict) -> list[dict]:
 
 
 def _conn():
-    return db.connect(PROJECT_CWD)
+    return db.connect(_project_cwd())
 
 
 def _unlatched_response(tool: str) -> dict:
@@ -283,7 +327,7 @@ def _wait_for_compaction_or_busy() -> dict | None:
     Stale locks left by crashed compactors are detected and unlinked here —
     see `lockfile.wait_for_compaction` for the PID-liveness rules."""
     try:
-        lockfile.wait_for_compaction(PROJECT_CWD)
+        lockfile.wait_for_compaction(_project_cwd())
     except lockfile.CompactionInProgressError:
         return {
             "ok": False,
@@ -307,6 +351,7 @@ def _start_embed_listener(project_cwd: str) -> None:
     block on cold-load. Best-effort — failures are logged via stderr only,
     since the MCP tool surface still works without it (just slower hooks).
     """
+    global _EMBED_OWNER
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -315,15 +360,24 @@ def _start_embed_listener(project_cwd: str) -> None:
         host, port = sock.getsockname()
 
         token = secrets.token_hex(16)
-        disc_dir = paths.ensure_project_dir(project_cwd)
-        disc_path = disc_dir / embeddings.DISCOVERY_FILE
-        disc_path.write_text(json.dumps({
+        paths.ensure_project_dir(project_cwd)
+        disc_path = mcp_broker.embed_discovery_path()
+        payload = json.dumps({
+            "runtime_key": mcp_broker.RUNTIME_KEY,
             "host": host,
             "port": port,
             "token": token,
             "pid": os.getpid(),
             "started_at": datetime.now(timezone.utc).isoformat(),
-        }), encoding="utf-8")
+        })
+        tmp_path = disc_path.with_name(f".{disc_path.name}.{os.getpid()}.tmp")
+        tmp_path.write_text(payload, encoding="utf-8")
+        try:
+            os.chmod(tmp_path, 0o600)
+        except OSError:
+            pass
+        os.replace(tmp_path, disc_path)
+        _EMBED_OWNER = (sock, os.getpid(), token)
     except Exception as e:
         sys.stderr.write(f"[latch] embed listener bind failed: {e}\n")
         return
@@ -362,7 +416,9 @@ def _start_embed_listener(project_cwd: str) -> None:
             if not isinstance(text, str):
                 client.sendall(b'{"error":"text_not_string"}\n')
                 return
+            mcp_runtime.touch_daemon()
             vec = embeddings.embed(text)
+            mcp_runtime.touch_daemon()
             client.sendall(json.dumps({"vec": vec.tolist()}).encode("utf-8") + b"\n")
         except Exception as e:
             try:
@@ -388,6 +444,41 @@ def _start_embed_listener(project_cwd: str) -> None:
     # mcp.run() (see __main__ block). Doing it on a daemon thread races the
     # Windows DLL loader with FastMCP's asyncio init and deadlocks scipy's
     # C-extension imports, which jams Thread.start() process-wide.
+
+
+def shutdown_runtime() -> None:
+    """Remove process-owned discovery and close the embed listener."""
+    global _EMBED_OWNER
+    owner, _EMBED_OWNER = _EMBED_OWNER, None
+    if owner is None:
+        return
+    sock, pid, token = owner
+    try:
+        sock.close()
+    except OSError:
+        pass
+    mcp_broker.remove_embed_discovery_if_owner(pid=pid, token=token)
+
+
+atexit.register(shutdown_runtime)
+
+
+async def run_shared_session(read_stream, write_stream) -> None:
+    """Compatibility boundary for FastMCP's custom-stream server runner.
+
+    FastMCP does not expose a public custom-stream entry point in the pinned
+    release.  Keep the private lookup isolated here, validate its shape, and
+    cover this adapter with a focused test so dependency upgrades fail loudly.
+    """
+    server = getattr(mcp, "_mcp_server", None)
+    run = getattr(server, "run", None)
+    options = getattr(server, "create_initialization_options", None)
+    if server is None or not callable(run) or not callable(options):
+        raise RuntimeError(
+            "installed mcp package is incompatible with latch's shared runtime; "
+            "install the version range pinned in requirements.txt"
+        )
+    await run(read_stream, write_stream, options())
 
 
 @mcp.tool(name="latch_search")
@@ -419,7 +510,9 @@ def kb_search(
     if paths.is_unlatched_mode():
         return _unlatched_response("latch_search")
     with _conn() as conn:
-        results = search.hybrid_search(conn, query, kind=kind, limit=limit, scope_repo=PROJECT_CWD)
+        results = search.hybrid_search(
+            conn, query, kind=kind, limit=limit, scope_repo=_project_cwd()
+        )
         if results:
             db.bump_focus_for_nodes(conn, [r["id"] for r in results])
     activity = _kb_activity(
@@ -599,7 +692,7 @@ def kb_gate_report(
     with _conn() as conn:
         report = gate_report.assemble_gate_report(
             conn,
-            project_path=PROJECT_CWD,
+            project_path=_project_cwd(),
             start=start_date,
             end=end_date,
             days=days,
@@ -733,7 +826,7 @@ def kb_insert(
             conn, kind=kind, title=title, body=body, status=status,
             session_id=session_id or _project_session_id(),
             links=links, use_llm=True,
-            workstream_id=workstream_id, project_path=PROJECT_CWD,
+            workstream_id=workstream_id, project_path=_project_cwd(),
             # Evidence contract: pass intended artifacts so on-insert heal sees the
             # new node's repo scope BEFORE arbitration (provenance is attached just
             # below, after this returns). Evidence only — never blocks the insert.
@@ -743,7 +836,7 @@ def kb_insert(
         if new_id is not None:
             db.bump_focus_for_nodes(conn, [new_id])
             captured = artifact_store.capture_for_node(
-                conn, new_id, artifacts=artifacts, project_cwd=PROJECT_CWD,
+                conn, new_id, artifacts=artifacts, project_cwd=_project_cwd(),
             )
             if captured:
                 result["artifacts"] = captured
@@ -827,7 +920,7 @@ def kb_update(
                 node_id=node_id, kind=old_kind, status=old_status,
                 old_embedding_blob=old_embedding, old_body=old_body,
                 new_body=body, new_vec=new_vec,
-                project_path=PROJECT_CWD, session_id=_project_session_id(),
+                project_path=_project_cwd(), session_id=_project_session_id(),
             )
     return {
         "id": node_id, "ok": True,
@@ -954,7 +1047,7 @@ def kb_link(src: int, dst: int, relation: str) -> dict:
     with _conn() as conn:
         db.add_edge(
             conn, src=src, dst=dst, relation=relation,
-            project_path=PROJECT_CWD, session_id=_project_session_id(),
+            project_path=_project_cwd(), session_id=_project_session_id(),
         )
         src_node = db.get_node(conn, src)
         ship_edge_hint = (
@@ -1115,7 +1208,7 @@ def kb_gate(request: str, max_chains: int = 5, verbose: bool = False) -> dict:
         }
     with _conn() as conn:
         full = gate.run_gate(
-            conn, request, project_path=PROJECT_CWD, max_chains=max_chains,
+            conn, request, project_path=_project_cwd(), max_chains=max_chains,
             session_id=_project_session_id(),
         )
     if verbose:
@@ -1225,7 +1318,7 @@ def kb_capture_decision(
         result = heal.insert_with_heal(
             conn, kind="decision", title=title, body=body, status=status,
             session_id=sid, links=edges or None, use_llm=True,
-            workstream_id=workstream_id, project_path=PROJECT_CWD,
+            workstream_id=workstream_id, project_path=_project_cwd(),
         )
         new_id = result.get("id")
         if new_id is not None:
@@ -1244,7 +1337,7 @@ def kb_capture_decision(
             was_confirmed=was_confirmed,
             human_action=human_action,
             query_hash=gate._query_hash(gate_request),
-            project_path=PROJECT_CWD,
+            project_path=_project_cwd(),
             session_id=sid,
         )
         decision_logged = True
@@ -1371,7 +1464,7 @@ def kb_correct_apply(
             corrected_status=corrected_status, reconcile_ids=reconcile_ids,
             workstream_id=workstream_id, links=links,
             trigger=trigger, prompt_hash=prompt_hash,
-            session_id=_project_session_id(), project_path=PROJECT_CWD,
+            session_id=_project_session_id(), project_path=_project_cwd(),
         )
         cid = result.get("corrected_node_id")
         if cid is not None:
@@ -1545,36 +1638,125 @@ def kb_profile_bind(
 @mcp.tool(name="latch_embed")
 @mcp.tool(name="kb_embed")
 def kb_embed(text: str) -> dict | list[float]:
-    """Embed `text` via the in-process model. Mainly here for parity with the
-    TCP embed listener — agents should rarely need to call this directly."""
+    """Embed `text` through the shared runtime's model owner. Mainly here for
+    parity with the TCP embed listener — agents should rarely call it directly."""
     if paths.is_unlatched_mode():
         return _unlatched_response("latch_embed")
     return embeddings.embed(text).tolist()
 
 
-if __name__ == "__main__":
-    if os.environ.get("LATCH_ADAPTER") == "cursor":
-        try:
-            import cursor_wiring
-            _wiring_result = cursor_wiring.repair_from_mcp_startup()
-            if _wiring_result.notice:
-                sys.stderr.write("[latch] " + _wiring_result.notice.strip("_") + "\n")
-        except Exception as e:
-            sys.stderr.write(
-                "[latch] Cursor wiring check failed; session will continue. "
-                f"Rerun bin/install_cursor manually ({e}).\n"
-            )
-    if not paths.is_unlatched_mode():
-        _start_embed_listener(PROJECT_CWD)
-        # Synchronous warm-up: load the embedder on the main thread before
-        # FastMCP's asyncio loop starts. Must happen here, not in a daemon
-        # thread — see _start_embed_listener for the deadlock rationale.
+def _peak_rss_bytes() -> int | None:
+    try:
+        import resource
+
+        value = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+        return value if sys.platform == "darwin" else value * 1024
+    except (ImportError, OSError, ValueError):
+        return None
+
+
+@mcp.tool(name="latch_runtime_status")
+@mcp.tool(name="kb_runtime_status")
+def kb_runtime_status() -> dict:
+    """Diagnose MCP/model ownership without scanning private host state.
+
+    Reports the shared owner, connection attribution source, activity/lease
+    counts, model-load state, and approximate process footprint.  Tokens and
+    full connection inventories are intentionally excluded.
+    """
+    daemon = mcp_runtime.daemon_snapshot()
+    connection = mcp_runtime.connection_snapshot()
+    embed_owner: dict[str, Any] | None = None
+    try:
+        payload = json.loads(mcp_broker.embed_discovery_path().read_text(encoding="utf-8"))
+        if isinstance(payload, dict):
+            embed_owner = {
+                key: payload.get(key)
+                for key in ("pid", "host", "port", "started_at")
+                if payload.get(key) is not None
+            }
+    except (OSError, ValueError):
+        pass
+    policy = mcp_broker.proxy_policy()
+    lease_state = mcp_broker.proxy_lease_state(policy=policy)
+    proxy_inventory = list(lease_state["live"])
+    legacy_inventory = list(lease_state.get("legacy_incompatible") or [])
+    unassociated_inventory = list(
+        lease_state.get("unassociated_capable") or []
+    )
+    other_owner_inventory = list(lease_state.get("other_live_owner") or [])
+    observed_inventory = list(lease_state.get("observed_live") or [])
+    return {
+        "mode": "shared_daemon" if daemon is not None else "legacy_stdio",
+        "process_pid": os.getpid(),
+        "project_cwd": _project_cwd(),
+        "session_id": _project_session_id(),
+        "connection": connection,
+        "daemon": daemon,
+        "proxy_pool": {
+            **policy,
+            "live_leases": len(proxy_inventory),
+            "legacy_incompatible_leases": len(legacy_inventory),
+            "unassociated_capable_leases": len(unassociated_inventory),
+            "other_live_owner_leases": len(other_owner_inventory),
+            "other_live_owner_count": len(
+                lease_state.get("other_owner_runtime_keys") or []
+            ),
+            "observed_live_leases": len(observed_inventory),
+            "stale_leases": int(lease_state.get("stale_count") or 0),
+            "max_stale_lease_age_s": float(
+                lease_state.get("max_stale_age_s") or 0.0
+            ),
+            "scope": "owner_runtime_key",
+            "owner_runtime_key": lease_state.get("owner_runtime_key"),
+            "alias_runtime_key_count": len(
+                lease_state.get("alias_runtime_keys") or []
+            ),
+            "unassociated_runtime_key_count": len(
+                lease_state.get("unassociated_runtime_keys") or []
+            ),
+            "bounded": bool(int(policy["cap"])),
+        },
+        "embedding": {
+            "model_loaded": embeddings.is_loaded(),
+            "heavy_model_owner_count": 1 if embeddings.is_loaded() else 0,
+            "listener": embed_owner,
+        },
+        "process_peak_rss_bytes": _peak_rss_bytes(),
+        "lifecycle": mcp_broker.lifecycle_summary(
+            hours=24, lease_state=lease_state, policy=policy
+        ),
+        "recovery": (
+            "Idle owners are reclaimed; the stdio proxy reconnects and replays MCP initialization. "
+            "In-flight calls are never automatically replayed."
+            if daemon is not None
+            else "Legacy mode owns one model per stdio process; restart after installing shared runtime."
+        ),
+    }
+
+
+def initialize_runtime(project_cwd: str, *, start_embed_listener: bool) -> None:
+    """Initialize heavyweight process-owned services exactly once.
+
+    The shared daemon calls this before serving readiness probes. Legacy fallback
+    calls the same path, preserving availability when broker startup fails.
+    """
+    global _RUNTIME_INITIALIZED
+    if paths.is_unlatched_mode() or _RUNTIME_INITIALIZED:
+        return
+    with _RUNTIME_INIT_LOCK:
+        if _RUNTIME_INITIALIZED:
+            return
+        if start_embed_listener:
+            _start_embed_listener(project_cwd)
         try:
             embeddings.embed("latch embed pre-warm")
         except Exception as e:
             sys.stderr.write(f"[latch] embed pre-warm failed: {e}\n")
-        # Self-triggering maintenance: replaces the external OS scheduler. Cheap
-        # cadence check + detached background spawn if due; never blocks startup.
-        # See selfheal.py / KB id=1173.
-        selfheal.maybe_trigger(PROJECT_CWD)
+        selfheal.maybe_trigger(project_cwd)
+        _RUNTIME_INITIALIZED = True
+
+
+if __name__ == "__main__":
+    initialize_runtime(PROJECT_CWD, start_embed_listener=True)
     mcp.run()
