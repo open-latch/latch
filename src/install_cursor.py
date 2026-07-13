@@ -93,6 +93,12 @@ CURSOR_COMMAND_FOOTER = (
     "wrappers. It never authorizes undocumented Cursor-history discovery.\n"
     f"<!-- latch-wiring-version: {WIRING_VERSION} -->\n"
 )
+CURSOR_PYTHON_BOUNDARY_NOTE = (
+    "\n\nCursor shell interpreter boundary: before any Shell call, read the "
+    "workspace `.cursor/mcp.json` and use the exact absolute "
+    "`mcpServers.latch.command` as `LATCH_PYTHON`. Never fall back to a "
+    "PATH `python3`; the MCP interpreter owns latch's native dependencies."
+)
 CURSOR_COMPACT_ASSETS = (
     Path("src") / "cursor_backend.py",
     Path("src") / "cursor_compact.py",
@@ -258,6 +264,8 @@ def render_cursor_command(
         f'LATCH_MAINTENANCE_BACKEND={backend} LATCH_MODEL_BACKEND={backend} '
         f'python "{home}/src/maintenance.py"',
     )
+    if "mcpServers.latch.command" not in body:
+        body = body.rstrip() + CURSOR_PYTHON_BOUNDARY_NOTE
     backend_note = (
         "\n\nCursor shell-fallback backend: `" + backend + "`. On PowerShell, "
         "set `LATCH_MODEL_BACKEND`, `LATCH_GATE_BACKEND`, "

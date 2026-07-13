@@ -8,6 +8,10 @@ description: Manually run latch gate on a coding or build request. Use when the 
 Latch Cursor skill boundary: this workflow is safe for project-synced skills
 and the Cursor plugin.
 
+Before any Shell fallback, read the workspace `.cursor/mcp.json` and use the
+exact absolute `mcpServers.latch.command` as `LATCH_PYTHON`. Never fall back to
+a PATH `python3`; the MCP interpreter owns latch's native dependencies.
+
 Prefer the `latch_gate` MCP tool and pass the user's request verbatim. If MCP is
 unavailable, resolve `latch_home` as `${CURSOR_PLUGIN_ROOT}` when set, otherwise
 use the absolute checkout in the project-sync footer, select native `cursor`

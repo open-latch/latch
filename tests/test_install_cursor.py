@@ -243,6 +243,24 @@ def test_current_session_workflows_use_prompt_time_id_handoff():
     print("PASS current_session_workflows_use_prompt_time_id_handoff")
 
 
+def test_cursor_shell_workflows_pin_mcp_interpreter():
+    for name in ic.CURSOR_COMMAND_FILES:
+        text = ic.render_cursor_command(name)
+        _assert("LATCH_PYTHON" in text and ".cursor/mcp.json" in text, name)
+        _assert("mcpServers.latch.command" in text, name)
+        _assert("Never fall back" in text and "PATH `python3`" in text, name)
+
+    for name in ic.CURSOR_SKILL_NAMES:
+        if name == "source-command-latch-pm":
+            continue  # MCP-only preview/apply; it does not invoke Shell.
+        path = ic.CURSOR_SKILLS_SRC / name / "SKILL.md"
+        text = path.read_text(encoding="utf-8")
+        _assert("LATCH_PYTHON" in text and ".cursor/mcp.json" in text, path)
+        _assert("mcpServers.latch.command" in text, path)
+        _assert("Never fall back" in text and "PATH `python3`" in text, path)
+    print("PASS cursor_shell_workflows_pin_mcp_interpreter")
+
+
 def test_check_mode_verifies_mcp_and_agents():
     d = Path(tempfile.mkdtemp(prefix="latch-cursor-check-"))
     try:

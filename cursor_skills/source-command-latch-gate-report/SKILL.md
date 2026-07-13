@@ -7,6 +7,10 @@ description: Show a read-only report over recent latch gate activity. Use when t
 
 Latch operation id: latch-gate-report run
 
+Before any Shell call, read the workspace `.cursor/mcp.json` and use the exact
+absolute `mcpServers.latch.command` as `LATCH_PYTHON`. Never fall back to a
+PATH `python3`; the MCP interpreter owns latch's native dependencies.
+
 Latch Cursor skill boundary: resolve `latch_home` as `${CURSOR_PLUGIN_ROOT}`
 when set, otherwise use the absolute checkout in the project-sync footer.
 Translate any user-supplied date/limit filters
