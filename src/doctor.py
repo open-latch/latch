@@ -91,6 +91,8 @@ def check_latch_version() -> tuple[str, str, str]:
         f"{versioning.LATCH_VERSION} ({commit}{dirty}); supports KB schema "
         f"{versioning.KB_SCHEMA_VERSION}; project wiring {versioning.WIRING_VERSION}",
     )
+
+
 EMBED_DIM = 384
 
 OK, WARN, FAIL, SKIP = "OK", "WARN", "FAIL", "SKIP"

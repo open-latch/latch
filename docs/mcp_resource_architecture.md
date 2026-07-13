@@ -316,7 +316,7 @@ designed to absorb.
 ## Verification
 
 Latest blocker-remediation receipts: 76 focused lifecycle/doctor/host-attribution/
-embed tests and 1,000 hermetic tests passed locally after rebasing onto current
+embed tests and 1,021 hermetic tests passed locally after rebasing onto current
 main;
 changed-file Ruff, public-release hygiene, compilation, and `git diff --check`
 passed. Warm prompt-hook wall was 93.5–141.2 ms. Fourteen clients used one

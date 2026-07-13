@@ -194,6 +194,17 @@ def _temp_vault() -> Path:
     return Path(tempfile.mkdtemp(prefix="latch_shared_mcp_"))
 
 
+def _copy_current_install_src(target: Path) -> None:
+    """Copy current runtime source plus PR #23's root version contract."""
+    shutil.copytree(
+        ROOT / "src",
+        target,
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+    )
+    for name in ("VERSION", "KB_SCHEMA_VERSION", "WIRING_VERSION"):
+        shutil.copy2(ROOT / name, target.parent / name)
+
+
 def _lifecycle_rows(kb_dir: Path) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for path in kb_dir.glob("mcp_lifecycle-*.log"):
@@ -405,11 +416,7 @@ def test_retained_proxy_recovers_after_in_place_compatible_upgrade() -> None:
     bootstrap: McpClient | None = None
     client: McpClient | None = None
     try:
-        shutil.copytree(
-            ROOT / "src",
-            install_src,
-            ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
-        )
+        _copy_current_install_src(install_src)
         env = os.environ.copy()
         env.update({
             "LATCH_HOME": str(ROOT),
@@ -576,11 +583,7 @@ def _assert_historical_proxy_requires_fresh_task(commit: str) -> None:
         )
         old_pid = client.status()["process_pid"]
         shutil.rmtree(install_src)
-        shutil.copytree(
-            ROOT / "src",
-            install_src,
-            ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
-        )
+        _copy_current_install_src(install_src)
         os.kill(old_pid, signal.SIGTERM)
         deadline = time.monotonic() + 5.0
         while time.monotonic() < deadline:
