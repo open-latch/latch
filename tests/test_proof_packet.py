@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -617,10 +618,18 @@ def test_packet_files_are_reproducible():
 
 
 def test_wrapper_uses_configured_python():
+    bash = shutil.which("bash")
+    _assert(bash is not None, "bash is required for the shell wrapper test")
     env = dict(os.environ)
-    env["LATCH_PYTHON"] = "echo"
+    env["LATCH_HOME"] = str(ROOT)
+    env["LATCH_PYTHON"] = sys.executable
+    # Prove the configured absolute interpreter is used: without it the
+    # wrapper cannot discover a fallback Python from this deliberately empty
+    # PATH.  This is portable to Git Bash on Windows, unlike relying on the
+    # platform-specific availability of an external `echo` executable.
+    env["PATH"] = ""
     result = subprocess.run(
-        ["bash", str(ROOT / "bin" / "latch_proof_packet.sh"), "--check"],
+        [bash, str(ROOT / "bin" / "latch_proof_packet.sh"), "--help"],
         cwd=ROOT,
         env=env,
         capture_output=True,
@@ -628,8 +637,8 @@ def test_wrapper_uses_configured_python():
         timeout=30,
     )
     _assert(result.returncode == 0, result.stderr)
-    _assert(str(ROOT / "src" / "proof_packet.py") in result.stdout, result.stdout)
-    _assert("--check" in result.stdout, result.stdout)
+    _assert("usage:" in result.stdout, result.stdout)
+    _assert("--capture-live" in result.stdout, result.stdout)
     print("PASS wrapper_uses_configured_python")
 
 
@@ -639,6 +648,20 @@ def test_powershell_wrapper_forwards_interpreter_and_args():
     _assert('"src/proof_packet.py"' in wrapper, wrapper)
     _assert("@args" in wrapper, wrapper)
     print("PASS powershell_wrapper_forwards_interpreter_and_args")
+
+
+def test_windows_workflow_propagates_proof_command_failures():
+    workflow = (
+        ROOT / ".github" / "workflows" / "public-release-hygiene.yml"
+    ).read_text(encoding="utf-8")
+    proof_job = workflow.split("  proof-packet-windows:", 1)[1].split(
+        "\n  cursor-cumulative-full-suite:", 1,
+    )[0]
+    _assert(
+        proof_job.count("if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }") == 2,
+        proof_job,
+    )
+    print("PASS windows_workflow_propagates_proof_command_failures")
 
 
 if __name__ == "__main__":
@@ -664,4 +687,5 @@ if __name__ == "__main__":
     test_packet_files_are_reproducible()
     test_wrapper_uses_configured_python()
     test_powershell_wrapper_forwards_interpreter_and_args()
+    test_windows_workflow_propagates_proof_command_failures()
     print("\nAll proof packet tests pass.")
