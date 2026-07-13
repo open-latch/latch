@@ -239,8 +239,8 @@ def test_runtime_manifest_canonicalizes_crlf_checkout():
 def test_source_commit_must_contain_manifest_blobs():
     receipt = copy.deepcopy(proof_packet.load_live_receipt())
     receipt["source_commit"] = subprocess.check_output(
-        ["git", "rev-parse", f"{receipt['source_commit']}^"], cwd=ROOT, text=True
-    ).strip()
+        ["git", "rev-list", "--max-parents=0", "HEAD"], cwd=ROOT, text=True
+    ).splitlines()[0]
     try:
         proof_packet.assert_tested_runtime_matches(receipt)
     except proof_packet.ProofPacketError:
