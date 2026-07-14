@@ -1,0 +1,104 @@
+{
+  "schema_version": 1,
+  "captured_at_utc": "2026-07-14T04:08:14Z",
+  "base_commit": "b4028bb95bb1a48ca605994a317f174e17d57010",
+  "candidate_state": "working tree before local release commits",
+  "wiring_version": {
+    "before": 1,
+    "candidate": 2
+  },
+  "measurement": {
+    "method": "Render each managed surface with kb_home=/opt/latch, include managed begin/end markers, count splitlines and whitespace-delimited words, and hash UTF-8 bytes.",
+    "baseline": {
+      "source_snippet": {"lines": 253, "words": 2020, "bytes": 13893, "sha256": "495d6e3290bb909c39d455809a722667e0e4ea5ad1b6a44fe6ee4a19fab867bc"},
+      "claude_managed_block": {"lines": 256, "words": 2049, "bytes": 14093, "sha256": "06771683089def562b99f500fbe65301ae20d5af0a4159d4819e7058b8ef294b"},
+      "agents_managed_block": {"lines": 256, "words": 2051, "bytes": 14107, "sha256": "c0e4c6a171f7cdb3b90467dd2cb29c0196fa29231cb6589080846e98d1976752"},
+      "cursor_rule": {"lines": 56, "words": 434, "bytes": 3158, "sha256": "b1f453228f8736345fa761ae770a632c359a2d0611dcd5a0dcf2c9aaf5af614c"},
+      "cursor_always_loaded": {"lines": 313, "words": 2485, "bytes": 17266, "sha256": "86b57d1dedaa929cc0c01c08f6b84f36967fed3ea422bfe7b8f6ef847cd21238"}
+    },
+    "candidate": {
+      "source_snippet": {"lines": 87, "words": 559, "bytes": 4238, "sha256": "f57fe3a39b211218e5e129e281253a2c7aa53069fbf7a561f08860ef65c5531c"},
+      "claude_managed_block": {"lines": 92, "words": 623, "bytes": 4644, "sha256": "6ba81e4d3aaaff35630c1138681a24e4da19fc632f0e80fe5155e43ba60deb78"},
+      "agents_managed_block": {"lines": 92, "words": 624, "bytes": 4655, "sha256": "bb8bf747bd6f117e45eda625e7e53abda17f94259c14acf090c05ec3751e2d0e"},
+      "cursor_rule": {"lines": 41, "words": 290, "bytes": 2107, "sha256": "1bb45c32664e4c3bd455622aa012ef084b75b48385ece9c9b4eeadf7ebd33237"},
+      "cursor_always_loaded": {"lines": 134, "words": 914, "bytes": 6763, "sha256": "9959283e59bcde6ace85161abaa4dffaa4e6a0c5c1445763aeec0d7718c62dab"}
+    },
+    "reductions_percent": {
+      "source_snippet": {"lines": 65.6, "words": 72.3},
+      "claude_managed_block": {"lines": 64.1, "words": 69.6},
+      "agents_managed_block": {"lines": 64.1, "words": 69.6},
+      "cursor_rule": {"lines": 26.8, "words": 33.2},
+      "cursor_always_loaded": {"lines": 57.2, "words": 63.2}
+    },
+    "budgets": {
+      "claude_managed_block": {"max_lines": 100, "max_words": 650, "passed": true},
+      "agents_managed_block": {"max_lines": 100, "max_words": 650, "passed": true},
+      "cursor_rule": {"max_lines": 50, "max_words": 350, "passed": true},
+      "cursor_always_loaded": {"max_lines": 150, "max_words": 1000, "passed": true}
+    }
+  },
+  "verification": {
+    "contract_and_sync": {
+      "result": "passed",
+      "tests": 46,
+      "command": "python -m pytest -q tests/test_agent_contract_artifacts.py tests/test_claude_md_sync.py tests/test_agents_md_sync.py tests/test_codex_session_start.py tests/test_cursor_rules_sync.py tests/test_wiring_version.py tests/test_versioning.py tests/test_public_release_check.py"
+    },
+    "authority_graph": {
+      "result": "passed",
+      "tests": 8,
+      "covers": ["supersedes", "reconciled_by", "reconciliation banners", "stale targets"]
+    },
+    "host_wiring_smoke": {
+      "result": "passed",
+      "tests": 57,
+      "covers": ["Claude render/sync", "Codex install/session-start", "Cursor install/lifecycle/rule", "versioned repair"]
+    },
+    "public_release_hygiene": {
+      "result": "passed",
+      "tracked_and_new_files_scanned": 343
+    },
+    "dependency_complete_suite": {
+      "result": "recapture_required",
+      "passed": 1044,
+      "failed": 5,
+      "reason": "The proof-honesty guard correctly rejected the pre-change live proof receipt after three runtime files changed. Refresh the live proof from a clean candidate source commit, commit generated proof artifacts as its child, and rerun."
+    }
+  },
+  "host_smokes": {
+    "claude": {
+      "cli": "Claude Code 2.1.207",
+      "deterministic_result": "passed",
+      "live_agent_scenarios": "not run in this distribution pass"
+    },
+    "codex": {
+      "cli": "codex-cli 0.142.5",
+      "deterministic_result": "passed",
+      "live_agent_scenarios": "not run in this distribution pass"
+    },
+    "cursor": {
+      "cli": "Cursor Agent 2026.07.09-a3815c0",
+      "deterministic_result": "passed",
+      "live_agent_scenarios": "not run in this distribution pass"
+    }
+  },
+  "update_and_rollback": {
+    "result": "passed",
+    "evidence": [
+      "Version 1 managed documents repair once to version 2 and preserve user content.",
+      "Unmanaged projects remain untouched.",
+      "Version 999 managed documents and Cursor rules are refused rather than downgraded.",
+      "Managed-document and Cursor-rule backups reproduce the older bytes; restoring those bytes is detected as older and safely rolls forward again.",
+      "Cursor collision and malformed-owned-hook cases stop without claiming current wiring."
+    ],
+    "limitation": "Rollback is backup-based and per-file; an atomic multi-file Cursor rollback transaction is not implemented."
+  },
+  "unverified_gaps": [
+    "The live three-host behavioral scenario corpus has not yet been run against isolated candidate installs.",
+    "Longitudinal adherence and silent-failure rates are not measured, so no claim is made about degradation over time.",
+    "Rendered line and word reduction is a leading footprint indicator, not proof of lower latency, cost, or better decisions.",
+    "No Windows host lifecycle was exercised in this pass.",
+    "Existing Cursor commands, skills, and hooks were covered by lifecycle tests, but their full behavioral matrix was not replayed with live model calls.",
+    "No automated alert currently detects every missed supersede, reconciliation, capture, or stop-and-show behavior."
+  ],
+  "follow_on": "See verification-brief.md for the exact deep-verification objective, hypotheses, indicators, baselines, and missing instrumentation."
+}

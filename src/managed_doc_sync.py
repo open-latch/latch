@@ -27,6 +27,18 @@ INVALID = "invalid"
 WIRING_MARKER_PREFIX = "<!-- latch-wiring-version:"
 _WIRING_RE = re.compile(r"<!--\s*latch-wiring-version:\s*([^\s>]+)\s*-->")
 
+CLAUDE_COMPACTION_TEXT = (
+    "At natural endpoints, offer `/latch-compact` by name. It persists the session\n"
+    "to Latch and is distinct from Claude Code's `/compact`, which only trims chat\n"
+    "context. It spends a model call, so never auto-run it without confirmation."
+)
+
+AGENTS_COMPACTION_TEXT = (
+    "At natural endpoints, offer `/latch-compact` by name. In Codex or Cursor, use\n"
+    "the installed host command/skill; ordinary chat compaction does not write to\n"
+    "Latch. It spends a model call, so never auto-run it without confirmation."
+)
+
 
 @dataclass(frozen=True)
 class ManagedDocSpec:
@@ -36,6 +48,7 @@ class ManagedDocSpec:
     end_mark: str
     source_doc_name: str = "CLAUDE.md"
     installer_name: str = "install_claude_md"
+    compaction_text: str = CLAUDE_COMPACTION_TEXT
 
 
 def _norm(text: str) -> str:
@@ -46,6 +59,7 @@ def render_contract(spec: ManagedDocSpec, kb_home: str) -> str:
     """Render the shared latch contract for one instruction-file surface."""
     text = spec.snippet_path.read_text(encoding="utf-8")
     text = text.replace("{{KB_HOME}}", kb_home)
+    text = text.replace("{{LATCH_COMPACTION_TEXT}}", spec.compaction_text)
     if spec.target_name != spec.source_doc_name:
         text = text.replace(spec.source_doc_name, spec.target_name)
     if spec.installer_name != "install_claude_md":

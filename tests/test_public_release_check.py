@@ -17,11 +17,16 @@ def _assert(cond, msg):
 def test_path_policy_blocks_strategy_docs():
     findings = prc.check_path_policy([
         "README.md",
+        "docs/agent-contract-reference.md",
         "docs/first_run_mission.md",
         "docs/mcp_resource_architecture.md",
         "docs/launch_strategy.md",
     ])
     _assert(any(f.path == "docs/launch_strategy.md" for f in findings), findings)
+    _assert(
+        not any(f.path == "docs/agent-contract-reference.md" for f in findings),
+        findings,
+    )
     _assert(
         not any(f.path == "docs/mcp_resource_architecture.md" for f in findings),
         findings,

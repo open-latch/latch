@@ -1,253 +1,87 @@
 <!--
-  latch — CLAUDE.md engine-contract snippet (Tier A)
-  --------------------------------------------------
-  SINGLE SOURCE OF TRUTH for "how an agent must drive latch." This block is
-  installed into a project's CLAUDE.md as a MANAGED REGION by
-  bin/install_claude_md.{sh,ps1} (the {{KB_HOME}} placeholder is substituted
-  with your latch install path, matching settings_snippet.json).
+  latch managed agent contract for CLAUDE.md.
 
-  DO NOT hand-edit the managed region in any CLAUDE.md. To change the contract,
-  edit THIS file in the latch repo and re-run the installer — it overwrites the
-  region in place (non-destructively; content outside the markers is preserved)
-  and `install_claude_md --check` flags any drift. A direct CLAUDE.md edit would
-  not propagate to the snippet or to other installs, and would be clobbered on
-  the next sync.
-
-  VERSIONED WITH THE ENGINE: when the contract changes (a new hint field, edge
-  relation, or banner), this file changes in lockstep and the installer re-syncs.
-
-  WHAT BELONGS HERE (Tier A): the irreducible bootstrap an agent needs before
-  any engine signal exists, plus how to interpret the signals latch emits
-  (banners, hints). Nothing here is project-specific.
-
-  WHAT DOES NOT BELONG HERE (Tier B): your project's facts, decisions, history,
-  parameters, file paths, directory ownership. Those go IN THE KB (via
-  latch_insert), or OUTSIDE this managed region in CLAUDE.md — never inside the
-  contract. A fact in CLAUDE.md is ambient and does not participate in heal,
-  traversal, or the gate, so a stale CLAUDE.md fact silently overrides a newer
-  canonical KB node.
+  Source of truth: claude_md_snippet.md. This region is installed by
+  bin/install_claude_md.{sh,ps1}; do not hand-edit it in a project file.
+  Re-run the installer to sync it. Detailed procedures live in
+  {{KB_HOME}}/docs/agent-contract-reference.md.
 -->
 
-## KB usage — MANDATORY
+## Latch Contract — Mandatory
 
-**Before responding to any prompt, query latch** via `latch_search`,
-`latch_get`, or `latch_recent` (legacy aliases: `kb_search`, `kb_get`,
-`kb_recent`). The KB carries the *why* behind decisions, what was ruled out,
-open questions, and prior attempts — context that does not live in code or git.
+Latch is the project's decision-continuity layer. This file is soft bootstrap,
+not the enforcement engine: keep project facts and decisions in Latch, and rely
+on tool receipts, hooks, tests, and audits for stronger guarantees.
 
-**Auto-injected `## KB hits` are similarity-ranked teasers, not results.**
-Treat them like seeing a filename in `git status`: they tell you something is
-relevant, not what it says. Pull the actual nodes before answering.
+Use this checkpoint order: **read → reconcile → gate → resolve → capture →
+report**. No silent Latch bypass and no invented Latch evidence.
 
-**Batch-load schemas on the first KB call of a session.** The KB MCP tools are
-deferred at session start. On the first KB call, discover the primary latch
-tools in one round-trip:
+### 1. Read and establish authority
+
+Before responding to any prompt, query Latch with `latch_search`, `latch_get`,
+or `latch_recent` (legacy: `kb_search`, `kb_get`, `kb_recent`). Auto-injected
+`## KB hits` are teasers, not authority; fetch the full node before relying on
+it. If no useful row was found, say so instead of inventing ids or history.
+
+On the first KB call in a session, batch-load schemas:
 `ToolSearch(query="mcp__latch latch_search latch_get latch_recent latch_gate")`.
-Existing installs may still expose the legacy `mcp__claude-kb__*` names; if the
-`mcp__latch__*` schemas are absent, retry broad discovery with
+If absent, try legacy discovery:
 `ToolSearch(query="mcp__claude-kb kb_search kb_get kb_recent kb_gate")`.
-Some Codex sessions can return zero results for an exact `select:` lookup even
-when broad discovery and live MCP calls succeed; treat that as non-definitive,
-then retry broad discovery and verify with a live `latch_search` / `kb_search`
-or `latch_recent` / `kb_recent` call before declaring latch unwired. Schemas
-stay loaded for the rest of the session.
+Treat an exact zero-result lookup as non-definitive; verify with a live search
+or recent call. If Latch or the SessionStart brief is missing, follow
+`{{KB_HOME}}/README.md` setup.
 
-**If the KB MCP tools or the SessionStart brief are missing**, latch is not yet
-wired up for the current user. Follow `{{KB_HOME}}/README.md` per-user setup.
+Every `latch_get` / `kb_get` result has `reconciliation_banner`. When non-empty,
+fetch every `linked_id` and read both nodes before acting. `reconciled_by` keeps
+both nodes true in scope; `supersedes` makes the older node stale. Weigh any
+standing priorities surfaced by SessionStart or the gate.
 
-## KB visibility — MANDATORY
+### 2. Gate and resolve implementation work
 
-**Surface latch activity in the foreground.** If a KB read materially affects
-your answer, briefly name the tool and important node ids/titles, or say no
-relevant KB rows were found. If a KB write succeeds, say what was tracked or
-updated and include the node id/kind/title when available.
+Before committing to an implementation plan for write/change/add/refactor/fix
+work, call `latch_gate` with the user's request verbatim (legacy: `kb_gate`).
+Skip it for pure explanation, status, search, or exploratory discussion.
 
-Core KB tools may return a compact `kb_activity` object with
-`must_display_to_user=true`; surface its `summary` in chat. Keep this to one
-line unless returned hints require action. Gate calls use the stronger
-`findings` block described below.
+For every non-skipped result, show a concise **Latch gate** block before normal
+implementation narration: say Latch ran the gate; show the recommendation,
+rationale, cited node ids/titles/status, receipt/source basis, risks or better
+next action, and uncovered claims.
 
-## KB content rule — MANDATORY
+Stop and show `MODIFY`, `DO_NOT_PROCEED`, or `NEEDS_HUMAN_JUDGMENT`; continue
+only after the user resolves or explicitly overrides it. On `PROCEED`, still
+show the receipt. Resolve uncovered claims by their suggested remedy:
+`hop_deeper`, `code_trace`, or `flag_to_user`.
 
-**Facts, decisions, framing, and history go in the KB. They do NOT go in
-CLAUDE.md.**
+If a gate is skipped, degraded, or has no recommendation, report that honestly
+and never treat it as approval. Follow any host enforcement that blocks mutation.
 
-- **Goes in KB** (`latch_insert` / `kb_insert`): parameters, architectures, decisions, "why we
-  ruled X out", historical results, postmortems, gate criteria, performance
-  numbers.
-- **Goes in CLAUDE.md**: directory paths, file-write rules, agent behaviors
-  (this snippet), session-start confirmations, environment configuration.
+### 3. Report and capture judgment
 
-**Why:** a fact in CLAUDE.md is ambient context that does not participate in
-heal, traversal, or the gate. When a later canonical KB node contradicts it,
-nothing flags the conflict — the agent reads both, feels grounded by CLAUDE.md,
-and silently picks the stale framing. If you reach for CLAUDE.md to record a
-domain fact or a decision about how something behaves, write it to the KB
-instead via `latch_insert(kind="fact" | "decision", ...)`.
+When a tool returns `kb_activity.must_display_to_user=true`, show its `summary`
+and `why_it_matters` when present. Name material reads and important node ids;
+report successful writes with node id/kind/title.
 
-## KB read hygiene — MANDATORY
+Capture durable decisions, findings, rejected paths, postmortems, and actual
+user overrides or refusals in the same turn with `latch_insert` or
+`latch_capture_decision` when appropriate. Do not capture routine chatter.
 
-**Every `latch_get` / `kb_get` response includes a `reconciliation_banner`
-field. When non-empty, you MUST fetch each listed node before treating the
-queried node's body as authoritative.**
+Facts, decisions, framing, history, parameters, rejected alternatives, results,
+and gate criteria belong in Latch—not in the managed host file. Static project instructions
+may hold paths, file rules, agent behavior, and environment setup.
 
-A node in the banner is **canonical and true in its own scope**, but its
-framing has been constrained or updated by a newer canonical decision. Reading
-the older node alone — and carrying its framing into new work — is the staleness
-failure pattern latch exists to prevent.
+### 4. Honor write and graph hints
 
-```
-"reconciliation_banner": [{"linked_id": <id>, "kind": ..., "title": ...}, ...]
-```
+Follow tool-returned hints before moving on: `plan_freshness_hint` means freshen
+the linked plan/workstream; `claim_change_hint` means use
+`latch_correct_plan` / `latch_correct_apply` instead of rewriting a canonical
+claim; `orphan_hint` means add the matching edge or remove the id mention; and
+`ship_edge_hint` means use implements/advances/depends_on as appropriate.
 
-Non-empty = stop, fetch each `linked_id`, read both before acting. Empty = no
-reconciliation declared; the node body is current.
+When a newer canonical fact/decision narrows an older one without replacing it,
+link older → newer with `reconciled_by`. Tombstone invalid edges with
+`latch_unlink`. Prefer `latch_append` for workstream/progress deltas and
+`latch_update` for living plan text when no canonical claim changes.
 
-**Distinct from `supersedes`:** `supersedes` marks the old node `stale` and
-removes it from default reads. `reconciled_by` leaves both nodes canonical — the
-reader is responsible for cross-checking.
+### 5. Compact deliberately
 
-## latch_gate on coding-shaped prompts — MANDATORY
-
-KB-first reads context. **`latch_gate` is the next layer: judgment.** Before you
-commit to an implementation plan on a coding/build/implement/refactor/add/extend
-prompt, call the `latch_gate` MCP tool with the user's request verbatim. It searches
-the KB (including stale nodes), walks the canonical relations 1–2 hops, and
-returns `{PROCEED | MODIFY | DO_NOT_PROCEED | NEEDS_HUMAN_JUDGMENT}` with cited
-node ids and a recommended next action.
-
-**Display the gate findings explicitly.** Every non-skipped `latch_gate` response
-includes a `findings` object with `must_display_to_user=true`. Before you move
-into native implementation narration, show a concise **Latch gate** block that
-starts from provenance: **Latch ran the gate on this request / plan.** Then name
-the recommendation, summary/rationale, cited KB evidence node ids/titles/status
-(the status is the visible current-authority signal), receipt/source basis when
-present, risk or better next action when present, and any uncovered claims. Do
-this even for `PROCEED`: users should be able to see that latch supplied
-judgment and evidence, not just infer it from the agent's prose.
-
-**When to call:** the prompt asks you to write, change, add, refactor, extend,
-fix, or rebuild code. Implementation-shaped intent.
-
-**When NOT to call:** explanation, status questions, search, debugging output
-already in front of you, exploratory design discussion before any code. The tool
-budget is shared with the compactor and nightly heal — don't spend it on prompts
-that wouldn't change behavior.
-
-**Surface, don't auto-redirect:** if the verdict is MODIFY or DO_NOT_PROCEED,
-surface the recommendation, the cited nodes, and the suggested next action to the
-user before acting. The user decides whether to follow it. For `PROCEED`, still
-surface the findings block, then continue normally.
-
-**Uncovered claims:** `verdict.uncovered_claims[]` lists load-bearing claims the
-gate found no backing for (it can be non-empty even on PROCEED). Before acting on
-such a claim, resolve it per its engine-supplied `suggested_remedy` — `hop_deeper`
-(walk the graph until it cites a node), `code_trace` (read the source, cite
-`file:line`), or `flag_to_user` (surface as an explicit assumption; never silently
-fill). Empty list = nothing unbacked.
-
-**Skipped/error verdicts:** if `verdict.recommendation` is None (budget cap, kill
-switch, parse failure), proceed with normal KB-first context. Don't block on a
-skipped gate.
-
-`/latch-gate "<request>"` is the manual escape hatch. `/kb-gate` remains a
-legacy alias on existing installs.
-
-## Standing priorities — top of mind
-
-A project may define **standing priorities** via `latch_priority_add` /
-`latch_priority_list` / `latch_priority_retire` — short directives the user wants
-weighed on builds (the complement of similarity retrieval; e.g. security review,
-cross-platform installability). Priorities have two scopes:
-
-- **Overall**: omit `workstream_id`; the directive applies everywhere and is
-  injected into every `latch_gate` classifier prompt and the SessionStart brief.
-- **Workstream**: pass `workstream_id=<workstream node id>`; the directive is
-  additive guidance only when the current gate request resolves to that
-  workstream. It also appears under that workstream in the brief for visibility.
-
-Both scopes are capped at 5 active priorities by default. Weigh each in-scope
-priority when planning — they are guidance to consider, not a hard gate.
-
-**Offer to capture sweeping guidelines.** When the user states a standing
-directive ("always …", "from now on …", "as a rule …"), offer to record it as a
-priority so latch carries it forward. The per-prompt hook emits a deterministic
-nudge on such phrasing — capture only with the user's go-ahead, never for a
-task-local ask.
-
-## KB write hygiene — MANDATORY
-
-**Plan-freshness:** when you insert a ship/progress node linked to a plan node via
-`implements`/`advances`/`depends_on`, you MUST reflect the new state in the linked
-node's body (bodies get read; edges don't). `latch_insert` returns a
-`plan_freshness_hint` field naming which (empty when none). Freshen each:
-**workstream/progress** bodies via `latch_append(linked_id, "<line>")`
-(delta-only — no full-body resend/re-embed); `latch_update` for a decision/plan
-body. Claim changes to a canonical `fact`/`decision` still route through the
-`latch_correct_plan` / `latch_correct_apply` correction flow, never an append.
-
-**Promotion:** once all steps in a sequence plan have shipped, promote the plan
-node to `status="canonical"` so future audits treat it as authoritative.
-
-**Claim changes route through correction, not a `latch_update` body rewrite:** a
-change to *what a canonical `fact`/`decision` asserts* must go through
-`latch_correct_plan` / `latch_correct_apply` (supersede/reconcile) so the old node survives as an auditable
-tombstone/banner — an in-place body rewrite destroys the decision-change
-transition. `latch_update` returns a `claim_change_hint` field, non-None when a
-body edit on a canonical fact/decision materially shifts the embedding and is
-not a pure append. It is a NUDGE, not a block: the write proceeds, but when it
-fires, prefer redoing the edit via `latch_correct_plan`. `latch_update` in
-place stays correct for non-claim edits (status promotion, typo, banner/cross-ref
-append) and for living-summary kinds (workstream/plan/progress, per
-plan-freshness above).
-
-**`reconciled_by` mandate:** when you insert a canonical decision/fact that
-updates a time scale, parameter, scope, or invariant established by an earlier
-canonical node — without fully replacing it — add a `reconciled_by` edge from the
-older node to the new one:
-
-```
-latch_link(src=<older_node>, dst=<new_node>, relation="reconciled_by")
-```
-
-This makes the older node's `latch_get` surface the new node as a banner. Use this
-when the older fact remains true in its own scope but a newer decision
-narrows / re-scopes / re-parameterises it. `reconciled_by` differs from
-`supersedes`: supersedes is full replacement (old → stale); reconciled_by is
-partial constraint (both canonical, with a cross-reference).
-
-**Body-edge agreement:** when a node's body mentions another node by id
-(`id=X`, "see id=X", "depends on id=X"), the corresponding active graph edge
-MUST exist from this node to the referenced node. Bodies and graph cannot
-disagree. When body framing introduces a reference, `latch_link`; when it
-invalidates one, `latch_unlink`.
-
-**Edge removal:** when refactoring a node's body such that an existing edge no
-longer reflects its meaning, `latch_unlink(src, dst, relation)` to tombstone the
-stale edge. Tombstone preserves the audit trail (the row persists with
-`status='tombstoned'`) and is excluded from `latch_get` neighbors, banners, gate
-traversal, and hints. Re-linking the same triple reactivates the row in place.
-
-## Capturing & compaction — MANDATORY
-
-The KB only pays rent if it actually accumulates the project's reasoning. Two
-habits keep it filling without the user having to manage it — the user should
-get value from latch without first learning to operate it.
-
-**Capture as you go.** When a decision is made, a finding lands, an approach is
-ruled out, or a postmortem is reached, write it to the KB *in that same turn*
-via `latch_insert` — do not defer to the end of the task. Capture decisions and
-durable findings, not running commentary: a node nobody would re-read is noise
-that slows retrieval. (*What* belongs in the KB vs. CLAUDE.md is governed by
-"KB content rule" above.)
-
-**Offer to compact at natural endpoints.** `/latch-compact` summarizes the session
-transcript into the KB — the other half of how the KB fills. **It is distinct
-from Claude Code's built-in `/compact`**, which only trims the conversation
-context window and writes nothing to the KB — only `/latch-compact` persists the
-session, so always recommend it by name. It is user-
-initiated by design: it spends a model call, so it never auto-runs. When you
-reach a natural endpoint — a task completes, a working session winds down, or a
-long context risks being lost before it is captured — **offer to run it** and
-let the user decide. Detecting the endpoint is your job; confirming the action
-is theirs. Do not let a substantive session end silently un-compacted.
+{{LATCH_COMPACTION_TEXT}}

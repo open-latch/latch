@@ -19,6 +19,7 @@ ROOT_MARKDOWN_ALLOW = {
 }
 
 DOCS_MARKDOWN_ALLOW = {
+    "docs/agent-contract-reference.md",
     "docs/first_run_mission.md",
     "docs/mcp_resource_architecture.md",
 }

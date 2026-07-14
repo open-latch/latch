@@ -7,56 +7,38 @@ alwaysApply: true
 
 # latch Cursor activation
 
-This Cursor rule is managed by latch. Re-run `{{KB_HOME}}/bin/install_cursor.sh --yes`
+This rule is managed by Latch. Re-run `{{KB_HOME}}/bin/install_cursor.sh --yes`
 from this project to refresh it.
 
-Use the project `latch` MCP server as the decision-continuity layer:
+Treat `AGENTS.md` as the shared Latch contract for live reads, authority and
+reconciliation, visible receipts, durable capture, write hints, and compaction.
+This rule adds Cursor-specific enforcement:
 
-- Before answering when project history, prior decisions, or rejected paths may
-  matter, read latch with `latch_search`, `latch_recent`, or `latch_get`.
-- If the session brief is present but the Cursor IDE tool catalog has no latch
-  server, do not repeatedly call `latch_gate` or try to bypass `preToolUse`.
-  Ask the user to open Cursor Settings > Tools & MCP, select this workspace,
-  enable `latch`, confirm it reports tools enabled (the exact count can grow
-  with the MCP surface), and then start a fresh Agent chat.
-  `agent mcp list` is CLI-only evidence and does not prove the IDE toggle.
-- Before committing to an implementation plan for a coding, build, add, fix,
-  refactor, extend, or rebuild request, call `latch_gate` with the user's
-  request verbatim.
-- When `latch_gate` returns `findings.must_display_to_user=true`, show a
-  concise **Latch gate** block before editing. Include the recommendation,
-  summary, cited evidence node ids/titles/status, risks or better next action,
-  and any uncovered claims.
-- If the gate is skipped, degraded, returns no recommendation, or was called
-  with a rephrased request, say so and do not attempt a mutation while the
-  opt-in gate hook is active. Resolve the gate or ask the user what to do.
-- If `preToolUse` denies an ordinary coding mutation for a missing current-
-  prompt receipt, call `latch_gate` with the current user request verbatim,
-  surface the findings, and then retry. A denial inside an explicit latch slash
-  workflow is different: rerun its documented preview/prepare step or correct
-  the exact invocation. A general gate receipt cannot override that narrow lane.
-  Never work around or disable the hook silently.
-- Explicit latch slash workflows use a separate one-shot operation receipt
-  bound to the current Cursor session, prompt, expected tool, and exact argument
-  shape. That narrow lane keeps compact/seed/maintenance workflows usable
-  without treating them as coding requests or exempting arbitrary latch writes.
-- A preview attempt does not authorize apply. Only a matching successful
-  `postToolUse` result may advance preview state. `/latch-pm` must use the
-  read-only `latch_pm_preview` tool so the exact staging decision is displayed
-  and digest-bound before one matching `latch_insert` can run.
-- Free-form Shell commands are mutation-capable. Use Cursor's exact native read
-  tools before the gate; a program name alone is not proof that its options are
-  side-effect-free.
-- Capture durable user decisions or rejected paths with `latch_capture_decision`
-  or `latch_insert` when appropriate.
+- If the session brief exists but Cursor's IDE tool catalog has no Latch tools,
+  ask the user to enable workspace server `latch` in Settings > Tools & MCP and
+  start a fresh Agent chat. `agent mcp list` does not prove the IDE toggle.
+- Before an ordinary coding mutation, pass the current user request verbatim to
+  `latch_gate`. When `findings.must_display_to_user=true`, show the **Latch
+  gate** block before editing.
+- If the gate is skipped, degraded, has no recommendation, or used a rephrased
+  request, say so and do not mutate while the opt-in gate hook is active.
+- If `preToolUse` denies a mutation for a missing current-prompt receipt, run
+  `latch_gate` on the current request, surface the findings, and retry. Never
+  work around or disable the hook silently.
+- Explicit Latch slash workflows use a separate one-shot operation receipt
+  bound to the Cursor session, prompt, expected tool, and exact arguments. A
+  general gate receipt cannot override that narrow lane.
+- Preview does not authorize apply. Only a matching successful `postToolUse`
+  result advances preview state. `/latch-pm` must display and digest-bind the
+  exact staging decision before one matching write.
+- Free-form Shell commands are mutation-capable. Before the gate, use Cursor's
+  exact native read tools rather than inferring safety from a program name.
 - Use `/latch-seed` only for the exact current hook-provided Cursor transcript;
   preview candidates before any confirmed staging write.
 
-Treat `AGENTS.md` as the fuller shared latch contract for this project.
-
-Cursor boundary: this install is MCP plus Cursor Rules plus `AGENTS.md` plus
-project-local `.cursor/commands` prompts and `.cursor/skills`. The Cursor Agent CLI is the native
-model backend. `--with-hooks` adds project-local session, current-prompt
-gate-enforcement, and activity hooks, and enables fail-closed current-session
-manual compaction when Cursor provides the exact `transcript_path`. Latch never
-discovers or guesses historical Cursor transcripts.
+Cursor's installed surface is project MCP, this rule, shared `AGENTS.md`, and
+project-local `.cursor/commands` plus `.cursor/skills`. `--with-hooks` adds
+session, current-prompt gate, and activity hooks. The Cursor Agent CLI is the
+native model backend. Manual compaction is fail-closed on the exact current
+`transcript_path`; Latch never discovers or guesses historical Cursor
+transcripts.

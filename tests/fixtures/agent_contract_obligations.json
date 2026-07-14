@@ -1,0 +1,95 @@
+{
+  "schema_version": 1,
+  "counting_rule": "Count the complete always-loaded surface, including managed begin/end and wiring markers.",
+  "budgets": {
+    "claude_managed": {"max_lines": 100, "max_words": 650},
+    "agents_managed": {"max_lines": 100, "max_words": 650},
+    "cursor_rule": {"max_lines": 50, "max_words": 350},
+    "cursor_always_loaded": {"max_lines": 150, "max_words": 1000}
+  },
+  "host_surfaces": {
+    "claude": {
+      "always_loaded": ["CLAUDE.md managed region"],
+      "additional": ["SessionStart and prompt hooks", "Claude commands"]
+    },
+    "codex": {
+      "always_loaded": ["AGENTS.md managed region"],
+      "additional": ["Codex SessionStart shim", "Codex skills"]
+    },
+    "cursor": {
+      "always_loaded": ["AGENTS.md managed region", ".cursor/rules/latch.mdc"],
+      "additional": ["Cursor commands", "Cursor skills", "project MCP", "optional hooks"]
+    }
+  },
+  "obligations": [
+    {
+      "id": "live_kb_read",
+      "description": "Perform a live Latch read before responding and fetch full nodes rather than trusting teasers.",
+      "markers": {"shared_contract": ["Before responding to any prompt", "## KB hits", "fetch the full node"]},
+      "scenario_ids": ["read_full_node", "honest_no_evidence"]
+    },
+    {
+      "id": "honest_evidence",
+      "description": "Never silently bypass Latch or invent ids, history, verdicts, or receipts.",
+      "markers": {"shared_contract": ["No silent Latch bypass", "no invented Latch evidence", "instead of inventing ids"]},
+      "scenario_ids": ["honest_no_evidence", "degraded_gate"]
+    },
+    {
+      "id": "authority_reconciliation",
+      "description": "Fetch reconciliation-banner nodes and distinguish reconciled scope from stale superseded authority.",
+      "markers": {"shared_contract": ["reconciliation_banner", "fetch every `linked_id`", "`supersedes` makes the older node stale"]},
+      "scenario_ids": ["reconciliation_follow", "authority_supersedes", "authority_reconciled", "authority_banner", "authority_stale_target"]
+    },
+    {
+      "id": "coding_gate",
+      "description": "Gate implementation-shaped work on the verbatim request and display a sourced receipt.",
+      "markers": {"shared_contract": ["call `latch_gate` with the user's request verbatim", "**Latch gate** block", "receipt/source basis"]},
+      "scenario_ids": ["gate_proceed", "gate_stop", "cursor_current_prompt_gate"]
+    },
+    {
+      "id": "resolve_gate",
+      "description": "Stop on non-PROCEED results and resolve uncovered claims through the supplied remedy.",
+      "markers": {"shared_contract": ["Stop and show `MODIFY`", "`NEEDS_HUMAN_JUDGMENT`", "`hop_deeper`, `code_trace`, or `flag_to_user`"]},
+      "scenario_ids": ["gate_stop", "uncovered_claim", "degraded_gate"]
+    },
+    {
+      "id": "foreground_activity",
+      "description": "Surface required activity and write receipts in the human-facing response.",
+      "markers": {"shared_contract": ["kb_activity.must_display_to_user=true", "show its `summary`", "node id/kind/title"]},
+      "scenario_ids": ["read_full_node", "capture_override"]
+    },
+    {
+      "id": "durable_capture",
+      "description": "Capture durable judgment, rejected paths, and actual user overrides/refusals without logging chatter.",
+      "markers": {"shared_contract": ["Capture durable decisions", "user overrides or refusals", "Do not capture routine chatter"]},
+      "scenario_ids": ["capture_override"]
+    },
+    {
+      "id": "content_placement",
+      "description": "Keep project facts and decisions in Latch rather than ambient instruction files.",
+      "markers": {"shared_contract": ["belong in Latch—not in the managed host file", "Static project instructions"]},
+      "scenario_ids": ["capture_override"]
+    },
+    {
+      "id": "write_hints",
+      "description": "Honor freshness, correction, orphan, ship-edge, reconciliation, and unlink hints.",
+      "markers": {"shared_contract": ["plan_freshness_hint", "claim_change_hint", "orphan_hint", "ship_edge_hint", "link older → newer with `reconciled_by`", "`latch_unlink`"]},
+      "scenario_ids": ["write_hint_followthrough", "authority_reconciled", "authority_stale_target"]
+    },
+    {
+      "id": "manual_compaction",
+      "description": "Offer user-confirmed Latch compaction with host-correct wording and distinguish ordinary chat compaction.",
+      "markers": {
+        "claude_contract": ["distinct from Claude Code's `/compact`"],
+        "agents_contract": ["In Codex or Cursor, use", "ordinary chat compaction does not write"]
+      },
+      "scenario_ids": ["host_compaction"]
+    },
+    {
+      "id": "cursor_specific_enforcement",
+      "description": "Keep Cursor current-prompt and one-shot operation enforcement in the Cursor rule without duplicating the full shared contract.",
+      "markers": {"cursor_rule": ["Treat `AGENTS.md` as the shared Latch contract", "current user", "`preToolUse`", "one-shot operation receipt", "Preview does not authorize apply"]},
+      "scenario_ids": ["cursor_current_prompt_gate", "cursor_operation_receipt"]
+    }
+  ]
+}
