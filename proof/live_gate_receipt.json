@@ -1,8 +1,8 @@
 {
   "backend": "codex",
-  "better_next_action": "Implement email sending through an inline task runner and document that it is suitable only for the demo/single-process limit, per id=1.",
+  "better_next_action": "Implement email sending with an inline single-process task runner and document its limits instead of adding Redis or a background worker.",
   "capture_command": "bash bin/latch_proof_packet.sh --capture-live --backend codex",
-  "captured_at_utc": "2026-07-14T04:55:35Z",
+  "captured_at_utc": "2026-07-14T07:28:08Z",
   "demo_kind": "synthetic_no_history_fixture",
   "evidence_nodes": [
     {
@@ -30,10 +30,10 @@
   "observed": true,
   "recommendation": "MODIFY",
   "request": "Implement email sending by adding a Redis-backed background job queue.",
-  "risk_if_proceed": "Adding Redis and a worker process would violate the install-light, easy-to-inspect demo-app constraint.",
+  "risk_if_proceed": "Adding Redis and a worker process would violate the install-light, easy-to-inspect demo-app constraint and repeat the rejected Redis-backed queue path.",
   "schema_version": 2,
-  "source_commit": "91d19e02e868fa5c58720ed2caaed1114b7a6dd8",
-  "summary": "The request conflicts with the canonical fixture decision to avoid adding a background job queue to this no-history demo app (id=1), and Redis-backed background jobs are specifically named as the rejected path. Email sending can still be implemented, but it must use the allowed single-process approach: an inline task runner with documented limits.",
+  "source_commit": "3f60fa03f2528ae25ee1edda74d03395b1aac381",
+  "summary": "The request\u2019s goal, email sending, can proceed, but the requested implementation path is explicitly rejected by the canonical decision for this no-history demo app. Node 1 says not to add a background job queue, specifically rejects a Redis-backed queue, and directs background work to remain single-process via an inline task runner with documented limits.",
   "tested_runtime_git_blobs": {
     ".gitattributes": "dfdb8b771ce07609491fa2e83698969fd917a135",
     "benchmarks/fixtures/wedge_v1.jsonl": "f32c5544a247c43490b5b84a6c4c4a057e91716b",
@@ -74,7 +74,7 @@
     "src/gate.py": "7c5657fde4cf210949584be46caa61fbc02a923c",
     "src/gate_report.py": "139ee87fc35c2c467df827fead08f258d235711b",
     "src/heal.py": "f32884a2b5eafb35cabca10c5e02bab09970161c",
-    "src/hooks/_common.py": "0494f1e0818285c36a162b0535d5eb5cbea2759b",
+    "src/hooks/_common.py": "0d8cb31f64e143e4f02719f62adf0fdcb4e6ce42",
     "src/hooks/codex_session_start.py": "e5a459a55add1494ee1a9fe8cdc21029b377e840",
     "src/hooks/cursor_before_submit.py": "9c19683b09475171aa106a51512884f0f7d4be37",
     "src/hooks/cursor_post_tool_use.py": "cb0e2f7015834c14c9ebbeb30d97e0472c39e4e3",
