@@ -138,6 +138,38 @@ def test_cursor_source_uses_exact_current_marker_without_history_scan():
         shutil.rmtree(root, ignore_errors=True)
 
 
+def test_cursor_transcript_excludes_injected_command_prompt_from_user_query():
+    root = Path(tempfile.mkdtemp(prefix="latch-seed-cursor-command-envelope-"))
+    transcript = root / "cursor.jsonl"
+    _write_jsonl(transcript, [{
+        "role": "user",
+        "message": {"content": [{
+            "type": "text",
+            "text": (
+                "<cursor_commands>\nNever add --yes before approval.\n"
+                "Do not use an id from another chat.\n</cursor_commands>\n"
+                "<timestamp>Sunday</timestamp>\n"
+                "<user_query>\n/latch-seed\n</user_query>"
+            ),
+        }]},
+    }])
+    try:
+        text = seed.read_cursor_transcript(transcript)
+        _assert("[user] /latch-seed" in text, text)
+        _assert("Never add" not in text and "another chat" not in text, text)
+        source = seed.SeedSource(
+            id="cursor:session",
+            agent="cursor",
+            path=str(transcript),
+            mtime="2026-07-12T00:00:00+00:00",
+            text=text,
+        )
+        _assert(seed.deterministic_candidates([source], max_candidates=10) == [], text)
+    finally:
+        import shutil
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def test_cursor_source_accepts_only_explicit_path_without_marker():
     root = Path(tempfile.mkdtemp(prefix="latch-seed-cursor-explicit-"))
     project = root / "repo"
@@ -539,6 +571,119 @@ def test_llm_candidate_quality_filter_keeps_durable_signals():
             and "Install seed proof loop" in titles,
             f"expected durable titles to survive: {titles}")
     print("PASS llm_candidate_quality_filter_keeps_durable_signals")
+
+
+def test_llm_rejected_path_uses_explicit_revive_target_for_catch_demo():
+    src = seed.SeedSource(
+        id="cursor:session",
+        agent="cursor",
+        path="/tmp/cursor.jsonl",
+        mtime="2026-07-12T00:00:00+00:00",
+        text="",
+    )
+    candidate = seed.candidate_from_llm_item({
+        "kind": "decision",
+        "title": "Seed preview Shell must request external permission first",
+        "body": "The sandboxed first attempt failed and consumed its one-shot receipt.",
+        "confidence": 0.94,
+        "signals": ["decision", "rejected_path", "verified_outcome"],
+        "rejected_path": "sandboxed preview first, followed by an elevated retry",
+    }, src)
+    _assert(candidate is not None, "explicit rejected path should remain writeable")
+    request = seed.catch_demo_request(candidate)
+    _assert("sandboxed preview first, followed by an elevated retry" in request, request)
+    _assert("must request external permission first" not in request, request)
+    _assert("Rejected path:\n> sandboxed preview first" in candidate.body, candidate.body)
+
+    missing_target = seed.candidate_from_llm_item({
+        "kind": "decision",
+        "title": "Seed preview Shell must request external permission first",
+        "body": "Keep the verified permission flow.",
+        "confidence": 0.94,
+        "signals": ["decision", "rejected_path"],
+    }, src)
+    _assert(missing_target is not None, "governing decision should remain useful")
+    _assert("rejected_path" not in seed.normalized_signals(missing_target.signals),
+            missing_target.signals)
+    _assert(seed.catch_demo_candidate([missing_target]) is None,
+            "missing revive target must not produce an inverted catch demo")
+    print("PASS llm_rejected_path_uses_explicit_revive_target_for_catch_demo")
+
+
+def test_cursor_seed_apply_loads_exact_digest_bound_preview():
+    root = Path(tempfile.mkdtemp(prefix="latch-seed-cursor-preview-cache-"))
+    project = root / "repo"
+    project.mkdir()
+    project_dir = paths.project_dir(str(project))
+    source = seed.SeedSource(
+        id="cursor:session",
+        agent="cursor",
+        path="/tmp/cursor.jsonl",
+        mtime="2026-07-12T00:00:00+00:00",
+        text="transcript text must not be cached",
+    )
+    candidate = seed.SeedCandidate(
+        kind="decision",
+        title="Use exact preview candidates",
+        body="The reviewed set must be the applied set.",
+        confidence=0.93,
+        signals=["decision", "llm_seed"],
+        source_ids=[source.id],
+        source_paths=[source.path],
+        llm_used=True,
+    )
+    try:
+        digest = seed.write_cursor_seed_preview(
+            project_path=str(project),
+            session_id="session",
+            sources=[source],
+            candidates=[candidate],
+            llm_estimate=1,
+        )
+        loaded_sources, loaded_candidates, estimate = seed.load_cursor_seed_preview(
+            project_path=str(project), session_id="session", preview_digest=digest,
+        )
+        _assert(estimate == 1 and loaded_candidates == [candidate], loaded_candidates)
+        _assert(loaded_sources[0].text == "", "preview cache must not retain transcript text")
+        try:
+            seed.load_cursor_seed_preview(
+                project_path=str(project), session_id="session", preview_digest="0" * 64,
+            )
+        except seed.CursorSeedPreviewError as exc:
+            _assert("digest" in str(exc).lower(), exc)
+        else:
+            raise AssertionError("mismatched preview digest must fail closed")
+
+        applied: list[seed.SeedCandidate] = []
+        original_llm = seed.llm_candidates
+        original_apply = seed.apply_candidates
+        seed.llm_candidates = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("Cursor apply must not make a second model call")
+        )
+        seed.apply_candidates = lambda candidates, **_kwargs: applied.extend(candidates) or [101]
+        try:
+            rc = seed.main([
+                "--source", "cursor",
+                "--project", str(project),
+                "--lookback-days", "5",
+                "--llm", "no",
+                "--allow-internal-no-llm",
+                "--cursor-session-id", "session",
+                "--preview-digest", digest,
+                "--format", "json",
+                "--apply", "--yes",
+            ])
+        finally:
+            seed.llm_candidates = original_llm
+            seed.apply_candidates = original_apply
+        _assert(rc == 0 and applied == [candidate], applied)
+        _assert(not seed._cursor_seed_preview_path(str(project), "session").exists(),
+                "successful apply should consume the cached preview")
+    finally:
+        import shutil
+        shutil.rmtree(project_dir, ignore_errors=True)
+        shutil.rmtree(root, ignore_errors=True)
+    print("PASS cursor_seed_apply_loads_exact_digest_bound_preview")
 
 
 def test_agent_mistake_candidates_require_high_confidence_and_agent_blame():
@@ -961,6 +1106,7 @@ if __name__ == "__main__":
     test_deterministic_seed_candidates_from_claude_transcript()
     test_machine_generated_claude_records_are_ignored()
     test_cursor_source_uses_exact_current_marker_without_history_scan()
+    test_cursor_transcript_excludes_injected_command_prompt_from_user_query()
     test_cursor_source_accepts_only_explicit_path_without_marker()
     test_both_source_selection_uses_global_recency_split()
     test_auto_source_noninteractive_requires_explicit_choice_when_ambiguous()
@@ -975,6 +1121,8 @@ if __name__ == "__main__":
     test_llm_mode_blocks_deterministic_only_write_candidates()
     test_llm_candidate_quality_filter_drops_sample_noise()
     test_llm_candidate_quality_filter_keeps_durable_signals()
+    test_llm_rejected_path_uses_explicit_revive_target_for_catch_demo()
+    test_cursor_seed_apply_loads_exact_digest_bound_preview()
     test_agent_mistake_candidates_require_high_confidence_and_agent_blame()
     test_seed_report_groups_candidates_into_demo_sections()
     test_seed_report_agent_mistake_can_drive_first_value_catch_demo()

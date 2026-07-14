@@ -11,7 +11,8 @@ sys.path.insert(0, str(SRC))
 sys.path.insert(0, str(SRC / "hooks"))
 
 import cursor_gate_state  # noqa: E402
-from _common import log, read_hook_input  # noqa: E402
+import cursor_session  # noqa: E402
+from _common import log, read_hook_input, transcript_path  # noqa: E402
 from paths import is_disabled, is_in_compact, is_unlatched_mode  # noqa: E402
 
 
@@ -29,11 +30,14 @@ OPERATION_DENY_MESSAGE = (
 
 
 def decision(payload: dict) -> dict:
+    cwd = cursor_gate_state.project_cwd(payload)
+    sid = cursor_gate_state.session_id(payload, cwd)
+    tpath = transcript_path(payload)
+    if sid and tpath:
+        cursor_session.refresh_transcript_path(cwd, sid, tpath)
     mutation, _kind = cursor_gate_state.mutation_capability(payload)
     if not mutation:
         return {}
-    cwd = cursor_gate_state.project_cwd(payload)
-    sid = cursor_gate_state.session_id(payload, cwd)
     operation_intended, _intent_reason = \
         cursor_gate_state.managed_operation_intended(cwd, sid)
     operation_allowed, _operation_reason = \

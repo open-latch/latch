@@ -13,8 +13,10 @@ sys.path.insert(0, str(ROOT / "src" / "hooks"))
 
 import cursor_post_tool_use as cptu  # noqa: E402
 import cursor_pre_tool_use as cpre  # noqa: E402
+import cursor_before_submit as cbs  # noqa: E402
 import cursor_session_start as css  # noqa: E402
 import cursor_gate_state as cgs  # noqa: E402
+import cursor_session  # noqa: E402
 import paths  # noqa: E402
 import shutil  # noqa: E402
 import tempfile  # noqa: E402
@@ -28,6 +30,32 @@ def test_cursor_session_fields_and_output_shape(monkeypatch):
     with redirect_stdout(out):
         css.emit_cursor_context("brief")
     assert json.loads(out.getvalue()) == {"additional_context": "brief"}
+
+
+def test_before_submit_reinjects_exact_current_session_id(monkeypatch):
+    root = tempfile.mkdtemp(prefix="cursor-before-submit-session-")
+    project_dir = paths.project_dir(root)
+    payload = {
+        "workspace_roots": [root],
+        "conversation_id": "current-conversation",
+        "prompt": "/latch-seed",
+    }
+    try:
+        monkeypatch.setattr(cbs, "read_hook_input", lambda: payload)
+        monkeypatch.setattr(cbs, "is_disabled", lambda: False)
+        monkeypatch.setattr(cbs, "is_in_compact", lambda: False)
+        monkeypatch.setattr(cbs, "is_unlatched_mode", lambda: False)
+        out = io.StringIO()
+        with redirect_stdout(out):
+            assert cbs.main() == 0
+        response = json.loads(out.getvalue())
+        assert response["continue"] is True
+        assert "Latch Cursor current session id: `current-conversation`" in \
+            response["additional_context"]
+        assert "must pass this exact id" in response["additional_context"]
+    finally:
+        shutil.rmtree(project_dir, ignore_errors=True)
+        shutil.rmtree(root, ignore_errors=True)
 
 
 def test_cursor_post_tool_use_reads_cursor_output_shapes():
@@ -148,6 +176,8 @@ def test_post_tool_use_accepts_supported_latch_gate_tool_identities():
             {"tool_name": "kb_gate", "tool_input": {"server": "claude-kb"}},
             {"tool_name": "mcp__latch__latch_gate"},
             {"tool_name": "mcp__claude-kb__kb_gate"},
+            {"tool_name": "MCP:latch_gate"},
+            {"tool_name": "MCP:kb_gate"},
             {"tool_name": "MCP", "tool_input": {
                 "server": "latch", "tool": "latch_gate",
             }},
@@ -171,6 +201,29 @@ def test_post_tool_use_accepts_supported_latch_gate_tool_identities():
             }
             assert cptu.record_gate_receipt(payload) == (True, "PROCEED"), tool_payload
             assert cgs.mutation_authorized(root, "conversation")[0] is True
+    finally:
+        shutil.rmtree(project_dir, ignore_errors=True)
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_pre_tool_use_refreshes_late_cursor_transcript_marker():
+    root = tempfile.mkdtemp(prefix="cursor-hook-transcript-")
+    project_dir = paths.project_dir(root)
+    transcript = str(Path(root) / "conversation.jsonl")
+    try:
+        cursor_session.write_marker(root, "conversation", transcript_path=None)
+        payload = {
+            "workspace_roots": [root],
+            "conversation_id": "conversation",
+            "transcript_path": transcript,
+            "tool_name": "MCP:latch_search",
+            "tool_input": {"query": "current direction"},
+        }
+
+        assert cpre.decision(payload) == {}
+        marker = cursor_session.read_marker(root, session_id="conversation")
+        assert marker is not None
+        assert marker["transcript_path"] == transcript
     finally:
         shutil.rmtree(project_dir, ignore_errors=True)
         shutil.rmtree(root, ignore_errors=True)

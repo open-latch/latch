@@ -16,6 +16,7 @@ import contextlib
 import io
 import json
 import os
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -457,20 +458,21 @@ def test_command_change_summary_separates_migration_actions():
 
 
 def test_resolve_python_override_and_env():
-    # explicit override that exists -> absolute resolved path
-    _assert(ie.resolve_python(sys.executable) == str(Path(sys.executable).resolve()),
-            "override to an existing path should resolve absolute")
+    # Explicit overrides become absolute without resolving virtualenv symlinks.
+    expected = str(Path(sys.executable).absolute())
+    _assert(ie.resolve_python(sys.executable) == expected,
+            "override to an existing path should become absolute")
     # Fresh env var is honored first; legacy env var remains supported.
     saved_latch = os.environ.get("LATCH_PYTHON")
     saved_legacy = os.environ.get("CLAUDE_KB_PYTHON")
     try:
         os.environ.pop("LATCH_PYTHON", None)
         os.environ["CLAUDE_KB_PYTHON"] = sys.executable
-        _assert(ie.resolve_python(None) == str(Path(sys.executable).resolve()),
+        _assert(ie.resolve_python(None) == expected,
                 "CLAUDE_KB_PYTHON should be honored")
 
         os.environ["LATCH_PYTHON"] = sys.executable
-        _assert(ie.resolve_python(None) == str(Path(sys.executable).resolve()),
+        _assert(ie.resolve_python(None) == expected,
                 "LATCH_PYTHON should be honored")
     finally:
         if saved_latch is None:
@@ -482,6 +484,21 @@ def test_resolve_python_override_and_env():
         else:
             os.environ["CLAUDE_KB_PYTHON"] = saved_legacy
     print("PASS resolve_python_override_and_env")
+
+
+def test_resolve_python_preserves_virtualenv_symlink():
+    if os.name == "nt":
+        return
+    root = Path(tempfile.mkdtemp(prefix="latch-python-symlink-"))
+    link = root / "venv" / "bin" / "python"
+    link.parent.mkdir(parents=True)
+    try:
+        link.symlink_to(Path(sys.executable).resolve())
+        _assert(ie.resolve_python(str(link)) == str(link.absolute()),
+                "explicit virtualenv interpreter must not resolve out of its environment")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+    print("PASS resolve_python_preserves_virtualenv_symlink")
 
 
 def test_seed_next_step_message_names_immediate_value_and_preview():
@@ -671,6 +688,7 @@ if __name__ == "__main__":
     test_default_commands_hide_workstream_control_surfaces()
     test_command_change_summary_separates_migration_actions()
     test_resolve_python_override_and_env()
+    test_resolve_python_preserves_virtualenv_symlink()
     test_seed_next_step_message_names_immediate_value_and_preview()
     test_seed_command_args_use_llm_apply_and_project()
     test_offer_seed_after_install_noninteractive_does_not_run()

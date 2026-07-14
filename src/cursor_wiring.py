@@ -189,7 +189,14 @@ def repair_project(project: str | Path) -> RepairResult:
             f"This task will continue; {_manual(root)} manually._",
         )
 
-    restart = " Restart Cursor or open a new task to reload hooks/MCP." if changed_reload else ""
+    restart = (
+        " Cursor reloads MCP when project wiring changes and may disable the "
+        "workspace server again. Open Cursor Settings > Tools & MCP, select this "
+        "workspace, re-enable latch, confirm latch reports tools enabled (the "
+        "exact count can grow with the MCP surface), and then start a "
+        "fresh Agent chat."
+        if changed_reload else ""
+    )
     return RepairResult(
         "synced",
         "_↻ latch repaired older Cursor project wiring once; only recognized "

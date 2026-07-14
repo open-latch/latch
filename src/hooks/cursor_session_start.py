@@ -58,7 +58,7 @@ def main() -> int:
         )
 
     try:
-        cursor_gate_state.reset_session(cwd, sid)
+        cursor_gate_state.initialize_session(cwd, sid)
     except Exception as e:
         log(f"cursor_session_start gate state reset failed: {e}")
 

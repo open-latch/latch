@@ -109,6 +109,10 @@ def test_cursor_bundle_repairs_once_and_preserves_unrelated_content(tmp_path):
     first = cursor_wiring.repair_project(tmp_path)
     assert first.action == "synced"
     assert "repaired older Cursor project wiring once" in (first.notice or "")
+    assert first.restart_required is True
+    assert "Cursor Settings > Tools & MCP" in (first.notice or "")
+    assert "tools enabled" in (first.notice or "")
+    assert "exact count can grow" in (first.notice or "")
     mcp = json.loads((tmp_path / ".cursor" / "mcp.json").read_text(encoding="utf-8"))
     assert mcp["setting"] == "keep"
     assert mcp["mcpServers"]["other"] == {"command": "node"}

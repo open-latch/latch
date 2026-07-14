@@ -322,13 +322,28 @@ The installed `/latch-compact` command and `run_cursor_compact_now` wrappers
 compact only the current conversation. Resolution fails closed unless the
 opt-in SessionStart hook recorded an exact per-session conversation id and
 `transcript_path` pair and the wrapper receives that surfaced session id
-explicitly; latch never scans Cursor databases or guesses the most recent chat.
+explicitly. Because Cursor may not retain the original SessionStart text in a
+long chat, `beforeSubmitPrompt` re-injects the same payload-derived conversation
+id on every prompt; latch never scans Cursor databases or guesses the most
+recent chat. The command/skill requests Cursor `required_permissions: ["all"]`
+on its first Shell call because compaction writes latch-owned budget/session/KB
+state outside the open workspace. Cursor still presents its normal permission
+flow; a sandboxed first attempt cannot be retried under the same one-shot
+managed receipt. Shell-backed Cursor commands read the workspace latch server's
+absolute interpreter from `.cursor/mcp.json` and set `LATCH_PYTHON` explicitly,
+so native dependencies cannot drift to a different PATH Python. Installer
+overrides preserve virtualenv interpreter symlinks for the same reason.
 
 The installed `/latch-seed` command is also current-session-only. It previews
 seed candidates as JSON from the exact marker/transcript pair. The preview
 attempt alone does not arm apply; a matching successful `postToolUse` result
 must be recorded before the separate `/latch-seed apply` confirmation can write
-staging evidence. `/latch-pm` similarly uses the read-only
+staging evidence. Its first preview Shell call requests the same external-state
+permission; approving it permits the preview to update latch-owned budget and
+session state, not to apply candidates. A successful Cursor preview caches only its candidate/source
+metadata (never transcript text) and returns `preview_digest`; apply requires
+that exact digest, loads the reviewed cached set, and makes no second model call.
+`/latch-pm` similarly uses the read-only
 `latch_pm_preview` MCP result—not agent prose—to display and digest-bind every
 load-bearing decision field before one matching staging insert.
 `--cursor-transcript PATH` is available for
@@ -345,12 +360,21 @@ a user-explicit file; latch never enumerates Cursor's private history folders.
 ```
 
 Restart Cursor after installing hooks so it reloads `.cursor/hooks.json`; run
-`agent mcp list` to inspect the MCP server. Live acceptance has two separate,
-user-controlled prerequisites: authenticate the Agent CLI with `agent login`,
-and approve the project `latch` MCP server in Cursor when Cursor prompts for
-approval. A `needs approval` / `not approved` result proves the static config
-was discovered, but it does not prove that MCP tools or the visible gate can run.
-This project does not invent an undocumented CLI approval command.
+`agent mcp list` to inspect the CLI-side MCP server. Live acceptance has three
+separate, user-controlled prerequisites: authenticate the Agent CLI with
+`agent login`; approve the project `latch` MCP server when Cursor prompts; and
+in the IDE open **Cursor Settings > Tools & MCP**, select the current workspace,
+turn on **latch**, and confirm it reports **tools enabled**; the exact count can
+grow with the MCP surface. Start a fresh Agent chat
+after enabling it. A `needs approval` / `not approved` result proves the static
+config was discovered, while even a CLI `ready` / tool-list result does not prove
+the IDE workspace toggle is enabled. Neither condition alone proves that IDE MCP
+tools or the visible gate can run. This project does not edit Cursor's private
+state or invent an undocumented CLI command to bypass that user trust action.
+If latch performs a one-time project-wiring repair after an engine upgrade,
+Cursor treats the resulting `.cursor/mcp.json` change as new workspace wiring
+and may disable the server again. Repeat the same IDE enablement check after the
+repair notice; the next task should report `unchanged`, not rewrite the config.
 
 With the native default, the doctor
 requires a reachable, authenticated Cursor Agent CLI and validates its JSON Ask
