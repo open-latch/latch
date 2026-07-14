@@ -138,6 +138,12 @@ def is_in_compact() -> bool:
 
 
 _MINGW_PATH_RE = re.compile(r"^/([a-zA-Z])/")
+# Cursor's hook payload reports ``workspace_roots`` as a URI-style path with a
+# leading slash before the drive, e.g. ``/C:/Users/...``. Left as-is this
+# sanitizes to a *different* project dir than the MCP daemon's native
+# ``C:\Users\...``, splitting hooks (session markers, session rows) and the MCP
+# KB into two folders. Strip the spurious leading slash so both agree.
+_LEADING_SLASH_DRIVE_RE = re.compile(r"^/([a-zA-Z]:[\\/])")
 # A Windows absolute path: drive letter + colon + slash (``C:/`` or ``C:\``).
 # These must be sanitized LEXICALLY, because on POSIX ``Path("C:/x").resolve()``
 # treats ``C:`` as a relative segment and prepends the cwd — so a Windows path
@@ -158,6 +164,10 @@ def _normalize_input_path(cwd: str) -> str:
     m = _MINGW_PATH_RE.match(cwd)
     if m:
         return f"{m.group(1).upper()}:/{cwd[m.end():]}"
+    # ``/C:/Users/...`` (Cursor workspace_roots) -> ``C:/Users/...`` so it
+    # sanitizes identically to the MCP daemon's native drive path.
+    if _LEADING_SLASH_DRIVE_RE.match(cwd):
+        return cwd[1:]
     return cwd
 
 
