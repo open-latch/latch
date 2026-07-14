@@ -5,7 +5,9 @@ This local integration replays the compact managed contract on public main
 `5afc52fbabadc8329734583613d87a994b5cada2`. The proof packet was captured
 from source commit `2450c24aab35b4302c0dbb07a324a214cc538d53`; its direct proof child is
 `1463ade7516237bd00b3a72dfe42ab5192780a94`. Later contract-only corrections
-do not change the runtime bundle covered by that proof packet.
+do not change the gate/runtime manifest covered by that proof packet. The proof
+does not validate the later managed contract text; contract, sync, wiring, and
+artifact checks cover that surface.
 
 The replay preserves the newer Cursor MCP catalog recovery wording and the
 current-main Cursor hook identity parser. There is no candidate diff from
@@ -16,7 +18,8 @@ public main in the current-prompt hook implementation or its focused tests.
 - 78 focused contract, sync, wiring, public guard, and Cursor lifecycle tests
   passed.
 - The complete dependency-backed suite passed: 1,062 tests in 102.80 seconds.
-- The proof packet is current and public-safe.
+- The proof packet's gate/runtime manifest is current and public-safe; its scope
+  excludes the later managed contract text.
 - Public-release hygiene, whitespace, and changed-shell syntax checks passed.
 - Claude and Codex managed blocks are within 100 lines and 650 words.
 - The Cursor rule is within 50 lines and 350 words; Cursor's combined

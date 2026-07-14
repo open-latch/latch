@@ -5,7 +5,8 @@
   "candidate_state": {
     "proof_source_commit": "2450c24aab35b4302c0dbb07a324a214cc538d53",
     "proof_artifact_commit": "1463ade7516237bd00b3a72dfe42ab5192780a94",
-    "final_contract_commit": "5afc52fbabadc8329734583613d87a994b5cada2"
+    "final_contract_commit": "5afc52fbabadc8329734583613d87a994b5cada2",
+    "proof_scope": "The proof packet covers its declared gate/runtime manifest at proof_source_commit. It does not validate later managed contract text; that surface is covered by the contract, sync, wiring, and artifact checks below."
   },
   "mainline_integration": {
     "origin_main_commit": "5d33047e9532eb091b46faaeac32d4d3d44f4ce0",
@@ -84,7 +85,7 @@
       "failed": 0,
       "duration_seconds": 102.80,
       "proof_packet_check": "passed",
-      "note": "The rebased source preserved current-main Cursor fixes. A clean live proof was recaptured from the replayed source commit, its three generated artifacts were committed as the direct child, and the complete suite passed."
+      "note": "The rebased source preserved current-main Cursor fixes. A clean live gate/runtime proof was recaptured from proof_source_commit and its three generated artifacts were committed as the direct child. Later managed contract corrections are outside that proof manifest and are covered by the contract, sync, wiring, artifact, and complete-suite checks."
     },
     "independent_review_corrections": {
       "result": "restored_and_represented_in_corpus",
