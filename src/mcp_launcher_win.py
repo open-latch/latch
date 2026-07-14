@@ -155,24 +155,18 @@ def _assign_to_job(job, process_handle) -> None:
         raise ctypes.WinError(ctypes.get_last_error())
 
 
-def _same_file(a: str, b: str) -> bool:
-    try:
-        return Path(a).resolve() == Path(b).resolve()
-    except OSError:
-        return os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
+def _venv_site_packages() -> str | None:
+    """The venv's ``Lib/site-packages``.
 
-
-def _venv_launcher_python() -> str | None:
-    """The venv's own ``python.exe`` (the redirector). Used only as the
-    ``__PYVENV_LAUNCHER__`` marker so the base interpreter adopts venv
-    site-packages — never launched directly (its re-exec drops
-    CREATE_NO_WINDOW and spawns a console window)."""
-    for name in ("LATCH_PYTHON", "CLAUDE_KB_PYTHON"):
-        value = (os.environ.get(name) or "").strip()
-        if value and Path(value).exists():
-            return value
-    candidate = Path(sys.prefix) / "Scripts" / "python.exe"
-    return str(candidate) if candidate.exists() else None
+    Injected into the base child's ``PYTHONPATH`` (rather than using
+    ``__PYVENV_LAUNCHER__``) so the child's ``sys.executable`` stays the BASE
+    ``python.exe``. That matters because the shared daemon is spawned via
+    ``sys.executable``: if that were the venv redirector, the daemon's
+    ``DETACHED_PROCESS`` re-exec would allocate a visible console window on a
+    cold start. Keeping ``sys.executable`` = base python keeps the daemon
+    windowless too."""
+    cand = Path(sys.prefix) / "Lib" / "site-packages"
+    return str(cand) if cand.is_dir() else None
 
 
 def _resolve_child_python() -> str:
@@ -191,8 +185,8 @@ def _resolve_child_python() -> str:
     base_console = Path(sys.base_prefix) / "python.exe"
     if base_console.exists():
         return str(base_console)
-    # Last resort: the venv redirector (may flash a window, but still works).
-    return _venv_launcher_python() or sys.executable
+    # Last resort: whatever launched us (may flash a window, but still works).
+    return sys.executable
 
 
 def main() -> int:
@@ -205,12 +199,14 @@ def main() -> int:
     server_py = Path(__file__).resolve().parent / "mcp_server.py"
     child_python = _resolve_child_python()
     child_env = os.environ.copy()
-    venv_marker = _venv_launcher_python()
-    if venv_marker and Path(child_python).name.lower() == "python.exe" and \
-            not _same_file(child_python, venv_marker):
-        # Base interpreter direct-launch: adopt the venv via the same marker the
-        # redirector would have set. Skipped when we fell back to the redirector.
-        child_env["__PYVENV_LAUNCHER__"] = venv_marker
+    site = _venv_site_packages()
+    if site:
+        # Base interpreter direct-launch: expose venv deps via PYTHONPATH so the
+        # child's sys.executable stays base python (keeps the cold-start daemon
+        # windowless too). __PYVENV_LAUNCHER__ would instead point sys.executable
+        # at the console-flashing venv redirector.
+        existing = child_env.get("PYTHONPATH", "")
+        child_env["PYTHONPATH"] = site + (os.pathsep + existing if existing else "")
 
     stdin_fd = _dup_std_fd(_STD_INPUT_HANDLE, os.O_RDONLY)
     stdout_fd = _dup_std_fd(_STD_OUTPUT_HANDLE, os.O_WRONLY)
