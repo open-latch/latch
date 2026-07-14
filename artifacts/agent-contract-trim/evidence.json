@@ -1,8 +1,11 @@
 {
   "schema_version": 1,
-  "captured_at_utc": "2026-07-14T04:08:14Z",
+  "captured_at_utc": "2026-07-14T04:15:21Z",
   "base_commit": "b4028bb95bb1a48ca605994a317f174e17d57010",
-  "candidate_state": "working tree before local release commits",
+  "candidate_state": {
+    "source_commit": "cbe5d02090c0a1dc75efc853c9c312810066fd2a",
+    "proof_artifact_commit": "ea049ae2bc15661bef3366894f7af78901a61c1a"
+  },
   "wiring_version": {
     "before": 1,
     "candidate": 2
@@ -58,10 +61,12 @@
       "tracked_and_new_files_scanned": 343
     },
     "dependency_complete_suite": {
-      "result": "recapture_required",
-      "passed": 1044,
-      "failed": 5,
-      "reason": "The proof-honesty guard correctly rejected the pre-change live proof receipt after three runtime files changed. Refresh the live proof from a clean candidate source commit, commit generated proof artifacts as its child, and rerun."
+      "result": "passed",
+      "passed": 1050,
+      "failed": 0,
+      "duration_seconds": 107.33,
+      "proof_packet_check": "passed",
+      "note": "The initial run passed 1044 tests and correctly refused 5 stale-proof cases. A clean live proof was then recaptured from the candidate source commit, its three generated artifacts were committed as the direct child, and the complete suite passed."
     }
   },
   "host_smokes": {
