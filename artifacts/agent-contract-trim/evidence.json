@@ -86,7 +86,7 @@
       "note": "The rebased source preserved current-main Cursor fixes. A clean live proof was recaptured from the replayed source commit, its three generated artifacts were committed as the direct child, and the complete suite passed."
     },
     "independent_review_corrections": {
-      "result": "fixed_and_covered",
+      "result": "restored_and_represented_in_corpus",
       "items": [
         "Restored the cross-host offer to capture sweeping directives through latch_priority_add only with user approval.",
         "Restored canonical promotion for fully shipped sequence plans.",
