@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -21,13 +22,16 @@ sys.path.insert(0, str(_SRC))
 import db  # noqa: E402
 import embeddings  # noqa: E402
 import log_utils  # noqa: E402
-import mcp_server  # noqa: E402
+import mcp_broker  # noqa: E402
 import paths  # noqa: E402
 
 
 def main() -> int:
     tmp = tempfile.mkdtemp(prefix="kb_latency_")
     print(f"project: {tmp}")
+    os.environ["LATCH_KB_DIR"] = tmp
+    os.environ["CLAUDE_KB_IN_MAINTENANCE"] = "1"
+    paths._PINNED_DIR = False
 
     # Seed a small KB so retrieval has something to work with.
     conn = db.connect(tmp)
@@ -42,17 +46,15 @@ def main() -> int:
     finally:
         conn.close()
 
-    mcp_server._start_embed_listener(tmp)
-
-    # Synchronous warm-up on the main thread (matches the new __main__
-    # flow in mcp_server.py — see notes there about the daemon-thread
-    # deadlock that motivated this change).
+    # Start the production shared-owner path; the hook intentionally trusts
+    # only an owner that has published readiness after model pre-warm.
     t_warm = time.perf_counter()
-    embeddings.embed("latch embed pre-warm")
-    print(f"warm-up: {(time.perf_counter() - t_warm) * 1000:.0f} ms")
+    owner = mcp_broker.ensure_daemon(tmp)
+    print(f"owner-ready: {(time.perf_counter() - t_warm) * 1000:.0f} ms")
 
     if embeddings.embed_remote("ready?", project_cwd=tmp, timeout=5.0) is None:
         print("FAIL: daemon never came up", file=sys.stderr)
+        os.kill(int(owner["pid"]), signal.SIGTERM)
         return 1
 
     hook_path = _SRC / "hooks" / "user_prompt_submit.py"
@@ -94,6 +96,10 @@ def main() -> int:
     print(f"\nbudget: {budget_ms} ms")
     print(f"elapsed (wall): min={min(elapsed):.1f}  max={max(elapsed):.1f}  median={sorted(elapsed)[len(elapsed)//2]:.1f}")
     print(f"over budget: {len(over)} / {len(elapsed)}")
+    try:
+        os.kill(int(owner["pid"]), signal.SIGTERM)
+    except OSError:
+        pass
     return 0 if not over else 1
 
 

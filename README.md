@@ -480,6 +480,22 @@ At natural stopping points, capture the session:
 Compaction is user-initiated because it spends a model call and writes a durable
 summary into the KB.
 
+Within each pinned vault and current owner fingerprint, latch shares its
+heavyweight local MCP/model runtime across tasks and subagents instead of
+loading a separate embedding model in every stdio process. Separate named
+vaults retain separate owners. During an in-place compatible upgrade, retained
+capability-epoch old-key proxies are authenticated aliases to the single current
+owner and migrate into its one lease pool. Idle capable leases remain visible
+and count toward that pool even before reconnecting; leases served by another
+live blue/green owner remain a separate scope. Older proxies that cannot enforce
+that lifecycle contract fail visibly and require a fresh task. Ask
+the agent to call `latch_runtime_status` when diagnosing resource use; it
+reports the shared owner, active connections, proxy lease bound, attribution
+source, model-listener PID, startup/cold-start data, peak connections, and
+recent or sustained lifecycle pressure without exposing authentication tokens.
+Contributor details and benchmark evidence are in
+[`docs/mcp_resource_architecture.md`](./docs/mcp_resource_architecture.md).
+
 ## Safety
 
 **Local-first storage.** latch stores project judgment locally in SQLite. It

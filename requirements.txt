@@ -1,4 +1,7 @@
-mcp>=1.2.0
+# Shared custom-stream adapter verified against FastMCP 1.28.x. Upgrade this
+# range only with test_fastmcp_private_boundary_is_pinned_and_available in
+# tests/test_mcp_lifecycle_contract.py passing on every host OS.
+mcp>=1.28.1,<1.29
 onnxruntime>=1.17.0
 tokenizers>=0.20.0
 numpy>=1.24.0

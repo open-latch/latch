@@ -91,6 +91,8 @@ def check_latch_version() -> tuple[str, str, str]:
         f"{versioning.LATCH_VERSION} ({commit}{dirty}); supports KB schema "
         f"{versioning.KB_SCHEMA_VERSION}; project wiring {versioning.WIRING_VERSION}",
     )
+
+
 EMBED_DIM = 384
 
 OK, WARN, FAIL, SKIP = "OK", "WARN", "FAIL", "SKIP"
@@ -624,6 +626,141 @@ def check_kb_pin() -> tuple[str, str, str]:
     )
 
 
+def _proxy_high_water_warn_at(cap: int) -> int | None:
+    """Ceiling of 75% of a positive configured cap; None when unbounded."""
+    return (cap * 3 + 3) // 4 if cap > 0 else None
+
+
+def check_mcp_runtime_lifecycle() -> tuple[str, str, str]:
+    """Surface lifecycle pressure without importing the heavyweight server."""
+    name = "MCP runtime lifecycle"
+    try:
+        import mcp_broker
+
+        policy = mcp_broker.proxy_policy()
+        lease_state = mcp_broker.proxy_lease_state(policy=policy)
+        inventory = list(lease_state["live"])
+        live = len(inventory)
+        legacy_incompatible = len(
+            lease_state.get("legacy_incompatible") or []
+        )
+        unassociated_capable = len(
+            lease_state.get("unassociated_capable") or []
+        )
+        other_owner_leases = len(lease_state.get("other_live_owner") or [])
+        observed_live = len(lease_state.get("observed_live") or [])
+        summary = mcp_broker.lifecycle_summary(
+            hours=24, lease_state=lease_state, policy=policy
+        )
+        discovery = mcp_broker.read_discovery()
+        discovery_live = (
+            discovery is not None
+            and mcp_broker.probe_discovery(discovery, timeout=0.2)
+        )
+    except Exception as exc:
+        return name, WARN, f"could not inspect lifecycle state: {exc}"
+
+    counts = summary.get("counts") or {}
+    warning_count = int(summary.get("warning_count") or 0)
+    cap = int(policy["cap"])
+    high_water = int(summary.get("proxy_high_water") or 0)
+    warn_at = _proxy_high_water_warn_at(cap)
+    current_over_cap_s = float(summary.get("current_over_cap_duration_s") or 0.0)
+    stale_leases = int(summary.get("current_stale_leases") or 0)
+    currently_over_cap = bool(summary.get("currently_over_cap")) or (
+        cap > 0 and live > cap
+    )
+    latest_start = summary.get("latest_daemon_start") or {}
+    start_detail = (
+        f"latest start={latest_start.get('reason', 'unknown')} "
+        f"in {latest_start.get('cold_start_duration_ms', 'unknown')}ms; "
+        if latest_start else ""
+    )
+    if os.environ.get("LATCH_MCP_ALLOW_LEGACY_FALLBACK") or os.environ.get(
+        "LATCH_MCP_FORCE_LEGACY"
+    ):
+        return name, WARN, (
+            "legacy mode/fallback is explicitly enabled; this can restore one "
+            "heavyweight model per stdio process"
+        )
+    pressure: list[str] = []
+    if warning_count:
+        signals = ", ".join(
+            f"{event}={count}" for event, count in counts.items()
+            if event in {
+                "daemon_failed", "daemon_start_failed", "daemon_owner_conflict",
+                "daemon_upgrade_incompatible",
+                "proxy_over_cap", "proxy_retired", "legacy_fallback",
+                "prompt_retrieval_degraded", "daemon_reconnect_failed",
+                "daemon_disconnect_unknown_outcome",
+                "proxy_upgrade_fresh_task_required",
+            } and count
+        )
+        pressure.append(f"{warning_count} lifecycle event(s): {signals}")
+    if warn_at is not None and high_water >= warn_at:
+        pressure.append(
+            f"proxy high-water {high_water} reached the 75% review threshold "
+            f"{warn_at}/{cap}"
+        )
+    if currently_over_cap:
+        pressure.append(
+            f"proxy pool is currently over cap for at least {current_over_cap_s:.1f}s"
+        )
+    if stale_leases:
+        pressure.append(
+            f"{stale_leases} stale live lease(s), oldest at least "
+            f"{float(summary.get('max_stale_lease_age_s') or 0.0):.1f}s"
+        )
+    if legacy_incompatible:
+        pressure.append(
+            f"{legacy_incompatible} pre-capability proxy lease(s) cannot join the "
+            "owner pool; start fresh tasks and close the old host contexts"
+        )
+    if unassociated_capable:
+        pressure.append(
+            f"{unassociated_capable} capable historical proxy lease(s) are included "
+            "in the owner cap but have not reconnected and migrated"
+        )
+    if other_owner_leases:
+        pressure.append(
+            f"{other_owner_leases} proxy lease(s) belong to another live "
+            "blue/green owner and remain a separate capacity scope"
+        )
+    if discovery is not None and isinstance(discovery.get("error"), str):
+        pressure.append(discovery["error"])
+    elif discovery is not None and not discovery_live:
+        pressure.append(
+            f"discovery points to unreachable owner pid={discovery['pid']}"
+        )
+    if pressure:
+        retirement_boundary = ""
+        if counts.get("proxy_retired"):
+            retirement_boundary = (
+                " A retired proxy cannot prove same-task host restart without a stable "
+                "host connection id; confirm reconnect or start a fresh task."
+            )
+        return name, WARN, (
+            f"24h lifecycle pressure: {'; '.join(pressure)}. "
+            f"Max completed over-cap duration="
+            f"{summary.get('max_over_cap_duration_s', 0)}s. "
+            f"{start_detail}Peak daemon connections="
+            f"{summary.get('max_peak_connections', 0)}. "
+            "Inspect latch_runtime_status lifecycle.recent_warnings and revisit "
+            f"the lease/idle defaults if this persists.{retirement_boundary}"
+        )
+    owner = f"owner pid={discovery['pid']}" if discovery_live else "no active owner"
+    return name, OK, (
+        f"{owner}; owner-scoped live leases={live}/{cap}; "
+        f"observed vault leases={observed_live}; "
+        f"retire idle={policy['retire_idle_s']:.0f}s; stale after={policy['stale_s']:.0f}s; "
+        f"24h high-water={high_water}"
+        f"/{warn_at if warn_at is not None else 'unbounded'}; "
+        f"{start_detail}peak daemon connections="
+        f"{summary.get('max_peak_connections', 0)}; "
+        "no lifecycle pressure events in 24h"
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Orchestration
 # --------------------------------------------------------------------------- #
@@ -654,8 +791,10 @@ def run_all(skip_embed: bool, no_arch: bool, allow_old_py: bool,
         results.append(("ONNX embedder", SKIP, "skipped: required imports failed"))
     if no_mcp:
         results.append(("MCP server wiring", SKIP, "skipped (--no-mcp)"))
+        results.append(("MCP runtime lifecycle", SKIP, "skipped (--no-mcp)"))
     else:
         results.append(check_mcp_wiring())
+        results.append(check_mcp_runtime_lifecycle())
     if no_commands:
         results.append(("slash commands installed", SKIP, "skipped (--no-commands)"))
     else:
@@ -716,8 +855,11 @@ def main(argv: list[str] | None = None) -> int:
             "machine": platform.machine(),
             "executable": sys.executable,
             "python": platform.python_version(),
-            "checks": [{"name": n, "level": l, "detail": d} for n, l, d in results],
-            "ok": all(l != FAIL for _, l, _ in results),
+            "checks": [
+                {"name": name, "level": level, "detail": detail}
+                for name, level, detail in results
+            ],
+            "ok": all(level != FAIL for _, level, _ in results),
         }
         print(json.dumps(payload, indent=2))
         return 0 if payload["ok"] else 1

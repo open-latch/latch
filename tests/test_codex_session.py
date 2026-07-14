@@ -45,7 +45,9 @@ def test_read_session_marker_missing_or_invalid_returns_none():
     try:
         _assert(codex_session.read_marker(tmp) is None, "missing marker should be None")
         project_dir.mkdir(parents=True, exist_ok=True)
-        codex_session.marker_path(tmp).write_text("{not json", encoding="utf-8")
+        marker = codex_session.marker_path(tmp)
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text("{not json", encoding="utf-8")
         _assert(codex_session.read_marker(tmp) is None, "bad marker should be None")
         _assert(codex_session.read_session_id(tmp) is None, "bad marker session id should be None")
     finally:
@@ -54,7 +56,28 @@ def test_read_session_marker_missing_or_invalid_returns_none():
     print("PASS read_session_marker_missing_or_invalid_returns_none")
 
 
+def test_pinned_vault_keeps_workspace_markers_distinct():
+    shared = Path(tempfile.mkdtemp(prefix="codex_session_shared_vault_"))
+    project_a = Path(tempfile.mkdtemp(prefix="codex_session_project_a_"))
+    project_b = Path(tempfile.mkdtemp(prefix="codex_session_project_b_"))
+    old = paths._PINNED_DIR
+    try:
+        paths._PINNED_DIR = shared
+        marker_a = codex_session.write_marker(project_a, "session-a")
+        marker_b = codex_session.write_marker(project_b, "session-b")
+        _assert(marker_a != marker_b, "pinned vault markers must be keyed by workspace")
+        _assert(codex_session.read_session_id(project_a) == "session-a", marker_a)
+        _assert(codex_session.read_session_id(project_b) == "session-b", marker_b)
+    finally:
+        paths._PINNED_DIR = old
+        shutil.rmtree(shared, ignore_errors=True)
+        shutil.rmtree(project_a, ignore_errors=True)
+        shutil.rmtree(project_b, ignore_errors=True)
+    print("PASS pinned_vault_keeps_workspace_markers_distinct")
+
+
 if __name__ == "__main__":
     test_write_and_read_session_marker()
     test_read_session_marker_missing_or_invalid_returns_none()
+    test_pinned_vault_keeps_workspace_markers_distinct()
     print("\nAll codex_session tests pass.")
