@@ -3,8 +3,9 @@
   "captured_at_utc": "2026-07-14T23:43:20Z",
   "base_commit": "5d33047e9532eb091b46faaeac32d4d3d44f4ce0",
   "candidate_state": {
-    "source_commit": "2450c24aab35b4302c0dbb07a324a214cc538d53",
-    "proof_artifact_commit": "1463ade7516237bd00b3a72dfe42ab5192780a94"
+    "proof_source_commit": "2450c24aab35b4302c0dbb07a324a214cc538d53",
+    "proof_artifact_commit": "1463ade7516237bd00b3a72dfe42ab5192780a94",
+    "final_contract_commit": "5afc52fbabadc8329734583613d87a994b5cada2"
   },
   "mainline_integration": {
     "origin_main_commit": "5d33047e9532eb091b46faaeac32d4d3d44f4ce0",

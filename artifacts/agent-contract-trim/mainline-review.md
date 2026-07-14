@@ -1,9 +1,11 @@
 # Compact agent contract mainline review
 
 This local integration replays the compact managed contract on public main
-`5d33047e9532eb091b46faaeac32d4d3d44f4ce0`. The source commit is
-`2450c24aab35b4302c0dbb07a324a214cc538d53`; its direct proof child is
-`1463ade7516237bd00b3a72dfe42ab5192780a94`.
+`5d33047e9532eb091b46faaeac32d4d3d44f4ce0`. The final contract commit is
+`5afc52fbabadc8329734583613d87a994b5cada2`. The proof packet was captured
+from source commit `2450c24aab35b4302c0dbb07a324a214cc538d53`; its direct proof child is
+`1463ade7516237bd00b3a72dfe42ab5192780a94`. Later contract-only corrections
+do not change the runtime bundle covered by that proof packet.
 
 The replay preserves the newer Cursor MCP catalog recovery wording and the
 current-main Cursor hook identity parser. There is no candidate diff from
