@@ -193,15 +193,23 @@ def render_cursor_server(
 ) -> dict[str, Any]:
     launcher = cursor_mcp_launcher(python_path)
     env = _adapter_env(model_backend)
+    entry = server_py
     if launcher != python_path:
         # Shell-backed Cursor workflows need a console interpreter so their
         # JSON/stdout remains visible.  Installed command/skill assets read
         # this field instead of reusing the windowless MCP launcher.
         env["LATCH_PYTHON"] = _forward_slash(python_path)
+        # Windows windowless transport: pythonw runs mcp_launcher_win.py, which
+        # spawns a base console python.exe child with CREATE_NO_WINDOW, hands it
+        # Cursor's inherited stdin/stdout/stderr pipes, runs mcp_server.py there,
+        # and owns it with a JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE job. This gives
+        # the server real OS pipes (no in-process handle recovery) with no
+        # console window and no orphaned proxy/daemon processes.
+        entry = str(Path(server_py).with_name("mcp_launcher_win.py"))
     return {
         "type": "stdio",
         "command": _forward_slash(launcher),
-        "args": [_forward_slash(server_py)],
+        "args": [_forward_slash(entry)],
         "env": env,
     }
 
