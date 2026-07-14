@@ -364,7 +364,8 @@ Restart Cursor after installing hooks so it reloads `.cursor/hooks.json`; run
 separate, user-controlled prerequisites: authenticate the Agent CLI with
 `agent login`; approve the project `latch` MCP server when Cursor prompts; and
 in the IDE open **Cursor Settings > Tools & MCP**, select the current workspace,
-turn on **latch**, and confirm **48 tools enabled**. Start a fresh Agent chat
+turn on **latch**, and confirm it reports **tools enabled**; the exact count can
+grow with the MCP surface. Start a fresh Agent chat
 after enabling it. A `needs approval` / `not approved` result proves the static
 config was discovered, while even a CLI `ready` / 48-tool result does not prove
 the IDE workspace toggle is enabled. Neither condition alone proves that IDE MCP

@@ -82,7 +82,8 @@ def cursor_ide_enablement_guidance() -> str:
     """Return the user-controlled IDE activation step CLI probes cannot prove."""
     return (
         "Cursor IDE action required: open Cursor Settings > Tools & MCP, select "
-        "this workspace, and enable latch. Expect '48 tools enabled'. A successful "
+        "this workspace, and enable latch. Confirm latch reports tools enabled; "
+        "the exact count can grow with the MCP surface. A successful "
         "'agent mcp list' or 'agent mcp list-tools latch' result is CLI-only and "
         "does not prove the Cursor IDE workspace toggle is enabled."
     )

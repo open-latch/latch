@@ -219,7 +219,7 @@ def test_cursor_ide_enablement_guidance_is_explicit_and_proof_honest():
     text = ic.cursor_ide_enablement_guidance()
     _assert("Cursor Settings > Tools & MCP" in text, text)
     _assert("workspace" in text.lower() and "latch" in text, text)
-    _assert("48 tools enabled" in text, text)
+    _assert("tools enabled" in text and "exact count can grow" in text, text)
     _assert("agent mcp" in text and "does not prove" in text, text)
     print("PASS cursor_ide_enablement_guidance_is_explicit_and_proof_honest")
 

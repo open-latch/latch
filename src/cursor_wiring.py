@@ -192,7 +192,8 @@ def repair_project(project: str | Path) -> RepairResult:
     restart = (
         " Cursor reloads MCP when project wiring changes and may disable the "
         "workspace server again. Open Cursor Settings > Tools & MCP, select this "
-        "workspace, re-enable latch, confirm '48 tools enabled', and then start a "
+        "workspace, re-enable latch, confirm latch reports tools enabled (the "
+        "exact count can grow with the MCP surface), and then start a "
         "fresh Agent chat."
         if changed_reload else ""
     )

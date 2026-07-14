@@ -185,7 +185,7 @@ def test_check_cursor_cli_mcp_ok_and_failure():
         _assert(ok.level == cd.OK, ok)
         _assert("CLI-only" in ok.detail, ok)
         _assert("Cursor Settings > Tools & MCP" in ok.detail, ok)
-        _assert("48 tools enabled" in ok.detail, ok)
+        _assert("tools enabled" in ok.detail and "exact count can grow" in ok.detail, ok)
         args = args_file.read_text(encoding="utf-8")
         _assert("mcp\nlist\n" in args and "mcp\nlist-tools\nlatch\n" in args, args)
 

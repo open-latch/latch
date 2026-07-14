@@ -43,7 +43,8 @@ does not approve project MCP servers: separately approve the `latch` server in
 Cursor when Cursor prompts. If `agent mcp list` reports `needs approval` or
 `not approved`, static wiring exists but live MCP/gate acceptance is still
 blocked. Before testing chat, open **Cursor Settings > Tools & MCP**, select the
-current workspace, enable **latch**, confirm **48 tools enabled**, and start a
+current workspace, enable **latch**, confirm it reports **tools enabled** (the
+exact count can grow with the MCP surface), and start a
 fresh Agent chat. CLI `ready` and `agent mcp list-tools latch` output are
 CLI-only proof and do not establish that the IDE workspace toggle is enabled.
 Do not edit Cursor's private state or invent an undocumented CLI command to
@@ -54,7 +55,7 @@ compatibility backend instead of native Cursor.
 A one-time latch wiring repair after an engine upgrade may legitimately update
 `.cursor/mcp.json`. Cursor can revoke the workspace toggle when that file
 changes. When the SessionStart brief reports a repair, re-enable **latch** in
-**Cursor Settings > Tools & MCP**, reconfirm **48 tools enabled**, and start a
+**Cursor Settings > Tools & MCP**, reconfirm it reports **tools enabled**, and start a
 fresh Agent chat. A second task must not rewrite current wiring.
 
 Expected files in the target project:
