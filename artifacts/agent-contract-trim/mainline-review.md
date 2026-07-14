@@ -20,6 +20,12 @@ public main in the current-prompt hook implementation or its focused tests.
 - The Cursor rule is within 50 lines and 350 words; Cursor's combined
   always-loaded surface is within 150 lines and 1,000 words.
 
+A fresh independent Latch/parity review caught three omissions in the first
+trim: standing-directive capture offers, completed sequence-plan promotion, and
+Cursor's exact `latch_pm_preview` to one `latch_insert` boundary. All three were
+restored compactly and added to the obligation/scenario corpus before the final
+review.
+
 ## Cursor live findings
 
 A two-run payload probe used Cursor Agent CLI `2026.07.09-a3815c0`, once with

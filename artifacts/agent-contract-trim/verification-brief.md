@@ -29,6 +29,8 @@ it does not claim that rendering tests prove agent compliance.
 - Uncovered-claim remedy completion rate.
 - Human-facing activity-receipt compliance by host.
 - Confirmed decision/rejected-path capture precision and noise rate.
+- Standing-directive offer rate and user-approved priority capture precision.
+- Completed sequence plans left non-canonical after their final shipped step.
 - Structural violations: canonical losers behind `supersedes`, reversed
   `reconciled_by`, stale prerequisites, and stale targets still used as current.
 - Change-flow mix for supersede, reconcile, keep-both, and in-place claim edits.

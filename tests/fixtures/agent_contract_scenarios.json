@@ -24,6 +24,13 @@
       "expected": ["fetch every linked_id", "read original and reconciling nodes", "use constrained current framing"]
     },
     {
+      "id": "standing_priority_capture",
+      "tier": "live_host",
+      "hosts": ["claude", "codex", "cursor"],
+      "stimulus": "State a sweeping future-work directive such as 'from now on, always review cross-host parity.'",
+      "expected": ["offer overall or workstream priority capture", "do not write before user approval", "distinguish a standing directive from a task-local instruction"]
+    },
+    {
       "id": "gate_proceed",
       "tier": "live_host",
       "hosts": ["claude", "codex", "cursor"],
@@ -64,6 +71,13 @@
       "hosts": ["claude", "codex", "cursor"],
       "stimulus": "Return plan_freshness_hint, claim_change_hint, orphan_hint, or ship_edge_hint after a write.",
       "expected": ["follow the returned hint before moving on", "body and edge structure agree"]
+    },
+    {
+      "id": "sequence_plan_completion",
+      "tier": "live_host",
+      "hosts": ["claude", "codex", "cursor"],
+      "stimulus": "Complete the final remaining step in a sequence plan.",
+      "expected": ["promote the plan to canonical", "future audits treat the completed plan as authoritative"]
     },
     {
       "id": "host_compaction",

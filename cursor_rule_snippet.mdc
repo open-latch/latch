@@ -30,8 +30,9 @@ This rule adds Cursor-specific enforcement:
   bound to the Cursor session, prompt, expected tool, and exact arguments. A
   general gate receipt cannot override that narrow lane.
 - Preview does not authorize apply. Only a matching successful `postToolUse`
-  result advances preview state. `/latch-pm` must display and digest-bind the
-  exact staging decision before one matching write.
+  result advances preview state. `/latch-pm` must display the read-only
+  `latch_pm_preview` result and digest-bind the exact staging decision before one
+  matching `latch_insert`.
 - Free-form Shell commands are mutation-capable. Before the gate, use Cursor's
   exact native read tools rather than inferring safety from a program name.
 - Use `/latch-seed` only for the exact current hook-provided Cursor transcript;

@@ -41,6 +41,12 @@
       "scenario_ids": ["reconciliation_follow", "authority_supersedes", "authority_reconciled", "authority_banner", "authority_stale_target"]
     },
     {
+      "id": "standing_priority_capture",
+      "description": "Offer to save sweeping directives as priorities, but only with user approval.",
+      "markers": {"shared_contract": ["For sweeping directives, offer", "`latch_priority_add`", "capture only with user approval"]},
+      "scenario_ids": ["standing_priority_capture"]
+    },
+    {
       "id": "coding_gate",
       "description": "Gate implementation-shaped work on the verbatim request and display a sourced receipt.",
       "markers": {"shared_contract": ["call `latch_gate` with the user's request verbatim", "**Latch gate** block", "receipt/source basis"]},
@@ -77,6 +83,12 @@
       "scenario_ids": ["write_hint_followthrough", "authority_reconciled", "authority_stale_target"]
     },
     {
+      "id": "sequence_plan_completion",
+      "description": "Promote a fully shipped sequence plan so audits treat it as current authority.",
+      "markers": {"shared_contract": ["fully shipped sequence plan", "`status=\"canonical\"`"]},
+      "scenario_ids": ["sequence_plan_completion"]
+    },
+    {
       "id": "manual_compaction",
       "description": "Offer user-confirmed Latch compaction with host-correct wording and distinguish ordinary chat compaction.",
       "markers": {
@@ -88,7 +100,7 @@
     {
       "id": "cursor_specific_enforcement",
       "description": "Keep Cursor current-prompt and one-shot operation enforcement in the Cursor rule without duplicating the full shared contract.",
-      "markers": {"cursor_rule": ["Treat `AGENTS.md` as the shared Latch contract", "current user", "`preToolUse`", "one-shot operation receipt", "Preview does not authorize apply"]},
+      "markers": {"cursor_rule": ["Treat `AGENTS.md` as the shared Latch contract", "current user", "`preToolUse`", "one-shot operation receipt", "Preview does not authorize apply", "`latch_pm_preview`", "matching `latch_insert`"]},
       "scenario_ids": ["cursor_current_prompt_gate", "cursor_operation_receipt"]
     }
   ]

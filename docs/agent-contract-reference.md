@@ -73,7 +73,9 @@ current truth. `latch_verify` can distinguish `OK`, `RECONCILED`, `STALE`, and
 Standing priorities are short user directives surfaced by SessionStart and the
 gate. Overall priorities apply everywhere; workstream priorities apply when the
 request resolves to that workstream. They are guidance unless a user decision
-or gate verdict makes them blocking.
+or gate verdict makes them blocking. When a user states a sweeping directive
+such as "always" or "from now on," offer to capture it with
+`latch_priority_add`; write it only with the user's approval.
 
 ## Gate receipts and degraded states
 
@@ -140,7 +142,8 @@ Tool-returned hints are part of the write contract:
 Use `latch_append` for workstream/progress deltas and `latch_update` for living
 plan text when no canonical claim changes. Tombstone invalid edges with
 `latch_unlink` so they stop affecting reads and traversal without losing the
-audit trail.
+audit trail. Once every step in a sequence plan has shipped, promote the plan to
+`status="canonical"` so future audits treat it as authoritative.
 
 When a newer canonical fact or decision narrows an older canonical node without
 fully replacing it, add `older --reconciled_by--> newer`. Both remain canonical,

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "captured_at_utc": "2026-07-14T23:17:26Z",
+  "captured_at_utc": "2026-07-14T23:37:25Z",
   "base_commit": "5d33047e9532eb091b46faaeac32d4d3d44f4ce0",
   "candidate_state": {
     "source_commit": "2450c24aab35b4302c0dbb07a324a214cc538d53",
@@ -27,18 +27,18 @@
       "cursor_always_loaded": {"lines": 319, "words": 2562, "bytes": 17711, "sha256": "a14ccc6952b231a90d4efe18b1e646c55c57fac0a7418591cee6f9f6aef5decd"}
     },
     "candidate": {
-      "source_snippet": {"lines": 87, "words": 559, "bytes": 4238, "sha256": "f57fe3a39b211218e5e129e281253a2c7aa53069fbf7a561f08860ef65c5531c"},
-      "claude_managed_block": {"lines": 92, "words": 623, "bytes": 4644, "sha256": "6ba81e4d3aaaff35630c1138681a24e4da19fc632f0e80fe5155e43ba60deb78"},
-      "agents_managed_block": {"lines": 92, "words": 624, "bytes": 4655, "sha256": "bb8bf747bd6f117e45eda625e7e53abda17f94259c14acf090c05ec3751e2d0e"},
-      "cursor_rule": {"lines": 45, "words": 338, "bytes": 2375, "sha256": "a53ac815fbe9f211a19e2353dca5211533eb24bb8f9e9b4cb49944af1df0ed46"},
-      "cursor_always_loaded": {"lines": 138, "words": 962, "bytes": 7031, "sha256": "7a80ec19dec022c7682c4c89b981ee2343ca1a1a18eda7d64c438207c505b18c"}
+      "source_snippet": {"lines": 89, "words": 574, "bytes": 4367, "sha256": "2b8a64e16f1fedd43624dab7e2f4cb0b2182b4fbe6371e0277c8c8157cedde69"},
+      "claude_managed_block": {"lines": 94, "words": 638, "bytes": 4773, "sha256": "d95ade9bd4e54d6d0be3ff3a71e9b07303faa48a14b764ed0c6ddb8fdd6f16f7"},
+      "agents_managed_block": {"lines": 94, "words": 639, "bytes": 4784, "sha256": "a2e8d5621109f1bfc678de1e0dcf9a2949f23adee0a1abcd9f9a79eae92e1113"},
+      "cursor_rule": {"lines": 46, "words": 342, "bytes": 2426, "sha256": "f9063a595f6d8a6f72cfcddd46aa85317ae57b26898eb3c48c34e010f0ae3550"},
+      "cursor_always_loaded": {"lines": 141, "words": 981, "bytes": 7211, "sha256": "9260934d08bc3dd1eeacd98ab1a4d6dd7b3c7e38ce88198228e890beeb3244a4"}
     },
     "reductions_percent": {
-      "source_snippet": {"lines": 65.6, "words": 72.3},
-      "claude_managed_block": {"lines": 64.1, "words": 69.6},
-      "agents_managed_block": {"lines": 64.1, "words": 69.6},
-      "cursor_rule": {"lines": 27.4, "words": 33.9},
-      "cursor_always_loaded": {"lines": 56.7, "words": 62.5}
+      "source_snippet": {"lines": 64.8, "words": 71.6},
+      "claude_managed_block": {"lines": 63.3, "words": 68.9},
+      "agents_managed_block": {"lines": 63.3, "words": 68.8},
+      "cursor_rule": {"lines": 25.8, "words": 33.1},
+      "cursor_always_loaded": {"lines": 55.8, "words": 61.7}
     },
     "budgets": {
       "claude_managed_block": {"max_lines": 100, "max_words": 650, "passed": true},
@@ -84,6 +84,14 @@
       "duration_seconds": 96.72,
       "proof_packet_check": "passed",
       "note": "The rebased source preserved current-main Cursor fixes. A clean live proof was recaptured from the replayed source commit, its three generated artifacts were committed as the direct child, and the complete suite passed."
+    },
+    "independent_review_corrections": {
+      "result": "fixed_and_covered",
+      "items": [
+        "Restored the cross-host offer to capture sweeping directives through latch_priority_add only with user approval.",
+        "Restored canonical promotion for fully shipped sequence plans.",
+        "Restored Cursor's exact read-only latch_pm_preview to one matching latch_insert boundary."
+      ]
     },
     "cursor_live_probe": {
       "result": "base_host_limitation_reproduced",

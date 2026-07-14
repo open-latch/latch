@@ -33,8 +33,9 @@ or recent call. If Latch or the SessionStart brief is missing, follow
 
 Every `latch_get` / `kb_get` result has `reconciliation_banner`. When non-empty,
 fetch every `linked_id` and read both nodes before acting. `reconciled_by` keeps
-both nodes true in scope; `supersedes` makes the older node stale. Weigh any
-standing priorities surfaced by SessionStart or the gate.
+both nodes true in scope; `supersedes` makes the older node stale. Weigh
+priorities from SessionStart or the gate. For sweeping directives, offer
+`latch_priority_add`; capture only with user approval.
 
 ### 2. Gate and resolve implementation work
 
@@ -80,7 +81,8 @@ claim; `orphan_hint` means add the matching edge or remove the id mention; and
 When a newer canonical fact/decision narrows an older one without replacing it,
 link older → newer with `reconciled_by`. Tombstone invalid edges with
 `latch_unlink`. Prefer `latch_append` for workstream/progress deltas and
-`latch_update` for living plan text when no canonical claim changes.
+`latch_update` for living plan text when no canonical claim changes. Promote a
+fully shipped sequence plan to `status="canonical"`.
 
 ### 5. Compact deliberately
 
