@@ -14,8 +14,8 @@ Treat `AGENTS.md` as the shared Latch contract for live reads, authority and
 reconciliation, visible receipts, durable capture, write hints, and compaction.
 This rule adds Cursor-specific enforcement:
 
-- If the session brief exists but the IDE has no Latch tools, do not repeatedly
-  call `latch_gate`. Ask the user to open Cursor Settings > Tools & MCP, enable
+- If the session brief exists but the IDE has no Latch tools, do not repeatedly call
+  `latch_gate`. Ask the user to open Cursor Settings > Tools & MCP, enable
   workspace server `latch`, and start a fresh Agent chat. `agent mcp list` does
   not prove the IDE toggle.
 - Before an ordinary coding mutation, pass the current user request verbatim to
