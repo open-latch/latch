@@ -171,9 +171,10 @@ def cursor_mcp_launcher(
 
     Cursor starts the configured stdio server as a long-lived child.  Launching
     ``python.exe`` directly gives that child a foreground console on Windows.
-    A standard Windows venv installs ``pythonw.exe`` beside ``python.exe``;
-    when present, it preserves the inherited stdio handles without allocating
-    a console window.  Custom interpreters without that sibling stay unchanged.
+    A standard Windows venv installs ``pythonw.exe`` beside ``python.exe``.
+    When present, it avoids allocating a console window; ``mcp_server.py``
+    restores Python's standard streams from Cursor's inherited pipe handles.
+    Custom interpreters without that sibling stay unchanged.
     """
     if (system or platform.system()) != "Windows":
         return python_path

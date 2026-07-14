@@ -44,6 +44,9 @@ def _repair_cursor_wiring_from_mcp_startup() -> None:
 # MCP/NumPy/ONNX imports so each host context stays a small stdio proxy.  Imports
 # of this module (tests and the shared daemon) still expose the tool registry.
 if __name__ == "__main__":
+    from windows_stdio import ensure_windows_standard_streams  # noqa: E402
+
+    ensure_windows_standard_streams()
     _repair_cursor_wiring_from_mcp_startup()
     if not os.environ.get("LATCH_MCP_LEGACY"):
         from mcp_proxy import main as _proxy_main  # noqa: E402

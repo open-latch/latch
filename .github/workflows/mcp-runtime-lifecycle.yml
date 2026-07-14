@@ -4,11 +4,13 @@ on:
   pull_request:
     paths:
       - "src/mcp_*.py"
+      - "src/windows_stdio.py"
       - "src/embeddings.py"
       - "src/codex_session.py"
       - "src/hooks/user_prompt_submit.py"
       - "src/doctor.py"
       - "tests/test_mcp_*.py"
+      - "tests/test_windows_stdio.py"
       - "tests/test_doctor.py"
       - "tests/test_codex_session.py"
       - "docs/mcp_resource_architecture.md"
@@ -50,4 +52,5 @@ jobs:
           tests/test_codex_session.py
           tests/test_mcp_session_id.py
           tests/test_mcp_proxy_session.py
+          tests/test_windows_stdio.py
           tests/test_embed_daemon.py
