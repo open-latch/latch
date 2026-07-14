@@ -11,9 +11,9 @@ public main in the current-prompt hook implementation or its focused tests.
 
 ## Local verification
 
-- 77 focused contract, sync, wiring, public guard, and Cursor lifecycle tests
+- 78 focused contract, sync, wiring, public guard, and Cursor lifecycle tests
   passed.
-- The complete dependency-backed suite passed: 1,061 tests in 96.72 seconds.
+- The complete dependency-backed suite passed: 1,062 tests in 102.80 seconds.
 - The proof packet is current and public-safe.
 - Public-release hygiene, whitespace, and changed-shell syntax checks passed.
 - Claude and Codex managed blocks are within 100 lines and 650 words.

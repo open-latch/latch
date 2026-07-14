@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "captured_at_utc": "2026-07-14T23:37:25Z",
+  "captured_at_utc": "2026-07-14T23:43:20Z",
   "base_commit": "5d33047e9532eb091b46faaeac32d4d3d44f4ce0",
   "candidate_state": {
     "source_commit": "2450c24aab35b4302c0dbb07a324a214cc538d53",
@@ -50,7 +50,7 @@
   "verification": {
     "rebased_focused_suite": {
       "result": "passed",
-      "tests": 77,
+      "tests": 78,
       "covers": [
         "managed contract artifacts and budgets",
         "Claude, Codex, and Cursor sync and wiring",
@@ -60,7 +60,7 @@
     },
     "contract_and_sync": {
       "result": "passed",
-      "tests": 46,
+      "tests": 47,
       "command": "python -m pytest -q tests/test_agent_contract_artifacts.py tests/test_claude_md_sync.py tests/test_agents_md_sync.py tests/test_codex_session_start.py tests/test_cursor_rules_sync.py tests/test_wiring_version.py tests/test_versioning.py tests/test_public_release_check.py"
     },
     "authority_graph": {
@@ -79,9 +79,9 @@
     },
     "dependency_complete_suite": {
       "result": "passed",
-      "passed": 1061,
+      "passed": 1062,
       "failed": 0,
-      "duration_seconds": 96.72,
+      "duration_seconds": 102.80,
       "proof_packet_check": "passed",
       "note": "The rebased source preserved current-main Cursor fixes. A clean live proof was recaptured from the replayed source commit, its three generated artifacts were committed as the direct child, and the complete suite passed."
     },
