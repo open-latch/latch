@@ -17,7 +17,8 @@ receipts do not allow those environment assignments.
 Latch Cursor skill boundary: resolve `latch_home` as `${CURSOR_PLUGIN_ROOT}`
 when set, otherwise use the absolute checkout in the project-sync footer.
 Select native `cursor` for plugin installs or the backend in that footer. Run
-`python "$latch_home/src/maintenance.py" tree "$PWD"` with
+`<CURSOR_MCP_PYTHON> "$latch_home/src/maintenance.py" tree "$PWD"` with
+`LATCH_PYTHON` set to that same absolute interpreter and
 `LATCH_MAINTENANCE_BACKEND` and `LATCH_MODEL_BACKEND` set. Report linkage,
 leaves, landmarks, clusters, summary counts, singletons, skipped oversize
 clusters, budget blocking, LLM failures, and stale prior summaries.

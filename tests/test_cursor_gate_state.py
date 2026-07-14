@@ -306,6 +306,7 @@ def test_managed_operations_reject_attacker_interpreter_paths(monkeypatch):
     try:
         attacks = [
             ("/latch-heal", f"/tmp/python {maintenance} nightly {root}"),
+            ("/latch-heal", f"python3 {maintenance} nightly {root}"),
             ("/latch-compact", f"/tmp/bash {compact} {sid}"),
             ("/latch-heal", f"C:/Temp/python.exe {maintenance} nightly {root}"),
             ("/latch-compact", f"C:/Temp/powershell.exe {compact_ps1} {sid}"),
@@ -353,6 +354,13 @@ def test_seed_operation_requires_preview_then_explicit_apply():
             f"--cursor-session-id {sid} --format json", root, sid,
         )
         assert cpre.decision(untrusted_python)["permission"] == "deny"
+
+        cgs.begin_prompt(root, sid, "/latch-seed")
+        path_python = _shell(
+            f"LATCH_PYTHON=python3 bash {seed} --source cursor "
+            f"--cursor-session-id {sid} --format json", root, sid,
+        )
+        assert cpre.decision(path_python)["permission"] == "deny"
 
         cgs.begin_prompt(root, sid, "/latch-seed")
         preview = _shell(
@@ -584,7 +592,9 @@ def test_managed_operation_intent_never_falls_through_to_general_gate():
 
         cgs.begin_prompt(root, sid, prompt)
         arm(prompt)
-        valid = _shell(f"python {maintenance} nightly {root}", root, sid)
+        valid = _shell(
+            f"{shlex.quote(sys.executable)} {maintenance} nightly {root}", root, sid,
+        )
         assert cpre.decision(valid) == {}
         assert cpre.decision(valid)["permission"] == "deny"
     finally:
@@ -597,12 +607,13 @@ def test_other_managed_operations_match_only_expected_wrappers():
 
     root, project_dir = _tmp()
     sid = "managed-operation-session"
+    python = shlex.quote(sys.executable)
     cases = [
         ("/latch-gate-report", f"bash {paths.KB_ROOT / 'bin' / 'latch_gate_report.sh'}"),
-        ("/latch-budget-approve", f"python {paths.KB_ROOT / 'src' / 'budget.py'} approve {root}"),
-        ("/latch-decay", f"python {paths.KB_ROOT / 'src' / 'maintenance.py'} weekly {root}"),
-        ("/latch-heal", f"python {paths.KB_ROOT / 'src' / 'maintenance.py'} nightly {root}"),
-        ("/latch-tree", f"python {paths.KB_ROOT / 'src' / 'maintenance.py'} tree {root}"),
+        ("/latch-budget-approve", f"{python} {paths.KB_ROOT / 'src' / 'budget.py'} approve {root}"),
+        ("/latch-decay", f"{python} {paths.KB_ROOT / 'src' / 'maintenance.py'} weekly {root}"),
+        ("/latch-heal", f"{python} {paths.KB_ROOT / 'src' / 'maintenance.py'} nightly {root}"),
+        ("/latch-tree", f"{python} {paths.KB_ROOT / 'src' / 'maintenance.py'} tree {root}"),
     ]
     try:
         for prompt, command in cases:
@@ -612,7 +623,7 @@ def test_other_managed_operations_match_only_expected_wrappers():
         maintenance = paths.KB_ROOT / "src" / "maintenance.py"
         cgs.begin_prompt(root, sid, "/latch-heal")
         assert cpre.decision(_shell(
-            f'python {maintenance} nightly "$PWD"', root, sid,
+            f'{python} {maintenance} nightly "$PWD"', root, sid,
         )) == {}
 
         cgs.begin_prompt(root, sid, "/unlatch")
@@ -641,10 +652,11 @@ def test_managed_maintenance_receipt_rejects_wrong_project_and_script_path():
     attacker_dir = paths.KB_ROOT / "attacker"
     attacker_script = attacker_dir / "maintenance.py"
     official_script = paths.KB_ROOT / "src" / "maintenance.py"
+    python = shlex.quote(sys.executable)
     try:
         cgs.begin_prompt(root, sid, "/latch-heal")
         wrong_project = _shell(
-            f"python {official_script} nightly {other_root}", root, sid,
+            f"{python} {official_script} nightly {other_root}", root, sid,
         )
         assert cpre.decision(wrong_project)["permission"] == "deny"
 
@@ -652,12 +664,12 @@ def test_managed_maintenance_receipt_rejects_wrong_project_and_script_path():
         attacker_script.write_text("# not a managed script\n", encoding="utf-8")
         cgs.begin_prompt(root, sid, "/latch-heal")
         wrong_script = _shell(
-            f"python {attacker_script} nightly {root}", root, sid,
+            f"{python} {attacker_script} nightly {root}", root, sid,
         )
         assert cpre.decision(wrong_script)["permission"] == "deny"
 
         cgs.begin_prompt(root, sid, "/latch-heal")
-        expected = _shell(f"python {official_script} nightly {root}", root, sid)
+        expected = _shell(f"{python} {official_script} nightly {root}", root, sid)
         assert cpre.decision(expected) == {}
     finally:
         attacker_script.unlink(missing_ok=True)
@@ -679,10 +691,11 @@ def test_managed_budget_receipt_rejects_wrong_project_and_script_path():
     attacker_dir = paths.KB_ROOT / "attacker"
     attacker_script = attacker_dir / "budget.py"
     official_script = paths.KB_ROOT / "src" / "budget.py"
+    python = shlex.quote(sys.executable)
     try:
         cgs.begin_prompt(root, sid, "/latch-budget-approve")
         wrong_project = _shell(
-            f"python {official_script} approve {other_root}", root, sid,
+            f"{python} {official_script} approve {other_root}", root, sid,
         )
         assert cpre.decision(wrong_project)["permission"] == "deny"
 
@@ -690,20 +703,20 @@ def test_managed_budget_receipt_rejects_wrong_project_and_script_path():
         attacker_script.write_text("# not a managed script\n", encoding="utf-8")
         cgs.begin_prompt(root, sid, "/latch-budget-approve")
         wrong_script = _shell(
-            f"python {attacker_script} approve {root}", root, sid,
+            f"{python} {attacker_script} approve {root}", root, sid,
         )
         assert cpre.decision(wrong_script)["permission"] == "deny"
 
         cgs.begin_prompt(root, sid, "/latch-budget-approve")
-        expected = _shell(f"python {official_script} approve {root}", root, sid)
+        expected = _shell(f"{python} {official_script} approve {root}", root, sid)
         assert cpre.decision(expected) == {}
 
         cgs.begin_prompt(root, sid, "/latch-budget-approve")
-        pwd_form = _shell(f'python {official_script} approve "$PWD"', root, sid)
+        pwd_form = _shell(f'{python} {official_script} approve "$PWD"', root, sid)
         assert cpre.decision(pwd_form) == {}
 
         cgs.begin_prompt(root, sid, "/latch-budget-approve")
-        wrong_cwd = _shell(f'python {official_script} approve "$PWD"', root, sid)
+        wrong_cwd = _shell(f'{python} {official_script} approve "$PWD"', root, sid)
         wrong_cwd["tool_input"]["cwd"] = other_root
         assert cpre.decision(wrong_cwd)["permission"] == "deny"
     finally:

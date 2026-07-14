@@ -818,7 +818,15 @@ def _resolved_executable(value: str) -> Path | None:
 
 
 def _trusted_launcher(value: str) -> bool:
-    candidate = _resolved_executable(value)
+    text = _strip_quotes(value)
+    has_path = Path(text).is_absolute() or "/" in text or "\\" in text
+    # Shell wrappers may be located through PATH, but Python may not.  Cursor
+    # current-session workflows must use the absolute MCP-bound interpreter;
+    # accepting bare ``python3`` here revives the interpreter-drift/SIGILL path
+    # even when every installed skill emits LATCH_PYTHON correctly.
+    if not has_path and Path(text).name.lower() not in _SHELL_LAUNCHERS:
+        return False
+    candidate = _resolved_executable(text)
     if candidate is None:
         return False
     trusted: set[Path] = {Path(sys.executable).resolve(strict=False)}
@@ -826,7 +834,7 @@ def _trusted_launcher(value: str) -> bool:
         configured = (os.environ.get(env_name) or "").strip()
         if configured:
             trusted.add(Path(configured).expanduser().resolve(strict=False))
-    for name in sorted(_SHELL_LAUNCHERS | _PYTHON_LAUNCHERS):
+    for name in sorted(_SHELL_LAUNCHERS):
         located = shutil.which(name)
         if located:
             trusted.add(Path(located).resolve(strict=False))

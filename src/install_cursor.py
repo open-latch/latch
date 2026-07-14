@@ -97,8 +97,10 @@ CURSOR_COMMAND_FOOTER = (
 CURSOR_PYTHON_BOUNDARY_NOTE = (
     "\n\nCursor shell interpreter boundary: before any Shell call, read the "
     "workspace `.cursor/mcp.json` and use the exact absolute "
-    "`mcpServers.latch.command` as `LATCH_PYTHON`. Never fall back to a "
-    "PATH `python3`; the MCP interpreter owns latch's native dependencies. "
+    "`mcpServers.latch.command` as `<CURSOR_MCP_PYTHON>` and `LATCH_PYTHON`. "
+    "When the command calls Python directly, invoke that same absolute "
+    "`<CURSOR_MCP_PYTHON>` path as the launcher. Never fall back to a PATH "
+    "`python3`; the MCP interpreter owns latch's native dependencies. "
     "Use the rendered absolute script path directly; do not export "
     "`LATCH_HOME` or `CLAUDE_KB_HOME` in the Shell call."
 )
@@ -261,6 +263,9 @@ def render_cursor_command(
     backend = model_backend or "cursor"
     body = src.read_text(encoding="utf-8").replace(COMMAND_PLACEHOLDER, home)
     body = body.replace(CURSOR_BACKEND_PLACEHOLDER, backend)
+    # Managed Cursor receipts reject command substitution.  The constrained
+    # $PWD sentinel is matched against the Shell tool cwd by cursor_gate_state.
+    body = body.replace('"$(pwd)"', '"$PWD"')
     body = body.replace(
         f"bash {home}/bin/run_latch_gate.sh",
         f"LATCH_GATE_BACKEND={backend} LATCH_MODEL_BACKEND={backend} "
@@ -268,9 +273,20 @@ def render_cursor_command(
     )
     body = body.replace(
         f'python "{home}/src/maintenance.py"',
+        f'LATCH_PYTHON="<CURSOR_MCP_PYTHON>" '
         f'LATCH_MAINTENANCE_BACKEND={backend} LATCH_MODEL_BACKEND={backend} '
-        f'python "{home}/src/maintenance.py"',
+        f'"<CURSOR_MCP_PYTHON>" "{home}/src/maintenance.py"',
     )
+    body = body.replace(
+        f'python "{home}/src/budget.py"',
+        f'LATCH_PYTHON="<CURSOR_MCP_PYTHON>" '
+        f'"<CURSOR_MCP_PYTHON>" "{home}/src/budget.py"',
+    )
+    if name == "latch-decay.md":
+        body = body.replace(
+            f'"<CURSOR_MCP_PYTHON>" "{home}/src/maintenance.py" "$PWD"',
+            f'"<CURSOR_MCP_PYTHON>" "{home}/src/maintenance.py" weekly "$PWD"',
+        )
     if "mcpServers.latch.command" not in body:
         body = body.rstrip() + CURSOR_PYTHON_BOUNDARY_NOTE
     elif "do not export `LATCH_HOME`" not in body:

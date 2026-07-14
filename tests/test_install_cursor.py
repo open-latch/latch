@@ -250,6 +250,15 @@ def test_cursor_shell_workflows_pin_mcp_interpreter():
         _assert("mcpServers.latch.command" in text, name)
         _assert("Never fall back" in text and "PATH `python3`" in text, name)
         _assert("do not export `LATCH_HOME`" in text, name)
+        _assert('\npython "' not in text, f"bare PATH Python remains in {name}")
+        _assert("$(pwd)" not in text, f"command substitution remains in {name}")
+        if name in {
+            "latch-budget-approve.md", "latch-decay.md",
+            "latch-heal.md", "latch-tree.md",
+        }:
+            _assert('"<CURSOR_MCP_PYTHON>"' in text, name)
+        if name == "latch-decay.md":
+            _assert('maintenance.py" weekly "$PWD"' in text, text)
 
     for name in ic.CURSOR_SKILL_NAMES:
         if name == "source-command-latch-pm":
@@ -260,6 +269,11 @@ def test_cursor_shell_workflows_pin_mcp_interpreter():
         _assert("mcpServers.latch.command" in text, path)
         _assert("Never fall back" in text and "PATH `python3`" in text, path)
         _assert("Do not export" in text and "`LATCH_HOME`" in text, path)
+        if name in {
+            "source-command-latch-budget-approve", "source-command-latch-decay",
+            "source-command-latch-heal", "source-command-latch-tree",
+        }:
+            _assert("<CURSOR_MCP_PYTHON>" in text, path)
     print("PASS cursor_shell_workflows_pin_mcp_interpreter")
 
 
