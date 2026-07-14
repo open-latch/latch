@@ -1,10 +1,17 @@
 {
   "schema_version": 1,
-  "captured_at_utc": "2026-07-14T04:15:21Z",
+  "captured_at_utc": "2026-07-14T23:17:26Z",
   "base_commit": "b4028bb95bb1a48ca605994a317f174e17d57010",
   "candidate_state": {
-    "source_commit": "cbe5d02090c0a1dc75efc853c9c312810066fd2a",
-    "proof_artifact_commit": "ea049ae2bc15661bef3366894f7af78901a61c1a"
+    "source_commit": "2450c24aab35b4302c0dbb07a324a214cc538d53",
+    "proof_artifact_commit": "1463ade7516237bd00b3a72dfe42ab5192780a94"
+  },
+  "mainline_integration": {
+    "origin_main_commit": "5d33047e9532eb091b46faaeac32d4d3d44f4ce0",
+    "local_branch": "trim-contract-mainline-review",
+    "source_replayed_on_origin_main": true,
+    "proof_recaptured_from_replayed_source": true,
+    "remote_or_public_git_actions": "none"
   },
   "wiring_version": {
     "before": 1,
@@ -23,15 +30,15 @@
       "source_snippet": {"lines": 87, "words": 559, "bytes": 4238, "sha256": "f57fe3a39b211218e5e129e281253a2c7aa53069fbf7a561f08860ef65c5531c"},
       "claude_managed_block": {"lines": 92, "words": 623, "bytes": 4644, "sha256": "6ba81e4d3aaaff35630c1138681a24e4da19fc632f0e80fe5155e43ba60deb78"},
       "agents_managed_block": {"lines": 92, "words": 624, "bytes": 4655, "sha256": "bb8bf747bd6f117e45eda625e7e53abda17f94259c14acf090c05ec3751e2d0e"},
-      "cursor_rule": {"lines": 41, "words": 290, "bytes": 2107, "sha256": "1bb45c32664e4c3bd455622aa012ef084b75b48385ece9c9b4eeadf7ebd33237"},
-      "cursor_always_loaded": {"lines": 134, "words": 914, "bytes": 6763, "sha256": "9959283e59bcde6ace85161abaa4dffaa4e6a0c5c1445763aeec0d7718c62dab"}
+      "cursor_rule": {"lines": 45, "words": 338, "bytes": 2375, "sha256": "a53ac815fbe9f211a19e2353dca5211533eb24bb8f9e9b4cb49944af1df0ed46"},
+      "cursor_always_loaded": {"lines": 138, "words": 962, "bytes": 7031, "sha256": "7a80ec19dec022c7682c4c89b981ee2343ca1a1a18eda7d64c438207c505b18c"}
     },
     "reductions_percent": {
       "source_snippet": {"lines": 65.6, "words": 72.3},
       "claude_managed_block": {"lines": 64.1, "words": 69.6},
       "agents_managed_block": {"lines": 64.1, "words": 69.6},
-      "cursor_rule": {"lines": 26.8, "words": 33.2},
-      "cursor_always_loaded": {"lines": 57.2, "words": 63.2}
+      "cursor_rule": {"lines": 19.6, "words": 22.1},
+      "cursor_always_loaded": {"lines": 55.9, "words": 61.3}
     },
     "budgets": {
       "claude_managed_block": {"max_lines": 100, "max_words": 650, "passed": true},
@@ -41,6 +48,16 @@
     }
   },
   "verification": {
+    "rebased_focused_suite": {
+      "result": "passed",
+      "tests": 77,
+      "covers": [
+        "managed contract artifacts and budgets",
+        "Claude, Codex, and Cursor sync and wiring",
+        "public release guard",
+        "Cursor gate identity parsing and lifecycle"
+      ]
+    },
     "contract_and_sync": {
       "result": "passed",
       "tests": 46,
@@ -58,15 +75,38 @@
     },
     "public_release_hygiene": {
       "result": "passed",
-      "tracked_and_new_files_scanned": 343
+      "tracked_and_new_files_scanned": 344
     },
     "dependency_complete_suite": {
       "result": "passed",
-      "passed": 1050,
+      "passed": 1061,
       "failed": 0,
-      "duration_seconds": 107.33,
+      "duration_seconds": 96.72,
       "proof_packet_check": "passed",
-      "note": "The initial run passed 1044 tests and correctly refused 5 stale-proof cases. A clean live proof was then recaptured from the candidate source commit, its three generated artifacts were committed as the direct child, and the complete suite passed."
+      "note": "The rebased source preserved current-main Cursor fixes. A clean live proof was recaptured from the replayed source commit, its three generated artifacts were committed as the direct child, and the complete suite passed."
+    },
+    "cursor_live_probe": {
+      "result": "base_host_limitation_reproduced",
+      "cli": "Cursor Agent 2026.07.09-a3815c0",
+      "runs": 2,
+      "with_force_events": ["sessionStart", "preToolUse", "postToolUse"],
+      "without_force_events": ["sessionStart"],
+      "missing_event": "beforeSubmitPrompt",
+      "effect": "The CLI cannot arm a prompt hash, so the opt-in preToolUse hook fails closed on mutation even after a matching gate call.",
+      "candidate_vs_origin_main_enforcement_diff": "none",
+      "interpretation": "This is not a compact-contract regression. Cursor IDE must be exercised separately because the headless CLI cannot prove current-prompt receipt success."
+    },
+    "cursor_targeted_replay": {
+      "result": "diagnostic_only",
+      "trials": 8,
+      "current_prompt_primary": "Three of three runs reached exact gate calls but performed no expected mutation because beforeSubmitPrompt did not arm state.",
+      "current_prompt_secondary": "One run rejected a stale echoed request and did not mutate.",
+      "pm_primary": "Three runs previewed but writes were hook-blocked while current-prompt state was unavailable.",
+      "pm_secondary": "One run previewed and correctly requested a later /latch-pm apply turn.",
+      "scoring_corrections": [
+        "A missing expected mutation in a blocker case must be a hard functional failure.",
+        "The PM scenario must use two turns in one resumed Cursor session; preview and apply are intentionally not a one-turn flow."
+      ]
     }
   },
   "host_smokes": {
@@ -83,7 +123,7 @@
     "cursor": {
       "cli": "Cursor Agent 2026.07.09-a3815c0",
       "deterministic_result": "passed",
-      "live_agent_scenarios": "not run in this distribution pass"
+      "live_agent_scenarios": "Targeted enforcement replay completed; the CLI host limitation and invalid one-turn PM expectation are recorded under verification."
     }
   },
   "update_and_rollback": {
@@ -98,11 +138,14 @@
     "limitation": "Rollback is backup-based and per-file; an atomic multi-file Cursor rollback transaction is not implemented."
   },
   "unverified_gaps": [
-    "The live three-host behavioral scenario corpus has not yet been run against isolated candidate installs.",
+    "The complete live Claude Code, Codex, and Cursor behavioral corpus has not yet been run against isolated mainline and candidate installs.",
+    "Cursor IDE current-prompt receipt success is not proven; the current Cursor Agent CLI does not emit beforeSubmitPrompt in the tested headless path.",
+    "Cursor PM preview/apply still needs a two-turn resumed-session live test, including exact-match success, changed-argument denial, and receipt replay denial.",
     "Longitudinal adherence and silent-failure rates are not measured, so no claim is made about degradation over time.",
     "Rendered line and word reduction is a leading footprint indicator, not proof of lower latency, cost, or better decisions.",
     "No Windows host lifecycle was exercised in this pass.",
-    "Existing Cursor commands, skills, and hooks were covered by lifecycle tests, but their full behavioral matrix was not replayed with live model calls.",
+    "Existing Cursor commands, skills, and hooks were covered by lifecycle tests, but their corrected full behavioral matrix was not replayed with live model calls.",
+    "The degraded-gate behavior is not uniformly enforced outside hook-capable hosts; the deep pass must measure and report this rather than infer safety from markdown wording.",
     "No automated alert currently detects every missed supersede, reconciliation, capture, or stop-and-show behavior."
   ],
   "follow_on": "See verification-brief.md for the exact deep-verification objective, hypotheses, indicators, baselines, and missing instrumentation."

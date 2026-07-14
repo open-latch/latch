@@ -60,6 +60,25 @@ thresholds. A low `reconciled_by` count is not automatically a defect.
 - Calibrated alert thresholds and age-gated reporting for relation underuse.
 - A causal comparison separating contract wording effects from hook, gate,
   retrieval, model, and project-data changes.
+- A Cursor IDE run proving that `beforeSubmitPrompt` arms a gate receipt. The
+  tested headless Cursor Agent CLI emitted session and tool hooks but did not
+  emit `beforeSubmitPrompt`, so CLI failure is a host-availability result rather
+  than evidence about the compact wording.
+- A valid two-turn Cursor PM run in one resumed session: preview first, then an
+  exact `/latch-pm apply`, plus changed-argument and replay-denial controls.
+- Hard-failure scoring when a blocker case requires a mutation and no mutation
+  occurs. Fail-closed safety and functional success must be reported
+  separately.
+
+## Silent-failure checks
+
+Treat missed authority transitions as engine-health signals, not markdown-only
+compliance. The deep pass should seed labeled supersede and reconcile moments,
+verify the expected edge and status transition, and alert on canonical losers,
+stale targets reused as current, missing banners, and in-place canonical claim
+rewrites. It should also exercise a degraded gate with no recommendation on
+each host and report whether mutation was structurally blocked, merely warned,
+or allowed.
 
 ## Recommended next objective
 
