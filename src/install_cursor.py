@@ -97,7 +97,13 @@ CURSOR_PYTHON_BOUNDARY_NOTE = (
     "\n\nCursor shell interpreter boundary: before any Shell call, read the "
     "workspace `.cursor/mcp.json` and use the exact absolute "
     "`mcpServers.latch.command` as `LATCH_PYTHON`. Never fall back to a "
-    "PATH `python3`; the MCP interpreter owns latch's native dependencies."
+    "PATH `python3`; the MCP interpreter owns latch's native dependencies. "
+    "Use the rendered absolute script path directly; do not export "
+    "`LATCH_HOME` or `CLAUDE_KB_HOME` in the Shell call."
+)
+CURSOR_HOME_ENV_BOUNDARY_NOTE = (
+    "\n\nUse the resolved latch home only to construct the absolute script path; "
+    "do not export `LATCH_HOME` or `CLAUDE_KB_HOME` in the Shell call."
 )
 CURSOR_COMPACT_ASSETS = (
     Path("src") / "cursor_backend.py",
@@ -266,6 +272,8 @@ def render_cursor_command(
     )
     if "mcpServers.latch.command" not in body:
         body = body.rstrip() + CURSOR_PYTHON_BOUNDARY_NOTE
+    elif "do not export `LATCH_HOME`" not in body:
+        body = body.rstrip() + CURSOR_HOME_ENV_BOUNDARY_NOTE
     backend_note = (
         "\n\nCursor shell-fallback backend: `" + backend + "`. On PowerShell, "
         "set `LATCH_MODEL_BACKEND`, `LATCH_GATE_BACKEND`, "

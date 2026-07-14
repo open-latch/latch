@@ -10,6 +10,9 @@ Latch operation id: latch-heal run
 Before any Shell call, read the workspace `.cursor/mcp.json` and use the exact
 absolute `mcpServers.latch.command` as `LATCH_PYTHON`. Never fall back to a
 PATH `python3`; the MCP interpreter owns latch's native dependencies.
+Use `latch_home` only to construct the absolute script path. Do not export
+`LATCH_HOME` or `CLAUDE_KB_HOME` in the Shell call; managed Cursor operation
+receipts do not allow those environment assignments.
 
 Latch Cursor skill boundary: resolve `latch_home` as `${CURSOR_PLUGIN_ROOT}`
 when set, otherwise use the absolute checkout in the project-sync footer.

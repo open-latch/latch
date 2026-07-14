@@ -249,6 +249,7 @@ def test_cursor_shell_workflows_pin_mcp_interpreter():
         _assert("LATCH_PYTHON" in text and ".cursor/mcp.json" in text, name)
         _assert("mcpServers.latch.command" in text, name)
         _assert("Never fall back" in text and "PATH `python3`" in text, name)
+        _assert("do not export `LATCH_HOME`" in text, name)
 
     for name in ic.CURSOR_SKILL_NAMES:
         if name == "source-command-latch-pm":
@@ -258,6 +259,7 @@ def test_cursor_shell_workflows_pin_mcp_interpreter():
         _assert("LATCH_PYTHON" in text and ".cursor/mcp.json" in text, path)
         _assert("mcpServers.latch.command" in text, path)
         _assert("Never fall back" in text and "PATH `python3`" in text, path)
+        _assert("Do not export" in text and "`LATCH_HOME`" in text, path)
     print("PASS cursor_shell_workflows_pin_mcp_interpreter")
 
 
