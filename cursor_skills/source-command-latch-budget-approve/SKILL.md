@@ -10,8 +10,9 @@ Latch operation id: latch-budget-approve run
 Latch Cursor skill boundary: this workflow is safe for project-synced skills
 and the Cursor plugin. Never approve the budget proactively.
 
-Before any Shell call, read the workspace `.cursor/mcp.json` and use the exact
-absolute `mcpServers.latch.command` as `LATCH_PYTHON`. Never fall back to a
+Before any Shell call, read the workspace `.cursor/mcp.json` and use
+`mcpServers.latch.env.LATCH_PYTHON` when present, otherwise
+`mcpServers.latch.command`, as `<CURSOR_MCP_PYTHON>` and `LATCH_PYTHON`. Never fall back to a
 PATH `python3`; the MCP interpreter owns latch's native dependencies.
 Use `latch_home` only to construct the absolute script path. Do not export
 `LATCH_HOME` or `CLAUDE_KB_HOME` in the Shell call; managed Cursor operation

@@ -13,10 +13,13 @@ the `beforeSubmitPrompt` hook re-injected it from this chat's payload. Substitut
 it for `<CURSOR_SESSION_ID>` below. Do not use an id from another chat or omit
 the argument.
 
-Read the workspace `.cursor/mcp.json` and take the exact absolute `command`
-from `mcpServers.latch` as `<CURSOR_MCP_PYTHON>`. Set `LATCH_PYTHON` to
-that interpreter on every Shell call below. Do not fall back to a PATH
-`python3`: the MCP interpreter owns latch's native dependencies.
+Read the workspace `.cursor/mcp.json` and take the exact absolute
+`mcpServers.latch.env.LATCH_PYTHON` when present, otherwise the exact absolute
+`mcpServers.latch.command`, as `<CURSOR_MCP_PYTHON>`. The Windows MCP command
+may be the windowless `pythonw.exe`; Shell calls must use the console
+interpreter from the env field. Set `LATCH_PYTHON` to that interpreter on every
+Shell call below. Never fall back to a PATH `python3`: the MCP interpreter owns
+latch's native dependencies.
 
 First run a preview from the current project:
 

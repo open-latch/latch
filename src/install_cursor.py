@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import platform
 import sys
 from pathlib import Path
 from typing import Any
@@ -97,9 +98,11 @@ CURSOR_COMMAND_FOOTER = (
 CURSOR_PYTHON_BOUNDARY_NOTE = (
     "\n\nCursor shell interpreter boundary: before any Shell call, read the "
     "workspace `.cursor/mcp.json` and use the exact absolute "
-    "`mcpServers.latch.command` as `<CURSOR_MCP_PYTHON>` and `LATCH_PYTHON`. "
-    "When the command calls Python directly, invoke that same absolute "
-    "`<CURSOR_MCP_PYTHON>` path as the launcher. Never fall back to a PATH "
+    "`mcpServers.latch.env.LATCH_PYTHON` when present, otherwise "
+    "`mcpServers.latch.command`, as `<CURSOR_MCP_PYTHON>` and `LATCH_PYTHON`. "
+    "The Windows MCP command may be the windowless `pythonw.exe`; Shell "
+    "workflows must use the console interpreter stored in the env field. "
+    "Invoke that absolute `<CURSOR_MCP_PYTHON>` path directly. Never fall back to a PATH "
     "`python3`; the MCP interpreter owns latch's native dependencies. "
     "Use the rendered absolute script path directly; do not export "
     "`LATCH_HOME` or `CLAUDE_KB_HOME` in the Shell call."
@@ -159,17 +162,46 @@ def _adapter_env(model_backend: str | None = None) -> dict[str, str]:
     return env
 
 
+def cursor_mcp_launcher(
+    python_path: str,
+    *,
+    system: str | None = None,
+) -> str:
+    """Use the windowless venv interpreter for Cursor's Windows MCP proxy.
+
+    Cursor starts the configured stdio server as a long-lived child.  Launching
+    ``python.exe`` directly gives that child a foreground console on Windows.
+    A standard Windows venv installs ``pythonw.exe`` beside ``python.exe``;
+    when present, it preserves the inherited stdio handles without allocating
+    a console window.  Custom interpreters without that sibling stay unchanged.
+    """
+    if (system or platform.system()) != "Windows":
+        return python_path
+    python = Path(python_path)
+    if python.name.lower() != "python.exe":
+        return python_path
+    windowless = python.with_name("pythonw.exe")
+    return str(windowless) if windowless.is_file() else python_path
+
+
 def render_cursor_server(
     python_path: str,
     server_py: str,
     *,
     model_backend: str | None = None,
 ) -> dict[str, Any]:
+    launcher = cursor_mcp_launcher(python_path)
+    env = _adapter_env(model_backend)
+    if launcher != python_path:
+        # Shell-backed Cursor workflows need a console interpreter so their
+        # JSON/stdout remains visible.  Installed command/skill assets read
+        # this field instead of reusing the windowless MCP launcher.
+        env["LATCH_PYTHON"] = _forward_slash(python_path)
     return {
         "type": "stdio",
-        "command": _forward_slash(python_path),
+        "command": _forward_slash(launcher),
         "args": [_forward_slash(server_py)],
-        "env": _adapter_env(model_backend),
+        "env": env,
     }
 
 
