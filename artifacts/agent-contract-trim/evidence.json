@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "captured_at_utc": "2026-07-14T23:17:26Z",
-  "base_commit": "b4028bb95bb1a48ca605994a317f174e17d57010",
+  "base_commit": "5d33047e9532eb091b46faaeac32d4d3d44f4ce0",
   "candidate_state": {
     "source_commit": "2450c24aab35b4302c0dbb07a324a214cc538d53",
     "proof_artifact_commit": "1463ade7516237bd00b3a72dfe42ab5192780a94"
@@ -23,8 +23,8 @@
       "source_snippet": {"lines": 253, "words": 2020, "bytes": 13893, "sha256": "495d6e3290bb909c39d455809a722667e0e4ea5ad1b6a44fe6ee4a19fab867bc"},
       "claude_managed_block": {"lines": 256, "words": 2049, "bytes": 14093, "sha256": "06771683089def562b99f500fbe65301ae20d5af0a4159d4819e7058b8ef294b"},
       "agents_managed_block": {"lines": 256, "words": 2051, "bytes": 14107, "sha256": "c0e4c6a171f7cdb3b90467dd2cb29c0196fa29231cb6589080846e98d1976752"},
-      "cursor_rule": {"lines": 56, "words": 434, "bytes": 3158, "sha256": "b1f453228f8736345fa761ae770a632c359a2d0611dcd5a0dcf2c9aaf5af614c"},
-      "cursor_always_loaded": {"lines": 313, "words": 2485, "bytes": 17266, "sha256": "86b57d1dedaa929cc0c01c08f6b84f36967fed3ea422bfe7b8f6ef847cd21238"}
+      "cursor_rule": {"lines": 62, "words": 511, "bytes": 3603, "sha256": "86a71ec4419c274ead8fcc4b995a4d6d9e95e3f1d46c9669dba8397a393a3ffc"},
+      "cursor_always_loaded": {"lines": 319, "words": 2562, "bytes": 17711, "sha256": "a14ccc6952b231a90d4efe18b1e646c55c57fac0a7418591cee6f9f6aef5decd"}
     },
     "candidate": {
       "source_snippet": {"lines": 87, "words": 559, "bytes": 4238, "sha256": "f57fe3a39b211218e5e129e281253a2c7aa53069fbf7a561f08860ef65c5531c"},
@@ -37,8 +37,8 @@
       "source_snippet": {"lines": 65.6, "words": 72.3},
       "claude_managed_block": {"lines": 64.1, "words": 69.6},
       "agents_managed_block": {"lines": 64.1, "words": 69.6},
-      "cursor_rule": {"lines": 19.6, "words": 22.1},
-      "cursor_always_loaded": {"lines": 55.9, "words": 61.3}
+      "cursor_rule": {"lines": 27.4, "words": 33.9},
+      "cursor_always_loaded": {"lines": 56.7, "words": 62.5}
     },
     "budgets": {
       "claude_managed_block": {"max_lines": 100, "max_words": 650, "passed": true},

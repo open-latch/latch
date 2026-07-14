@@ -6,6 +6,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
@@ -143,6 +145,67 @@ def test_evidence_candidate_footprints_match_rendered_surfaces() -> None:
         "cursor_always_loaded": _evidence_metric(agents + "\n" + cursor_rule),
     }
     assert evidence["measurement"]["candidate"] == measured
+
+
+def test_evidence_baseline_footprints_match_base_commit() -> None:
+    evidence = json.loads(
+        (ROOT / "artifacts" / "agent-contract-trim" / "evidence.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    commit = evidence["base_commit"]
+
+    def show(path: str) -> str:
+        proc = subprocess.run(
+            ["git", "show", f"{commit}:{path}"],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+        )
+        if proc.returncode != 0:
+            pytest.skip(f"baseline commit {commit} is unavailable in this checkout")
+        return proc.stdout
+
+    version = show("WIRING_VERSION").strip()
+    source = show("claude_md_snippet.md")
+
+    def contract(target_name: str, installer_name: str) -> str:
+        text = source.replace("{{KB_HOME}}", "/opt/latch")
+        if target_name != "CLAUDE.md":
+            text = text.replace("CLAUDE.md", target_name)
+        if installer_name != "install_claude_md":
+            text = text.replace("install_claude_md", installer_name)
+        rendered = text.replace("\r\n", "\n").replace("\r", "\n").strip("\n")
+        return f"<!-- latch-wiring-version: {version} -->\n{rendered}"
+
+    claude = _block(
+        claude_md_sync.BEGIN_MARK,
+        contract("CLAUDE.md", "install_claude_md"),
+        claude_md_sync.END_MARK,
+    )
+    agents = _block(
+        agents_md_sync.BEGIN_MARK,
+        contract("AGENTS.md", "install_agents_md"),
+        agents_md_sync.END_MARK,
+    )
+    cursor_rule = (
+        show("cursor_rule_snippet.mdc")
+        .replace("{{KB_HOME}}", "/opt/latch")
+        .replace("{{WIRING_VERSION}}", version)
+        .replace("\r\n", "\n")
+        .replace("\r", "\n")
+        .strip("\n")
+        + "\n"
+    )
+    measured = {
+        "source_snippet": _evidence_metric(source),
+        "claude_managed_block": _evidence_metric(claude),
+        "agents_managed_block": _evidence_metric(agents),
+        "cursor_rule": _evidence_metric(cursor_rule),
+        "cursor_always_loaded": _evidence_metric(agents + "\n" + cursor_rule),
+    }
+    assert evidence["mainline_integration"]["origin_main_commit"] == commit
+    assert evidence["measurement"]["baseline"] == measured
 
 
 def test_generated_root_instruction_files_are_not_tracked() -> None:
