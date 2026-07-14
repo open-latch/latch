@@ -14,14 +14,14 @@ This packet combines one observed live gate receipt with two small, deterministi
 
 ## Observed live gate
 
-Captured with the `codex` backend on commit `3f60fa03f2528ae25ee1edda74d03395b1aac381`. This is a synthetic no-history fixture and used no personal conversation history.
+Captured with the `codex` backend on commit `5606b7143e4ef109e45662d26ba4dfc9bd0ce55b`. This is a synthetic no-history fixture and used no personal conversation history.
 
 ```text
 Request: Implement email sending by adding a Redis-backed background job queue.
 Recommendation: MODIFY
-Summary: The request’s goal, email sending, can proceed, but the requested implementation path is explicitly rejected by the canonical decision for this no-history demo app. Node 1 says not to add a background job queue, specifically rejects a Redis-backed queue, and directs background work to remain single-process via an inline task runner with documented limits.
-Risk if proceed: Adding Redis and a worker process would violate the install-light, easy-to-inspect demo-app constraint and repeat the rejected Redis-backed queue path.
-Better next action: Implement email sending with an inline single-process task runner and document its limits instead of adding Redis or a background worker.
+Summary: The request directly conflicts with the canonical decision not to add a background job queue to this no-history demo app (id=1). Redis-backed background jobs are specifically named as the rejected path, while the allowed path is to keep the app single-process and use an inline task runner if background work is needed.
+Risk if proceed: Adding Redis and a worker process would violate the install-light, easy-to-inspect demo-app constraint.
+Better next action: Implement email sending through the single-process allowed path: use an inline task runner and document its limit, rather than adding Redis-backed jobs.
 Cited evidence:
 - id=1 decision status=canonical: No background job queue for the no-history demo app
 Worktree changed before/after gate: no
@@ -63,7 +63,7 @@ This deterministic fixture eval grades seed-report capture and filtering; it is 
 
 ## Reproduce
 
-The deterministic results were generated from commit `3f60fa03f2528ae25ee1edda74d03395b1aac381`.
+The deterministic results were generated from commit `5606b7143e4ef109e45662d26ba4dfc9bd0ce55b`.
 
 ```bash
 bash bin/latch_eval.sh
