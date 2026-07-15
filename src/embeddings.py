@@ -149,19 +149,10 @@ def embed_remote(
     # other's embed endpoint.  Import locally to keep module initialization
     # ordering simple (mcp_broker itself remains stdlib-only).
     import mcp_broker
-    disc = mcp_broker.embed_discovery_path()
-    if not disc.exists():
-        return None
-    try:
-        meta = _json.loads(disc.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    meta = mcp_broker.read_live_embed_discovery()
+    if meta is None:
         return None
     host, port, token = meta.get("host"), meta.get("port"), meta.get("token")
-    if (
-        not host or not port or not token
-        or meta.get("runtime_key") != mcp_broker.RUNTIME_KEY
-    ):
-        return None
     try:
         with _socket.create_connection((host, int(port)), timeout=timeout) as s:
             s.settimeout(timeout)
