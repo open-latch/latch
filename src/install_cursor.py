@@ -980,6 +980,13 @@ def main(argv: list[str] | None = None) -> int:
             print(cursor_ide_enablement_guidance())
         if not args.with_hooks:
             print("Cursor hooks were not installed; re-run with --with-hooks for session briefing, pre-edit gating, and activity context.")
+        if args.with_hooks and os.name == "nt":
+            print(
+                "\nWindows note: the long-lived latch MCP server is launched\n"
+                "windowlessly. Project hooks continue to use the console Python so\n"
+                "Cursor can capture their gate decisions; some Windows/Cursor builds\n"
+                "may briefly show a console window while a hook runs."
+            )
         print("Cursor Agent CLI is the native model backend; pass --model-backend claude|codex only for an explicit compatibility override.")
     print()
     return 0
