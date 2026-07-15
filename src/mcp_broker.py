@@ -989,19 +989,124 @@ def remove_discovery_aliases_if_owner(*, pid: int, token: str) -> None:
                 pass
 
 
-def remove_embed_discovery_if_owner(*, pid: int, token: str) -> None:
-    path = embed_discovery_path()
+def read_live_embed_discovery(
+    *,
+    runtime_key: str | None = None,
+    owner_payload: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Return validated embed discovery for one runtime key.
+
+    ``owner_payload`` must be the MCP discovery record already selected by the
+    caller.  When supplied, the embed endpoint must belong to that exact live
+    process and, for aliases, declare the same blue/green owner.  Centralizing
+    this check keeps hook clients and alias publication from independently
+    trusting a stale ``embed.sock.json``.
+    """
+    key = runtime_key or RUNTIME_KEY
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload = json.loads(
+            embed_discovery_path(key).read_text(encoding="utf-8")
+        )
     except (OSError, ValueError):
-        return
-    if payload.get("pid") == pid and secrets.compare_digest(
-        str(payload.get("token") or ""), token
+        return None
+    if not isinstance(payload, dict) or payload.get("runtime_key") != key:
+        return None
+    host = payload.get("host")
+    port = payload.get("port")
+    token = payload.get("token")
+    pid = payload.get("pid")
+    if (
+        host != "127.0.0.1"
+        or not isinstance(port, int)
+        or isinstance(port, bool)
+        or not 1 <= port <= 65535
+        or not isinstance(token, str)
+        or not token
+        or not isinstance(pid, int)
+        or isinstance(pid, bool)
+        or not _pid_alive(pid)
     ):
+        return None
+    if owner_payload is not None:
+        owner_pid = owner_payload.get("pid")
+        owner_key = owner_payload.get("owner_runtime_key")
+        if not isinstance(owner_key, str) or not owner_key:
+            owner_key = owner_payload.get("runtime_key")
+        if not isinstance(owner_key, str) or not owner_key:
+            owner_key = RUNTIME_KEY
+        if (
+            not isinstance(owner_pid, int)
+            or isinstance(owner_pid, bool)
+            or pid != owner_pid
+            or not isinstance(owner_key, str)
+            or not owner_key
+        ):
+            return None
+        declared_owner = payload.get("owner_runtime_key")
+        if declared_owner is not None and declared_owner != owner_key:
+            return None
+    return payload
+
+
+def remove_embed_discovery_if_owner(*, pid: int, token: str) -> None:
+    """Remove every embed-discovery alias still owned by this exact PID/token.
+
+    A daemon publishes embed aliases under retained runtime keys during blue/
+    green upgrades (``publish_embed_alias``). On shutdown it must retract ALL of
+    them — not merely the current key's file — or a retained key keeps an embed
+    discovery pointing at this now-dead endpoint, and a retained-key process
+    reads it and fails every remote embed. Mirrors
+    ``remove_discovery_aliases_if_owner`` for the embed socket.
+    """
+    registry = runtime_dir() / "runtime" / RUNTIME_REGISTRY_DIR
+    try:
+        paths_to_check = list(registry.glob(f"*/{EMBED_DISCOVERY_FILE}"))
+    except OSError:
+        paths_to_check = []
+    for path in paths_to_check:
         try:
-            path.unlink()
-        except OSError:
-            pass
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if payload.get("pid") == pid and secrets.compare_digest(
+            str(payload.get("token") or ""), token
+        ):
+            try:
+                path.unlink()
+            except OSError:
+                pass
+
+
+def publish_embed_alias(
+    retained_key: str,
+    *,
+    owner_payload: dict[str, Any],
+) -> "Path | None":
+    """Repoint a retained runtime key's embed discovery at the current owner.
+
+    The blue/green MCP upgrade already aliases ``mcp-daemon.json`` for a retained
+    key so a retained proxy keeps reaching the new owner. The embed socket needs
+    the same alias, or a process still running under the retained key reads its
+    own stale/dead ``embed.sock.json`` and every remote embed fails
+    (``embed_daemon_unavailable``). Copy the current owner's live embed endpoint
+    under the retained key, tagged with ``owner_runtime_key`` so cleanup and
+    client validation can identify it. Returns the alias path, or None when the
+    owner has no live embed discovery to alias.
+    """
+    owner_meta = read_live_embed_discovery(owner_payload=owner_payload)
+    if owner_meta is None:
+        return None
+    owner_key = owner_payload.get("owner_runtime_key")
+    if not isinstance(owner_key, str) or not owner_key:
+        owner_key = owner_payload.get("runtime_key")
+    if not isinstance(owner_key, str) or not owner_key:
+        owner_key = RUNTIME_KEY
+    alias = dict(owner_meta)
+    alias["runtime_key"] = retained_key
+    alias["owner_runtime_key"] = owner_key
+    dest = embed_discovery_path(retained_key)
+    _atomic_json(dest, alias)
+    return dest
 
 
 def _main() -> int:

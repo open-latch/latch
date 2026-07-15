@@ -84,7 +84,7 @@ def _publish_upgrade_alias(
     payload: dict[str, Any],
     *,
     capable: bool,
-) -> None:
+) -> bool:
     compatibility = "migrate" if capable else "fresh_task_required"
     values = {
         "port": int(payload["port"]),
@@ -95,9 +95,26 @@ def _publish_upgrade_alias(
         "owner_runtime_key": mcp_broker.RUNTIME_KEY,
         "compatibility": compatibility,
     }
+    # Stage the embed alias first.  MCP discovery is the transition commit
+    # point: once a retained proxy can observe the new MCP owner, the matching
+    # embed alias has either already been published or the degraded state has
+    # been made explicit in lifecycle telemetry.
+    embed_alias = mcp_broker.publish_embed_alias(
+        runtime_key,
+        owner_payload=payload,
+    )
+    if embed_alias is None:
+        mcp_broker.emit_lifecycle(
+            "embed_alias_unavailable",
+            requested_runtime_key=runtime_key,
+            owner_runtime_key=(
+                payload.get("owner_runtime_key") or payload.get("runtime_key")
+            ),
+        )
     mcp_broker.publish_discovery(**values)
     if not capable:
         mcp_broker.publish_discovery(**values, legacy_path=True)
+    return embed_alias is not None
 
 
 def _alias_ready_owner(runtime_key: str, *, capable: bool) -> bool:
@@ -106,12 +123,15 @@ def _alias_ready_owner(runtime_key: str, *, capable: bool) -> bool:
     while time.monotonic() < deadline:
         payload = mcp_broker.read_discovery()
         if payload is not None and mcp_broker.probe_discovery(payload):
-            _publish_upgrade_alias(runtime_key, payload, capable=capable)
+            embed_alias_published = _publish_upgrade_alias(
+                runtime_key, payload, capable=capable
+            )
             mcp_broker.emit_lifecycle(
                 "daemon_upgrade_alias_published",
                 requested_runtime_key=runtime_key,
                 owner_runtime_key=mcp_broker.RUNTIME_KEY,
                 compatibility=("migrate" if capable else "fresh_task_required"),
+                embed_alias_published=embed_alias_published,
             )
             return True
         time.sleep(0.05)
