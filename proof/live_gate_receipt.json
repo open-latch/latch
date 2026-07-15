@@ -1,8 +1,8 @@
 {
   "backend": "codex",
-  "better_next_action": "Implement email sending with an inline task runner and document that the demo remains single-process and not suitable for durable background delivery.",
+  "better_next_action": "Implement email sending with an inline task runner and document that it is a demo limitation, per id=1.",
   "capture_command": "bash bin/latch_proof_packet.sh --capture-live --backend codex",
-  "captured_at_utc": "2026-07-15T03:19:23Z",
+  "captured_at_utc": "2026-07-15T03:25:57Z",
   "demo_kind": "synthetic_no_history_fixture",
   "evidence_nodes": [
     {
@@ -28,12 +28,12 @@
     "unchanged": true
   },
   "observed": true,
-  "recommendation": "MODIFY",
+  "recommendation": "DO_NOT_PROCEED",
   "request": "Implement email sending by adding a Redis-backed background job queue.",
-  "risk_if_proceed": "Adding Redis and a worker process would violate the install-light, easy-to-inspect demo-app constraint and repeat the explicitly rejected queue path.",
+  "risk_if_proceed": "Adding Redis and a worker process would violate the install-light, easy-to-inspect demo-app constraint already recorded in the canonical decision.",
   "schema_version": 2,
-  "source_commit": "a53310e9b36ad3e9fad3e3f536bb767c52ad9e3d",
-  "summary": "The request directly asks for the rejected implementation path: a Redis-backed background job queue. The canonical decision for this demo app is to avoid adding any background job queue, keep it single-process, and use an inline task runner if background work is needed (id=1). Email sending can proceed only if implemented without Redis or a worker process.",
+  "source_commit": "6c1af147b67f711670ee8d4cfd763a665d294711",
+  "summary": "The KB explicitly decides not to add a background job queue to this no-history demo app (id=1), and specifically rejects a Redis-backed background job queue. The allowed direction is to keep the app single-process and use an inline task runner if background work is needed, with the limitation documented.",
   "tested_runtime_git_blobs": {
     ".gitattributes": "dfdb8b771ce07609491fa2e83698969fd917a135",
     "benchmarks/fixtures/wedge_v1.jsonl": "f32c5544a247c43490b5b84a6c4c4a057e91716b",
@@ -88,7 +88,7 @@
     "src/hooks/vscode_session_start.py": "d446716797b22cdba2a985eddfc4aa943ba6d555",
     "src/install_claude_desktop.py": "37795eb3695cea94e468b44ac52e5522b99482ed",
     "src/install_codex.py": "27ad7c99333e30f0bb75814a616333d4d000338c",
-    "src/install_cursor.py": "9e4d8f22b32de27ede6d50da0eb29f044349d74b",
+    "src/install_cursor.py": "86ce0a32fed7b904eeafcaa71e760558d21178c6",
     "src/install_engine.py": "8d48e1dc8be62035a29c29b114dcde25b5bea572",
     "src/install_vscode.py": "4d3a1212de3efc01984876631a98230c9423250c",
     "src/kb_focus_cli.py": "beae60c37b3970c9642bac6ec7b29287755bbef8",
