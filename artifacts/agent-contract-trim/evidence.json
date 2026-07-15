@@ -1,39 +1,39 @@
 {
   "schema_version": 1,
-  "captured_at_utc": "2026-07-14T23:43:20Z",
-  "base_commit": "5d33047e9532eb091b46faaeac32d4d3d44f4ce0",
+  "captured_at_utc": "2026-07-15T04:35:26Z",
+  "base_commit": "51b36412e182623978b1f141fb8719182dddd833",
   "candidate_state": {
-    "proof_source_commit": "2450c24aab35b4302c0dbb07a324a214cc538d53",
-    "proof_artifact_commit": "1463ade7516237bd00b3a72dfe42ab5192780a94",
-    "final_contract_commit": "5afc52fbabadc8329734583613d87a994b5cada2",
+    "proof_source_commit": "e6234d691360cb6de0f5f523a1d615282a7b7462",
+    "proof_artifact_commit": "e6a9cfc637441c4e982a50575be1e04e2952a753",
+    "final_contract_commit": "b237a5269285cb9634fc5d6cf413af68596dfa41",
     "proof_scope": "The proof packet covers its declared gate/runtime manifest at proof_source_commit. It does not validate later managed contract text; that surface is covered by the contract, sync, wiring, and artifact checks below."
   },
   "mainline_integration": {
-    "origin_main_commit": "5d33047e9532eb091b46faaeac32d4d3d44f4ce0",
+    "origin_main_commit": "51b36412e182623978b1f141fb8719182dddd833",
     "local_branch": "trim-contract-mainline-review",
     "source_replayed_on_origin_main": true,
     "proof_recaptured_from_replayed_source": true,
-    "remote_or_public_git_actions": "none"
+    "remote_or_public_git_actions_at_capture": "none; this public-native stack is intended to replace the obsolete head of existing PR 6 after exact-head verification"
   },
   "wiring_version": {
-    "before": 1,
-    "candidate": 2
+    "before": 2,
+    "candidate": 3
   },
   "measurement": {
     "method": "Render each managed surface with kb_home=/opt/latch, include managed begin/end markers, count splitlines and whitespace-delimited words, and hash UTF-8 bytes.",
     "baseline": {
       "source_snippet": {"lines": 253, "words": 2020, "bytes": 13893, "sha256": "495d6e3290bb909c39d455809a722667e0e4ea5ad1b6a44fe6ee4a19fab867bc"},
-      "claude_managed_block": {"lines": 256, "words": 2049, "bytes": 14093, "sha256": "06771683089def562b99f500fbe65301ae20d5af0a4159d4819e7058b8ef294b"},
-      "agents_managed_block": {"lines": 256, "words": 2051, "bytes": 14107, "sha256": "c0e4c6a171f7cdb3b90467dd2cb29c0196fa29231cb6589080846e98d1976752"},
-      "cursor_rule": {"lines": 62, "words": 511, "bytes": 3603, "sha256": "86a71ec4419c274ead8fcc4b995a4d6d9e95e3f1d46c9669dba8397a393a3ffc"},
-      "cursor_always_loaded": {"lines": 319, "words": 2562, "bytes": 17711, "sha256": "a14ccc6952b231a90d4efe18b1e646c55c57fac0a7418591cee6f9f6aef5decd"}
+      "claude_managed_block": {"lines": 256, "words": 2049, "bytes": 14093, "sha256": "d4ab619433e75d648fc8fde0e4c620a3e7550b01e1526c3aca493d0c78cdcb59"},
+      "agents_managed_block": {"lines": 256, "words": 2051, "bytes": 14107, "sha256": "f63236a8b30b4c22d60e1e794d89e831ea3269d812dde4b0cafcad97ee650d4d"},
+      "cursor_rule": {"lines": 62, "words": 511, "bytes": 3603, "sha256": "bd6c775db266f036a81ee80328ad5e3e5ded47e19f63c1c4e2de05e102eb8fbc"},
+      "cursor_always_loaded": {"lines": 319, "words": 2562, "bytes": 17711, "sha256": "25c8bec2ae365a25aed9ce295dc9347d49d97e3d0ddb534f8d8a7c1dcc4ecc2c"}
     },
     "candidate": {
       "source_snippet": {"lines": 89, "words": 574, "bytes": 4367, "sha256": "2b8a64e16f1fedd43624dab7e2f4cb0b2182b4fbe6371e0277c8c8157cedde69"},
-      "claude_managed_block": {"lines": 94, "words": 638, "bytes": 4773, "sha256": "d95ade9bd4e54d6d0be3ff3a71e9b07303faa48a14b764ed0c6ddb8fdd6f16f7"},
-      "agents_managed_block": {"lines": 94, "words": 639, "bytes": 4784, "sha256": "a2e8d5621109f1bfc678de1e0dcf9a2949f23adee0a1abcd9f9a79eae92e1113"},
-      "cursor_rule": {"lines": 46, "words": 342, "bytes": 2426, "sha256": "f9063a595f6d8a6f72cfcddd46aa85317ae57b26898eb3c48c34e010f0ae3550"},
-      "cursor_always_loaded": {"lines": 141, "words": 981, "bytes": 7211, "sha256": "9260934d08bc3dd1eeacd98ab1a4d6dd7b3c7e38ce88198228e890beeb3244a4"}
+      "claude_managed_block": {"lines": 94, "words": 638, "bytes": 4773, "sha256": "888285fa29c52507ff27de12f39d17000aeb9f7c1bf5f214f39c40f66902b214"},
+      "agents_managed_block": {"lines": 94, "words": 639, "bytes": 4784, "sha256": "fd6ed49e5ad833179eaa230bc46554242217b7bd43ae5abd833df10c51521e5a"},
+      "cursor_rule": {"lines": 46, "words": 342, "bytes": 2426, "sha256": "7fb4f6693ba2ed443c4937de2b18732f74767dee1b369302d1f74571b8990491"},
+      "cursor_always_loaded": {"lines": 141, "words": 981, "bytes": 7211, "sha256": "d5b5f5bc874dbc28d88ed4c4f15bb849c721cdcf283d07ac7fa28dae9ae98d2a"}
     },
     "reductions_percent": {
       "source_snippet": {"lines": 64.8, "words": 71.6},
@@ -52,7 +52,8 @@
   "verification": {
     "rebased_focused_suite": {
       "result": "passed",
-      "tests": 78,
+      "tests": 59,
+      "command": "python -m pytest -q tests/test_agent_contract_artifacts.py tests/test_claude_md_sync.py tests/test_agents_md_sync.py tests/test_codex_session_start.py tests/test_cursor_rules_sync.py tests/test_wiring_version.py tests/test_versioning.py tests/test_public_release_check.py tests/test_cursor_hook_runtime.py tests/test_cursor_lifecycle_e2e.py",
       "covers": [
         "managed contract artifacts and budgets",
         "Claude, Codex, and Cursor sync and wiring",
@@ -62,28 +63,31 @@
     },
     "contract_and_sync": {
       "result": "passed",
-      "tests": 47,
+      "tests": 49,
       "command": "python -m pytest -q tests/test_agent_contract_artifacts.py tests/test_claude_md_sync.py tests/test_agents_md_sync.py tests/test_codex_session_start.py tests/test_cursor_rules_sync.py tests/test_wiring_version.py tests/test_versioning.py tests/test_public_release_check.py"
     },
     "authority_graph": {
       "result": "passed",
-      "tests": 8,
+      "tests": 15,
+      "command": "python -m pytest -q tests/test_verify.py",
       "covers": ["supersedes", "reconciled_by", "reconciliation banners", "stale targets"]
     },
     "host_wiring_smoke": {
       "result": "passed",
-      "tests": 57,
+      "tests": 65,
+      "command": "python -m pytest -q tests/test_claude_md_sync.py tests/test_agents_md_sync.py tests/test_codex_session_start.py tests/test_install_codex.py tests/test_install_cursor.py tests/test_cursor_lifecycle_e2e.py tests/test_wiring_version.py",
       "covers": ["Claude render/sync", "Codex install/session-start", "Cursor install/lifecycle/rule", "versioned repair"]
     },
     "public_release_hygiene": {
       "result": "passed",
-      "tracked_and_new_files_scanned": 344
+      "tracked_and_new_files_scanned": 349
     },
     "dependency_complete_suite": {
       "result": "passed",
-      "passed": 1062,
+      "passed": 1077,
       "failed": 0,
-      "duration_seconds": 102.80,
+      "skipped": 2,
+      "duration_seconds": 102.42,
       "proof_packet_check": "passed",
       "note": "The rebased source preserved current-main Cursor fixes. A clean live gate/runtime proof was recaptured from proof_source_commit and its three generated artifacts were committed as the direct child. Later managed contract corrections are outside that proof manifest and are covered by the contract, sync, wiring, artifact, and complete-suite checks."
     },
@@ -139,7 +143,7 @@
   "update_and_rollback": {
     "result": "passed",
     "evidence": [
-      "Version 1 managed documents repair once to version 2 and preserve user content.",
+      "Version 2 managed documents repair once to version 3 and preserve user content.",
       "Unmanaged projects remain untouched.",
       "Version 999 managed documents and Cursor rules are refused rather than downgraded.",
       "Managed-document and Cursor-rule backups reproduce the older bytes; restoring those bytes is detected as older and safely rolls forward again.",

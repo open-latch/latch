@@ -1,10 +1,10 @@
 # Compact agent contract mainline review
 
 This local integration replays the compact managed contract on public main
-`5d33047e9532eb091b46faaeac32d4d3d44f4ce0`. The final contract commit is
-`5afc52fbabadc8329734583613d87a994b5cada2`. The proof packet was captured
-from source commit `2450c24aab35b4302c0dbb07a324a214cc538d53`; its direct proof child is
-`1463ade7516237bd00b3a72dfe42ab5192780a94`. Later contract-only corrections
+`51b36412e182623978b1f141fb8719182dddd833`. The final contract commit is
+`b237a5269285cb9634fc5d6cf413af68596dfa41`. The proof packet was captured
+from source commit `e6234d691360cb6de0f5f523a1d615282a7b7462`; its direct proof child is
+`e6a9cfc637441c4e982a50575be1e04e2952a753`. Later contract-only corrections
 do not change the gate/runtime manifest covered by that proof packet. The proof
 does not validate the later managed contract text; contract, sync, wiring, and
 artifact checks cover that surface.
@@ -15,9 +15,10 @@ public main in the current-prompt hook implementation or its focused tests.
 
 ## Local verification
 
-- 78 focused contract, sync, wiring, public guard, and Cursor lifecycle tests
+- 59 focused contract, sync, wiring, public guard, and Cursor lifecycle tests
   passed.
-- The complete dependency-backed suite passed: 1,062 tests in 102.80 seconds.
+- The complete dependency-backed suite passed: 1,077 tests, with 2 skipped, in
+  102.42 seconds.
 - The proof packet's gate/runtime manifest is current and public-safe; its scope
   excludes the later managed contract text.
 - Public-release hygiene, whitespace, and changed-shell syntax checks passed.
@@ -57,4 +58,5 @@ The later deep evaluation must:
    deterministic engine enforcement.
 
 No remote branch, pull request, comment, merge, or push was created or changed
-during this integration.
+during this local evidence capture. This public-native stack is intended to
+replace the obsolete head of existing PR 6 after exact-head verification.
