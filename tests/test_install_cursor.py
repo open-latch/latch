@@ -82,6 +82,23 @@ def test_cursor_mcp_launcher_uses_pythonw_only_when_available_on_windows():
                 server["args"] == [str(standalone).replace("\\", "/")],
                 "a standalone server must not be redirected to a missing launcher",
             )
+            _assert(
+                server["command"] == str(python).replace("\\", "/"),
+                "a standalone server must keep console Python for MCP stdio",
+            )
+            _assert(
+                "LATCH_PYTHON" not in server["env"],
+                "standalone console launch must not advertise a separate interpreter",
+            )
+            ok, detail = ic.cursor_mcp_launch_assets_status(
+                str(python), str(standalone), system="Windows",
+            )
+            _assert(ok, detail)
+            _assert(
+                str(python).replace("\\", "/") in detail
+                and str(pythonw).replace("\\", "/") not in detail,
+                "launch-target validation must describe the same console command",
+            )
 
             server_py = d / "src" / "mcp_server.py"
             launcher_py = d / "src" / "mcp_launcher_win.py"

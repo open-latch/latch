@@ -168,14 +168,15 @@ def cursor_mcp_launcher(
     *,
     system: str | None = None,
 ) -> str:
-    """Use the windowless venv interpreter for Cursor's Windows MCP proxy.
+    """Return the candidate windowless interpreter for Cursor's MCP proxy.
 
     Cursor starts the configured stdio server as a long-lived child.  Launching
     ``python.exe`` directly gives that child a foreground console on Windows.
     A standard Windows venv installs ``pythonw.exe`` beside ``python.exe``.
-    When present, it avoids allocating a console window; ``mcp_server.py``
-    restores Python's standard streams from Cursor's inherited pipe handles.
-    Custom interpreters without that sibling stay unchanged.
+    When present, it avoids allocating a console window.  The renderer only
+    selects it when the managed ``mcp_launcher_win.py`` supervisor also exists;
+    standalone servers keep ``python.exe`` so their stdio remains usable.
+    Custom interpreters without a sibling ``pythonw.exe`` stay unchanged.
     """
     if (system or platform.system()) != "Windows":
         return python_path
@@ -196,10 +197,6 @@ def render_cursor_server(
     env = _adapter_env(model_backend)
     entry = server_py
     if launcher != python_path:
-        # Shell-backed Cursor workflows need a console interpreter so their
-        # JSON/stdout remains visible.  Installed command/skill assets read
-        # this field instead of reusing the windowless MCP launcher.
-        env["LATCH_PYTHON"] = _forward_slash(python_path)
         # Windows windowless transport: pythonw runs mcp_launcher_win.py, which
         # spawns a base console python.exe child with CREATE_NO_WINDOW, hands it
         # Cursor's inherited stdin/stdout/stderr pipes, runs mcp_server.py there,
@@ -212,7 +209,15 @@ def render_cursor_server(
         # asset is actually present; never write a config targeting a missing
         # script.
         if windows_entry.is_file():
+            # Shell-backed Cursor workflows need a console interpreter so their
+            # JSON/stdout remains visible. Installed command/skill assets read
+            # this field instead of reusing the windowless MCP launcher.
+            env["LATCH_PYTHON"] = _forward_slash(python_path)
             entry = str(windows_entry)
+        else:
+            # pythonw has no reliable stdio for an arbitrary standalone server.
+            # Without latch's supervisor, preserve the caller's console Python.
+            launcher = python_path
     return {
         "type": "stdio",
         "command": _forward_slash(launcher),
@@ -295,7 +300,11 @@ def cursor_mcp_launch_assets_status(
     """Validate the executable and script Cursor will actually launch."""
     launcher = cursor_mcp_launcher(python_path, system=system)
     windows_entry = Path(server_py).with_name("mcp_launcher_win.py")
-    entry = str(windows_entry) if launcher != python_path and windows_entry.is_file() else server_py
+    if launcher != python_path and windows_entry.is_file():
+        entry = str(windows_entry)
+    else:
+        launcher = python_path
+        entry = server_py
     required = [
         ("console interpreter", python_path),
         ("MCP launcher", launcher),
