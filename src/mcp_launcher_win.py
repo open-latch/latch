@@ -3,25 +3,20 @@
 Rationale
 ---------
 Cursor on Windows launches the ``mcp.json`` command with an inherited
-stdin/stdout/stderr pipe trio.  Two naive options both fail:
-
-* ``python.exe`` directly -> a **console window** appears for the server's
-  whole lifetime.
-* ``pythonw.exe`` running the server in-process -> **no window**, but CPython
-  leaves ``sys.stdin/out/err`` as ``None`` and the recovered-handle proxy did
-  not deliver tool responses back to Cursor reliably (empty-payload failure).
-
-This launcher takes the proven Windows pattern instead:
+stdin/stdout/stderr pipe trio.  Launching ``python.exe`` directly can allocate
+a foreground console for the server's whole lifetime.  This launcher uses a
+windowless supervisor while preserving real OS pipes for the stdio proxy:
 
 * it is itself launched via ``pythonw.exe`` (so *it* is windowless);
 * it hands the **real inherited std handles** straight to a normal
   ``python.exe`` child started with ``CREATE_NO_WINDOW`` (also windowless);
 * the child runs ``mcp_server.py`` with genuine OS pipes as its std streams —
   no in-process handle recovery, no re-wrapping;
-* the child is owned by a Job Object with
-  ``JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`` so it (and anything it spawns that
-  does not break away) is reaped the instant Cursor closes or kills this
-  launcher — no orphaned proxy/daemon processes;
+* the proxy child is owned by a Job Object with
+  ``JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE``, so it is reaped if Cursor kills the
+  launcher;
+* the shared MCP daemon explicitly breaks away from that job and remains
+  governed by its normal multi-client idle policy;
 * the child's exit code is propagated.
 
 Only used on Windows; other platforms never launch this module.
@@ -43,6 +38,7 @@ _DUPLICATE_SAME_ACCESS = 0x00000002
 # Job object
 _JobObjectExtendedLimitInformation = 9
 _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
+_JOB_OBJECT_LIMIT_BREAKAWAY_OK = 0x00000800
 
 # Keep the job handle alive for this process's lifetime so KILL_ON_JOB_CLOSE
 # only fires when the launcher itself dies.
@@ -50,9 +46,12 @@ _JOB_HANDLE = None
 
 
 def _diag(msg: str) -> None:
-    """Best-effort file log (stderr may be ``None`` under pythonw)."""
+    """Best-effort opt-in log (stderr may be ``None`` under pythonw)."""
     try:
-        path = Path(__file__).resolve().parent.parent / "mcp_launcher_win.log"
+        configured = os.environ.get("LATCH_MCP_LAUNCHER_LOG")
+        if not configured:
+            return
+        path = Path(configured)
         from datetime import datetime, timezone
         with path.open("a", encoding="utf-8") as f:
             f.write(f"[{datetime.now(timezone.utc).isoformat(timespec='milliseconds')}] "
@@ -131,7 +130,10 @@ def _create_kill_on_close_job():
         ]
 
     info = _EXT()
-    info.BasicLimitInformation.LimitFlags = _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+    info.BasicLimitInformation.LimitFlags = (
+        _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        | _JOB_OBJECT_LIMIT_BREAKAWAY_OK
+    )
     k32.SetInformationJobObject.argtypes = [
         wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD]
     k32.SetInformationJobObject.restype = wintypes.BOOL
@@ -175,8 +177,8 @@ def _resolve_child_python() -> str:
     The stdlib venv ``python.exe``/``pythonw.exe`` on Windows re-exec the base
     interpreter as a child and drop ``CREATE_NO_WINDOW`` in the process, which
     is what puts a console window on screen. Launching the base interpreter
-    directly (with ``__PYVENV_LAUNCHER__`` set by the caller for venv
-    site-packages) keeps CREATE_NO_WINDOW effective — no window."""
+    directly and exposing the venv site-packages through ``PYTHONPATH`` keeps
+    CREATE_NO_WINDOW effective — no window."""
     base = getattr(sys, "_base_executable", None) or ""
     if base:
         console = Path(base).with_name("python.exe")
@@ -199,6 +201,10 @@ def main() -> int:
     server_py = Path(__file__).resolve().parent / "mcp_server.py"
     child_python = _resolve_child_python()
     child_env = os.environ.copy()
+    # The proxy is intentionally job-owned, but the shared daemon must outlive
+    # any single Cursor connection. mcp_broker consumes this private launcher
+    # signal and adds CREATE_BREAKAWAY_FROM_JOB only to the daemon process.
+    child_env["LATCH_MCP_DAEMON_BREAKAWAY_FROM_JOB"] = "1"
     site = _venv_site_packages()
     if site:
         # Base interpreter direct-launch: expose venv deps via PYTHONPATH so the

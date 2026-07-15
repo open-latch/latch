@@ -5,9 +5,10 @@ Unlike the pipe-echo unit test, this drives a real MCP session through
 
     initialize -> notifications/initialized -> tools/list
         -> latch_insert (seed) -> latch_recent(limit=5) -> validate JSON-RPC
-        -> close stdin -> assert launcher + child exit, no descendant remains.
+        -> close stdin -> assert the per-connection proxy exits while the
+           shared daemon remains available to a second launcher.
 
-Windows-only; requires the built ``.venv`` and a writable project KB.
+Windows-only; all writes are pinned to pytest's temporary KB.
 """
 from __future__ import annotations
 
@@ -30,11 +31,52 @@ LAUNCHER = SRC / "mcp_launcher_win.py"
 PYTHONW = Path(sys.executable).with_name("pythonw.exe")
 
 
-def _env() -> dict:
+def _env(tmp_path: Path) -> dict:
     env = os.environ.copy()
     env["LATCH_ADAPTER"] = "cursor"
-    env.setdefault("LATCH_PYTHON", sys.executable)
+    env["LATCH_PYTHON"] = sys.executable
+    env["LATCH_KB_DIR"] = str(tmp_path / "kb")
+    env["LATCH_MCP_DAEMON_IDLE_TTL_SEC"] = "30"
+    env["LATCH_MCP_LAUNCHER_LOG"] = str(tmp_path / "launcher.log")
     return env
+
+
+def _pid_alive(pid: int) -> bool:
+    import ctypes
+    from ctypes import wintypes
+
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    k32.OpenProcess.restype = wintypes.HANDLE
+    k32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+    k32.GetExitCodeProcess.restype = wintypes.BOOL
+    k32.CloseHandle.argtypes = [wintypes.HANDLE]
+    handle = k32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        return False
+    try:
+        code = wintypes.DWORD()
+        return bool(k32.GetExitCodeProcess(handle, ctypes.byref(code))) and code.value == 259
+    finally:
+        k32.CloseHandle(handle)
+
+
+def _terminate_pid(pid: int) -> None:
+    import ctypes
+    from ctypes import wintypes
+
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    k32.OpenProcess.restype = wintypes.HANDLE
+    k32.TerminateProcess.argtypes = [wintypes.HANDLE, wintypes.UINT]
+    k32.CloseHandle.argtypes = [wintypes.HANDLE]
+    handle = k32.OpenProcess(0x0001, False, pid)  # PROCESS_TERMINATE
+    if not handle:
+        return
+    try:
+        k32.TerminateProcess(handle, 0)
+    finally:
+        k32.CloseHandle(handle)
 
 
 def _descendant_pids(root: int) -> set[int]:
@@ -101,51 +143,102 @@ def _result(msg):
     return msg.get("result") or {}
 
 
-def test_launcher_full_mcp_lifecycle_and_reaping(tmp_path):
-    assert PYTHONW.is_file(), PYTHONW
+def _start_launcher(tmp_path: Path):
     proc = subprocess.Popen(
         [str(PYTHONW), str(LAUNCHER)],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        cwd=str(tmp_path), env=_env(),
+        cwd=str(tmp_path), env=_env(tmp_path),
     )
     out = _Reader(proc.stdout)
     out.start()
-    try:
-        _send(proc, {"jsonrpc": "2.0", "id": 1, "method": "initialize",
-                     "params": {"protocolVersion": "2024-11-05", "capabilities": {},
-                                "clientInfo": {"name": "pytest", "version": "0"}}})
-        init = _result(out.next_json())
-        assert "serverInfo" in init or "capabilities" in init, init.keys()
-        _send(proc, {"jsonrpc": "2.0", "method": "notifications/initialized"})
+    return proc, out
 
-        _send(proc, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
-        tools = _result(out.next_json()).get("tools", [])
+
+def _initialize(proc, out, *, request_id: int) -> None:
+    _send(proc, {"jsonrpc": "2.0", "id": request_id, "method": "initialize",
+                 "params": {"protocolVersion": "2024-11-05", "capabilities": {},
+                            "clientInfo": {"name": "pytest", "version": "0"}}})
+    init = _result(out.next_json())
+    assert "serverInfo" in init or "capabilities" in init, init.keys()
+    _send(proc, {"jsonrpc": "2.0", "method": "notifications/initialized"})
+
+
+def _daemon_pid(tmp_path: Path) -> int:
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        for path in (tmp_path / "kb").rglob("mcp-daemon.json"):
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                pid = payload.get("pid")
+                if isinstance(pid, int) and _pid_alive(pid):
+                    return pid
+            except (OSError, ValueError):
+                pass
+        time.sleep(0.05)
+    raise AssertionError("shared daemon discovery did not appear in temporary KB")
+
+
+def _close_launcher(proc) -> int:
+    try:
+        proc.stdin.close()
+    except OSError:
+        pass
+    return proc.wait(timeout=30)
+
+
+def test_launcher_full_mcp_lifecycle_and_shared_daemon_survival(tmp_path):
+    assert PYTHONW.is_file(), PYTHONW
+    first = second = None
+    daemon_pid = None
+    try:
+        first, first_out = _start_launcher(tmp_path)
+        _initialize(first, first_out, request_id=1)
+
+        _send(first, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+        tools = _result(first_out.next_json()).get("tools", [])
         names = {t.get("name") for t in tools}
         assert "latch_recent" in names, names
 
-        _send(proc, {"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+        _send(first, {"jsonrpc": "2.0", "id": 3, "method": "tools/call",
                      "params": {"name": "latch_insert", "arguments": {
                          "kind": "fact", "title": "protocol test seed",
                          "body": "win launcher protocol regression seed"}}})
-        assert _result(out.next_json()).get("isError") is not True
+        assert _result(first_out.next_json()).get("isError") is not True
 
-        _send(proc, {"jsonrpc": "2.0", "id": 4, "method": "tools/call",
+        _send(first, {"jsonrpc": "2.0", "id": 4, "method": "tools/call",
                      "params": {"name": "latch_recent", "arguments": {"limit": 5}}})
-        recent = _result(out.next_json())
+        recent = _result(first_out.next_json())
         assert recent.get("isError") is not True
         content = recent.get("content")
         assert isinstance(content, list) and len(content) >= 1, recent.keys()
 
-        child_pids = _descendant_pids(proc.pid)
+        daemon_pid = _daemon_pid(tmp_path)
+        child_pids = _descendant_pids(first.pid)
         assert child_pids, "expected at least the server child under the launcher"
-    finally:
-        try:
-            proc.stdin.close()
-        except OSError:
-            pass
-        code = proc.wait(timeout=30)
+        proxy_pids = child_pids - {daemon_pid}
+        assert proxy_pids, child_pids
 
-    assert code == 0, code
-    time.sleep(2.0)  # allow JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE to reap
-    remaining = _descendant_pids(proc.pid)
-    assert not remaining, f"orphaned descendants after EOF: {remaining}"
+        assert _close_launcher(first) == 0
+        first = None
+        time.sleep(1.0)
+        assert all(not _pid_alive(pid) for pid in proxy_pids), proxy_pids
+        assert _pid_alive(daemon_pid), "shared daemon died with first Cursor connection"
+
+        second, second_out = _start_launcher(tmp_path)
+        _initialize(second, second_out, request_id=5)
+        _send(second, {"jsonrpc": "2.0", "id": 6, "method": "tools/call",
+                       "params": {"name": "latch_recent", "arguments": {"limit": 5}}})
+        second_recent = _result(second_out.next_json())
+        assert second_recent.get("isError") is not True
+        assert isinstance(second_recent.get("content"), list)
+        assert _daemon_pid(tmp_path) == daemon_pid, "second launcher did not reuse daemon"
+        assert _close_launcher(second) == 0
+        second = None
+        assert _pid_alive(daemon_pid), "shared daemon died with second Cursor connection"
+    finally:
+        for proc in (first, second):
+            if proc is not None and proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=10)
+        if daemon_pid is not None:
+            _terminate_pid(daemon_pid)

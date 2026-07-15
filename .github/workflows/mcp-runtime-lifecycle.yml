@@ -11,6 +11,7 @@ on:
       - "src/doctor.py"
       - "tests/test_mcp_*.py"
       - "tests/test_windows_stdio.py"
+      - "tests/test_win_launcher_protocol.py"
       - "tests/test_doctor.py"
       - "tests/test_codex_session.py"
       - "docs/mcp_resource_architecture.md"
@@ -53,4 +54,5 @@ jobs:
           tests/test_mcp_session_id.py
           tests/test_mcp_proxy_session.py
           tests/test_windows_stdio.py
+          tests/test_win_launcher_protocol.py
           tests/test_embed_daemon.py

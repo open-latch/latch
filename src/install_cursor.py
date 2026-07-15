@@ -279,6 +279,29 @@ def mcp_status(
     return False, f"Cursor MCP server missing or drifted in {path}"
 
 
+def cursor_mcp_launch_assets_status(
+    python_path: str,
+    server_py: str,
+    *,
+    system: str | None = None,
+) -> tuple[bool, str]:
+    """Validate the executable and script Cursor will actually launch."""
+    launcher = cursor_mcp_launcher(python_path, system=system)
+    entry = (
+        str(Path(server_py).with_name("mcp_launcher_win.py"))
+        if launcher != python_path
+        else server_py
+    )
+    missing: list[str] = []
+    if not Path(launcher).is_file():
+        missing.append(f"interpreter not found: {launcher}")
+    if not Path(entry).is_file():
+        missing.append(f"launch script not found: {entry}")
+    if missing:
+        return False, "; ".join(missing)
+    return True, f"Cursor MCP launch target: {launcher} -> {entry}"
+
+
 def write_config(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
@@ -725,6 +748,7 @@ def _check(args: argparse.Namespace, python_path: str, server_py: str) -> int:
             server_py,
             model_backend=args.model_backend,
         ))
+        checks.append(cursor_mcp_launch_assets_status(python_path, server_py))
     if not args.skip_agents:
         status = agents_md_sync.evaluate(Path(args.agents_md))
         checks.append((status == agents_md_sync.OK, f"AGENTS.md managed region: {status}"))

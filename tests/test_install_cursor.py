@@ -81,6 +81,26 @@ def test_cursor_mcp_launcher_uses_pythonw_only_when_available_on_windows():
             server["env"]["LATCH_PYTHON"] == str(python).replace("\\", "/"),
             "windowless MCP config must retain the console interpreter",
         )
+        _assert(
+            server["args"] == [
+                str(Path("/repo/src/mcp_launcher_win.py")).replace("\\", "/")
+            ],
+            server,
+        )
+
+        server_py = d / "src" / "mcp_server.py"
+        launcher_py = d / "src" / "mcp_launcher_win.py"
+        server_py.parent.mkdir()
+        server_py.write_text("# server\n", encoding="utf-8")
+        ok, detail = ic.cursor_mcp_launch_assets_status(
+            str(python), str(server_py), system="Windows",
+        )
+        _assert(not ok and "mcp_launcher_win.py" in detail, detail)
+        launcher_py.write_text("# launcher\n", encoding="utf-8")
+        ok, detail = ic.cursor_mcp_launch_assets_status(
+            str(python), str(server_py), system="Windows",
+        )
+        _assert(ok, detail)
         print("PASS cursor_mcp_launcher_uses_pythonw_only_when_available_on_windows")
     finally:
         shutil.rmtree(d, ignore_errors=True)
