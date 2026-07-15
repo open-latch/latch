@@ -1,15 +1,15 @@
 {
   "schema_version": 1,
-  "captured_at_utc": "2026-07-15T04:35:26Z",
-  "base_commit": "51b36412e182623978b1f141fb8719182dddd833",
+  "captured_at_utc": "2026-07-15T04:49:37Z",
+  "base_commit": "c65ff621d0a8ff37cbe2056f962c15cd233b9c45",
   "candidate_state": {
-    "proof_source_commit": "e6234d691360cb6de0f5f523a1d615282a7b7462",
-    "proof_artifact_commit": "e6a9cfc637441c4e982a50575be1e04e2952a753",
-    "final_contract_commit": "b237a5269285cb9634fc5d6cf413af68596dfa41",
+    "proof_source_commit": "4ad0d51fb12734778148343db6d54d98a837b69e",
+    "proof_artifact_commit": "9b139028c41db3b63462bd7c60f8745dcbf92032",
+    "final_contract_commit": "a7dad5c98872fd9f511cfe7a2301e74dc10f88c2",
     "proof_scope": "The proof packet covers its declared gate/runtime manifest at proof_source_commit. It does not validate later managed contract text; that surface is covered by the contract, sync, wiring, and artifact checks below."
   },
   "mainline_integration": {
-    "origin_main_commit": "51b36412e182623978b1f141fb8719182dddd833",
+    "origin_main_commit": "c65ff621d0a8ff37cbe2056f962c15cd233b9c45",
     "local_branch": "trim-contract-mainline-review",
     "source_replayed_on_origin_main": true,
     "proof_recaptured_from_replayed_source": true,
@@ -87,7 +87,7 @@
       "passed": 1077,
       "failed": 0,
       "skipped": 2,
-      "duration_seconds": 102.42,
+      "duration_seconds": 108.86,
       "proof_packet_check": "passed",
       "note": "The rebased source preserved current-main Cursor fixes. A clean live gate/runtime proof was recaptured from proof_source_commit and its three generated artifacts were committed as the direct child. Later managed contract corrections are outside that proof manifest and are covered by the contract, sync, wiring, artifact, and complete-suite checks."
     },

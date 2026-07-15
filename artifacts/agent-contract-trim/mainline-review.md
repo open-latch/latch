@@ -1,10 +1,10 @@
 # Compact agent contract mainline review
 
 This local integration replays the compact managed contract on public main
-`51b36412e182623978b1f141fb8719182dddd833`. The final contract commit is
-`b237a5269285cb9634fc5d6cf413af68596dfa41`. The proof packet was captured
-from source commit `e6234d691360cb6de0f5f523a1d615282a7b7462`; its direct proof child is
-`e6a9cfc637441c4e982a50575be1e04e2952a753`. Later contract-only corrections
+`c65ff621d0a8ff37cbe2056f962c15cd233b9c45`. The final contract commit is
+`a7dad5c98872fd9f511cfe7a2301e74dc10f88c2`. The proof packet was captured
+from source commit `4ad0d51fb12734778148343db6d54d98a837b69e`; its direct proof child is
+`9b139028c41db3b63462bd7c60f8745dcbf92032`. Later contract-only corrections
 do not change the gate/runtime manifest covered by that proof packet. The proof
 does not validate the later managed contract text; contract, sync, wiring, and
 artifact checks cover that surface.
@@ -18,7 +18,7 @@ public main in the current-prompt hook implementation or its focused tests.
 - 59 focused contract, sync, wiring, public guard, and Cursor lifecycle tests
   passed.
 - The complete dependency-backed suite passed: 1,077 tests, with 2 skipped, in
-  102.42 seconds.
+  108.86 seconds.
 - The proof packet's gate/runtime manifest is current and public-safe; its scope
   excludes the later managed contract text.
 - Public-release hygiene, whitespace, and changed-shell syntax checks passed.
