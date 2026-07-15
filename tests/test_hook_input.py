@@ -13,6 +13,7 @@ sys.path.insert(0, str(ROOT / "src" / "hooks"))
 
 import _common as hook_common  # noqa: E402
 import cursor_pre_tool_use  # noqa: E402
+import cursor_post_tool_use  # noqa: E402
 
 
 def _windows_stdin(payload: bytes) -> io.TextIOWrapper:
@@ -65,6 +66,41 @@ def test_read_hook_input_fails_closed_on_malformed_json(monkeypatch):
     monkeypatch.setattr(sys, "stdin", _windows_stdin(b"\xef\xbb\xbfnot-json"))
 
     assert hook_common.read_hook_input() == {}
+
+
+def test_cursor_post_tool_use_arms_gate_receipt_from_bom_payload(monkeypatch):
+    """Regression: postToolUse must use the BOM-safe reader. Cursor's BOM-
+    prefixed latch_gate result previously failed json.loads at char 0, so the
+    gate receipt never armed and post-gate Write/Shell stayed denied."""
+    prompt = "add cusip helper"
+    gate_inner = json.dumps(
+        {"request": prompt, "gate_status": "OK", "verdict": {"recommendation": "PROCEED"}}
+    )
+    tool_output = json.dumps({"content": [{"type": "text", "text": gate_inner}], "isError": False})
+    payload = {
+        "conversation_id": "conversation",
+        "session_id": "conversation",
+        "tool_name": "MCP:latch_gate",
+        "tool_input": {"request": prompt},
+        "tool_output": tool_output,
+        "workspace_roots": ["/C:/Users/test/latch-project"],
+        "cursor_version": "3.11.19",
+    }
+    encoded = b"\xef\xbb\xbf" + json.dumps(payload).encode("utf-8") + b"\n"
+    monkeypatch.setattr(sys, "stdin", _windows_stdin(encoded))
+
+    captured: dict = {}
+
+    def fake_record_gate(cwd, sid, *, request, gate_status, recommendation):
+        captured.update(request=request, gate_status=gate_status, recommendation=recommendation)
+        return True, recommendation
+
+    monkeypatch.setattr(cursor_post_tool_use.cursor_gate_state, "record_gate", fake_record_gate)
+
+    with redirect_stdout(io.StringIO()):
+        assert cursor_post_tool_use.main() == 0
+
+    assert captured == {"request": prompt, "gate_status": "OK", "recommendation": "PROCEED"}
 
 
 def test_cursor_pre_tool_use_allows_bom_prefixed_latch_read(monkeypatch):
