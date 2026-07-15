@@ -87,6 +87,13 @@
       "expected": ["offer latch-compact by name", "use exact current host transcript path", "do not auto-run"]
     },
     {
+      "id": "cursor_mcp_recovery",
+      "tier": "live_host",
+      "hosts": ["cursor"],
+      "stimulus": "Open a Cursor Agent task with a Latch session brief but no Latch tools in the IDE catalog.",
+      "expected": ["open workspace Tools & MCP", "enable latch", "confirm tools enabled without assuming an exact count", "start a fresh Agent chat"]
+    },
+    {
       "id": "cursor_current_prompt_gate",
       "tier": "live_host",
       "hosts": ["cursor"],

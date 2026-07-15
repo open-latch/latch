@@ -16,8 +16,8 @@ This rule adds Cursor-specific enforcement:
 
 - If the session brief exists but the IDE has no Latch tools, do not repeatedly call
   `latch_gate`. Ask the user to open Cursor Settings > Tools & MCP, enable
-  workspace server `latch`, and start a fresh Agent chat. `agent mcp list` does
-  not prove the IDE toggle.
+  workspace server `latch`, confirm it reports tools enabled (count may vary),
+  and start a fresh Agent chat. `agent mcp list` does not prove the IDE toggle.
 - Before an ordinary coding mutation, pass the current user request verbatim to
   `latch_gate`. When `findings.must_display_to_user=true`, show the **Latch
   gate** block before editing.
