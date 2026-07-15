@@ -2,7 +2,7 @@
 
 This local integration replays the compact managed contract on public main
 `c65ff621d0a8ff37cbe2056f962c15cd233b9c45`. The final contract commit is
-`a7dad5c98872fd9f511cfe7a2301e74dc10f88c2`. The proof packet was captured
+`f0fc2a747017fc27ea6fbf628c4e18975c0ee033`. The proof packet was captured
 from source commit `4ad0d51fb12734778148343db6d54d98a837b69e`; its direct proof child is
 `9b139028c41db3b63462bd7c60f8745dcbf92032`. Later contract-only corrections
 do not change the gate/runtime manifest covered by that proof packet. The proof
@@ -23,14 +23,19 @@ public main in the current-prompt hook implementation or its focused tests.
   excludes the later managed contract text.
 - Public-release hygiene, whitespace, and changed-shell syntax checks passed.
 - Claude and Codex managed blocks are within 100 lines and 650 words.
-- The Cursor rule is within 50 lines and 350 words; Cursor's combined
-  always-loaded surface is within 150 lines and 1,000 words.
+- The Cursor rule is 46 lines and 350 words; Cursor's combined always-loaded
+  surface is 141 lines and 989 words.
 
 A fresh independent Latch/parity review caught three omissions in the first
 trim: standing-directive capture offers, completed sequence-plan promotion, and
 Cursor's exact `latch_pm_preview` to one `latch_insert` boundary. All three were
 restored compactly and added to the obligation/scenario corpus before the final
 review.
+
+The final current-main review also caught a shortened Cursor IDE recovery step.
+The rule now requires enabling the workspace server, confirming tools are
+reported without assuming a fixed count, and only then starting a fresh Agent
+chat; the obligation/scenario corpus covers this wording.
 
 ## Cursor live findings
 
@@ -57,6 +62,6 @@ The later deep evaluation must:
 4. Separate compact-contract behavior from host-hook availability and from
    deterministic engine enforcement.
 
-No remote branch, pull request, comment, merge, or push was created or changed
-during this local evidence capture. This public-native stack is intended to
-replace the obsolete head of existing PR 6 after exact-head verification.
+PR 6 had already been updated to the prior verified head. This refresh is
+intended to update it again only after current main advanced and the new exact
+head passed verification.

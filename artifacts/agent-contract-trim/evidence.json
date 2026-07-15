@@ -1,11 +1,11 @@
 {
   "schema_version": 1,
-  "captured_at_utc": "2026-07-15T04:49:37Z",
+  "captured_at_utc": "2026-07-15T04:54:03Z",
   "base_commit": "c65ff621d0a8ff37cbe2056f962c15cd233b9c45",
   "candidate_state": {
     "proof_source_commit": "4ad0d51fb12734778148343db6d54d98a837b69e",
     "proof_artifact_commit": "9b139028c41db3b63462bd7c60f8745dcbf92032",
-    "final_contract_commit": "a7dad5c98872fd9f511cfe7a2301e74dc10f88c2",
+    "final_contract_commit": "f0fc2a747017fc27ea6fbf628c4e18975c0ee033",
     "proof_scope": "The proof packet covers its declared gate/runtime manifest at proof_source_commit. It does not validate later managed contract text; that surface is covered by the contract, sync, wiring, and artifact checks below."
   },
   "mainline_integration": {
@@ -13,7 +13,7 @@
     "local_branch": "trim-contract-mainline-review",
     "source_replayed_on_origin_main": true,
     "proof_recaptured_from_replayed_source": true,
-    "remote_or_public_git_actions_at_capture": "none; this public-native stack is intended to replace the obsolete head of existing PR 6 after exact-head verification"
+    "remote_or_public_git_actions_at_capture": "PR 6 had already been updated to the prior verified head; this refresh is intended to update it again after current main advanced and exact-head verification completes"
   },
   "wiring_version": {
     "before": 2,
@@ -32,15 +32,15 @@
       "source_snippet": {"lines": 89, "words": 574, "bytes": 4367, "sha256": "2b8a64e16f1fedd43624dab7e2f4cb0b2182b4fbe6371e0277c8c8157cedde69"},
       "claude_managed_block": {"lines": 94, "words": 638, "bytes": 4773, "sha256": "888285fa29c52507ff27de12f39d17000aeb9f7c1bf5f214f39c40f66902b214"},
       "agents_managed_block": {"lines": 94, "words": 639, "bytes": 4784, "sha256": "fd6ed49e5ad833179eaa230bc46554242217b7bd43ae5abd833df10c51521e5a"},
-      "cursor_rule": {"lines": 46, "words": 342, "bytes": 2426, "sha256": "7fb4f6693ba2ed443c4937de2b18732f74767dee1b369302d1f74571b8990491"},
-      "cursor_always_loaded": {"lines": 141, "words": 981, "bytes": 7211, "sha256": "d5b5f5bc874dbc28d88ed4c4f15bb849c721cdcf283d07ac7fa28dae9ae98d2a"}
+      "cursor_rule": {"lines": 46, "words": 350, "bytes": 2477, "sha256": "b5a74f8d452363c275b0902ace3b0aa0fe8043cfd80ea203251205d359e0ccbf"},
+      "cursor_always_loaded": {"lines": 141, "words": 989, "bytes": 7262, "sha256": "7e8f8bb286b6b7d11fbad5df650863ca3b54e5d6ca0d00c48dd332327291c0c1"}
     },
     "reductions_percent": {
       "source_snippet": {"lines": 64.8, "words": 71.6},
       "claude_managed_block": {"lines": 63.3, "words": 68.9},
       "agents_managed_block": {"lines": 63.3, "words": 68.8},
-      "cursor_rule": {"lines": 25.8, "words": 33.1},
-      "cursor_always_loaded": {"lines": 55.8, "words": 61.7}
+      "cursor_rule": {"lines": 25.8, "words": 31.5},
+      "cursor_always_loaded": {"lines": 55.8, "words": 61.4}
     },
     "budgets": {
       "claude_managed_block": {"max_lines": 100, "max_words": 650, "passed": true},
@@ -96,7 +96,8 @@
       "items": [
         "Restored the cross-host offer to capture sweeping directives through latch_priority_add only with user approval.",
         "Restored canonical promotion for fully shipped sequence plans.",
-        "Restored Cursor's exact read-only latch_pm_preview to one matching latch_insert boundary."
+        "Restored Cursor's exact read-only latch_pm_preview to one matching latch_insert boundary.",
+        "Restored explicit Cursor IDE catalog recovery confirmation: enable the workspace server, confirm tools are reported without assuming a fixed count, then start a fresh Agent chat."
       ]
     },
     "cursor_live_probe": {
