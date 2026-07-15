@@ -1,8 +1,8 @@
 {
   "backend": "codex",
-  "better_next_action": "Implement email sending with a single-process inline task runner and document its limits, per id=1.",
+  "better_next_action": "Implement email sending with an inline task runner and document that the demo remains single-process and not suitable for durable background delivery.",
   "capture_command": "bash bin/latch_proof_packet.sh --capture-live --backend codex",
-  "captured_at_utc": "2026-07-15T03:09:03Z",
+  "captured_at_utc": "2026-07-15T03:19:23Z",
   "demo_kind": "synthetic_no_history_fixture",
   "evidence_nodes": [
     {
@@ -28,12 +28,12 @@
     "unchanged": true
   },
   "observed": true,
-  "recommendation": "DO_NOT_PROCEED",
+  "recommendation": "MODIFY",
   "request": "Implement email sending by adding a Redis-backed background job queue.",
-  "risk_if_proceed": "Adding Redis and a worker process would violate the install-light, easy-to-inspect demo-app constraint already decided in id=1.",
+  "risk_if_proceed": "Adding Redis and a worker process would violate the install-light, easy-to-inspect demo-app constraint and repeat the explicitly rejected queue path.",
   "schema_version": 2,
-  "source_commit": "ee45d4cf713de7ebfe487b1adcab5d0fbd890ee5",
-  "summary": "The request directly contradicts the canonical fixture decision (id=1): this demo app must not add a background job queue, and the Redis-backed background job queue is specifically listed as the rejected path. The allowed direction is to keep the app single-process and use an inline task runner if email work needs to be deferred within the demo constraints.",
+  "source_commit": "a53310e9b36ad3e9fad3e3f536bb767c52ad9e3d",
+  "summary": "The request directly asks for the rejected implementation path: a Redis-backed background job queue. The canonical decision for this demo app is to avoid adding any background job queue, keep it single-process, and use an inline task runner if background work is needed (id=1). Email sending can proceed only if implemented without Redis or a worker process.",
   "tested_runtime_git_blobs": {
     ".gitattributes": "dfdb8b771ce07609491fa2e83698969fd917a135",
     "benchmarks/fixtures/wedge_v1.jsonl": "f32c5544a247c43490b5b84a6c4c4a057e91716b",

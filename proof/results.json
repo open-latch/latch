@@ -1,8 +1,8 @@
 {
   "live_demo": {
     "backend": "codex",
-    "better_next_action": "Implement email sending with a single-process inline task runner and document its limits, per id=1.",
-    "captured_at_utc": "2026-07-15T03:09:03Z",
+    "better_next_action": "Implement email sending with an inline task runner and document that the demo remains single-process and not suitable for durable background delivery.",
+    "captured_at_utc": "2026-07-15T03:19:23Z",
     "demo_kind": "synthetic_no_history_fixture",
     "evidence_nodes": [
       {
@@ -28,11 +28,11 @@
       "unchanged": true
     },
     "observed": true,
-    "recommendation": "DO_NOT_PROCEED",
+    "recommendation": "MODIFY",
     "request": "Implement email sending by adding a Redis-backed background job queue.",
-    "risk_if_proceed": "Adding Redis and a worker process would violate the install-light, easy-to-inspect demo-app constraint already decided in id=1.",
-    "source_commit": "ee45d4cf713de7ebfe487b1adcab5d0fbd890ee5",
-    "summary": "The request directly contradicts the canonical fixture decision (id=1): this demo app must not add a background job queue, and the Redis-backed background job queue is specifically listed as the rejected path. The allowed direction is to keep the app single-process and use an inline task runner if email work needs to be deferred within the demo constraints."
+    "risk_if_proceed": "Adding Redis and a worker process would violate the install-light, easy-to-inspect demo-app constraint and repeat the explicitly rejected queue path.",
+    "source_commit": "a53310e9b36ad3e9fad3e3f536bb767c52ad9e3d",
+    "summary": "The request directly asks for the rejected implementation path: a Redis-backed background job queue. The canonical decision for this demo app is to avoid adding any background job queue, keep it single-process, and use an inline task runner if background work is needed (id=1). Email sending can proceed only if implemented without Redis or a worker process."
   },
   "reproduction": {
     "check_packet": "bash bin/latch_proof_packet.sh --check",
@@ -64,7 +64,7 @@
       "filtered": 4
     }
   },
-  "source_commit": "ee45d4cf713de7ebfe487b1adcab5d0fbd890ee5",
+  "source_commit": "a53310e9b36ad3e9fad3e3f536bb767c52ad9e3d",
   "tested_runtime_manifest_sha256": "ef486f86e88f381c67c26e1ab0e333b98251fe8ab84b17863b0e1b985ea69fc7",
   "thesis": "Latch preserves project judgment and can surface a rejected path before an agent changes files.",
   "wedge_v1": {
