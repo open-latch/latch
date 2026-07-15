@@ -14,14 +14,14 @@ This packet combines one observed live gate receipt with two small, deterministi
 
 ## Observed live gate
 
-Captured with the `codex` backend on commit `6c1af147b67f711670ee8d4cfd763a665d294711`. This is a synthetic no-history fixture and used no personal conversation history.
+Captured with the `codex` backend on commit `b46fd2f2b6d2237f6459c7e2023575f56363f7f7`. This is a synthetic no-history fixture and used no personal conversation history.
 
 ```text
 Request: Implement email sending by adding a Redis-backed background job queue.
 Recommendation: DO_NOT_PROCEED
-Summary: The KB explicitly decides not to add a background job queue to this no-history demo app (id=1), and specifically rejects a Redis-backed background job queue. The allowed direction is to keep the app single-process and use an inline task runner if background work is needed, with the limitation documented.
-Risk if proceed: Adding Redis and a worker process would violate the install-light, easy-to-inspect demo-app constraint already recorded in the canonical decision.
-Better next action: Implement email sending with an inline task runner and document that it is a demo limitation, per id=1.
+Summary: The request directly contradicts the canonical decision for this no-history demo app: do not add a background job queue (id=1). The specifically rejected path is a Redis-backed background job queue, while the allowed path is single-process behavior with an inline task runner if background work is needed.
+Risk if proceed: The app would gain Redis and worker-process requirements that violate the install-light, easy-to-inspect demo constraint.
+Better next action: Implement email sending with a single-process inline task runner and document that it is not intended for production-scale background processing.
 Cited evidence:
 - id=1 decision status=canonical: No background job queue for the no-history demo app
 Worktree changed before/after gate: no
@@ -63,7 +63,7 @@ This deterministic fixture eval grades seed-report capture and filtering; it is 
 
 ## Reproduce
 
-The deterministic results were generated from commit `6c1af147b67f711670ee8d4cfd763a665d294711`.
+The deterministic results were generated from commit `b46fd2f2b6d2237f6459c7e2023575f56363f7f7`.
 
 ```bash
 bash bin/latch_eval.sh
