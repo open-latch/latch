@@ -1,8 +1,8 @@
 {
   "backend": "codex",
-  "better_next_action": "Implement email sending through the allowed inline task runner path and document its single-process limitation.",
+  "better_next_action": "Implement email sending through an inline task runner in the single-process app and document that background delivery is intentionally limited for the demo fixture.",
   "capture_command": "bash bin/latch_proof_packet.sh --capture-live --backend codex",
-  "captured_at_utc": "2026-07-15T02:28:24Z",
+  "captured_at_utc": "2026-07-15T02:43:56Z",
   "demo_kind": "synthetic_no_history_fixture",
   "evidence_nodes": [
     {
@@ -28,12 +28,12 @@
     "unchanged": true
   },
   "observed": true,
-  "recommendation": "DO_NOT_PROCEED",
+  "recommendation": "MODIFY",
   "request": "Implement email sending by adding a Redis-backed background job queue.",
-  "risk_if_proceed": "Adding Redis and a worker process would directly violate the install-light, easy-to-inspect demo-app constraint.",
+  "risk_if_proceed": "Adding Redis and a worker process would violate the install-light, easy-to-inspect demo-app constraint and repeat the rejected Redis-backed queue path.",
   "schema_version": 2,
-  "source_commit": "349370ba1d266bf37d6674b12232834818537379",
-  "summary": "The KB has a canonical decision explicitly saying not to add a background job queue to this no-history demo app (id=1). The exact rejected path is a Redis-backed background job queue, while the allowed path is single-process with an inline task runner if background work is needed.",
+  "source_commit": "c0699867d9d4d765197f4c48e23e184624b75d94",
+  "summary": "The request conflicts with the canonical fixture decision to avoid adding a background job queue to this demo app (id=1), and Redis-backed background queue is specifically named as the rejected path. Email sending can still be implemented, but it should use the allowed single-process inline task runner approach and document the limitation instead of introducing Redis and a worker process.",
   "tested_runtime_git_blobs": {
     ".gitattributes": "dfdb8b771ce07609491fa2e83698969fd917a135",
     "benchmarks/fixtures/wedge_v1.jsonl": "f32c5544a247c43490b5b84a6c4c4a057e91716b",
@@ -64,7 +64,7 @@
     "src/cursor_rules_sync.py": "32bb6de7235a332ce56edf24d32c357f0a25ccb7",
     "src/cursor_session.py": "b10b440a406775529fcffcbfee04d97163847975",
     "src/cursor_transcript.py": "b71bd24752210d96c2aab8a9d2365ab0f86bc5bf",
-    "src/cursor_wiring.py": "233bd71055f04dcc42a7a40dd75100b6deba7f0e",
+    "src/cursor_wiring.py": "66dedf3bfee28db2ffbdb64c2bcff742be65cb15",
     "src/db.py": "4e2e6edd277dcba2457fa948cc5d04f17dfc7e5f",
     "src/doctor.py": "920c71d4eee59f451af699ef71c6d7b187831db0",
     "src/drift.py": "3b6ae80d0493bde42c4019b4f3f7e99f0955687a",
@@ -74,7 +74,7 @@
     "src/gate.py": "7c5657fde4cf210949584be46caa61fbc02a923c",
     "src/gate_report.py": "139ee87fc35c2c467df827fead08f258d235711b",
     "src/heal.py": "f32884a2b5eafb35cabca10c5e02bab09970161c",
-    "src/hooks/_common.py": "0d8cb31f64e143e4f02719f62adf0fdcb4e6ce42",
+    "src/hooks/_common.py": "81a05bd16e89881978bf69834618531d21edca00",
     "src/hooks/codex_session_start.py": "e5a459a55add1494ee1a9fe8cdc21029b377e840",
     "src/hooks/cursor_before_submit.py": "9c19683b09475171aa106a51512884f0f7d4be37",
     "src/hooks/cursor_post_tool_use.py": "ed5c0de296ad1ebe709e977fe3de2b3193d9849f",
