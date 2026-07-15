@@ -100,7 +100,7 @@
     {
       "id": "cursor_specific_enforcement",
       "description": "Keep Cursor current-prompt and one-shot operation enforcement in the Cursor rule without duplicating the full shared contract.",
-      "markers": {"cursor_rule": ["Treat `AGENTS.md` as the shared Latch contract", "confirm it reports tools enabled (count may vary)", "current user", "`preToolUse`", "one-shot operation receipt", "Preview does not authorize apply", "`latch_pm_preview`", "matching `latch_insert`"]},
+      "markers": {"cursor_rule": ["Treat `AGENTS.md` as the shared Latch contract", "Cursor Settings > Tools & MCP", "workspace server `latch`", "confirm it reports tools enabled (count may vary)", "start a fresh Agent chat", "current user", "`preToolUse`", "one-shot operation receipt", "Preview does not authorize apply", "`latch_pm_preview`", "matching `latch_insert`"]},
       "scenario_ids": ["cursor_mcp_recovery", "cursor_current_prompt_gate", "cursor_operation_receipt"]
     }
   ]

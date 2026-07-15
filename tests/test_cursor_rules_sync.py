@@ -30,6 +30,9 @@ def test_render_rule_has_cursor_frontmatter_and_gate_contract():
     _assert("preToolUse" in out and "current user request verbatim" in out,
             "rule should explain current-prompt enforcement recovery")
     _assert("Cursor Settings > Tools & MCP" in out
+            and "workspace server `latch`" in out
+            and "confirm it reports tools enabled (count may vary)" in out
+            and "start a fresh Agent chat" in out
             and "do not repeatedly call" in out and "`latch_gate`" in out,
             "rule should recover honestly when the IDE MCP catalog lacks latch")
     _assert("/opt/latch/bin/install_cursor.sh --yes" in out,
