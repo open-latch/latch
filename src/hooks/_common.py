@@ -16,7 +16,19 @@ PYTHON_BIN = sys.executable
 
 
 def read_hook_input() -> dict:
-    raw = sys.stdin.read() if not sys.stdin.isatty() else ""
+    # Cursor (observed on 3.11.x) prepends a UTF-8 BOM (EF BB BF) to hook stdin.
+    # Decoding stdin as text uses the platform default (cp1252 on Windows), which
+    # turns the BOM into three mojibake chars ("\u00ef\u00bb\u00bf"), not U+FEFF \u2014
+    # so a text-level lstrip can't remove it. json.loads then rejects the leading
+    # bytes ("Expecting value: line 1 column 1"), the payload parses as {}, and
+    # fail-closed hooks deny every tool call. Read bytes and decode utf-8-sig so a
+    # leading BOM is stripped before parsing, independent of the locale codepage.
+    try:
+        data = sys.stdin.buffer.read() if not sys.stdin.isatty() else b""
+    except (AttributeError, ValueError):
+        text = sys.stdin.read() if not sys.stdin.isatty() else ""
+        data = text.encode("utf-8", "replace")
+    raw = data.decode("utf-8-sig", errors="replace")
     if not raw.strip():
         return {}
     try:
