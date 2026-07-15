@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import shutil
 import sys
 import tempfile
@@ -73,7 +74,21 @@ def test_cursor_mcp_launcher_uses_pythonw_only_when_available_on_windows():
         original_system = ic.platform.system
         ic.platform.system = lambda: "Windows"
         try:
-            server = ic.render_cursor_server(str(python), "/repo/src/mcp_server.py")
+            standalone = d / "standalone" / "mcp_server.py"
+            standalone.parent.mkdir()
+            standalone.write_text("# standalone\n", encoding="utf-8")
+            server = ic.render_cursor_server(str(python), str(standalone))
+            _assert(
+                server["args"] == [str(standalone).replace("\\", "/")],
+                "a standalone server must not be redirected to a missing launcher",
+            )
+
+            server_py = d / "src" / "mcp_server.py"
+            launcher_py = d / "src" / "mcp_launcher_win.py"
+            server_py.parent.mkdir()
+            server_py.write_text("# server\n", encoding="utf-8")
+            launcher_py.write_text("# launcher\n", encoding="utf-8")
+            server = ic.render_cursor_server(str(python), str(server_py))
         finally:
             ic.platform.system = original_system
         _assert(server["command"] == str(pythonw).replace("\\", "/"), server)
@@ -83,20 +98,11 @@ def test_cursor_mcp_launcher_uses_pythonw_only_when_available_on_windows():
         )
         _assert(
             server["args"] == [
-                str(Path("/repo/src/mcp_launcher_win.py")).replace("\\", "/")
+                str(launcher_py).replace("\\", "/")
             ],
             server,
         )
 
-        server_py = d / "src" / "mcp_server.py"
-        launcher_py = d / "src" / "mcp_launcher_win.py"
-        server_py.parent.mkdir()
-        server_py.write_text("# server\n", encoding="utf-8")
-        ok, detail = ic.cursor_mcp_launch_assets_status(
-            str(python), str(server_py), system="Windows",
-        )
-        _assert(not ok and "mcp_launcher_win.py" in detail, detail)
-        launcher_py.write_text("# launcher\n", encoding="utf-8")
         ok, detail = ic.cursor_mcp_launch_assets_status(
             str(python), str(server_py), system="Windows",
         )
@@ -112,6 +118,22 @@ def test_cursor_mcp_launcher_uses_pythonw_only_when_available_on_windows():
             str(python), str(server_py), system="Windows",
         )
         _assert(not ok and "console interpreter" in detail, detail)
+
+        path_python = d / "path-python.exe"
+        path_python.write_text("", encoding="utf-8")
+        path_python.chmod(0o755)
+        old_path = os.environ.get("PATH")
+        os.environ["PATH"] = str(d) + os.pathsep + (old_path or "")
+        try:
+            ok, detail = ic.cursor_mcp_launch_assets_status(
+                path_python.name, str(server_py), system="Linux",
+            )
+            _assert(ok, detail)
+        finally:
+            if old_path is None:
+                os.environ.pop("PATH", None)
+            else:
+                os.environ["PATH"] = old_path
         print("PASS cursor_mcp_launcher_uses_pythonw_only_when_available_on_windows")
     finally:
         shutil.rmtree(d, ignore_errors=True)

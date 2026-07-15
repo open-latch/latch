@@ -23,6 +23,7 @@ import argparse
 import json
 import os
 import platform
+import shutil
 import sys
 from pathlib import Path
 from typing import Any
@@ -205,7 +206,13 @@ def render_cursor_server(
         # and owns the per-connection proxy with a kill-on-close Job Object.
         # Silent child breakaway preserves the existing shared-daemon lifetime.
         # This gives the proxy real OS pipes with no foreground console.
-        entry = str(Path(server_py).with_name("mcp_launcher_win.py"))
+        windows_entry = Path(server_py).with_name("mcp_launcher_win.py")
+        # A caller may intentionally supply a standalone/custom mcp_server.py.
+        # Only redirect it through latch's Windows supervisor when that sibling
+        # asset is actually present; never write a config targeting a missing
+        # script.
+        if windows_entry.is_file():
+            entry = str(windows_entry)
     return {
         "type": "stdio",
         "command": _forward_slash(launcher),
@@ -287,11 +294,8 @@ def cursor_mcp_launch_assets_status(
 ) -> tuple[bool, str]:
     """Validate the executable and script Cursor will actually launch."""
     launcher = cursor_mcp_launcher(python_path, system=system)
-    entry = (
-        str(Path(server_py).with_name("mcp_launcher_win.py"))
-        if launcher != python_path
-        else server_py
-    )
+    windows_entry = Path(server_py).with_name("mcp_launcher_win.py")
+    entry = str(windows_entry) if launcher != python_path and windows_entry.is_file() else server_py
     required = [
         ("console interpreter", python_path),
         ("MCP launcher", launcher),
@@ -301,7 +305,7 @@ def cursor_mcp_launch_assets_status(
     missing = [
         f"{label} not found: {path}"
         for label, path in dict(required).items()
-        if not Path(path).is_file()
+        if not Path(path).is_file() and shutil.which(path) is None
     ]
     if missing:
         return False, "; ".join(missing)

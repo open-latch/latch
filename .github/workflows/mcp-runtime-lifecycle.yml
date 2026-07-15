@@ -4,12 +4,16 @@ on:
   pull_request:
     paths:
       - "src/mcp_*.py"
+      - "src/install_cursor.py"
+      - "src/cursor_doctor.py"
       - "src/windows_stdio.py"
       - "src/embeddings.py"
       - "src/codex_session.py"
       - "src/hooks/user_prompt_submit.py"
       - "src/doctor.py"
       - "tests/test_mcp_*.py"
+      - "tests/test_install_cursor.py"
+      - "tests/test_cursor_doctor.py"
       - "tests/test_windows_stdio.py"
       - "tests/test_win_launcher_protocol.py"
       - "tests/test_doctor.py"
@@ -55,4 +59,6 @@ jobs:
           tests/test_mcp_proxy_session.py
           tests/test_windows_stdio.py
           tests/test_win_launcher_protocol.py
+          tests/test_install_cursor.py::test_cursor_mcp_launcher_uses_pythonw_only_when_available_on_windows
+          tests/test_cursor_doctor.py::test_check_mcp_launch_target
           tests/test_embed_daemon.py
