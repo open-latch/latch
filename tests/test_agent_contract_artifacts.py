@@ -72,7 +72,7 @@ def test_machine_reviewable_obligations_and_footprint_budgets() -> None:
         "claude_managed": _metric(claude),
         "agents_managed": _metric(agents),
         "cursor_rule": _metric(cursor_rule),
-        "cursor_always_loaded": _metric(agents + cursor_rule),
+        "cursor_always_loaded": _metric(agents + "\n" + cursor_rule),
     }
     for surface, budget in matrix["budgets"].items():
         assert measured[surface]["lines"] <= budget["max_lines"], (surface, measured[surface])
