@@ -811,9 +811,14 @@ def _spawn_daemon(project_cwd: str, *, start_reason: str) -> int:
         "close_fds": True,
     }
     if os.name == "nt":
+        # CREATE_NO_WINDOW: DETACHED_PROCESS alone still lets Windows allocate a
+        # console for a console-subsystem python.exe spawned from a GUI/console-
+        # less parent (Cursor, VS Code), flashing a window (KB id=1183). Add the
+        # no-window flag so the detached daemon stays invisible.
         kwargs["creationflags"] = (
             getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
             | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+            | getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
         )
     else:
         env["LATCH_MCP_DAEMONIZE"] = "1"
@@ -886,9 +891,12 @@ def request_daemon_start(project_cwd: str) -> bool:
         "close_fds": True,
     }
     if os.name == "nt":
+        # CREATE_NO_WINDOW: see _spawn_daemon — DETACHED_PROCESS alone still
+        # flashes a console window for the detached wake bootstrap (KB id=1183).
         kwargs["creationflags"] = (
             getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
             | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+            | getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
         )
     else:
         kwargs["start_new_session"] = True
