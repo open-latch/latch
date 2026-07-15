@@ -14,14 +14,14 @@ This packet combines one observed live gate receipt with two small, deterministi
 
 ## Observed live gate
 
-Captured with the `codex` backend on commit `84b57a0f0aeed9cacac56d8c7e2534c0ffc5bd4a`. This is a synthetic no-history fixture and used no personal conversation history.
+Captured with the `codex` backend on commit `349370ba1d266bf37d6674b12232834818537379`. This is a synthetic no-history fixture and used no personal conversation history.
 
 ```text
 Request: Implement email sending by adding a Redis-backed background job queue.
 Recommendation: DO_NOT_PROCEED
-Summary: The request directly contradicts the canonical decision for this demo app: do not add a background job queue (id=1). The same node explicitly rejects a Redis-backed background job queue and says email-related background work should stay single-process via an inline task runner with documented limits.
-Risk if proceed: Adding Redis and a worker process would violate the install-light, easy-to-inspect demo constraint and repeat the rejected Redis-backed queue path.
-Better next action: Implement email sending with the allowed single-process inline task runner and document its limits, per id=1.
+Summary: The KB has a canonical decision explicitly saying not to add a background job queue to this no-history demo app (id=1). The exact rejected path is a Redis-backed background job queue, while the allowed path is single-process with an inline task runner if background work is needed.
+Risk if proceed: Adding Redis and a worker process would directly violate the install-light, easy-to-inspect demo-app constraint.
+Better next action: Implement email sending through the allowed inline task runner path and document its single-process limitation.
 Cited evidence:
 - id=1 decision status=canonical: No background job queue for the no-history demo app
 Worktree changed before/after gate: no
@@ -63,7 +63,7 @@ This deterministic fixture eval grades seed-report capture and filtering; it is 
 
 ## Reproduce
 
-The deterministic results were generated from commit `84b57a0f0aeed9cacac56d8c7e2534c0ffc5bd4a`.
+The deterministic results were generated from commit `349370ba1d266bf37d6674b12232834818537379`.
 
 ```bash
 bash bin/latch_eval.sh
