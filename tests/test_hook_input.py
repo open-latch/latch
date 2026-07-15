@@ -14,6 +14,8 @@ sys.path.insert(0, str(ROOT / "src" / "hooks"))
 import _common as hook_common  # noqa: E402
 import cursor_pre_tool_use  # noqa: E402
 import cursor_post_tool_use  # noqa: E402
+import cursor_before_submit  # noqa: E402
+import pytest  # noqa: E402
 
 
 def _windows_stdin(payload: bytes) -> io.TextIOWrapper:
@@ -56,10 +58,23 @@ def test_read_hook_input_accepts_unicode_bom_in_text_only_stream(monkeypatch):
     assert hook_common.read_hook_input() == payload
 
 
-def test_read_hook_input_fails_closed_on_invalid_utf8(monkeypatch):
+def test_read_hook_input_propagates_invalid_utf8_to_fail_closed_hooks(monkeypatch):
     monkeypatch.setattr(sys, "stdin", _windows_stdin(b"\xff\xfe{"))
 
-    assert hook_common.read_hook_input() == {}
+    with pytest.raises(UnicodeDecodeError):
+        hook_common.read_hook_input()
+
+
+@pytest.mark.parametrize("hook", [cursor_before_submit, cursor_pre_tool_use])
+def test_cursor_fail_closed_hooks_propagate_invalid_utf8(monkeypatch, hook):
+    monkeypatch.setattr(sys, "stdin", _windows_stdin(b"\xff\xfe{"))
+    if hook is cursor_pre_tool_use:
+        monkeypatch.setattr(hook, "is_disabled", lambda: False)
+        monkeypatch.setattr(hook, "is_in_compact", lambda: False)
+        monkeypatch.setattr(hook, "is_unlatched_mode", lambda: False)
+
+    with pytest.raises(UnicodeDecodeError):
+        hook.main()
 
 
 def test_read_hook_input_fails_closed_on_malformed_json(monkeypatch):

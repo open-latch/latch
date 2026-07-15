@@ -64,11 +64,17 @@ def test_engine_release_version_does_not_drive_project_rewrite(tmp_path, monkeyp
     assert target.read_bytes() == before
 
 
-def _install_cursor_bundle(root: Path, *, with_hooks: bool = True) -> None:
+def _install_cursor_bundle(
+    root: Path,
+    *,
+    with_hooks: bool = True,
+    python_path: str | None = None,
+) -> None:
+    python_path = python_path or sys.executable
     mcp = root / ".cursor" / "mcp.json"
     existing = json.dumps({"setting": "keep", "mcpServers": {"other": {"command": "node"}}}) + "\n"
     rendered, _ = install_cursor.merge_mcp_config(
-        existing, sys.executable, str(ROOT / "src" / "mcp_server.py"), path=mcp
+        existing, python_path, str(ROOT / "src" / "mcp_server.py"), path=mcp
     )
     install_cursor.write_config(mcp, rendered)
     agents = root / "AGENTS.md"
@@ -85,7 +91,7 @@ def _install_cursor_bundle(root: Path, *, with_hooks: bool = True) -> None:
         }) + "\n"
         rendered_hooks, _ = cursor_hooks.merge_hooks(
             existing_hooks,
-            sys.executable,
+            python_path,
             str(ROOT / "src" / "hooks" / "cursor_session_start.py"),
             str(ROOT / "src" / "hooks" / "cursor_before_submit.py"),
             str(ROOT / "src" / "hooks" / "cursor_pre_tool_use.py"),
@@ -130,6 +136,37 @@ def test_cursor_bundle_repairs_once_and_preserves_unrelated_content(tmp_path):
         path.relative_to(tmp_path): path.read_bytes()
         for path in tmp_path.rglob("*") if path.is_file() and not path.name.endswith(".latchbak")
     }
+
+
+def test_windows_cursor_bundle_repair_preserves_console_interpreter(
+    tmp_path, monkeypatch,
+):
+    python = tmp_path / "venv" / "Scripts" / "python.exe"
+    pythonw = python.with_name("pythonw.exe")
+    python.parent.mkdir(parents=True)
+    python.write_bytes(b"")
+    pythonw.write_bytes(b"")
+    monkeypatch.setattr(install_cursor.platform, "system", lambda: "Windows")
+
+    _install_cursor_bundle(tmp_path, python_path=str(python))
+    initial = json.loads(
+        (tmp_path / ".cursor" / "mcp.json").read_text(encoding="utf-8")
+    )["mcpServers"]["latch"]
+    assert initial["command"] == str(pythonw).replace("\\", "/")
+    assert initial["args"] == [
+        str(ROOT / "src" / "mcp_launcher_win.py").replace("\\", "/")
+    ]
+    assert initial["env"]["LATCH_PYTHON"] == str(python).replace("\\", "/")
+
+    _downgrade_cursor_bundle(tmp_path)
+    result = cursor_wiring.repair_project(tmp_path)
+    assert result.action == "synced"
+    repaired = json.loads(
+        (tmp_path / ".cursor" / "mcp.json").read_text(encoding="utf-8")
+    )["mcpServers"]["latch"]
+    assert repaired["command"] == str(pythonw).replace("\\", "/")
+    assert repaired["args"] == initial["args"]
+    assert repaired["env"]["LATCH_PYTHON"] == str(python).replace("\\", "/")
 
 
 def test_cursor_unmanaged_newer_and_collision_boundaries(tmp_path):

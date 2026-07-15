@@ -26,10 +26,11 @@ def read_hook_input() -> dict:
     # explicitly; utf-8-sig accepts both BOM and BOM-free UTF-8.
     stream = getattr(sys.stdin, "buffer", None)
     if stream is not None:
-        try:
-            raw = stream.read().decode("utf-8-sig")
-        except UnicodeDecodeError:
-            return {}
+        # Deliberately let UnicodeDecodeError escape. Cursor marks the prompt
+        # and pre-tool hooks failClosed; converting undecodable bytes to an
+        # empty payload would bypass that contract exactly when the request
+        # cannot be fingerprinted.
+        raw = stream.read().decode("utf-8-sig")
     else:
         # StringIO and other text-only streams are useful in tests and embeds.
         # Their decoder may already have preserved a Unicode BOM marker.

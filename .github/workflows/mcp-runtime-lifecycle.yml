@@ -6,6 +6,9 @@ on:
       - "src/mcp_*.py"
       - "src/install_cursor.py"
       - "src/cursor_doctor.py"
+      - "src/cursor_wiring.py"
+      - "src/hooks/_common.py"
+      - "src/hooks/cursor_post_tool_use.py"
       - "src/windows_stdio.py"
       - "src/embeddings.py"
       - "src/codex_session.py"
@@ -14,6 +17,8 @@ on:
       - "tests/test_mcp_*.py"
       - "tests/test_install_cursor.py"
       - "tests/test_cursor_doctor.py"
+      - "tests/test_hook_input.py"
+      - "tests/test_wiring_version.py"
       - "tests/test_windows_stdio.py"
       - "tests/test_win_launcher_protocol.py"
       - "tests/test_doctor.py"
@@ -61,4 +66,6 @@ jobs:
           tests/test_win_launcher_protocol.py
           tests/test_install_cursor.py::test_cursor_mcp_launcher_uses_pythonw_only_when_available_on_windows
           tests/test_cursor_doctor.py::test_check_mcp_launch_target
+          tests/test_hook_input.py
+          tests/test_wiring_version.py::test_windows_cursor_bundle_repair_preserves_console_interpreter
           tests/test_embed_daemon.py
