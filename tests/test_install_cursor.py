@@ -137,6 +137,36 @@ def test_cursor_mcp_launcher_uses_pythonw_only_when_available_on_windows():
         )
         _assert(not ok and "console interpreter" in detail, detail)
 
+        path_pair = d / "path-pair"
+        path_pair.mkdir()
+        path_console = path_pair / "python.exe"
+        path_windowless = path_pair / "pythonw.exe"
+        path_console.write_bytes(b"")
+        path_windowless.write_bytes(b"")
+        path_console.chmod(0o755)
+        path_windowless.chmod(0o755)
+        old_path = os.environ.get("PATH")
+        os.environ["PATH"] = str(path_pair) + os.pathsep + (old_path or "")
+        original_system = ic.platform.system
+        ic.platform.system = lambda: "Windows"
+        try:
+            path_server = ic.render_cursor_server("python.exe", str(server_py))
+        finally:
+            ic.platform.system = original_system
+            if old_path is None:
+                os.environ.pop("PATH", None)
+            else:
+                os.environ["PATH"] = old_path
+        _assert(
+            path_server["command"] == str(path_windowless).replace("\\", "/"),
+            path_server,
+        )
+        _assert(
+            path_server["env"]["LATCH_PYTHON"]
+            == str(path_console).replace("\\", "/"),
+            path_server,
+        )
+
         path_python = d / "path-python.exe"
         path_python.write_text("", encoding="utf-8")
         path_python.chmod(0o755)

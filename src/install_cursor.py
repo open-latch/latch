@@ -134,6 +134,14 @@ def _forward_slash(value: str) -> str:
     return value.replace("\\", "/")
 
 
+def _resolved_executable(value: str) -> str:
+    """Resolve PATH commands when possible while preserving missing/custom values."""
+    path = Path(value)
+    if path.is_file():
+        return str(path)
+    return shutil.which(value) or value
+
+
 def _json_object(text: str, *, path: Path) -> dict[str, Any]:
     if not text.strip():
         return {}
@@ -180,7 +188,7 @@ def cursor_mcp_launcher(
     """
     if (system or platform.system()) != "Windows":
         return python_path
-    python = Path(python_path)
+    python = Path(_resolved_executable(python_path))
     if python.name.lower() != "python.exe":
         return python_path
     windowless = python.with_name("pythonw.exe")
@@ -212,7 +220,9 @@ def render_cursor_server(
             # Shell-backed Cursor workflows need a console interpreter so their
             # JSON/stdout remains visible. Installed command/skill assets read
             # this field instead of reusing the windowless MCP launcher.
-            env["LATCH_PYTHON"] = _forward_slash(python_path)
+            env["LATCH_PYTHON"] = _forward_slash(
+                _resolved_executable(python_path)
+            )
             entry = str(windows_entry)
         else:
             # pythonw has no reliable stdio for an arbitrary standalone server.
