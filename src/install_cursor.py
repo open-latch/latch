@@ -173,6 +173,27 @@ def render_cursor_server(
     }
 
 
+def mcp_server_python(python_path: str) -> str:
+    """Interpreter for the long-lived Cursor MCP server.
+
+    On Windows prefer ``pythonw.exe``: Cursor is a console-less GUI, so it
+    allocates a visible console window for a console-subsystem ``python.exe``.
+    The MCP stdio transport is a persistent bidirectional pipe that ``pythonw``
+    serves correctly, so the server runs windowless with no functional cost.
+    Hooks intentionally keep ``python.exe`` (see ``main``): they are short-lived
+    and ``pythonw`` does not reliably deliver a quick hook's stdout to Cursor's
+    hook capture, which would fail the gate closed.
+    """
+    if os.name != "nt":
+        return python_path
+    candidate = Path(python_path)
+    if candidate.name.lower() == "python.exe":
+        pyw = candidate.with_name("pythonw.exe")
+        if pyw.exists():
+            return _forward_slash(str(pyw))
+    return python_path
+
+
 def merge_mcp_config(
     existing: str,
     python_path: str,
@@ -680,7 +701,7 @@ def _check(args: argparse.Namespace, python_path: str, server_py: str) -> int:
     if not args.skip_mcp:
         checks.append(mcp_status(
             Path(args.mcp_json),
-            python_path,
+            mcp_server_python(python_path),
             server_py,
             model_backend=args.model_backend,
         ))
@@ -773,10 +794,14 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
+    mcp_python = mcp_server_python(python_path)
+
     print("\nlatch Cursor installer")
     print(f"  version      : {LATCH_VERSION} (wiring {WIRING_VERSION})")
     print(f"  KB_HOME      : {KB_HOME}")
     print(f"  interpreter  : {python_path}")
+    if mcp_python != python_path:
+        print(f"  MCP interp.  : {mcp_python} (windowless; hooks keep python.exe)")
     print(f"  MCP config   : {'skipped' if args.skip_mcp else args.mcp_json}")
     print(f"  Cursor rule  : {'skipped' if args.skip_rules else args.rules_mdc}")
     print(f"  Commands     : {'skipped' if args.skip_commands else args.commands_dir}")
@@ -792,7 +817,7 @@ def main(argv: list[str] | None = None) -> int:
         try:
             new_mcp, changes = merge_mcp_config(
                 existing,
-                python_path,
+                mcp_python,
                 server_py,
                 path=mcp_path,
                 model_backend=args.model_backend,
@@ -886,6 +911,18 @@ def main(argv: list[str] | None = None) -> int:
             print(cursor_ide_enablement_guidance())
         if not args.with_hooks:
             print("Cursor hooks were not installed; re-run with --with-hooks for session briefing, pre-edit gating, and activity context.")
+        if args.with_hooks and os.name == "nt":
+            print(
+                "\nWindows note (gating hooks): each latch hook runs as a short-lived\n"
+                "console process, so Cursor briefly shows a console window on tool\n"
+                "calls. This is a Windows limitation -- a hook cannot be both\n"
+                "windowless (pythonw) AND deliver its gate decision to Cursor, so the\n"
+                "gate would fail closed. The MCP server itself runs windowless. The\n"
+                "gate is latch's core safety guarantee (every implementation step is\n"
+                "checked), so hooks stay enabled by default. To turn off the auto\n"
+                "hooks, delete .cursor/hooks.json (or re-run install without\n"
+                "--with-hooks); you can still gate manually with /latch-gate."
+            )
         print("Cursor Agent CLI is the native model backend; pass --model-backend claude|codex only for an explicit compatibility override.")
     print()
     return 0
