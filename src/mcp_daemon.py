@@ -98,6 +98,9 @@ def _publish_upgrade_alias(
     mcp_broker.publish_discovery(**values)
     if not capable:
         mcp_broker.publish_discovery(**values, legacy_path=True)
+    # Publish the matching embed alias so a retained-key process reaches the
+    # owner's live embedder instead of its own stale embed.sock.json (KB id=1912).
+    mcp_broker.publish_embed_alias(runtime_key)
 
 
 def _alias_ready_owner(runtime_key: str, *, capable: bool) -> bool:

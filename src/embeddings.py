@@ -162,6 +162,14 @@ def embed_remote(
         or meta.get("runtime_key") != mcp_broker.RUNTIME_KEY
     ):
         return None
+    # Validate the advertised owner is alive before trusting the endpoint. A
+    # retained-key process can otherwise read a stale embed.sock.json whose
+    # owner has exited (KB id=1912); treat a dead/invalid owner as stale
+    # discovery so the caller's bounded wake can spawn a fresh owner instead of
+    # burning the whole connect timeout on a socket nobody is serving.
+    pid = meta.get("pid")
+    if not isinstance(pid, int) or not mcp_broker._pid_alive(pid):
+        return None
     try:
         with _socket.create_connection((host, int(port)), timeout=timeout) as s:
             s.settimeout(timeout)
