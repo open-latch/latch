@@ -815,10 +815,6 @@ def _spawn_daemon(project_cwd: str, *, start_reason: str) -> int:
             getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
             | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
         )
-        if os.environ.get("LATCH_MCP_DAEMON_BREAKAWAY_FROM_JOB") == "1":
-            kwargs["creationflags"] |= getattr(
-                subprocess, "CREATE_BREAKAWAY_FROM_JOB", 0x01000000
-            )
     else:
         env["LATCH_MCP_DAEMONIZE"] = "1"
 

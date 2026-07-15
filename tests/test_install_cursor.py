@@ -101,6 +101,17 @@ def test_cursor_mcp_launcher_uses_pythonw_only_when_available_on_windows():
             str(python), str(server_py), system="Windows",
         )
         _assert(ok, detail)
+        server_py.unlink()
+        ok, detail = ic.cursor_mcp_launch_assets_status(
+            str(python), str(server_py), system="Windows",
+        )
+        _assert(not ok and "MCP server" in detail, detail)
+        server_py.write_text("# server\n", encoding="utf-8")
+        python.unlink()
+        ok, detail = ic.cursor_mcp_launch_assets_status(
+            str(python), str(server_py), system="Windows",
+        )
+        _assert(not ok and "console interpreter" in detail, detail)
         print("PASS cursor_mcp_launcher_uses_pythonw_only_when_available_on_windows")
     finally:
         shutil.rmtree(d, ignore_errors=True)

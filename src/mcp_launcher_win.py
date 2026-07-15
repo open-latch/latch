@@ -15,8 +15,9 @@ windowless supervisor while preserving real OS pipes for the stdio proxy:
 * the proxy child is owned by a Job Object with
   ``JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE``, so it is reaped if Cursor kills the
   launcher;
-* the shared MCP daemon explicitly breaks away from that job and remains
-  governed by its normal multi-client idle policy;
+* the private job uses silent breakaway so child processes such as the shared
+  MCP daemon are not captured by the per-connection job and remain governed by
+  their normal multi-client idle policy;
 * the child's exit code is propagated.
 
 Only used on Windows; other platforms never launch this module.
@@ -38,7 +39,7 @@ _DUPLICATE_SAME_ACCESS = 0x00000002
 # Job object
 _JobObjectExtendedLimitInformation = 9
 _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
-_JOB_OBJECT_LIMIT_BREAKAWAY_OK = 0x00000800
+_JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK = 0x00001000
 
 # Keep the job handle alive for this process's lifetime so KILL_ON_JOB_CLOSE
 # only fires when the launcher itself dies.
@@ -132,7 +133,7 @@ def _create_kill_on_close_job():
     info = _EXT()
     info.BasicLimitInformation.LimitFlags = (
         _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
-        | _JOB_OBJECT_LIMIT_BREAKAWAY_OK
+        | _JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK
     )
     k32.SetInformationJobObject.argtypes = [
         wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD]
@@ -201,10 +202,6 @@ def main() -> int:
     server_py = Path(__file__).resolve().parent / "mcp_server.py"
     child_python = _resolve_child_python()
     child_env = os.environ.copy()
-    # The proxy is intentionally job-owned, but the shared daemon must outlive
-    # any single Cursor connection. mcp_broker consumes this private launcher
-    # signal and adds CREATE_BREAKAWAY_FROM_JOB only to the daemon process.
-    child_env["LATCH_MCP_DAEMON_BREAKAWAY_FROM_JOB"] = "1"
     site = _venv_site_packages()
     if site:
         # Base interpreter direct-launch: expose venv deps via PYTHONPATH so the

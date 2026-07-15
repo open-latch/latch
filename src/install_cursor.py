@@ -202,9 +202,9 @@ def render_cursor_server(
         # Windows windowless transport: pythonw runs mcp_launcher_win.py, which
         # spawns a base console python.exe child with CREATE_NO_WINDOW, hands it
         # Cursor's inherited stdin/stdout/stderr pipes, runs mcp_server.py there,
-        # and owns it with a JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE job. This gives
-        # the server real OS pipes (no in-process handle recovery) with no
-        # console window and no orphaned proxy/daemon processes.
+        # and owns the per-connection proxy with a kill-on-close Job Object.
+        # Silent child breakaway preserves the existing shared-daemon lifetime.
+        # This gives the proxy real OS pipes with no foreground console.
         entry = str(Path(server_py).with_name("mcp_launcher_win.py"))
     return {
         "type": "stdio",
@@ -292,11 +292,17 @@ def cursor_mcp_launch_assets_status(
         if launcher != python_path
         else server_py
     )
-    missing: list[str] = []
-    if not Path(launcher).is_file():
-        missing.append(f"interpreter not found: {launcher}")
-    if not Path(entry).is_file():
-        missing.append(f"launch script not found: {entry}")
+    required = [
+        ("console interpreter", python_path),
+        ("MCP launcher", launcher),
+        ("MCP server", server_py),
+        ("launch script", entry),
+    ]
+    missing = [
+        f"{label} not found: {path}"
+        for label, path in dict(required).items()
+        if not Path(path).is_file()
+    ]
     if missing:
         return False, "; ".join(missing)
     return True, f"Cursor MCP launch target: {launcher} -> {entry}"
