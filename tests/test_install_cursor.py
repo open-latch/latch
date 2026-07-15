@@ -94,9 +94,10 @@ def test_cursor_mcp_launcher_uses_pythonw_only_when_available_on_windows():
                 str(python), str(standalone), system="Windows",
             )
             _assert(ok, detail)
+            normalized_detail = detail.replace("\\", "/")
             _assert(
-                str(python).replace("\\", "/") in detail
-                and str(pythonw).replace("\\", "/") not in detail,
+                str(python).replace("\\", "/") in normalized_detail
+                and str(pythonw).replace("\\", "/") not in normalized_detail,
                 "launch-target validation must describe the same console command",
             )
 

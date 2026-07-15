@@ -231,7 +231,7 @@ def test_latch_kb_dir_precedes_legacy_env_pin():
         os.environ["CLAUDE_KB_DIR"] = "/tmp/legacy-kb"
         os.environ["LATCH_KB_DIR"] = "/tmp/latch-kb"
         paths._PINNED_DIR = False
-        _assert(str(paths._resolve_pinned_dir()) == "/tmp/latch-kb",
+        _assert(paths._resolve_pinned_dir() == Path("/tmp/latch-kb"),
                 "LATCH_KB_DIR should take precedence over legacy CLAUDE_KB_DIR")
         print("PASS latch_kb_dir_precedes_legacy_env_pin")
     finally:
