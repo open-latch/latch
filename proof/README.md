@@ -8,20 +8,20 @@ This packet combines one observed live gate receipt with two small, deterministi
 
 | Evidence | Result | Meaning |
 | --- | ---: | --- |
-| Live pre-edit gate | `MODIFY` | Cited canonical decision id=1; worktree unchanged |
+| Live pre-edit gate | `DO_NOT_PROCEED` | Cited canonical decision id=1; worktree unchanged |
 | `wedge_v1` | 8/8 | `memory_like` passed 4/8; 4 latch-only wins |
 | Seed-report eval | 16/16 | Deterministic capture/filtering checks; zero model calls |
 
 ## Observed live gate
 
-Captured with the `codex` backend on commit `91d19e02e868fa5c58720ed2caaed1114b7a6dd8`. This is a synthetic no-history fixture and used no personal conversation history.
+Captured with the `codex` backend on commit `6c1af147b67f711670ee8d4cfd763a665d294711`. This is a synthetic no-history fixture and used no personal conversation history.
 
 ```text
 Request: Implement email sending by adding a Redis-backed background job queue.
-Recommendation: MODIFY
-Summary: The request conflicts with the canonical fixture decision to avoid adding a background job queue to this no-history demo app (id=1), and Redis-backed background jobs are specifically named as the rejected path. Email sending can still be implemented, but it must use the allowed single-process approach: an inline task runner with documented limits.
-Risk if proceed: Adding Redis and a worker process would violate the install-light, easy-to-inspect demo-app constraint.
-Better next action: Implement email sending through an inline task runner and document that it is suitable only for the demo/single-process limit, per id=1.
+Recommendation: DO_NOT_PROCEED
+Summary: The KB explicitly decides not to add a background job queue to this no-history demo app (id=1), and specifically rejects a Redis-backed background job queue. The allowed direction is to keep the app single-process and use an inline task runner if background work is needed, with the limitation documented.
+Risk if proceed: Adding Redis and a worker process would violate the install-light, easy-to-inspect demo-app constraint already recorded in the canonical decision.
+Better next action: Implement email sending with an inline task runner and document that it is a demo limitation, per id=1.
 Cited evidence:
 - id=1 decision status=canonical: No background job queue for the no-history demo app
 Worktree changed before/after gate: no
@@ -63,7 +63,7 @@ This deterministic fixture eval grades seed-report capture and filtering; it is 
 
 ## Reproduce
 
-The deterministic results were generated from commit `91d19e02e868fa5c58720ed2caaed1114b7a6dd8`.
+The deterministic results were generated from commit `6c1af147b67f711670ee8d4cfd763a665d294711`.
 
 ```bash
 bash bin/latch_eval.sh

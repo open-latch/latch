@@ -16,8 +16,9 @@ the `beforeSubmitPrompt` hook re-injected it from this chat's payload. Pass it
 as the wrapper's first positional argument. Never omit it or reuse an id from
 another chat.
 
-Before the Shell call, read the workspace `.cursor/mcp.json` and use the exact
-absolute `mcpServers.latch.command` as `LATCH_PYTHON`. Never fall back to a
+Before the Shell call, read the workspace `.cursor/mcp.json` and use
+`mcpServers.latch.env.LATCH_PYTHON` when present, otherwise
+`mcpServers.latch.command`, as `<CURSOR_MCP_PYTHON>` and `LATCH_PYTHON`. Never fall back to a
 PATH `python3`; the MCP interpreter owns latch's native dependencies.
 Use `latch_home` only to construct the absolute wrapper path. Do not export
 `LATCH_HOME` or `CLAUDE_KB_HOME` in the Shell call; managed Cursor operation

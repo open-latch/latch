@@ -15,7 +15,7 @@ sys.path.insert(0, str(SRC))
 sys.path.insert(0, str(SRC / "hooks"))
 
 from post_tool_use import surface_message  # noqa: E402
-from _common import log  # noqa: E402
+from _common import log, read_hook_input  # noqa: E402
 import cursor_gate_state  # noqa: E402
 
 
@@ -98,8 +98,11 @@ def record_operation_success(payload: dict) -> tuple[bool, str] | None:
 
 def main() -> int:
     try:
-        raw = sys.stdin.read() if not sys.stdin.isatty() else ""
-        payload = json.loads(raw) if raw.strip() else {}
+        # Use the shared BOM-safe reader. Cursor sends BOM-prefixed UTF-8 hook
+        # payloads; the previous inline sys.stdin.read()+json.loads decoded that
+        # as cp1252 and failed at char 0, so the gate receipt never armed and
+        # every post-gate Write/Shell stayed denied.
+        payload = read_hook_input()
         msg = cursor_surface_message(payload)
         gate_record = record_gate_receipt(payload)
         operation_record = record_operation_success(payload)

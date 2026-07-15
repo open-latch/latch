@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import shutil
 import sys
 import tempfile
@@ -43,6 +44,147 @@ def test_render_cursor_server_uses_cursor_mcp_shape():
     ):
         _assert(default["env"][key] == "cursor", default)
     print("PASS render_cursor_server_uses_cursor_mcp_shape")
+
+
+def test_cursor_mcp_launcher_uses_pythonw_only_when_available_on_windows():
+    d = Path(tempfile.mkdtemp(prefix="latch-cursor-pythonw-"))
+    try:
+        python = d / "python.exe"
+        pythonw = d / "pythonw.exe"
+        python.write_bytes(b"")
+
+        _assert(
+            ic.cursor_mcp_launcher(str(python), system="Windows") == str(python),
+            "python.exe must remain when pythonw.exe is unavailable",
+        )
+        pythonw.write_bytes(b"")
+        _assert(
+            ic.cursor_mcp_launcher(str(python), system="Windows") == str(pythonw),
+            "Windows MCP launch should use the sibling pythonw.exe",
+        )
+        _assert(
+            ic.cursor_mcp_launcher(str(python), system="Linux") == str(python),
+            "non-Windows hosts must keep their configured interpreter",
+        )
+        _assert(
+            ic.cursor_mcp_launcher(str(d / "custom.exe"), system="Windows")
+            == str(d / "custom.exe"),
+            "custom Windows launchers must remain unchanged",
+        )
+        original_system = ic.platform.system
+        ic.platform.system = lambda: "Windows"
+        try:
+            standalone = d / "standalone" / "mcp_server.py"
+            standalone.parent.mkdir()
+            standalone.write_text("# standalone\n", encoding="utf-8")
+            server = ic.render_cursor_server(str(python), str(standalone))
+            _assert(
+                server["args"] == [str(standalone).replace("\\", "/")],
+                "a standalone server must not be redirected to a missing launcher",
+            )
+            _assert(
+                server["command"] == str(python).replace("\\", "/"),
+                "a standalone server must keep console Python for MCP stdio",
+            )
+            _assert(
+                "LATCH_PYTHON" not in server["env"],
+                "standalone console launch must not advertise a separate interpreter",
+            )
+            ok, detail = ic.cursor_mcp_launch_assets_status(
+                str(python), str(standalone), system="Windows",
+            )
+            _assert(ok, detail)
+            normalized_detail = detail.replace("\\", "/")
+            _assert(
+                str(python).replace("\\", "/") in normalized_detail
+                and str(pythonw).replace("\\", "/") not in normalized_detail,
+                "launch-target validation must describe the same console command",
+            )
+
+            server_py = d / "src" / "mcp_server.py"
+            launcher_py = d / "src" / "mcp_launcher_win.py"
+            server_py.parent.mkdir()
+            server_py.write_text("# server\n", encoding="utf-8")
+            launcher_py.write_text("# launcher\n", encoding="utf-8")
+            server = ic.render_cursor_server(str(python), str(server_py))
+        finally:
+            ic.platform.system = original_system
+        _assert(server["command"] == str(pythonw).replace("\\", "/"), server)
+        _assert(
+            server["env"]["LATCH_PYTHON"] == str(python).replace("\\", "/"),
+            "windowless MCP config must retain the console interpreter",
+        )
+        _assert(
+            server["args"] == [
+                str(launcher_py).replace("\\", "/")
+            ],
+            server,
+        )
+
+        ok, detail = ic.cursor_mcp_launch_assets_status(
+            str(python), str(server_py), system="Windows",
+        )
+        _assert(ok, detail)
+        server_py.unlink()
+        ok, detail = ic.cursor_mcp_launch_assets_status(
+            str(python), str(server_py), system="Windows",
+        )
+        _assert(not ok and "MCP server" in detail, detail)
+        server_py.write_text("# server\n", encoding="utf-8")
+        python.unlink()
+        ok, detail = ic.cursor_mcp_launch_assets_status(
+            str(python), str(server_py), system="Windows",
+        )
+        _assert(not ok and "console interpreter" in detail, detail)
+
+        path_pair = d / "path-pair"
+        path_pair.mkdir()
+        path_console = path_pair / "python.exe"
+        path_windowless = path_pair / "pythonw.exe"
+        path_console.write_bytes(b"")
+        path_windowless.write_bytes(b"")
+        path_console.chmod(0o755)
+        path_windowless.chmod(0o755)
+        old_path = os.environ.get("PATH")
+        os.environ["PATH"] = str(path_pair) + os.pathsep + (old_path or "")
+        original_system = ic.platform.system
+        ic.platform.system = lambda: "Windows"
+        try:
+            path_server = ic.render_cursor_server("python.exe", str(server_py))
+        finally:
+            ic.platform.system = original_system
+            if old_path is None:
+                os.environ.pop("PATH", None)
+            else:
+                os.environ["PATH"] = old_path
+        _assert(
+            path_server["command"] == str(path_windowless).replace("\\", "/"),
+            path_server,
+        )
+        _assert(
+            path_server["env"]["LATCH_PYTHON"]
+            == str(path_console).replace("\\", "/"),
+            path_server,
+        )
+
+        path_python = d / "path-python.exe"
+        path_python.write_text("", encoding="utf-8")
+        path_python.chmod(0o755)
+        old_path = os.environ.get("PATH")
+        os.environ["PATH"] = str(d) + os.pathsep + (old_path or "")
+        try:
+            ok, detail = ic.cursor_mcp_launch_assets_status(
+                path_python.name, str(server_py), system="Linux",
+            )
+            _assert(ok, detail)
+        finally:
+            if old_path is None:
+                os.environ.pop("PATH", None)
+            else:
+                os.environ["PATH"] = old_path
+        print("PASS cursor_mcp_launcher_uses_pythonw_only_when_available_on_windows")
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
 
 
 def test_merge_mcp_config_preserves_unrelated_servers_and_settings():
@@ -248,6 +390,7 @@ def test_cursor_shell_workflows_pin_mcp_interpreter():
         text = ic.render_cursor_command(name)
         _assert("LATCH_PYTHON" in text and ".cursor/mcp.json" in text, name)
         _assert("mcpServers.latch.command" in text, name)
+        _assert("mcpServers.latch.env.LATCH_PYTHON" in text, name)
         _assert("Never fall back" in text and "PATH `python3`" in text, name)
         _assert("do not export `LATCH_HOME`" in text, name)
         _assert('\npython "' not in text, f"bare PATH Python remains in {name}")
@@ -267,6 +410,7 @@ def test_cursor_shell_workflows_pin_mcp_interpreter():
         text = path.read_text(encoding="utf-8")
         _assert("LATCH_PYTHON" in text and ".cursor/mcp.json" in text, path)
         _assert("mcpServers.latch.command" in text, path)
+        _assert("mcpServers.latch.env.LATCH_PYTHON" in text, path)
         _assert("Never fall back" in text and "PATH `python3`" in text, path)
         _assert("Do not export" in text and "`LATCH_HOME`" in text, path)
         if name in {
@@ -662,6 +806,7 @@ def test_with_hooks_installs_and_check_requires_hooks():
 
 if __name__ == "__main__":
     test_render_cursor_server_uses_cursor_mcp_shape()
+    test_cursor_mcp_launcher_uses_pythonw_only_when_available_on_windows()
     test_merge_mcp_config_preserves_unrelated_servers_and_settings()
     test_merge_mcp_config_replaces_existing_latch_only()
     test_merge_mcp_config_migrates_legacy_adapter_names()

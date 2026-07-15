@@ -25,12 +25,12 @@ def test_managed_doc_marker_repairs_once_and_preserves_user_content(tmp_path):
     target = tmp_path / "CLAUDE.md"
     target.write_text("user-before\n", encoding="utf-8")
     assert claude_md_sync.sync(target) == "appended"
-    _replace(target, "latch-wiring-version: 1", "latch-wiring-version: 0")
+    _replace(target, "latch-wiring-version: 2", "latch-wiring-version: 1")
     _replace(target, "KB usage", "old KB usage")
     assert claude_md_sync.sync_if_outdated(target) == "synced"
     repaired = target.read_bytes()
     assert target.read_text(encoding="utf-8").startswith("user-before\n")
-    assert "latch-wiring-version: 1" in target.read_text(encoding="utf-8")
+    assert "latch-wiring-version: 2" in target.read_text(encoding="utf-8")
     assert claude_md_sync.sync_if_outdated(target) == "unchanged"
     assert target.read_bytes() == repaired
 
@@ -38,7 +38,7 @@ def test_managed_doc_marker_repairs_once_and_preserves_user_content(tmp_path):
 def test_legacy_unmanaged_and_newer_managed_doc_boundaries(tmp_path):
     legacy = tmp_path / "legacy.md"
     claude_md_sync.sync(legacy)
-    _replace(legacy, "<!-- latch-wiring-version: 1 -->\n", "")
+    _replace(legacy, "<!-- latch-wiring-version: 2 -->\n", "")
     assert claude_md_sync.sync_if_outdated(legacy) == "synced"
 
     unmanaged = tmp_path / "plain.md"
@@ -49,7 +49,7 @@ def test_legacy_unmanaged_and_newer_managed_doc_boundaries(tmp_path):
 
     newer = tmp_path / "newer.md"
     claude_md_sync.sync(newer)
-    _replace(newer, "latch-wiring-version: 1", "latch-wiring-version: 999")
+    _replace(newer, "latch-wiring-version: 2", "latch-wiring-version: 999")
     before = newer.read_bytes()
     assert claude_md_sync.sync_if_outdated(newer) == "newer"
     assert newer.read_bytes() == before
@@ -64,11 +64,17 @@ def test_engine_release_version_does_not_drive_project_rewrite(tmp_path, monkeyp
     assert target.read_bytes() == before
 
 
-def _install_cursor_bundle(root: Path, *, with_hooks: bool = True) -> None:
+def _install_cursor_bundle(
+    root: Path,
+    *,
+    with_hooks: bool = True,
+    python_path: str | None = None,
+) -> None:
+    python_path = python_path or sys.executable
     mcp = root / ".cursor" / "mcp.json"
     existing = json.dumps({"setting": "keep", "mcpServers": {"other": {"command": "node"}}}) + "\n"
     rendered, _ = install_cursor.merge_mcp_config(
-        existing, sys.executable, str(ROOT / "src" / "mcp_server.py"), path=mcp
+        existing, python_path, str(ROOT / "src" / "mcp_server.py"), path=mcp
     )
     install_cursor.write_config(mcp, rendered)
     agents = root / "AGENTS.md"
@@ -85,7 +91,7 @@ def _install_cursor_bundle(root: Path, *, with_hooks: bool = True) -> None:
         }) + "\n"
         rendered_hooks, _ = cursor_hooks.merge_hooks(
             existing_hooks,
-            sys.executable,
+            python_path,
             str(ROOT / "src" / "hooks" / "cursor_session_start.py"),
             str(ROOT / "src" / "hooks" / "cursor_before_submit.py"),
             str(ROOT / "src" / "hooks" / "cursor_pre_tool_use.py"),
@@ -96,10 +102,10 @@ def _install_cursor_bundle(root: Path, *, with_hooks: bool = True) -> None:
 
 
 def _downgrade_cursor_bundle(root: Path) -> None:
-    _replace(root / ".cursor" / "rules" / "latch.mdc", "latch-wiring-version: 1", "latch-wiring-version: 0")
-    _replace(root / ".cursor" / "commands" / "latch-gate.md", "latch-wiring-version: 1", "latch-wiring-version: 0")
+    _replace(root / ".cursor" / "rules" / "latch.mdc", "latch-wiring-version: 2", "latch-wiring-version: 1")
+    _replace(root / ".cursor" / "commands" / "latch-gate.md", "latch-wiring-version: 2", "latch-wiring-version: 1")
     data = json.loads((root / ".cursor" / "mcp.json").read_text(encoding="utf-8"))
-    data["mcpServers"]["latch"]["env"]["LATCH_WIRING_VERSION"] = "0"
+    data["mcpServers"]["latch"]["env"]["LATCH_WIRING_VERSION"] = "1"
     (root / ".cursor" / "mcp.json").write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
 
@@ -132,6 +138,88 @@ def test_cursor_bundle_repairs_once_and_preserves_unrelated_content(tmp_path):
     }
 
 
+def test_windows_cursor_bundle_repair_preserves_console_interpreter(
+    tmp_path, monkeypatch,
+):
+    python = tmp_path / "venv" / "Scripts" / "python.exe"
+    pythonw = python.with_name("pythonw.exe")
+    python.parent.mkdir(parents=True)
+    python.write_bytes(b"")
+    pythonw.write_bytes(b"")
+    monkeypatch.setattr(install_cursor.platform, "system", lambda: "Windows")
+
+    _install_cursor_bundle(tmp_path, python_path=str(python))
+    initial = json.loads(
+        (tmp_path / ".cursor" / "mcp.json").read_text(encoding="utf-8")
+    )["mcpServers"]["latch"]
+    assert initial["command"] == str(pythonw).replace("\\", "/")
+    assert initial["args"] == [
+        str(ROOT / "src" / "mcp_launcher_win.py").replace("\\", "/")
+    ]
+    assert initial["env"]["LATCH_PYTHON"] == str(python).replace("\\", "/")
+
+    _downgrade_cursor_bundle(tmp_path)
+    legacy_mcp_path = tmp_path / ".cursor" / "mcp.json"
+    legacy_obj = json.loads(legacy_mcp_path.read_text(encoding="utf-8"))
+    legacy = legacy_obj["mcpServers"]["latch"]
+    legacy["command"] = str(python).replace("\\", "/")
+    legacy["args"] = [
+        str(ROOT / "src" / "mcp_server.py").replace("\\", "/")
+    ]
+    legacy["env"].pop("LATCH_PYTHON", None)
+    legacy_mcp_path.write_text(
+        json.dumps(legacy_obj, indent=2) + "\n", encoding="utf-8",
+    )
+    result = cursor_wiring.repair_project(tmp_path)
+    assert result.action == "synced"
+    repaired = json.loads(
+        (tmp_path / ".cursor" / "mcp.json").read_text(encoding="utf-8")
+    )["mcpServers"]["latch"]
+    assert repaired["command"] == str(pythonw).replace("\\", "/")
+    assert repaired["args"] == initial["args"]
+    assert repaired["env"]["LATCH_PYTHON"] == str(python).replace("\\", "/")
+
+
+def test_windows_cursor_bundle_repair_preserves_path_resolved_pair(
+    tmp_path, monkeypatch,
+):
+    pair = tmp_path / "path-pair"
+    python = pair / "python.exe"
+    pythonw = pair / "pythonw.exe"
+    pair.mkdir()
+    python.write_bytes(b"")
+    pythonw.write_bytes(b"")
+    python.chmod(0o755)
+    pythonw.chmod(0o755)
+    monkeypatch.setenv("PATH", str(pair) + os.pathsep + os.environ.get("PATH", ""))
+    monkeypatch.setattr(install_cursor.platform, "system", lambda: "Windows")
+
+    _install_cursor_bundle(tmp_path, python_path="python.exe")
+    initial = json.loads(
+        (tmp_path / ".cursor" / "mcp.json").read_text(encoding="utf-8")
+    )["mcpServers"]["latch"]
+    assert initial["command"] == str(pythonw).replace("\\", "/")
+    assert initial["env"]["LATCH_PYTHON"] == str(python).replace("\\", "/")
+
+    _downgrade_cursor_bundle(tmp_path)
+    legacy_mcp_path = tmp_path / ".cursor" / "mcp.json"
+    legacy_obj = json.loads(legacy_mcp_path.read_text(encoding="utf-8"))
+    legacy = legacy_obj["mcpServers"]["latch"]
+    legacy["command"] = "pythonw.exe"
+    legacy["env"]["LATCH_PYTHON"] = "python.exe"
+    legacy_mcp_path.write_text(
+        json.dumps(legacy_obj, indent=2) + "\n", encoding="utf-8",
+    )
+    result = cursor_wiring.repair_project(tmp_path)
+    assert result.action == "synced"
+    repaired = json.loads(
+        (tmp_path / ".cursor" / "mcp.json").read_text(encoding="utf-8")
+    )["mcpServers"]["latch"]
+    assert repaired["command"] == initial["command"]
+    assert repaired["args"] == initial["args"]
+    assert repaired["env"]["LATCH_PYTHON"] == initial["env"]["LATCH_PYTHON"]
+
+
 def test_cursor_unmanaged_newer_and_collision_boundaries(tmp_path):
     unmanaged = tmp_path / "unmanaged"
     unmanaged.mkdir()
@@ -141,7 +229,7 @@ def test_cursor_unmanaged_newer_and_collision_boundaries(tmp_path):
     newer = tmp_path / "newer"
     newer.mkdir()
     _install_cursor_bundle(newer, with_hooks=False)
-    _replace(newer / ".cursor" / "rules" / "latch.mdc", "latch-wiring-version: 1", "latch-wiring-version: 999")
+    _replace(newer / ".cursor" / "rules" / "latch.mdc", "latch-wiring-version: 2", "latch-wiring-version: 999")
     before = {p.relative_to(newer): p.read_bytes() for p in newer.rglob("*") if p.is_file()}
     assert cursor_wiring.repair_project(newer).action == "newer"
     assert before == {p.relative_to(newer): p.read_bytes() for p in newer.rglob("*") if p.is_file()}
@@ -171,8 +259,8 @@ def test_cursor_additive_bundle_assets_are_installed_safely(tmp_path):
     assert result.action == "synced"
     assert command.is_file()
     assert skill.is_file()
-    assert "latch-wiring-version: 1" in command.read_text(encoding="utf-8")
-    assert "latch-wiring-version: 1" in skill.read_text(encoding="utf-8")
+    assert "latch-wiring-version: 2" in command.read_text(encoding="utf-8")
+    assert "latch-wiring-version: 2" in skill.read_text(encoding="utf-8")
     assert cursor_rules_sync.wiring_state(tmp_path / ".cursor" / "rules" / "latch.mdc") == cursor_rules_sync.CURRENT
 
 

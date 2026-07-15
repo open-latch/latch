@@ -111,14 +111,10 @@ def check_cursor_hooks(
 
 
 def check_mcp_launch_target(python_path: str, server_py: str) -> Check:
-    missing: list[str] = []
-    if not _exists_or_on_path(python_path):
-        missing.append(f"interpreter not found: {python_path}")
-    if not Path(server_py).exists():
-        missing.append(f"server script not found: {server_py}")
-    if missing:
-        return Check("Cursor MCP launch target", FAIL, "; ".join(missing))
-    return Check("Cursor MCP launch target", OK, f"{python_path} -> {server_py}")
+    ok, detail = install_cursor.cursor_mcp_launch_assets_status(
+        python_path, server_py,
+    )
+    return Check("Cursor MCP launch target", OK if ok else FAIL, detail)
 
 
 def _output_excerpt(proc: subprocess.CompletedProcess[str]) -> str:

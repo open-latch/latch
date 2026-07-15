@@ -22,6 +22,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import platform
+import shutil
 import sys
 from pathlib import Path
 from typing import Any
@@ -97,9 +99,11 @@ CURSOR_COMMAND_FOOTER = (
 CURSOR_PYTHON_BOUNDARY_NOTE = (
     "\n\nCursor shell interpreter boundary: before any Shell call, read the "
     "workspace `.cursor/mcp.json` and use the exact absolute "
-    "`mcpServers.latch.command` as `<CURSOR_MCP_PYTHON>` and `LATCH_PYTHON`. "
-    "When the command calls Python directly, invoke that same absolute "
-    "`<CURSOR_MCP_PYTHON>` path as the launcher. Never fall back to a PATH "
+    "`mcpServers.latch.env.LATCH_PYTHON` when present, otherwise "
+    "`mcpServers.latch.command`, as `<CURSOR_MCP_PYTHON>` and `LATCH_PYTHON`. "
+    "The Windows MCP command may be the windowless `pythonw.exe`; Shell "
+    "workflows must use the console interpreter stored in the env field. "
+    "Invoke that absolute `<CURSOR_MCP_PYTHON>` path directly. Never fall back to a PATH "
     "`python3`; the MCP interpreter owns latch's native dependencies. "
     "Use the rendered absolute script path directly; do not export "
     "`LATCH_HOME` or `CLAUDE_KB_HOME` in the Shell call."
@@ -128,6 +132,14 @@ class CursorConfigError(ValueError):
 
 def _forward_slash(value: str) -> str:
     return value.replace("\\", "/")
+
+
+def _resolved_executable(value: str) -> str:
+    """Resolve PATH commands when possible while preserving missing/custom values."""
+    path = Path(value)
+    if path.is_file():
+        return str(path)
+    return shutil.which(value) or value
 
 
 def _json_object(text: str, *, path: Path) -> dict[str, Any]:
@@ -159,17 +171,68 @@ def _adapter_env(model_backend: str | None = None) -> dict[str, str]:
     return env
 
 
+def cursor_mcp_launcher(
+    python_path: str,
+    *,
+    system: str | None = None,
+) -> str:
+    """Return the candidate windowless interpreter for Cursor's MCP proxy.
+
+    Cursor starts the configured stdio server as a long-lived child.  Launching
+    ``python.exe`` directly gives that child a foreground console on Windows.
+    A standard Windows venv installs ``pythonw.exe`` beside ``python.exe``.
+    When present, it avoids allocating a console window.  The renderer only
+    selects it when the managed ``mcp_launcher_win.py`` supervisor also exists;
+    standalone servers keep ``python.exe`` so their stdio remains usable.
+    Custom interpreters without a sibling ``pythonw.exe`` stay unchanged.
+    """
+    if (system or platform.system()) != "Windows":
+        return python_path
+    python = Path(_resolved_executable(python_path))
+    if python.name.lower() != "python.exe":
+        return python_path
+    windowless = python.with_name("pythonw.exe")
+    return str(windowless) if windowless.is_file() else python_path
+
+
 def render_cursor_server(
     python_path: str,
     server_py: str,
     *,
     model_backend: str | None = None,
 ) -> dict[str, Any]:
+    launcher = cursor_mcp_launcher(python_path)
+    env = _adapter_env(model_backend)
+    entry = server_py
+    if launcher != python_path:
+        # Windows windowless transport: pythonw runs mcp_launcher_win.py, which
+        # spawns a base console python.exe child with CREATE_NO_WINDOW, hands it
+        # Cursor's inherited stdin/stdout/stderr pipes, runs mcp_server.py there,
+        # and owns the per-connection proxy with a kill-on-close Job Object.
+        # Silent child breakaway preserves the existing shared-daemon lifetime.
+        # This gives the proxy real OS pipes with no foreground console.
+        windows_entry = Path(server_py).with_name("mcp_launcher_win.py")
+        # A caller may intentionally supply a standalone/custom mcp_server.py.
+        # Only redirect it through latch's Windows supervisor when that sibling
+        # asset is actually present; never write a config targeting a missing
+        # script.
+        if windows_entry.is_file():
+            # Shell-backed Cursor workflows need a console interpreter so their
+            # JSON/stdout remains visible. Installed command/skill assets read
+            # this field instead of reusing the windowless MCP launcher.
+            env["LATCH_PYTHON"] = _forward_slash(
+                _resolved_executable(python_path)
+            )
+            entry = str(windows_entry)
+        else:
+            # pythonw has no reliable stdio for an arbitrary standalone server.
+            # Without latch's supervisor, preserve the caller's console Python.
+            launcher = python_path
     return {
         "type": "stdio",
-        "command": _forward_slash(python_path),
-        "args": [_forward_slash(server_py)],
-        "env": _adapter_env(model_backend),
+        "command": _forward_slash(launcher),
+        "args": [_forward_slash(entry)],
+        "env": env,
     }
 
 
@@ -236,6 +299,36 @@ def mcp_status(
     if desired == current and not changes:
         return True, f"Cursor MCP server installed in {path}"
     return False, f"Cursor MCP server missing or drifted in {path}"
+
+
+def cursor_mcp_launch_assets_status(
+    python_path: str,
+    server_py: str,
+    *,
+    system: str | None = None,
+) -> tuple[bool, str]:
+    """Validate the executable and script Cursor will actually launch."""
+    launcher = cursor_mcp_launcher(python_path, system=system)
+    windows_entry = Path(server_py).with_name("mcp_launcher_win.py")
+    if launcher != python_path and windows_entry.is_file():
+        entry = str(windows_entry)
+    else:
+        launcher = python_path
+        entry = server_py
+    required = [
+        ("console interpreter", python_path),
+        ("MCP launcher", launcher),
+        ("MCP server", server_py),
+        ("launch script", entry),
+    ]
+    missing = [
+        f"{label} not found: {path}"
+        for label, path in dict(required).items()
+        if not Path(path).is_file() and shutil.which(path) is None
+    ]
+    if missing:
+        return False, "; ".join(missing)
+    return True, f"Cursor MCP launch target: {launcher} -> {entry}"
 
 
 def write_config(path: Path, content: str) -> None:
@@ -684,6 +777,7 @@ def _check(args: argparse.Namespace, python_path: str, server_py: str) -> int:
             server_py,
             model_backend=args.model_backend,
         ))
+        checks.append(cursor_mcp_launch_assets_status(python_path, server_py))
     if not args.skip_agents:
         status = agents_md_sync.evaluate(Path(args.agents_md))
         checks.append((status == agents_md_sync.OK, f"AGENTS.md managed region: {status}"))

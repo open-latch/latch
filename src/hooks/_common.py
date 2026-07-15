@@ -1,4 +1,4 @@
-"""Shared hook utilities. Hooks read JSON on stdin from Claude Code."""
+"""Shared hook utilities. Hooks read UTF-8 JSON from agent stdin."""
 from __future__ import annotations
 
 import json
@@ -16,7 +16,25 @@ PYTHON_BIN = sys.executable
 
 
 def read_hook_input() -> dict:
-    raw = sys.stdin.read() if not sys.stdin.isatty() else ""
+    if sys.stdin.isatty():
+        return {}
+
+    # Cursor on Windows writes BOM-prefixed UTF-8 hook payloads, while the
+    # inherited console locale can wrap stdin as cp1252.  Reading through that
+    # text wrapper turns EF BB BF into the three characters ``ï»¿`` and makes
+    # otherwise-valid JSON fail at column 1.  Decode the underlying bytes
+    # explicitly; utf-8-sig accepts both BOM and BOM-free UTF-8.
+    stream = getattr(sys.stdin, "buffer", None)
+    if stream is not None:
+        # Deliberately let UnicodeDecodeError escape. Cursor marks the prompt
+        # and pre-tool hooks failClosed; converting undecodable bytes to an
+        # empty payload would bypass that contract exactly when the request
+        # cannot be fingerprinted.
+        raw = stream.read().decode("utf-8-sig")
+    else:
+        # StringIO and other text-only streams are useful in tests and embeds.
+        # Their decoder may already have preserved a Unicode BOM marker.
+        raw = sys.stdin.read().removeprefix("\ufeff")
     if not raw.strip():
         return {}
     try:

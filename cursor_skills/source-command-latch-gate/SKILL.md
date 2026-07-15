@@ -8,8 +8,9 @@ description: Manually run latch gate on a coding or build request. Use when the 
 Latch Cursor skill boundary: this workflow is safe for project-synced skills
 and the Cursor plugin.
 
-Before any Shell fallback, read the workspace `.cursor/mcp.json` and use the
-exact absolute `mcpServers.latch.command` as `LATCH_PYTHON`. Never fall back to
+Before any Shell fallback, read the workspace `.cursor/mcp.json` and use
+`mcpServers.latch.env.LATCH_PYTHON` when present, otherwise
+`mcpServers.latch.command`, as `<CURSOR_MCP_PYTHON>` and `LATCH_PYTHON`. Never fall back to
 a PATH `python3`; the MCP interpreter owns latch's native dependencies.
 Use `latch_home` only to construct the absolute wrapper path. Do not export
 `LATCH_HOME` or `CLAUDE_KB_HOME` in the Shell fallback.

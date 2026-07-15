@@ -79,7 +79,21 @@ def _server_details(path: Path) -> tuple[str, str, str | None]:
         raise RuntimeError("Cursor MCP latch entry has an unsupported command shape")
     env = server.get("env")
     backend = env.get("LATCH_MODEL_BACKEND") if isinstance(env, dict) else None
-    return command, args[0], backend if isinstance(backend, str) else None
+    entry = args[0]
+    # A managed Windows config launches the MCP supervisor with pythonw, but
+    # wiring repair must re-render from the console interpreter and real server
+    # entrypoint. Feeding pythonw + mcp_launcher_win.py back into the installer
+    # would drop env.LATCH_PYTHON and break shell-backed Cursor workflows.
+    if Path(command).name.lower() == "pythonw.exe":
+        console = env.get("LATCH_PYTHON") if isinstance(env, dict) else None
+        if not isinstance(console, str) or not console.strip():
+            raise RuntimeError(
+                "windowless Cursor MCP entry is missing env.LATCH_PYTHON"
+            )
+        command = console
+    if Path(entry).name.lower() == "mcp_launcher_win.py":
+        entry = str(Path(entry).with_name("mcp_server.py"))
+    return command, entry, backend if isinstance(backend, str) else None
 
 
 def repair_project(project: str | Path) -> RepairResult:

@@ -61,6 +61,28 @@ def test_sanitize_cwd_windows_drive_lexical():
     print("PASS sanitize_cwd_windows_drive_lexical")
 
 
+def test_normalize_cursor_leading_slash_drive():
+    """Cursor's workspace_roots reports ``/C:/Users/...`` (leading slash before
+    the drive). It must normalize to the native ``C:/Users/...``."""
+    _assert(paths._normalize_input_path("/C:/Users/me/proj") == "C:/Users/me/proj",
+            "leading-slash drive should drop the slash")
+    _assert(paths._normalize_input_path("/d:/Foo/Bar") == "d:/Foo/Bar",
+            "lower-drive leading-slash form too")
+    print("PASS normalize_cursor_leading_slash_drive")
+
+
+def test_sanitize_cwd_cursor_workspace_root_matches_native():
+    """Regression: Cursor hooks (``/C:/...``) and the MCP daemon (native
+    ``C:\\...``) MUST resolve to the same project dir, or session markers and
+    the KB split across two folders (SessionStart-marker-missing bug)."""
+    native_fwd = paths.sanitize_cwd("C:/Users/me/proj")
+    native_bs = paths.sanitize_cwd("C:\\Users\\me\\proj")
+    cursor = paths.sanitize_cwd("/C:/Users/me/proj")
+    _assert(native_fwd == native_bs == cursor == "c--Users-me-proj",
+            f"all forms must agree: fwd={native_fwd!r} bs={native_bs!r} cursor={cursor!r}")
+    print(f"PASS sanitize_cwd_cursor_workspace_root_matches_native ({cursor})")
+
+
 def test_sanitize_cwd_mingw_does_not_double_prefix():
     """Regression: the bug produced `c--c-Users-...`. Make sure it's gone."""
     out = paths.sanitize_cwd("/c/Users/me/myproject")
@@ -209,7 +231,7 @@ def test_latch_kb_dir_precedes_legacy_env_pin():
         os.environ["CLAUDE_KB_DIR"] = "/tmp/legacy-kb"
         os.environ["LATCH_KB_DIR"] = "/tmp/latch-kb"
         paths._PINNED_DIR = False
-        _assert(str(paths._resolve_pinned_dir()) == "/tmp/latch-kb",
+        _assert(paths._resolve_pinned_dir() == Path("/tmp/latch-kb"),
                 "LATCH_KB_DIR should take precedence over legacy CLAUDE_KB_DIR")
         print("PASS latch_kb_dir_precedes_legacy_env_pin")
     finally:
@@ -226,6 +248,8 @@ if __name__ == "__main__":
     test_normalize_mingw_drive_letter()
     test_normalize_preserves_native_windows()
     test_normalize_preserves_non_mingw_paths()
+    test_normalize_cursor_leading_slash_drive()
+    test_sanitize_cwd_cursor_workspace_root_matches_native()
     test_sanitize_cwd_mingw_matches_native()
     test_sanitize_cwd_windows_drive_lexical()
     test_sanitize_cwd_mingw_does_not_double_prefix()

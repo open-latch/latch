@@ -44,7 +44,7 @@ def test_auto_sync_agents_md_repairs_existing_managed_region():
         ams.sync(target)
         target.write_text(
             target.read_text(encoding="utf-8").replace(
-                "latch-wiring-version: 1", "latch-wiring-version: 0"
+                "latch-wiring-version: 2", "latch-wiring-version: 1"
             ).replace("KB usage", "KB X"),
             encoding="utf-8",
         )
