@@ -159,12 +159,11 @@ def test_evidence_baseline_footprints_match_base_commit() -> None:
         proc = subprocess.run(
             ["git", "show", f"{commit}:{path}"],
             cwd=ROOT,
-            text=True,
             capture_output=True,
         )
         if proc.returncode != 0:
             pytest.skip(f"baseline commit {commit} is unavailable in this checkout")
-        return proc.stdout
+        return proc.stdout.decode("utf-8")
 
     version = show("WIRING_VERSION").strip()
     source = show("claude_md_snippet.md")
