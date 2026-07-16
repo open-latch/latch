@@ -28,6 +28,7 @@ SPEC = mds.ManagedDocSpec(
     begin_mark=BEGIN_MARK,
     end_mark=END_MARK,
     installer_name="install_agents_md",
+    compaction_text=mds.AGENTS_COMPACTION_TEXT,
 )
 LEGACY_SPEC = mds.ManagedDocSpec(
     target_name="AGENTS.md",
@@ -35,6 +36,7 @@ LEGACY_SPEC = mds.ManagedDocSpec(
     begin_mark=LEGACY_BEGIN_MARK,
     end_mark=LEGACY_END_MARK,
     installer_name="install_agents_md",
+    compaction_text=mds.AGENTS_COMPACTION_TEXT,
 )
 
 

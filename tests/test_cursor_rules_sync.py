@@ -30,13 +30,16 @@ def test_render_rule_has_cursor_frontmatter_and_gate_contract():
     _assert("preToolUse" in out and "current user request verbatim" in out,
             "rule should explain current-prompt enforcement recovery")
     _assert("Cursor Settings > Tools & MCP" in out
+            and "workspace server `latch`" in out
+            and "confirm it reports tools enabled (count may vary)" in out
+            and "start a fresh Agent chat" in out
             and "do not repeatedly call" in out and "`latch_gate`" in out,
             "rule should recover honestly when the IDE MCP catalog lacks latch")
     _assert("/opt/latch/bin/install_cursor.sh --yes" in out,
             "KB_HOME placeholder should resolve")
     _assert(".cursor/commands" in out and "--with-hooks" in out
-            and "Cursor Agent CLI is the native" in out
-            and "never\ndiscovers or guesses historical Cursor transcripts" in out,
+            and "Cursor Agent CLI" in out and "native model backend" in out
+            and "never discovers or guesses historical Cursor" in out,
             "rule should state Cursor runtime boundaries")
     print("PASS render_rule_has_cursor_frontmatter_and_gate_contract")
 

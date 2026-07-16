@@ -1,0 +1,167 @@
+{
+  "schema_version": 1,
+  "captured_at_utc": "2026-07-16T03:46:12Z",
+  "base_commit": "ebe16e703af72e0649d84f28004c189c2b8cd187",
+  "candidate_state": {
+    "proof_source_commit": "6b115a84f3a8ac3dd401be7d076e04427c262c00",
+    "proof_artifact_commit": "6b5059a6ccc23ee94f4c63fb3efb584070182784",
+    "final_contract_commit": "d6f5f99fd9b51f6dcbaa1c8291fb565c74570c01",
+    "proof_scope": "The proof packet covers its declared gate/runtime manifest at proof_source_commit. It does not validate managed contract text outside that manifest; that surface is covered by the contract, sync, wiring, and artifact checks below."
+  },
+  "mainline_integration": {
+    "origin_main_commit": "ebe16e703af72e0649d84f28004c189c2b8cd187",
+    "local_branch": "trim-contract-mainline-review",
+    "source_replayed_on_origin_main": true,
+    "proof_recaptured_from_replayed_source": true,
+    "remote_or_public_git_actions_at_capture": "PR 6 still points to prior verified head f9829d02390b7bcaf11ac2c2ce3c0fcbdd6a0774; this rebased refresh remains local until exact-head verification and final review complete"
+  },
+  "wiring_version": {
+    "before": 2,
+    "candidate": 3
+  },
+  "measurement": {
+    "method": "Render each managed surface with kb_home=/opt/latch, include managed begin/end markers, count splitlines and whitespace-delimited words, and hash UTF-8 bytes.",
+    "baseline": {
+      "source_snippet": {"lines": 253, "words": 2020, "bytes": 13893, "sha256": "495d6e3290bb909c39d455809a722667e0e4ea5ad1b6a44fe6ee4a19fab867bc"},
+      "claude_managed_block": {"lines": 256, "words": 2049, "bytes": 14093, "sha256": "d4ab619433e75d648fc8fde0e4c620a3e7550b01e1526c3aca493d0c78cdcb59"},
+      "agents_managed_block": {"lines": 256, "words": 2051, "bytes": 14107, "sha256": "f63236a8b30b4c22d60e1e794d89e831ea3269d812dde4b0cafcad97ee650d4d"},
+      "cursor_rule": {"lines": 62, "words": 511, "bytes": 3603, "sha256": "bd6c775db266f036a81ee80328ad5e3e5ded47e19f63c1c4e2de05e102eb8fbc"},
+      "cursor_always_loaded": {"lines": 319, "words": 2562, "bytes": 17711, "sha256": "25c8bec2ae365a25aed9ce295dc9347d49d97e3d0ddb534f8d8a7c1dcc4ecc2c"}
+    },
+    "candidate": {
+      "source_snippet": {"lines": 89, "words": 574, "bytes": 4367, "sha256": "2b8a64e16f1fedd43624dab7e2f4cb0b2182b4fbe6371e0277c8c8157cedde69"},
+      "claude_managed_block": {"lines": 94, "words": 638, "bytes": 4773, "sha256": "888285fa29c52507ff27de12f39d17000aeb9f7c1bf5f214f39c40f66902b214"},
+      "agents_managed_block": {"lines": 94, "words": 639, "bytes": 4784, "sha256": "fd6ed49e5ad833179eaa230bc46554242217b7bd43ae5abd833df10c51521e5a"},
+      "cursor_rule": {"lines": 46, "words": 350, "bytes": 2477, "sha256": "b5a74f8d452363c275b0902ace3b0aa0fe8043cfd80ea203251205d359e0ccbf"},
+      "cursor_always_loaded": {"lines": 141, "words": 989, "bytes": 7262, "sha256": "7e8f8bb286b6b7d11fbad5df650863ca3b54e5d6ca0d00c48dd332327291c0c1"}
+    },
+    "reductions_percent": {
+      "source_snippet": {"lines": 64.8, "words": 71.6},
+      "claude_managed_block": {"lines": 63.3, "words": 68.9},
+      "agents_managed_block": {"lines": 63.3, "words": 68.8},
+      "cursor_rule": {"lines": 25.8, "words": 31.5},
+      "cursor_always_loaded": {"lines": 55.8, "words": 61.4}
+    },
+    "budgets": {
+      "claude_managed_block": {"max_lines": 100, "max_words": 650, "passed": true},
+      "agents_managed_block": {"max_lines": 100, "max_words": 650, "passed": true},
+      "cursor_rule": {"max_lines": 50, "max_words": 350, "passed": true},
+      "cursor_always_loaded": {"max_lines": 150, "max_words": 1000, "passed": true}
+    }
+  },
+  "verification": {
+    "rebased_focused_suite": {
+      "result": "passed",
+      "tests": 59,
+      "command": "python -m pytest -q tests/test_agent_contract_artifacts.py tests/test_claude_md_sync.py tests/test_agents_md_sync.py tests/test_codex_session_start.py tests/test_cursor_rules_sync.py tests/test_wiring_version.py tests/test_versioning.py tests/test_public_release_check.py tests/test_cursor_hook_runtime.py tests/test_cursor_lifecycle_e2e.py",
+      "covers": [
+        "managed contract artifacts and budgets",
+        "Claude, Codex, and Cursor sync and wiring",
+        "public release guard",
+        "Cursor gate identity parsing and lifecycle"
+      ]
+    },
+    "contract_and_sync": {
+      "result": "passed",
+      "tests": 49,
+      "command": "python -m pytest -q tests/test_agent_contract_artifacts.py tests/test_claude_md_sync.py tests/test_agents_md_sync.py tests/test_codex_session_start.py tests/test_cursor_rules_sync.py tests/test_wiring_version.py tests/test_versioning.py tests/test_public_release_check.py"
+    },
+    "authority_graph": {
+      "result": "passed",
+      "tests": 15,
+      "command": "python -m pytest -q tests/test_verify.py",
+      "covers": ["supersedes", "reconciled_by", "reconciliation banners", "stale targets"]
+    },
+    "host_wiring_smoke": {
+      "result": "passed",
+      "tests": 65,
+      "command": "python -m pytest -q tests/test_claude_md_sync.py tests/test_agents_md_sync.py tests/test_codex_session_start.py tests/test_install_codex.py tests/test_install_cursor.py tests/test_cursor_lifecycle_e2e.py tests/test_wiring_version.py",
+      "covers": ["Claude render/sync", "Codex install/session-start", "Cursor install/lifecycle/rule", "versioned repair"]
+    },
+    "public_release_hygiene": {
+      "result": "passed",
+      "tracked_and_new_files_scanned": 351
+    },
+    "dependency_complete_suite": {
+      "result": "passed",
+      "passed": 1083,
+      "failed": 0,
+      "skipped": 2,
+      "duration_seconds": 110.0,
+      "proof_packet_check": "passed",
+      "note": "The rebased source preserved current-main Cursor fixes plus the newer README proof and daemon reliability merges. A clean live gate/runtime proof was recaptured from proof_source_commit and its three generated artifacts were committed as the direct child. Managed contract text outside that proof manifest is covered by the contract, sync, wiring, artifact, and complete-suite checks."
+    },
+    "independent_review_corrections": {
+      "result": "restored_and_represented_in_corpus",
+      "items": [
+        "Restored the cross-host offer to capture sweeping directives through latch_priority_add only with user approval.",
+        "Restored canonical promotion for fully shipped sequence plans.",
+        "Restored Cursor's exact read-only latch_pm_preview to one matching latch_insert boundary.",
+        "Restored explicit Cursor IDE catalog recovery confirmation: enable the workspace server, confirm tools are reported without assuming a fixed count, then start a fresh Agent chat."
+      ]
+    },
+    "cursor_live_probe": {
+      "result": "base_host_limitation_reproduced",
+      "cli": "Cursor Agent 2026.07.09-a3815c0",
+      "runs": 2,
+      "with_force_events": ["sessionStart", "preToolUse", "postToolUse"],
+      "without_force_events": ["sessionStart"],
+      "missing_event": "beforeSubmitPrompt",
+      "effect": "The CLI cannot arm a prompt hash, so the opt-in preToolUse hook fails closed on mutation even after a matching gate call.",
+      "candidate_vs_origin_main_enforcement_diff": "none",
+      "interpretation": "This is not a compact-contract regression. Cursor IDE must be exercised separately because the headless CLI cannot prove current-prompt receipt success."
+    },
+    "cursor_targeted_replay": {
+      "result": "diagnostic_only",
+      "trials": 8,
+      "current_prompt_primary": "Three of three runs reached exact gate calls but performed no expected mutation because beforeSubmitPrompt did not arm state.",
+      "current_prompt_secondary": "One run rejected a stale echoed request and did not mutate.",
+      "pm_primary": "Three runs previewed but writes were hook-blocked while current-prompt state was unavailable.",
+      "pm_secondary": "One run previewed and correctly requested a later /latch-pm apply turn.",
+      "scoring_corrections": [
+        "A missing expected mutation in a blocker case must be a hard functional failure.",
+        "The PM scenario must use two turns in one resumed Cursor session; preview and apply are intentionally not a one-turn flow."
+      ]
+    }
+  },
+  "host_smokes": {
+    "claude": {
+      "cli": "Claude Code 2.1.207",
+      "deterministic_result": "passed",
+      "live_agent_scenarios": "not run in this distribution pass"
+    },
+    "codex": {
+      "cli": "codex-cli 0.142.5",
+      "deterministic_result": "passed",
+      "live_agent_scenarios": "not run in this distribution pass"
+    },
+    "cursor": {
+      "cli": "Cursor Agent 2026.07.09-a3815c0",
+      "deterministic_result": "passed",
+      "live_agent_scenarios": "Targeted enforcement replay completed; the CLI host limitation and invalid one-turn PM expectation are recorded under verification."
+    }
+  },
+  "update_and_rollback": {
+    "result": "passed",
+    "evidence": [
+      "Version 2 managed documents repair once to version 3 and preserve user content.",
+      "Unmanaged projects remain untouched.",
+      "Version 999 managed documents and Cursor rules are refused rather than downgraded.",
+      "Managed-document and Cursor-rule backups reproduce the older bytes; restoring those bytes is detected as older and safely rolls forward again.",
+      "Cursor collision and malformed-owned-hook cases stop without claiming current wiring."
+    ],
+    "limitation": "Rollback is backup-based and per-file; an atomic multi-file Cursor rollback transaction is not implemented."
+  },
+  "unverified_gaps": [
+    "The complete live Claude Code, Codex, and Cursor behavioral corpus has not yet been run against isolated mainline and candidate installs.",
+    "Cursor IDE current-prompt receipt success is not proven; the current Cursor Agent CLI does not emit beforeSubmitPrompt in the tested headless path.",
+    "Cursor PM preview/apply still needs a two-turn resumed-session live test, including exact-match success, changed-argument denial, and receipt replay denial.",
+    "Longitudinal adherence and silent-failure rates are not measured, so no claim is made about degradation over time.",
+    "Rendered line and word reduction is a leading footprint indicator, not proof of lower latency, cost, or better decisions.",
+    "No Windows host lifecycle was exercised in this pass.",
+    "Existing Cursor commands, skills, and hooks were covered by lifecycle tests, but their corrected full behavioral matrix was not replayed with live model calls.",
+    "The degraded-gate behavior is not uniformly enforced outside hook-capable hosts; the deep pass must measure and report this rather than infer safety from markdown wording.",
+    "No automated alert currently detects every missed supersede, reconciliation, capture, or stop-and-show behavior."
+  ],
+  "follow_on": "See verification-brief.md for the exact deep-verification objective, hypotheses, indicators, baselines, and missing instrumentation."
+}

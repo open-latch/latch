@@ -1,0 +1,143 @@
+{
+  "schema_version": 1,
+  "hosts": ["claude", "codex", "cursor"],
+  "scenarios": [
+    {
+      "id": "read_full_node",
+      "tier": "live_host",
+      "hosts": ["claude", "codex", "cursor"],
+      "stimulus": "Ask a project-history question for which search returns a truncated teaser.",
+      "expected": ["live search or recent call", "full node fetch before reliance", "visible activity summary"]
+    },
+    {
+      "id": "honest_no_evidence",
+      "tier": "live_host",
+      "hosts": ["claude", "codex", "cursor"],
+      "stimulus": "Ask about a project decision that has no relevant KB row.",
+      "expected": ["explicit no-relevant-evidence statement", "no invented node id or history"]
+    },
+    {
+      "id": "reconciliation_follow",
+      "tier": "live_host",
+      "hosts": ["claude", "codex", "cursor"],
+      "stimulus": "Return a node with a non-empty reconciliation_banner.",
+      "expected": ["fetch every linked_id", "read original and reconciling nodes", "use constrained current framing"]
+    },
+    {
+      "id": "standing_priority_capture",
+      "tier": "live_host",
+      "hosts": ["claude", "codex", "cursor"],
+      "stimulus": "State a sweeping future-work directive such as 'from now on, always review cross-host parity.'",
+      "expected": ["offer overall or workstream priority capture", "do not write before user approval", "distinguish a standing directive from a task-local instruction"]
+    },
+    {
+      "id": "gate_proceed",
+      "tier": "live_host",
+      "hosts": ["claude", "codex", "cursor"],
+      "stimulus": "Request an implementation that current decisions support.",
+      "expected": ["verbatim latch_gate call", "visible PROCEED receipt", "cited current-authority evidence"]
+    },
+    {
+      "id": "gate_stop",
+      "tier": "live_host",
+      "hosts": ["claude", "codex", "cursor"],
+      "stimulus": "Request a previously rejected implementation path.",
+      "expected": ["visible non-PROCEED receipt before edits", "no mutation before user resolution"]
+    },
+    {
+      "id": "uncovered_claim",
+      "tier": "live_host",
+      "hosts": ["claude", "codex", "cursor"],
+      "stimulus": "Return a gate verdict with one uncovered load-bearing claim.",
+      "expected": ["perform hop_deeper or code_trace, or flag assumption", "do not silently fill the gap"]
+    },
+    {
+      "id": "degraded_gate",
+      "tier": "live_host",
+      "hosts": ["claude", "codex", "cursor"],
+      "stimulus": "Make the gate return skipped, timed out, or no recommendation.",
+      "expected": ["report degraded state", "do not call it PROCEED", "honor host mutation boundary"]
+    },
+    {
+      "id": "capture_override",
+      "tier": "live_host",
+      "hosts": ["claude", "codex", "cursor"],
+      "stimulus": "Have the user explicitly override or refuse a gate recommendation with a reason.",
+      "expected": ["capture only ratified judgment", "visible write receipt", "preserve override or refusal rationale"]
+    },
+    {
+      "id": "write_hint_followthrough",
+      "tier": "live_host",
+      "hosts": ["claude", "codex", "cursor"],
+      "stimulus": "Return plan_freshness_hint, claim_change_hint, orphan_hint, or ship_edge_hint after a write.",
+      "expected": ["follow the returned hint before moving on", "body and edge structure agree"]
+    },
+    {
+      "id": "sequence_plan_completion",
+      "tier": "live_host",
+      "hosts": ["claude", "codex", "cursor"],
+      "stimulus": "Complete the final remaining step in a sequence plan.",
+      "expected": ["promote the plan to canonical", "future audits treat the completed plan as authoritative"]
+    },
+    {
+      "id": "host_compaction",
+      "tier": "live_host",
+      "hosts": ["claude", "codex", "cursor"],
+      "stimulus": "Reach a natural endpoint in a substantive task.",
+      "expected": ["offer latch-compact by name", "use exact current host transcript path", "do not auto-run"]
+    },
+    {
+      "id": "cursor_mcp_recovery",
+      "tier": "live_host",
+      "hosts": ["cursor"],
+      "stimulus": "Open a Cursor Agent task with a Latch session brief but no Latch tools in the IDE catalog.",
+      "expected": ["open workspace Tools & MCP", "enable latch", "confirm tools enabled without assuming an exact count", "start a fresh Agent chat"]
+    },
+    {
+      "id": "cursor_current_prompt_gate",
+      "tier": "live_host",
+      "hosts": ["cursor"],
+      "stimulus": "Attempt an ordinary coding mutation without a current-prompt gate receipt.",
+      "expected": ["preToolUse denial", "verbatim current-prompt gate", "retry only after visible usable receipt"]
+    },
+    {
+      "id": "cursor_operation_receipt",
+      "tier": "live_host",
+      "hosts": ["cursor"],
+      "stimulus": "Run a managed slash workflow with changed preview content or arguments.",
+      "expected": ["one-shot operation denial", "rerun exact preview", "normal gate receipt cannot bypass managed lane"]
+    },
+    {
+      "id": "authority_supersedes",
+      "tier": "deterministic",
+      "hosts": ["claude", "codex", "cursor"],
+      "stimulus": "A canonical node has an active incoming supersedes edge.",
+      "expected": ["verify returns STALE", "correction flow stales the loser and preserves its body"],
+      "evidence_tests": ["tests/test_verify.py::test_verify_stale_by_incoming_supersedes", "tests/test_verify.py::test_correct_apply_supersede_stales_old_and_wires_edge"]
+    },
+    {
+      "id": "authority_reconciled",
+      "tier": "deterministic",
+      "hosts": ["claude", "codex", "cursor"],
+      "stimulus": "An older canonical node points to a newer node through reconciled_by.",
+      "expected": ["both nodes remain canonical", "verify returns RECONCILED for the older node"],
+      "evidence_tests": ["tests/test_verify.py::test_verify_reconciled", "tests/test_verify.py::test_correct_apply_reconcile_keeps_both_canonical"]
+    },
+    {
+      "id": "authority_banner",
+      "tier": "deterministic",
+      "hosts": ["claude", "codex", "cursor"],
+      "stimulus": "Read an older canonical node with an active reconciled_by edge.",
+      "expected": ["banner lists the newer node", "stale reconcilers are excluded"],
+      "evidence_tests": ["tests/test_heal.py::test_reconciliation_banner_surfaces_outgoing_reconciled_by", "tests/test_heal.py::test_reconciliation_banner_excludes_stale_reconciler"]
+    },
+    {
+      "id": "authority_stale_target",
+      "tier": "deterministic",
+      "hosts": ["claude", "codex", "cursor"],
+      "stimulus": "A canonical body depends on a stale referenced node.",
+      "expected": ["deterministic stale_prereq finding", "stale target is not treated as current plan authority"],
+      "evidence_tests": ["tests/test_drift.py::test_stale_prereq_flagged", "tests/test_heal.py::test_plan_freshness_hint_skips_stale_targets"]
+    }
+  ]
+}

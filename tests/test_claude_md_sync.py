@@ -29,6 +29,8 @@ def _tmp():
 def test_render_substitutes_placeholder():
     out = cms.render_contract(kb_home="/some/where")
     _assert("{{KB_HOME}}" not in out, "placeholder must be substituted")
+    _assert("{{LATCH_COMPACTION_TEXT}}" not in out,
+            "host compaction placeholder must be substituted")
     _assert(out.strip() != "", "rendered contract must be non-empty")
     _assert('ToolSearch(query="mcp__latch latch_search latch_get latch_recent latch_gate")' in out,
             "contract should prefer latch-named MCP tools")
@@ -36,6 +38,8 @@ def test_render_substitutes_placeholder():
             "contract should not use brittle exact-select legacy discovery")
     _assert("/latch-compact" in out and "/kb-compact" not in out,
             "contract should prefer latch compact command")
+    _assert("Claude Code's `/compact`" in out,
+            "Claude contract should distinguish host-only chat compaction")
     print("PASS render_substitutes_placeholder")
 
 
@@ -99,7 +103,7 @@ def test_drift_detected_and_resynced_preserving_outside():
         t.write_text("# Header before\n", encoding="utf-8")
         cms.sync(t)
         t.write_text(
-            t.read_text(encoding="utf-8").replace("KB usage", "KB TAMPERED")
+            t.read_text(encoding="utf-8").replace("Latch Contract", "Latch TAMPERED")
             + "\n## trailing project section\n",
             encoding="utf-8",
         )
@@ -108,7 +112,7 @@ def test_drift_detected_and_resynced_preserving_outside():
         _assert(action == "synced", action)
         _assert(cms.evaluate(t) == cms.OK, "post-resync -> OK")
         body = t.read_text(encoding="utf-8")
-        _assert("KB TAMPERED" not in body, "tamper removed")
+        _assert("Latch TAMPERED" not in body, "tamper removed")
         _assert("# Header before" in body, "leading content preserved")
         _assert("## trailing project section" in body, "trailing content preserved")
         print("PASS drift_detected_and_resynced_preserving_outside")
@@ -138,7 +142,7 @@ def test_create_false_resyncs_wired_drift():
     try:
         t = d / "CLAUDE.md"
         cms.sync(t)  # wire it
-        t.write_text(t.read_text(encoding="utf-8").replace("KB usage", "KB X"),
+        t.write_text(t.read_text(encoding="utf-8").replace("Latch Contract", "Latch X"),
                      encoding="utf-8")
         _assert(cms.evaluate(t) == cms.DRIFT, "should read DRIFT")
         _assert(cms.sync(t, create=False) == "synced",
@@ -231,7 +235,7 @@ def test_main_drift_resync_does_not_prompt():
     try:
         t = d / "CLAUDE.md"
         cms.sync(t)  # first wiring, bypassing main()
-        t.write_text(t.read_text(encoding="utf-8").replace("KB usage", "KB X"),
+        t.write_text(t.read_text(encoding="utf-8").replace("Latch Contract", "Latch X"),
                      encoding="utf-8")
         _assert(cms.evaluate(t) == cms.DRIFT, "tampered region -> DRIFT")
         rc = cms.main([str(t)])

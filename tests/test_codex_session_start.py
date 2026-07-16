@@ -14,6 +14,7 @@ sys.path.insert(0, str(SRC / "hooks"))
 import agents_md_sync as ams  # noqa: E402
 import codex_session_start as css  # noqa: E402
 import session_start  # noqa: E402
+import versioning  # noqa: E402
 
 
 def _assert(cond, msg):
@@ -44,8 +45,9 @@ def test_auto_sync_agents_md_repairs_existing_managed_region():
         ams.sync(target)
         target.write_text(
             target.read_text(encoding="utf-8").replace(
-                "latch-wiring-version: 2", "latch-wiring-version: 1"
-            ).replace("KB usage", "KB X"),
+                f"latch-wiring-version: {versioning.WIRING_VERSION}",
+                f"latch-wiring-version: {versioning.WIRING_VERSION - 1}",
+            ).replace("Latch Contract", "Latch X"),
             encoding="utf-8",
         )
         _assert(ams.evaluate(target) == ams.DRIFT, "tampered region -> DRIFT")

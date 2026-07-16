@@ -14,7 +14,12 @@ import cursor_hooks  # noqa: E402
 import cursor_rules_sync  # noqa: E402
 import cursor_wiring  # noqa: E402
 import install_cursor  # noqa: E402
+import managed_doc_sync as mds  # noqa: E402
 import versioning  # noqa: E402
+
+
+def _marker(value: int) -> str:
+    return f"latch-wiring-version: {value}"
 
 
 def _replace(path: Path, old: str, new: str) -> None:
@@ -25,20 +30,27 @@ def test_managed_doc_marker_repairs_once_and_preserves_user_content(tmp_path):
     target = tmp_path / "CLAUDE.md"
     target.write_text("user-before\n", encoding="utf-8")
     assert claude_md_sync.sync(target) == "appended"
-    _replace(target, "latch-wiring-version: 2", "latch-wiring-version: 1")
-    _replace(target, "KB usage", "old KB usage")
+    _replace(target, _marker(versioning.WIRING_VERSION), _marker(versioning.WIRING_VERSION - 1))
+    _replace(target, "Latch Contract", "old Latch Contract")
+    older_bytes = target.read_bytes()
     assert claude_md_sync.sync_if_outdated(target) == "synced"
     repaired = target.read_bytes()
+    backup = target.with_name(target.name + ".latchbak")
+    assert backup.read_bytes() == older_bytes
     assert target.read_text(encoding="utf-8").startswith("user-before\n")
-    assert "latch-wiring-version: 2" in target.read_text(encoding="utf-8")
+    assert _marker(versioning.WIRING_VERSION) in target.read_text(encoding="utf-8")
     assert claude_md_sync.sync_if_outdated(target) == "unchanged"
+    assert target.read_bytes() == repaired
+    target.write_bytes(backup.read_bytes())
+    assert claude_md_sync.wiring_state(target) == mds.OLDER
+    assert claude_md_sync.sync_if_outdated(target) == "synced"
     assert target.read_bytes() == repaired
 
 
 def test_legacy_unmanaged_and_newer_managed_doc_boundaries(tmp_path):
     legacy = tmp_path / "legacy.md"
     claude_md_sync.sync(legacy)
-    _replace(legacy, "<!-- latch-wiring-version: 2 -->\n", "")
+    _replace(legacy, f"<!-- {_marker(versioning.WIRING_VERSION)} -->\n", "")
     assert claude_md_sync.sync_if_outdated(legacy) == "synced"
 
     unmanaged = tmp_path / "plain.md"
@@ -49,7 +61,7 @@ def test_legacy_unmanaged_and_newer_managed_doc_boundaries(tmp_path):
 
     newer = tmp_path / "newer.md"
     claude_md_sync.sync(newer)
-    _replace(newer, "latch-wiring-version: 2", "latch-wiring-version: 999")
+    _replace(newer, _marker(versioning.WIRING_VERSION), "latch-wiring-version: 999")
     before = newer.read_bytes()
     assert claude_md_sync.sync_if_outdated(newer) == "newer"
     assert newer.read_bytes() == before
@@ -102,10 +114,13 @@ def _install_cursor_bundle(
 
 
 def _downgrade_cursor_bundle(root: Path) -> None:
-    _replace(root / ".cursor" / "rules" / "latch.mdc", "latch-wiring-version: 2", "latch-wiring-version: 1")
-    _replace(root / ".cursor" / "commands" / "latch-gate.md", "latch-wiring-version: 2", "latch-wiring-version: 1")
+    older = _marker(versioning.WIRING_VERSION - 1)
+    _replace(root / ".cursor" / "rules" / "latch.mdc", _marker(versioning.WIRING_VERSION), older)
+    _replace(root / ".cursor" / "commands" / "latch-gate.md", _marker(versioning.WIRING_VERSION), older)
     data = json.loads((root / ".cursor" / "mcp.json").read_text(encoding="utf-8"))
-    data["mcpServers"]["latch"]["env"]["LATCH_WIRING_VERSION"] = "1"
+    data["mcpServers"]["latch"]["env"]["LATCH_WIRING_VERSION"] = str(
+        versioning.WIRING_VERSION - 1
+    )
     (root / ".cursor" / "mcp.json").write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
 
@@ -136,6 +151,13 @@ def test_cursor_bundle_repairs_once_and_preserves_unrelated_content(tmp_path):
         path.relative_to(tmp_path): path.read_bytes()
         for path in tmp_path.rglob("*") if path.is_file() and not path.name.endswith(".latchbak")
     }
+    rule = tmp_path / ".cursor" / "rules" / "latch.mdc"
+    backup = rule.with_name(rule.name + ".latchbak")
+    assert _marker(versioning.WIRING_VERSION - 1) in backup.read_text(encoding="utf-8")
+    rule.write_bytes(backup.read_bytes())
+    assert cursor_rules_sync.wiring_state(rule) == cursor_rules_sync.OLDER
+    assert cursor_wiring.repair_project(tmp_path).action == "synced"
+    assert cursor_rules_sync.wiring_state(rule) == cursor_rules_sync.CURRENT
 
 
 def test_windows_cursor_bundle_repair_preserves_console_interpreter(
@@ -229,7 +251,7 @@ def test_cursor_unmanaged_newer_and_collision_boundaries(tmp_path):
     newer = tmp_path / "newer"
     newer.mkdir()
     _install_cursor_bundle(newer, with_hooks=False)
-    _replace(newer / ".cursor" / "rules" / "latch.mdc", "latch-wiring-version: 2", "latch-wiring-version: 999")
+    _replace(newer / ".cursor" / "rules" / "latch.mdc", _marker(versioning.WIRING_VERSION), "latch-wiring-version: 999")
     before = {p.relative_to(newer): p.read_bytes() for p in newer.rglob("*") if p.is_file()}
     assert cursor_wiring.repair_project(newer).action == "newer"
     assert before == {p.relative_to(newer): p.read_bytes() for p in newer.rglob("*") if p.is_file()}
@@ -259,8 +281,8 @@ def test_cursor_additive_bundle_assets_are_installed_safely(tmp_path):
     assert result.action == "synced"
     assert command.is_file()
     assert skill.is_file()
-    assert "latch-wiring-version: 2" in command.read_text(encoding="utf-8")
-    assert "latch-wiring-version: 2" in skill.read_text(encoding="utf-8")
+    assert _marker(versioning.WIRING_VERSION) in command.read_text(encoding="utf-8")
+    assert _marker(versioning.WIRING_VERSION) in skill.read_text(encoding="utf-8")
     assert cursor_rules_sync.wiring_state(tmp_path / ".cursor" / "rules" / "latch.mdc") == cursor_rules_sync.CURRENT
 
 

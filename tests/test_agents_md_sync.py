@@ -24,6 +24,8 @@ def test_render_contract_targets_agents_md():
     out = ams.render_contract(kb_home="/opt/latch")
     _assert("AGENTS.md" in out, "contract should mention AGENTS.md")
     _assert("CLAUDE.md" not in out, "Codex contract should not mention CLAUDE.md")
+    _assert("{{LATCH_COMPACTION_TEXT}}" not in out,
+            "host compaction placeholder must be substituted")
     _assert("install_agents_md" in out, "contract should mention AGENTS installer")
     _assert("/opt/latch/README.md" in out, "KB_HOME placeholder should be resolved")
     _assert('ToolSearch(query="mcp__latch latch_search latch_get latch_recent latch_gate")' in out,
@@ -32,6 +34,8 @@ def test_render_contract_targets_agents_md():
             "contract should not use brittle exact-select legacy discovery")
     _assert("/latch-compact" in out and "/kb-compact" not in out,
             "contract should prefer latch compact command")
+    _assert("In Codex or Cursor" in out and "ordinary chat compaction" in out,
+            "AGENTS contract should carry Codex and Cursor compaction wording")
     print("PASS render_contract_targets_agents_md")
 
 
