@@ -1,13 +1,12 @@
 # Compact agent contract mainline review
 
 This local integration replays the compact managed contract on public main
-`c65ff621d0a8ff37cbe2056f962c15cd233b9c45`. The final contract commit is
-`f0fc2a747017fc27ea6fbf628c4e18975c0ee033`. The proof packet was captured
-from source commit `4ad0d51fb12734778148343db6d54d98a837b69e`; its direct proof child is
-`9b139028c41db3b63462bd7c60f8745dcbf92032`. Later contract-only corrections
-do not change the gate/runtime manifest covered by that proof packet. The proof
-does not validate the later managed contract text; contract, sync, wiring, and
-artifact checks cover that surface.
+`ebe16e703af72e0649d84f28004c189c2b8cd187`. The final contract commit is
+`d6f5f99fd9b51f6dcbaa1c8291fb565c74570c01`. The proof packet was captured
+from source commit `6b115a84f3a8ac3dd401be7d076e04427c262c00`; its direct proof child is
+`6b5059a6ccc23ee94f4c63fb3efb584070182784`. Managed contract text is outside
+that gate/runtime manifest, so the proof does not validate it; contract, sync,
+wiring, and artifact checks cover that surface.
 
 The replay preserves the newer Cursor MCP catalog recovery wording and the
 current-main Cursor hook identity parser. There is no candidate diff from
@@ -17,10 +16,10 @@ public main in the current-prompt hook implementation or its focused tests.
 
 - 59 focused contract, sync, wiring, public guard, and Cursor lifecycle tests
   passed.
-- The complete dependency-backed suite passed: 1,077 tests, with 2 skipped, in
-  108.86 seconds.
+- The complete dependency-backed suite passed: 1,083 tests, with 2 skipped, in
+  110.00 seconds.
 - The proof packet's gate/runtime manifest is current and public-safe; its scope
-  excludes the later managed contract text.
+  excludes managed contract text outside that manifest.
 - Public-release hygiene, whitespace, and changed-shell syntax checks passed.
 - Claude and Codex managed blocks are within 100 lines and 650 words.
 - The Cursor rule is 46 lines and 350 words; Cursor's combined always-loaded
@@ -62,6 +61,6 @@ The later deep evaluation must:
 4. Separate compact-contract behavior from host-hook availability and from
    deterministic engine enforcement.
 
-PR 6 had already been updated to the prior verified head. This refresh is
-intended to update it again only after current main advanced and the new exact
-head passed verification.
+PR 6 still points to prior verified head
+`f9829d02390b7bcaf11ac2c2ce3c0fcbdd6a0774`. This refresh remains local until
+the rebased exact head passes verification and final review.

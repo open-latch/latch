@@ -1,19 +1,19 @@
 {
   "schema_version": 1,
-  "captured_at_utc": "2026-07-15T04:54:03Z",
-  "base_commit": "c65ff621d0a8ff37cbe2056f962c15cd233b9c45",
+  "captured_at_utc": "2026-07-16T03:46:12Z",
+  "base_commit": "ebe16e703af72e0649d84f28004c189c2b8cd187",
   "candidate_state": {
-    "proof_source_commit": "4ad0d51fb12734778148343db6d54d98a837b69e",
-    "proof_artifact_commit": "9b139028c41db3b63462bd7c60f8745dcbf92032",
-    "final_contract_commit": "f0fc2a747017fc27ea6fbf628c4e18975c0ee033",
-    "proof_scope": "The proof packet covers its declared gate/runtime manifest at proof_source_commit. It does not validate later managed contract text; that surface is covered by the contract, sync, wiring, and artifact checks below."
+    "proof_source_commit": "6b115a84f3a8ac3dd401be7d076e04427c262c00",
+    "proof_artifact_commit": "6b5059a6ccc23ee94f4c63fb3efb584070182784",
+    "final_contract_commit": "d6f5f99fd9b51f6dcbaa1c8291fb565c74570c01",
+    "proof_scope": "The proof packet covers its declared gate/runtime manifest at proof_source_commit. It does not validate managed contract text outside that manifest; that surface is covered by the contract, sync, wiring, and artifact checks below."
   },
   "mainline_integration": {
-    "origin_main_commit": "c65ff621d0a8ff37cbe2056f962c15cd233b9c45",
+    "origin_main_commit": "ebe16e703af72e0649d84f28004c189c2b8cd187",
     "local_branch": "trim-contract-mainline-review",
     "source_replayed_on_origin_main": true,
     "proof_recaptured_from_replayed_source": true,
-    "remote_or_public_git_actions_at_capture": "PR 6 had already been updated to the prior verified head; this refresh is intended to update it again after current main advanced and exact-head verification completes"
+    "remote_or_public_git_actions_at_capture": "PR 6 still points to prior verified head f9829d02390b7bcaf11ac2c2ce3c0fcbdd6a0774; this rebased refresh remains local until exact-head verification and final review complete"
   },
   "wiring_version": {
     "before": 2,
@@ -80,16 +80,16 @@
     },
     "public_release_hygiene": {
       "result": "passed",
-      "tracked_and_new_files_scanned": 349
+      "tracked_and_new_files_scanned": 351
     },
     "dependency_complete_suite": {
       "result": "passed",
-      "passed": 1077,
+      "passed": 1083,
       "failed": 0,
       "skipped": 2,
-      "duration_seconds": 108.86,
+      "duration_seconds": 110.0,
       "proof_packet_check": "passed",
-      "note": "The rebased source preserved current-main Cursor fixes. A clean live gate/runtime proof was recaptured from proof_source_commit and its three generated artifacts were committed as the direct child. Later managed contract corrections are outside that proof manifest and are covered by the contract, sync, wiring, artifact, and complete-suite checks."
+      "note": "The rebased source preserved current-main Cursor fixes plus the newer README proof and daemon reliability merges. A clean live gate/runtime proof was recaptured from proof_source_commit and its three generated artifacts were committed as the direct child. Managed contract text outside that proof manifest is covered by the contract, sync, wiring, artifact, and complete-suite checks."
     },
     "independent_review_corrections": {
       "result": "restored_and_represented_in_corpus",
