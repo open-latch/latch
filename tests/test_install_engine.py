@@ -505,24 +505,24 @@ def test_resolve_python_preserves_virtualenv_symlink():
 
 def test_seed_next_step_message_names_immediate_value_and_preview():
     msg = ie.seed_next_step_message(
-        "bash bin/latch_seed.sh --lookback-days 14 --apply"
+        "bash bin/latch_seed.sh --lookback-days 90 --last-sessions 50 --apply"
     )
-    _assert("immediate judgment value from latch" in msg,
-            "seed next-step copy should name immediate judgment value")
-    _assert("bash bin/latch_seed.sh --lookback-days 14 --apply" in msg,
+    _assert("initial decision KB" in msg,
+            "seed next-step copy should name the immediate initial-KB outcome")
+    _assert("bash bin/latch_seed.sh --lookback-days 90 --last-sessions 50 --apply" in msg,
             "seed next-step copy should include the command")
-    _assert("selected local Claude and/or Codex chats" in msg,
+    _assert("local Claude and/or Codex history" in msg,
             "seed next-step copy should explain what gets read")
-    _assert("uses LLM calls" in msg and "LLM-call budget guardrail" in msg,
+    _assert("bounded LLM calls" in msg,
             "seed next-step copy should make LLM use and budget guardrail clear")
-    _assert("structured seed report" in msg and "staging evidence" in msg,
+    _assert("structured report" in msg and "staging evidence" in msg,
             "seed next-step copy should explain approval/authority")
-    _assert("catch-demo command" in msg and "after you approve staging evidence" in msg,
-            "seed next-step copy should name the post-apply rejected-path demo")
-    _assert("repeats that proof command after a successful write" in msg,
-            "seed next-step copy should name the post-write proof command")
-    _assert("default 20" in msg and "--last-sessions N" in msg,
-            "seed next-step copy should make the session cap configurable")
+    _assert("catch demo is a separate post-apply check" in msg,
+            "seed next-step copy should keep the post-apply demo separate")
+    _assert("90-day lookback" in msg and "up to 50 sessions" in msg,
+            "seed next-step copy should name the stronger default acquisition window")
+    _assert("proof" not in msg.lower() and "first-wow" not in msg.lower(),
+            "initial-KB copy should not frame seeding as a proof or optional wow")
     _assert("harvest" not in msg.lower() and "glean" not in msg.lower(),
             "seed copy should avoid rejected naming")
     print("PASS seed_next_step_message_names_immediate_value_and_preview")
@@ -537,6 +537,10 @@ def test_seed_command_args_use_llm_apply_and_project():
             f"seed command should target the project path: {args}")
     _assert("--source" in args and "codex" in args,
             f"seed command should preserve source selection: {args}")
+    _assert("--lookback-days" in args and "90" in args,
+            f"install-time seed should use the 90-day initial-KB horizon: {args}")
+    _assert("--last-sessions" in args and "50" in args,
+            f"install-time seed should select up to 50 sessions: {args}")
     _assert("--llm" not in args,
             f"install-time seed should rely on default LLM-backed mode, not expose --llm: {args}")
     _assert("--apply" in args,
@@ -551,18 +555,25 @@ def test_offer_seed_after_install_noninteractive_does_not_run():
     calls = []
     old_tty = ie._stdio_is_tty
     old_run = ie.subprocess.run
+    output = io.StringIO()
     try:
         ie._stdio_is_tty = lambda: False
         ie.subprocess.run = lambda args: calls.append(args)
-        ie.offer_seed_after_install(
-            python_path="/py",
-            source="auto",
-            project=Path("/tmp/example-project"),
-        )
+        with contextlib.redirect_stdout(output):
+            ie.offer_seed_after_install(
+                python_path="/py",
+                source="auto",
+                project=Path("/tmp/example-project"),
+            )
         _assert(calls == [], f"noninteractive seed offer must not run subprocess: {calls}")
     finally:
         ie._stdio_is_tty = old_tty
         ie.subprocess.run = old_run
+    text = output.getvalue()
+    _assert("initial KB is pending" in text,
+            f"noninteractive install must truthfully report the unbuilt initial KB:\n{text}")
+    _assert("--lookback-days 90" in text and "--last-sessions 50" in text,
+            f"noninteractive handoff should include explicit stronger defaults:\n{text}")
     print("PASS offer_seed_after_install_noninteractive_does_not_run")
 
 
@@ -587,7 +598,7 @@ def test_no_seed_prompt_prints_seed_handoff_unless_suppressed():
             rc = ie.main(["--python", sys.executable, "--no-seed-prompt"])
         text = output.getvalue()
         _assert(rc == 0, f"installer should complete in patched test path, got {rc}:\n{text}")
-        _assert(text.count("Seed latch from prior work") == 1,
+        _assert(text.count("Build latch's initial decision KB") == 1,
                 f"--no-seed-prompt should still print standalone seed handoff:\n{text}")
 
         output = io.StringIO()
@@ -600,7 +611,7 @@ def test_no_seed_prompt_prints_seed_handoff_unless_suppressed():
             ])
         text = output.getvalue()
         _assert(rc == 0, f"suppressed installer should complete, got {rc}:\n{text}")
-        _assert("Seed latch from prior work" not in text,
+        _assert("Build latch's initial decision KB" not in text,
                 f"--suppress-seed-output should silence installer seed handoff:\n{text}")
     finally:
         for name, value in original.items():

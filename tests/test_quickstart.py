@@ -133,17 +133,39 @@ def test_seed_command_includes_project_source_sessions_and_apply():
         python_path="/py",
         project=project,
         source="both",
-        last_sessions=20,
+        last_sessions=50,
     )
     _assert(args[:2] == ["/py", str(qs.KB_HOME / "src" / "seed.py")], args)
     _assert("--project" in args and str(project) in args, args)
     _assert("--source" in args and "both" in args, args)
-    _assert("--last-sessions" in args and "20" in args, args)
+    _assert("--lookback-days" in args and "90" in args, args)
+    _assert("--last-sessions" in args and "50" in args, args)
     _assert("--apply" in args, args)
     formatted = qs.format_command(args)
     _assert("'/tmp/example project'" in formatted,
             f"formatted command should quote project paths with spaces: {formatted}")
     print("PASS seed_command_includes_project_source_sessions_and_apply")
+
+
+def test_initial_kb_defaults_and_dry_run_plan_are_explicit():
+    args = qs.parse_args(["--agents", "codex", "--project", "/tmp/example-project"])
+    _assert(args.lookback_days == 90 and args.last_sessions == 50,
+            f"unexpected initial-KB defaults: {args}")
+
+    command = qs.seed_command_args(
+        python_path="/py",
+        project=Path("/tmp/example-project"),
+        source="codex",
+    )
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        qs.print_plan([], command)
+    text = output.getvalue()
+    _assert("Build the initial decision KB (review before staging writes)" in text,
+            f"dry-run plan should make initial-KB authority boundaries explicit:\n{text}")
+    _assert("--lookback-days 90" in text and "--last-sessions 50" in text,
+            f"dry-run plan should expose the acquisition bounds:\n{text}")
+    print("PASS initial_kb_defaults_and_dry_run_plan_are_explicit")
 
 
 def test_resolve_agents_requires_choice_noninteractive_even_with_context():
@@ -242,15 +264,15 @@ def test_quickstart_seed_handoff_prints_once_noninteractive():
                 python_path="/py",
                 project=Path("/tmp/example-project"),
                 source="both",
-                last_sessions=20,
+                last_sessions=50,
                 run=lambda _command: None,
             )
     finally:
         qs._stdio_is_tty = old_tty
     text = output.getvalue()
-    _assert(text.count("Seed latch from prior work") == 1,
+    _assert(text.count("Build latch's initial decision KB") == 1,
             f"quickstart should emit one final seed handoff, got:\n{text}")
-    _assert("Non-interactive shell: quickstart is wired" in text,
+    _assert("quickstart wiring is complete, but the initial KB is pending" in text,
             f"noninteractive quickstart should not run seed automatically:\n{text}")
     print("PASS quickstart_seed_handoff_prints_once_noninteractive")
 
@@ -262,6 +284,7 @@ if __name__ == "__main__":
     test_build_doctor_steps_cover_cursor_surface()
     test_seed_source_follows_agents_by_default()
     test_seed_command_includes_project_source_sessions_and_apply()
+    test_initial_kb_defaults_and_dry_run_plan_are_explicit()
     test_resolve_agents_requires_choice_noninteractive_even_with_context()
     test_resolve_agents_uses_detected_default_when_interactive()
     test_resolve_agents_accepts_cursor_and_all()

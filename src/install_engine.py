@@ -146,20 +146,24 @@ PROJECTS_DIR = KB_HOME / "projects"
 DEFAULT_STORE_DIR = KB_HOME / "store"
 
 
-def seed_next_step_message(command: str = "bash bin/latch_seed.sh --apply") -> str:
-    """User-facing post-install prompt for the cold-start seed pass."""
+def seed_next_step_message(
+    command: str = (
+        "bash bin/latch_seed.sh --lookback-days 90 --last-sessions 50 --apply"
+    ),
+) -> str:
+    """User-facing post-install prompt for building the initial decision KB."""
     return (
-        "Seed latch from prior work for immediate judgment value from latch:\n"
+        "Build latch's initial decision KB from relevant prior work:\n"
         f"  {command}\n"
-        "Seeding reads selected local Claude and/or Codex chats for this project and "
-        "uses LLM calls to propose decisions, preferences, and rejected paths that "
-        "latch can judge against before the first new compacted session. It shows "
-        "a structured seed report first, includes a rejected-path catch-demo command "
-        "to run after you approve staging evidence, repeats that proof command "
-        "after a successful write, asks which transcript source to use, asks for "
-        "a lookback window, asks how many recent sessions to scan "
-        "(default 20; configurable with --last-sessions N), keeps the LLM-call "
-        "budget guardrail, and writes only staging evidence when you approve it."
+        "Seed latch from prior work now so its decision-continuity checks have "
+        "useful evidence immediately. Latch selects local Claude and/or Codex history "
+        "for this project from a "
+        "90-day lookback (up to 50 sessions) and uses bounded LLM calls to propose "
+        "durable decisions, preferences, constraints, corrections, rejected paths, "
+        "and project facts. Review the structured report before anything is written; "
+        "accepted entries remain staging evidence with source provenance. The "
+        "rejected-path catch demo is a separate post-apply check, not a prerequisite "
+        "for creating the initial KB. Until this review runs, the initial KB is pending."
     )
 
 
@@ -176,6 +180,10 @@ def seed_command_args(
         str(project),
         "--source",
         source,
+        "--lookback-days",
+        "90",
+        "--last-sessions",
+        "50",
         "--apply",
     ]
 
@@ -202,7 +210,7 @@ def offer_seed_after_install(
     source: str = "auto",
     project: Path | None = None,
 ) -> None:
-    """Offer an interactive LLM-backed seed pass without making install depend on it."""
+    """Offer review-first initial-KB seeding after installation."""
     project = (project or Path.cwd()).resolve()
     command = seed_command_args(python_path=python_path, project=project, source=source)
     command_text = format_command(command)
@@ -212,21 +220,21 @@ def offer_seed_after_install(
     print()
 
     if not _stdio_is_tty():
-        print("Non-interactive shell: install is complete. Run the seed command above "
-              "from the project you want latch to learn when you are ready.")
+        print("Non-interactive shell: install is complete, but the initial KB is pending. "
+              "Run the command above from the project you want latch to seed.")
         return
 
-    print(f"Current seed target: {project}")
-    if not _prompt_yes_no("Run LLM-backed seed now for this project?", default=True):
-        print("Skipped seed. Run the command above later to avoid a cold start.")
+    print(f"Initial-KB target: {project}")
+    if not _prompt_yes_no("Build the review-first initial KB now for this project?", default=True):
+        print("Initial KB remains pending. Run the command above when you are ready to review it.")
         return
 
     print()
     result = subprocess.run(command)
     if result.returncode == 0:
-        print("Seed step finished.")
+        print("Initial-KB review finished; only entries you approved were staged.")
     else:
-        print(f"Seed step exited with status {result.returncode}; install is still complete.")
+        print(f"Initial-KB step exited with status {result.returncode}; install is still complete.")
 
 
 # --------------------------------------------------------------------------- #
@@ -750,7 +758,7 @@ def main(argv: list[str] | None = None) -> int:
                                      "Default on a fresh install: <KB_HOME>/store. An existing "
                                      "per-cwd install is left in legacy mode unless this is given.")
     ap.add_argument("--no-seed-prompt", action="store_true",
-                    help="do not offer the post-install cold-start seed prompt")
+                    help="leave the initial KB pending and print its review command")
     ap.add_argument("--suppress-seed-output", action="store_true", help=argparse.SUPPRESS)
     args = ap.parse_args(argv)
 

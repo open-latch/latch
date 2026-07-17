@@ -309,7 +309,8 @@ def seed_command_args(
     python_path: str,
     project: Path,
     source: str,
-    last_sessions: int,
+    lookback_days: int = 90,
+    last_sessions: int = 50,
 ) -> list[str]:
     return [
         python_path,
@@ -318,6 +319,8 @@ def seed_command_args(
         str(project),
         "--source",
         source,
+        "--lookback-days",
+        str(lookback_days),
         "--last-sessions",
         str(last_sessions),
         "--apply",
@@ -335,7 +338,7 @@ def print_plan(steps: Sequence[Step], seed_command: Sequence[str] | None) -> Non
         print(f"   cwd: {step.cwd}")
         print(f"   cmd: {format_command(step.command)}")
     if seed_command:
-        print(f"{len(steps) + 1}. Start seed-first setup")
+        print(f"{len(steps) + 1}. Build the initial decision KB (review before staging writes)")
         print(f"   cmd: {format_command(seed_command)}")
     print()
 
@@ -361,13 +364,15 @@ def offer_seed_after_quickstart(
     python_path: str,
     project: Path,
     source: str,
-    last_sessions: int,
+    lookback_days: int = 90,
+    last_sessions: int = 50,
     run: Callable[..., subprocess.CompletedProcess] = subprocess.run,
 ) -> None:
     command = seed_command_args(
         python_path=python_path,
         project=project,
         source=source,
+        lookback_days=lookback_days,
         last_sessions=last_sessions,
     )
     command_text = format_command(command)
@@ -375,18 +380,18 @@ def offer_seed_after_quickstart(
     print(install_engine.seed_next_step_message(command_text))
     print()
     if not _stdio_is_tty():
-        print("Non-interactive shell: quickstart is wired. Run the seed command above "
-              "from the project when you are ready.")
+        print("Non-interactive shell: quickstart wiring is complete, but the initial KB "
+              "is pending. Run the command above from the project to review it.")
         return
-    print(f"Current seed target: {project}")
-    if not _prompt_yes_no("Run LLM-backed seed now for this project?", default=True):
-        print("Skipped seed. Run the command above later to avoid a cold start.")
+    print(f"Initial-KB target: {project}")
+    if not _prompt_yes_no("Build the review-first initial KB now for this project?", default=True):
+        print("Initial KB remains pending. Run the command above when you are ready to review it.")
         return
     result = run(command)
     if result.returncode == 0:
-        print("Seed step finished.")
+        print("Initial-KB review finished; only entries you approved were staged.")
     else:
-        print(f"Seed step exited with status {result.returncode}; wiring is still complete.")
+        print(f"Initial-KB step exited with status {result.returncode}; wiring is still complete.")
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -403,8 +408,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                     default="auto",
                     help=("transcript source for seed setup (default follows --agents; "
                           "Cursor requires a current SessionStart marker)"))
-    ap.add_argument("--last-sessions", type=int, default=20,
-                    help="recent sessions to scan during seed setup (default: 20)")
+    ap.add_argument("--lookback-days", type=int, default=90,
+                    help="history horizon for initial-KB seeding (default: 90)")
+    ap.add_argument("--last-sessions", type=int, default=50,
+                    help="maximum sessions selected for initial-KB seeding (default: 50)")
     ap.add_argument("--dry-run", action="store_true",
                     help="show the install/check/seed plan without writing anything")
     ap.add_argument("--skip-doctor", action="store_true",
@@ -416,7 +423,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument("--cursor-with-hooks", action="store_true",
                     help="install and verify opt-in Cursor session/gate/activity hooks")
     ap.add_argument("--no-seed", action="store_true",
-                    help="print the seed command but do not offer to run it")
+                    help="leave the initial KB pending and print its review command")
     return ap.parse_args(argv)
 
 
@@ -426,8 +433,8 @@ def main(argv: list[str] | None = None) -> int:
     if not project.exists():
         print(f"error: project path does not exist: {project}", file=sys.stderr)
         return 2
-    if args.last_sessions <= 0:
-        print("error: --last-sessions must be positive", file=sys.stderr)
+    if args.lookback_days <= 0 or args.last_sessions <= 0:
+        print("error: --lookback-days and --last-sessions must be positive", file=sys.stderr)
         return 2
 
     python_path = install_engine.resolve_python(args.python)
@@ -468,6 +475,7 @@ def main(argv: list[str] | None = None) -> int:
         python_path=python_path,
         project=project,
         source=source,
+        lookback_days=args.lookback_days,
         last_sessions=args.last_sessions,
     )
 
@@ -478,10 +486,12 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  interpreter  : {python_path}")
     print(f"  agents       : {', '.join(agents)}")
     print(f"  seed source  : {source}")
+    print(f"  lookback days: {args.lookback_days}")
     if "cursor" in agents:
         print(f"  Cursor backend: {args.cursor_model_backend or 'cursor (native default)'}")
         print(f"  Cursor hooks  : {'enabled' if args.cursor_with_hooks else 'not installed'}")
-    print(f"  last sessions: {args.last_sessions}")
+    print(f"  session cap  : {args.last_sessions}")
+    print("  initial KB   : pending review")
     print(f"  mode         : {'DRY-RUN (no writes)' if args.dry_run else 'apply'}")
 
     if args.dry_run:
@@ -495,6 +505,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.no_seed:
         print()
+        print("Initial KB remains pending because --no-seed was selected.")
         print(install_engine.seed_next_step_message(format_command(seed_cmd)))
         print()
         return 0
@@ -503,6 +514,7 @@ def main(argv: list[str] | None = None) -> int:
         python_path=python_path,
         project=project,
         source=source,
+        lookback_days=args.lookback_days,
         last_sessions=args.last_sessions,
     )
     return 0

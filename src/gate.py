@@ -52,6 +52,8 @@ on edge walks). The whole point of the tool is to find what was abandoned.
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 import hashlib
 import json
 import os
@@ -470,8 +472,10 @@ def _evidence_node(
     """Materialize an evidence node row. Returns None if the node id no
     longer exists (FK CASCADE should make this rare, but defensive)."""
     row = conn.execute(
-        "SELECT id, kind, title, body, status, workstream_id, updated_at "
-        "FROM nodes WHERE id = ?",
+        "SELECT n.id, n.kind, n.title, n.body, n.status, n.workstream_id, "
+        "n.updated_at, (SELECT MAX(si.observed_at) FROM seed_import si "
+        "WHERE si.node_id = n.id AND si.state = 'applied') AS seed_observed_at "
+        "FROM nodes n WHERE n.id = ?",
         (node_id,),
     ).fetchone()
     if row is None:
@@ -484,6 +488,7 @@ def _evidence_node(
         "status": row["status"],
         "workstream_id": row["workstream_id"],
         "updated_at": row["updated_at"],
+        "seed_observed_at": row["seed_observed_at"],
         "via_relation": via_relation,
         "direction": direction,
         "hop": hop,
@@ -716,6 +721,19 @@ OUTPUT:
 """
 
 
+def _evidence_recency_epoch(node: dict) -> float:
+    value = node.get("seed_observed_at") or node.get("updated_at")
+    if not value:
+        return float("-inf")
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return float("-inf")
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc).timestamp()
+
+
 def _evidence_sort_for_relevance(evidence: list[dict]) -> list[dict]:
     """Order evidence best-first for prompt inclusion (KB id=1415).
 
@@ -725,8 +743,15 @@ def _evidence_sort_for_relevance(evidence: list[dict]) -> list[dict]:
       stale → recency descending.
     The recency tilt also addresses id=525 (4a had no per-node recency)."""
     ev = list(evidence)
-    ev.sort(key=lambda n: n.get("updated_at") or "", reverse=True)          # recent first
-    ev.sort(key=lambda n: 0 if (n.get("status") != "stale") else 1)         # active first
+    ev.sort(
+        key=_evidence_recency_epoch,
+        reverse=True,
+    )                                                                       # evidence recency first
+    ev.sort(
+        key=lambda n: {"canonical": 0, "staging": 1, "stale": 2}.get(
+            str(n.get("status")), 1,
+        )
+    )                                                                       # authority first
     ev.sort(key=lambda n: 0 if n.get("via_relation") in _HIGH_SIGNAL_RELATIONS else 1)
     ev.sort(key=lambda n: n.get("hop", 99))                                 # nearer first
     return ev
@@ -817,6 +842,11 @@ def _render_chain_for_prompt(
                         f"via={ev['via_relation']}({ev['direction']}), "
                         f"status={ev['status']}, {ev['kind']}] {ev['title']}"
                     )
+                    if ev.get("seed_observed_at"):
+                        lines.append(
+                            f"      imported evidence observed_at: "
+                            f"{ev['seed_observed_at']}"
+                        )
                     eb = ev.get("body_excerpt", "")
                     if eb:
                         lines.append(f"      body: {eb}")

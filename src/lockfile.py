@@ -20,6 +20,9 @@ Design:
   file disappears OR the writing PID is confirmed dead (stale, unlink),
   OR `timeout_s` elapses (raises `CompactionInProgressError`). We do not
   steal a live lock — only one that names a dead PID.
+- `writer_lock(project_path, timeout_s=60)` retries the same atomic acquire
+  and, once successful, holds `compactor.lock` for the writer's whole context.
+  Use it for multi-commit batches where wait-then-write would leave a race.
 
 Why not block on a stdlib threading.Lock or a SQLite advisory lock instead:
 the compactor runs in a separate Python process (spawned by the bash
@@ -195,3 +198,39 @@ def wait_for_compaction(
                 f"compaction lock at {lock_file} still held after {timeout_s}s"
             )
         time.sleep(poll_interval_s)
+
+
+@contextlib.contextmanager
+def writer_lock(
+    project_path: str,
+    timeout_s: float = WRITE_LOCK_TIMEOUT_S,
+    poll_interval_s: float = POLL_INTERVAL_S,
+):
+    """Atomically acquire and hold the shared project lock for a write batch.
+
+    Unlike ``wait_for_compaction``, this closes the check/use race: successful
+    acquisition creates the same exclusive ``compactor.lock`` sentinel and
+    keeps it until the caller exits the context, so a compactor cannot start
+    between individual commits in the batch.  Live holders are never stolen;
+    dead-PID locks are evicted by ``compactor_lock`` and retried immediately.
+
+    Raises ``CompactionInProgressError`` when no acquisition succeeds before
+    ``timeout_s``.  The lock is released even when the batch raises.
+    """
+    if timeout_s < 0:
+        raise ValueError("timeout_s must be non-negative")
+    if poll_interval_s <= 0:
+        raise ValueError("poll_interval_s must be positive")
+    deadline = time.monotonic() + timeout_s
+    while True:
+        with compactor_lock(project_path) as acquired:
+            if acquired:
+                yield
+                return
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise CompactionInProgressError(
+                f"writer lock at {_lock_path(project_path)} still held "
+                f"after {timeout_s}s"
+            )
+        time.sleep(min(poll_interval_s, remaining))

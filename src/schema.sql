@@ -114,6 +114,87 @@ CREATE TABLE IF NOT EXISTS focus (
 
 CREATE INDEX IF NOT EXISTS idx_focus_score ON focus(score DESC);
 
+-- Idempotency ledgers for history seeding.  The source ledger answers
+-- "did this exact transcript revision already complete extraction?"; the
+-- candidate ledger answers "did this exact reviewed candidate already create
+-- a node?".  Metadata is deliberately structured and error_code is a closed,
+-- privacy-safe enum: raw exception text and transcript content never belong in
+-- either table.
+CREATE TABLE IF NOT EXISTS seed_source_import (
+    import_key        TEXT PRIMARY KEY,
+    source_id         TEXT NOT NULL,
+    source_agent      TEXT NOT NULL,
+    source_path       TEXT NOT NULL,
+    source_mtime      TEXT NOT NULL,
+    source_digest     TEXT NOT NULL,
+    project_path      TEXT NOT NULL,
+    workstream_key    TEXT,
+    extractor_name    TEXT NOT NULL,
+    extractor_version TEXT NOT NULL,
+    state             TEXT NOT NULL DEFAULT 'pending'
+                              CHECK (state IN ('pending', 'applied', 'failed')),
+    error_code        TEXT CHECK (error_code IN (
+                              'source_unavailable', 'source_invalid',
+                              'extractor_failed', 'candidate_invalid',
+                              'node_write_failed', 'workstream_attach_failed',
+                              'interrupted', 'internal'
+                          )),
+    attempt_count     INTEGER NOT NULL DEFAULT 1 CHECK (attempt_count >= 1),
+    created_at        TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at        TEXT NOT NULL DEFAULT (datetime('now')),
+    completed_at      TEXT,
+    CHECK (
+        (state = 'failed' AND error_code IS NOT NULL AND completed_at IS NOT NULL)
+        OR (state = 'applied' AND error_code IS NULL AND completed_at IS NOT NULL)
+        OR (state = 'pending' AND error_code IS NULL AND completed_at IS NULL)
+    )
+);
+
+CREATE INDEX IF NOT EXISTS idx_seed_source_import_state
+    ON seed_source_import(state);
+CREATE INDEX IF NOT EXISTS idx_seed_source_import_source
+    ON seed_source_import(source_id, source_digest);
+CREATE INDEX IF NOT EXISTS idx_seed_source_import_scope
+    ON seed_source_import(project_path, workstream_key);
+
+CREATE TABLE IF NOT EXISTS seed_import (
+    import_key              TEXT PRIMARY KEY,
+    claim_key               TEXT,
+    source_import_keys_json TEXT NOT NULL DEFAULT '[]',
+    source_ids_json         TEXT NOT NULL DEFAULT '[]',
+    project_path            TEXT NOT NULL,
+    workstream_key          TEXT,
+    workstream_id           INTEGER REFERENCES nodes(id) ON DELETE SET NULL,
+    extractor_name          TEXT NOT NULL,
+    extractor_version       TEXT NOT NULL,
+    observed_at             TEXT,
+    state                   TEXT NOT NULL DEFAULT 'pending'
+                                  CHECK (state IN ('pending', 'applied', 'failed')),
+    error_code              TEXT CHECK (error_code IN (
+                                  'source_unavailable', 'source_invalid',
+                                  'extractor_failed', 'candidate_invalid',
+                                  'node_write_failed', 'workstream_attach_failed',
+                                  'interrupted', 'internal'
+                              )),
+    node_id                 INTEGER REFERENCES nodes(id),
+    attempt_count           INTEGER NOT NULL DEFAULT 1 CHECK (attempt_count >= 1),
+    created_at              TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at              TEXT NOT NULL DEFAULT (datetime('now')),
+    completed_at            TEXT,
+    CHECK (
+        (state = 'failed' AND error_code IS NOT NULL AND completed_at IS NOT NULL)
+        OR (state = 'applied' AND error_code IS NULL AND completed_at IS NOT NULL
+                           AND node_id IS NOT NULL)
+        OR (state = 'pending' AND error_code IS NULL AND completed_at IS NULL)
+    )
+);
+
+CREATE INDEX IF NOT EXISTS idx_seed_import_state ON seed_import(state);
+CREATE INDEX IF NOT EXISTS idx_seed_import_node ON seed_import(node_id);
+CREATE INDEX IF NOT EXISTS idx_seed_import_claim ON seed_import(claim_key, state);
+CREATE INDEX IF NOT EXISTS idx_seed_import_scope
+    ON seed_import(project_path, workstream_key);
+
 -- FTS5 virtual table mirrors nodes(title, body). Kept in sync via triggers.
 CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts USING fts5(
     title,
