@@ -410,6 +410,55 @@ def test_git_bash_default_converges_on_windows_local_app_data(tmp_path: Path):
     assert "install dir: /c/Users/Test User/AppData/Local/Latch/app" in result.stdout
 
 
+def test_posix_bootstrap_canonicalizes_equivalent_git_bash_local_origins(
+    tmp_path: Path,
+):
+    origin = make_origin(tmp_path)
+    fake_uv = make_fake_uv(tmp_path)
+    first, app, _, _ = invoke_installer(
+        tmp_path=tmp_path,
+        origin=origin,
+        fake_uv=fake_uv,
+        extra=("--agents", "codex", "--no-seed"),
+    )
+    assert first.returncode == 0, first.stdout + first.stderr
+    git(app, "remote", "set-url", "origin", "C:/Users/Test/origin")
+
+    fake_bin = tmp_path / "git-bash-bin"
+    fake_bin.mkdir()
+    fake_cygpath = fake_bin / "cygpath"
+    fake_cygpath.write_text(
+        """#!/usr/bin/env bash
+set -eu
+[ "$1" = "-am" ]
+case "$2" in
+  C:/Users/Test/origin|/c/Users/Test/origin)
+    printf '%s\\n' 'C:/Users/Test/origin'
+    ;;
+  *)
+    exit 3
+    ;;
+esac
+""",
+        encoding="utf-8",
+    )
+    fake_cygpath.chmod(0o755)
+
+    rerun, _, _, _ = invoke_installer(
+        tmp_path=tmp_path,
+        origin=origin,
+        fake_uv=fake_uv,
+        extra=("--agents", "codex", "--no-seed"),
+        env_extra={
+            "LATCH_INSTALL_REPOSITORY": "/c/Users/Test/origin",
+            "PATH": str(fake_bin) + os.pathsep + os.environ["PATH"],
+        },
+    )
+
+    assert rerun.returncode == 0, rerun.stdout + rerun.stderr
+    assert "keeping its source revision" in rerun.stdout
+
+
 def test_bootstrap_script_contracts_and_syntax():
     syntax = run("bash", "-n", str(INSTALL_SH))
     assert syntax.returncode == 0, syntax.stderr

@@ -150,10 +150,21 @@ fi
 command -v git >/dev/null 2>&1 || die 'git is required; install Git and rerun'
 
 normalize_repository() {
-  local value="$1"
+  local value="$1" converted
   case "$value" in
     git@github.com:*) value="https://github.com/${value#git@github.com:}" ;;
     ssh://git@github.com/*) value="https://github.com/${value#ssh://git@github.com/}" ;;
+  esac
+  # Git for Windows records a Git Bash local path such as /c/Users/... as
+  # C:/Users/... in remote.origin.url. Canonicalize both spellings before the
+  # ownership comparison so the checkout does not reject its own staged clone.
+  case "$value" in
+    /*|[A-Za-z]:/*)
+      if command -v cygpath >/dev/null 2>&1 \
+          && converted="$(cygpath -am "$value" 2>/dev/null)"; then
+        value="$converted"
+      fi
+      ;;
   esac
   value="${value%/}"
   value="${value%.git}"
