@@ -51,6 +51,10 @@ Never use a direct test script as a substitute for pytest.
 
 ## Windows Python-window attribution
 
+For the exact branch checkout, safety tests, transient-process watcher,
+evidence bundle, and acceptance criteria, use the
+[Windows incident-hardening verification handoff](./windows_incident_hardening_handoff.md).
+
 Claude, Codex, and Cursor use `pythonw.exe` plus `mcp_launcher_win.py` when the
 complete managed launcher pair exists. The supervisor starts base `python.exe`
 with `CREATE_NO_WINDOW`; daemon cold-start helpers additionally use hidden,
