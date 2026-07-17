@@ -29,6 +29,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from _common import project_cwd, read_hook_input  # noqa: E402
+import vault_policy  # noqa: E402
+
 # Cap the surfaced line so a long gate/why-it-matters summary stays a glance,
 # not a wall. Generous enough to never clip a normal one-liner.
 _MAX_LEN = 600
@@ -121,11 +124,15 @@ def surface_message(payload: dict) -> str | None:
 
 def main() -> int:
     try:
-        raw = sys.stdin.read() if not sys.stdin.isatty() else ""
-        payload = json.loads(raw) if raw.strip() else {}
+        payload = read_hook_input()
+        project_cwd(payload)
         msg = surface_message(payload)
         if msg:
             print(json.dumps({"systemMessage": msg}))
+    except vault_policy.VaultPolicyError:
+        # Ordinary surfacing errors remain fail-open, but protected-root
+        # identity failures must never silently fall back to outer Latch.
+        return 1
     except Exception:
         # Fail silent-open: never break or annotate the observed tool call.
         return 0

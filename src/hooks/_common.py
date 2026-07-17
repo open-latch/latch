@@ -52,7 +52,9 @@ def hook_field(payload: dict, *keys, default=None):
 
 
 def project_cwd(payload: dict) -> str:
-    return hook_field(payload, "cwd", "workingDirectory", default=os.getcwd())
+    cwd = hook_field(payload, "cwd", "workingDirectory", default=os.getcwd())
+    paths.enforce_vault_policy(cwd)
+    return cwd
 
 
 def session_id(payload: dict) -> str | None:

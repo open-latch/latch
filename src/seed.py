@@ -25,6 +25,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 import codex_transcript  # noqa: E402
 import cursor_transcript  # noqa: E402
 import paths  # noqa: E402
+import vault_policy  # noqa: E402
 
 DEFAULT_LOOKBACK_DAYS = 14
 LOOKBACK_CHOICES = (5, 14, 30)
@@ -369,6 +370,7 @@ def discover_sources(
     all_projects: bool = False,
     now: datetime | None = None,
 ) -> list[SeedSource]:
+    vault_policy.require_operation_allowed("seed", project_path)
     cutoff = (now or utc_now()) - timedelta(days=lookback_days)
     roots: list[tuple[str, Path, str]] = []
     selected_agents = source_agents(source)
@@ -1654,6 +1656,7 @@ def remove_cursor_seed_preview(project_path: str, session_id: str) -> None:
 
 
 def apply_candidates(candidates: list[SeedCandidate], *, project_path: str) -> list[int]:
+    vault_policy.require_operation_allowed("seed", project_path)
     import heal  # noqa: WPS433
     import db  # noqa: WPS433
 
@@ -1686,6 +1689,11 @@ def clip(text: str, limit: int) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    try:
+        vault_policy.require_operation_allowed("seed", args.project)
+    except vault_policy.VaultPolicyError as exc:
+        print(f"latch seed blocked: {exc}", file=sys.stderr)
+        return 2
     disabled = no_llm_disabled_reason(args)
     if disabled:
         print(disabled, file=sys.stderr)

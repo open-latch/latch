@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """Quarantined launcher for consultant client work.
 
-This module is deliberately standalone.  Nothing in ``src/`` imports it, so
-normal Latch processes do not execute this code or inspect client roots.
+The launcher creates the binding consumed by ``src/vault_policy.py``.  Normal
+Latch behavior remains unchanged when no protected-root tripwire exists.
 """
 from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -17,11 +16,15 @@ import sys
 from typing import Mapping, Sequence
 
 
-SCHEMA_VERSION = 1
-STATE_DIR_NAME = ".latch-vault"
-MARKER_NAME = "binding.json"
+_BOOTSTRAP_INSTALL_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_BOOTSTRAP_INSTALL_ROOT / "src"))
+import vault_policy  # noqa: E402
+
+SCHEMA_VERSION = vault_policy.SCHEMA_VERSION
+STATE_DIR_NAME = vault_policy.STATE_DIR_NAME
+MARKER_NAME = vault_policy.MARKER_NAME
 STATIC_LINKS = ("vendor",)
-INSTALL_ROOT = Path(__file__).resolve().parent.parent
+INSTALL_ROOT = vault_policy.INSTALL_ROOT
 MODEL_BLOCKER = INSTALL_ROOT / "bin" / "latch_vault_model_block.py"
 
 
@@ -66,8 +69,7 @@ def _canonical_existing_dir(value: str | os.PathLike[str]) -> Path:
 
 
 def _binding_id(root: Path) -> str:
-    material = f"latch-vault-v{SCHEMA_VERSION}\0{root}\0{INSTALL_ROOT}"
-    return hashlib.sha256(material.encode("utf-8")).hexdigest()[:20]
+    return vault_policy.binding_id(root, INSTALL_ROOT)
 
 
 def _state_for(root: Path) -> VaultState:
@@ -109,12 +111,7 @@ def _mkdir_private(path: Path, label: str) -> None:
 
 
 def _expected_marker(state: VaultState) -> dict[str, object]:
-    return {
-        "schema_version": SCHEMA_VERSION,
-        "protected_root": str(state.protected_root),
-        "install_root": str(INSTALL_ROOT),
-        "binding_id": state.binding_id,
-    }
+    return vault_policy.expected_marker(state.protected_root, INSTALL_ROOT)
 
 
 def _write_marker(state: VaultState) -> None:
@@ -266,6 +263,14 @@ def _configure_git_exclude(root: Path) -> bool:
 
 def initialize(root_value: str | os.PathLike[str]) -> VaultState:
     root = _canonical_existing_dir(root_value)
+    try:
+        existing_root = vault_policy.discover_root(root)
+    except vault_policy.VaultPolicyError as exc:
+        raise VaultError(str(exc)) from exc
+    if existing_root is not None and existing_root != root:
+        raise VaultError(
+            f"refusing nested vault inside protected root {existing_root}"
+        )
     state = _state_for(root)
     _mkdir_private(state.state_dir, "vault state directory")
     _mkdir_private(state.home_dir, "vault home directory")
@@ -276,6 +281,10 @@ def initialize(root_value: str | os.PathLike[str]) -> VaultState:
         _ensure_static_link(state.home_dir, name)
     _write_marker(state)
     _configure_git_exclude(root)
+    try:
+        vault_policy.load_binding(root, INSTALL_ROOT)
+    except vault_policy.VaultPolicyError as exc:
+        raise VaultError(str(exc)) from exc
     return state
 
 
@@ -287,8 +296,11 @@ def _find_protected_root(start: Path) -> Path:
     if not current.is_dir():
         current = current.parent
     for candidate in (current, *current.parents):
-        marker = candidate / STATE_DIR_NAME / MARKER_NAME
-        if marker.exists() or marker.is_symlink():
+        # The state directory itself is the persistent tripwire.  A missing or
+        # damaged marker must be reported as damage, never as an uninitialized
+        # ordinary repository.
+        state_dir = candidate / STATE_DIR_NAME
+        if state_dir.exists() or state_dir.is_symlink():
             return candidate
     raise VaultError(
         f"no {STATE_DIR_NAME}/{MARKER_NAME} found; run `latch-vault init ROOT` first"
@@ -300,6 +312,12 @@ def load(root_value: str | os.PathLike[str] | None = None) -> VaultState:
         root_value if root_value is not None else _find_protected_root(Path.cwd())
     )
     state = _state_for(root)
+    try:
+        discovered_root = vault_policy.discover_root(root)
+    except vault_policy.VaultPolicyError as exc:
+        raise VaultError(str(exc)) from exc
+    if discovered_root != root:
+        raise VaultError("protected root tripwire does not match the requested root")
     _assert_real_dir(state.state_dir, "vault state directory")
     _assert_real_dir(state.home_dir, "vault home directory")
     _assert_real_dir(state.kb_dir, "vault KB directory")
@@ -308,6 +326,7 @@ def load(root_value: str | os.PathLike[str] | None = None) -> VaultState:
     for name in STATIC_LINKS:
         _validate_static_link(state.home_dir, name)
     _load_marker(state)
+    vault_policy.load_binding(root, INSTALL_ROOT)
     return state
 
 
@@ -322,6 +341,9 @@ def build_environment(
             "LATCH_VAULT_MODE": "1",
             "LATCH_VAULT_PROTECTED_ROOT": str(state.protected_root),
             "LATCH_VAULT_BINDING_ID": state.binding_id,
+            "LATCH_VAULT_FINGERPRINT": vault_policy.marker_fingerprint(
+                _expected_marker(state)
+            ),
             "LATCH_HOME": str(state.home_dir),
             "CLAUDE_KB_HOME": str(state.home_dir),
             "LATCH_KB_DIR": str(state.kb_dir),
@@ -330,6 +352,10 @@ def build_environment(
             "TEMP": str(state.temp_dir),
             "TMP": str(state.temp_dir),
             "PYTHONDONTWRITEBYTECODE": "1",
+            # Vault mode uses the existing brute-force cosine fallback.  This
+            # avoids loading a native SQLite extension into the NDA-specific
+            # process while preserving deterministic search behavior.
+            "LATCH_VAULT_DISABLE_SQLITE_VEC": "1",
             "CLAUDE_KB_LOG_RAW_QUERY": "0",
             "CLAUDE_KB_GIT_SNAPSHOT": "0",
             # Stop/SessionEnd are the transcript-compaction write path.  Keep
@@ -350,6 +376,8 @@ def build_environment(
         "CLAUDE_KB_IN_COMPACT",
         "LATCH_IN_COMPACT",
         "LATCH_MCP_FORCE_LEGACY",
+        "LATCH_MCP_ALLOW_LEGACY_FALLBACK",
+        "LATCH_MCP_LEGACY",
         "LATCH_MCP_INITIAL_PROJECT_CWD",
         "LATCH_MCP_RUNTIME_KEY",
         "LATCH_MCP_START_REASON",
@@ -377,12 +405,14 @@ def _receipt(state: VaultState, *, ready: bool) -> str:
             f"Latch vault: {status}",
             f"Protected root: {state.protected_root}",
             f"Binding: {state.binding_id}",
+            f"Fingerprint: {vault_policy.marker_fingerprint(_expected_marker(state))}",
             f"Vault state: {state.state_dir}",
             "Outer KB: disconnected in latch-vault launched sessions",
             "Latch model subprocesses: blocked (account identity unverified)",
             "Automatic transcript compaction: off",
             "Host coding-agent account/storage: unchanged; client policy applies",
-            "Normal Latch: unchanged outside latch-vault launched sessions",
+            "Uninitialized repositories: ordinary Latch behavior unchanged",
+            "This initialized root: Latch requires the vault launcher",
         ]
     )
 
@@ -404,7 +434,10 @@ def launch(
 
     cwd = Path.cwd().resolve(strict=True)
     if not _is_within(cwd, state.protected_root):
-        os.chdir(state.protected_root)
+        raise VaultError(
+            "launch must be invoked from inside the bound protected root; "
+            "outside --root invocation is refused"
+        )
 
     env = build_environment(state)
     print(_receipt(state, ready=True), file=sys.stderr, flush=True)

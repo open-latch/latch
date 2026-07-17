@@ -23,6 +23,7 @@ from _common import hook_field, log, read_hook_input, transcript_path  # noqa: E
 
 import budget  # noqa: E402
 import db  # noqa: E402
+import paths  # noqa: E402
 from paths import is_disabled, is_in_compact, is_unlatched_mode  # noqa: E402
 from session_start import (  # noqa: E402
     _build_briefing,
@@ -33,7 +34,7 @@ from session_start import (  # noqa: E402
 
 
 def vscode_project_cwd(payload: dict) -> str:
-    return hook_field(
+    cwd = hook_field(
         payload,
         "cwd",
         "workingDirectory",
@@ -42,6 +43,8 @@ def vscode_project_cwd(payload: dict) -> str:
         "workdir",
         default=os.getcwd(),
     )
+    paths.enforce_vault_policy(cwd)
+    return cwd
 
 
 def vscode_session_id(payload: dict) -> str | None:
@@ -49,6 +52,10 @@ def vscode_session_id(payload: dict) -> str | None:
 
 
 def main() -> int:
+    # Treat the hook payload workspace as authority before reading any Latch
+    # sentinel from the process environment/install.
+    payload = read_hook_input()
+    cwd = vscode_project_cwd(payload)
     if is_in_compact():
         return 0
     if is_unlatched_mode():
@@ -59,9 +66,6 @@ def main() -> int:
         return 0
     if is_disabled():
         return 0
-
-    payload = read_hook_input()
-    cwd = vscode_project_cwd(payload)
     sid = vscode_session_id(payload)
     tpath = transcript_path(payload)
 

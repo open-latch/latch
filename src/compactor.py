@@ -27,6 +27,7 @@ import embeddings  # noqa: E402
 import heal  # noqa: E402
 import lockfile  # noqa: E402
 import paths  # noqa: E402
+import vault_policy  # noqa: E402
 
 # On Windows, subprocess.run([...]) with shell=False calls CreateProcess, which
 # does not consult PATHEXT — a bare "claude" argv0 won't find claude.cmd. Resolve
@@ -196,6 +197,15 @@ def run_compaction(
     summarizer_backend: str | None = None,
 ) -> dict:
     """Run one compaction pass. Returns a small status dict."""
+    try:
+        paths.require_vault_operation_allowed("compaction", project_path)
+    except vault_policy.VaultPolicyError as exc:
+        return {
+            "ok": False,
+            "reason": "vault_policy",
+            "error": str(exc),
+            "session_id": session_id,
+        }
     if paths.is_unlatched_mode():
         return {
             "ok": False,

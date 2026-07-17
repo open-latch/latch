@@ -50,6 +50,11 @@ _GETTING_STARTED_BLOCK = (
 
 
 def main() -> int:
+    # Validate the hook-reported project before consulting any install-level
+    # control files.  Hosts may launch hooks from a different process cwd; a
+    # protected payload must never fall through to outer Latch state.
+    payload = read_hook_input()
+    cwd = project_cwd(payload)
     if is_in_compact():
         return 0
     if is_unlatched_mode():
@@ -60,8 +65,6 @@ def main() -> int:
         return 0
     if is_disabled():
         return 0
-    payload = read_hook_input()
-    cwd = project_cwd(payload)
     sid = session_id(payload)
     tpath = transcript_path(payload)
 

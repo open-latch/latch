@@ -23,6 +23,7 @@ from _common import hook_field, log, read_hook_input, transcript_path  # noqa: E
 import budget  # noqa: E402
 import codex_session  # noqa: E402
 import db  # noqa: E402
+import paths  # noqa: E402
 from paths import is_disabled, is_in_compact, is_unlatched_mode  # noqa: E402
 from session_start import (  # noqa: E402
     _build_briefing,
@@ -34,7 +35,7 @@ from session_start import (  # noqa: E402
 
 
 def codex_project_cwd(payload: dict) -> str:
-    return hook_field(
+    cwd = hook_field(
         payload,
         "cwd",
         "workingDirectory",
@@ -42,6 +43,8 @@ def codex_project_cwd(payload: dict) -> str:
         "workdir",
         default=os.getcwd(),
     )
+    paths.enforce_vault_policy(cwd)
+    return cwd
 
 
 def codex_session_id(payload: dict) -> str | None:
@@ -52,6 +55,10 @@ def codex_session_id(payload: dict) -> str | None:
 
 
 def main() -> int:
+    # Codex can invoke this script with a process cwd different from the
+    # workspace in its payload.  Bind that workspace before any control read.
+    payload = read_hook_input()
+    cwd = codex_project_cwd(payload)
     if is_in_compact():
         return 0
     if is_unlatched_mode():
@@ -62,9 +69,6 @@ def main() -> int:
         return 0
     if is_disabled():
         return 0
-
-    payload = read_hook_input()
-    cwd = codex_project_cwd(payload)
     sid = codex_session_id(payload)
     tpath = transcript_path(payload)
 

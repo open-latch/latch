@@ -26,6 +26,7 @@ from typing import Any
 
 import codex_session
 import mcp_broker
+import vault_policy
 
 
 SESSION_ENV_VARS = (
@@ -88,8 +89,9 @@ def _resolve_session(project_cwd: str) -> tuple[str | None, str]:
 
 def connection_metadata(project_cwd: str | None = None) -> dict[str, Any]:
     cwd = os.path.abspath(project_cwd or os.getcwd())
+    binding = vault_policy.enforce(cwd)
     session_id, source = _resolve_session(cwd)
-    return {
+    metadata = {
         "connection_id": uuid.uuid4().hex,
         "project_cwd": cwd,
         "session_id": session_id,
@@ -99,6 +101,9 @@ def connection_metadata(project_cwd: str | None = None) -> dict[str, Any]:
         "runtime_key": mcp_broker.RUNTIME_KEY,
         "proxy_capability_epoch": mcp_broker.PROXY_CAPABILITY_EPOCH,
     }
+    if binding is not None:
+        metadata["vault_binding"] = binding.connection_metadata()
+    return metadata
 
 
 def _message(line: bytes) -> dict[str, Any] | None:
@@ -546,7 +551,11 @@ def _exec_legacy_server() -> None:
 
 
 def main() -> int:
-    metadata = connection_metadata()
+    try:
+        metadata = connection_metadata()
+    except vault_policy.VaultPolicyError as exc:
+        sys.stderr.write(f"[latch] consultant vault blocked MCP startup: {exc}\n")
+        return 2
     if os.environ.get("LATCH_MCP_FORCE_LEGACY"):
         mcp_broker.emit_lifecycle("legacy_fallback", reason="forced_by_env")
         _exec_legacy_server()

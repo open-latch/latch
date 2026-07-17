@@ -29,6 +29,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import vault_policy
+
 CREATE_NO_WINDOW = 0x08000000
 
 _STD_INPUT_HANDLE = -10
@@ -194,6 +196,10 @@ def _resolve_child_python() -> str:
 
 def main() -> int:
     global _JOB_HANDLE
+    # Validate before diagnostics, handle setup, or child creation.  In
+    # particular, a forgotten vault launcher must not write the configured
+    # machine-level launcher log before the child server gets a chance to fail.
+    vault_policy.enforce(os.getcwd())
     if os.name != "nt":
         # Never the launch path off Windows; exec the server directly.
         server = Path(__file__).resolve().parent / "mcp_server.py"

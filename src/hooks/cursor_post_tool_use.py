@@ -17,6 +17,7 @@ sys.path.insert(0, str(SRC / "hooks"))
 from post_tool_use import surface_message  # noqa: E402
 from _common import log, read_hook_input  # noqa: E402
 import cursor_gate_state  # noqa: E402
+import vault_policy  # noqa: E402
 
 
 def cursor_tool_response(payload: dict):
@@ -103,6 +104,7 @@ def main() -> int:
         # as cp1252 and failed at char 0, so the gate receipt never armed and
         # every post-gate Write/Shell stayed denied.
         payload = read_hook_input()
+        cursor_gate_state.project_cwd(payload)
         msg = cursor_surface_message(payload)
         gate_record = record_gate_receipt(payload)
         operation_record = record_operation_success(payload)
@@ -123,6 +125,10 @@ def main() -> int:
                 "additional_context":
                     "IMPORTANT: Surface this latch activity to the user now: " + msg
             }))
+    except vault_policy.VaultPolicyError:
+        # Vault policy is fail-closed even though ordinary postToolUse errors
+        # remain fail-open; do not leak the protected path to an outer log.
+        return 1
     except Exception as e:
         log(f"cursor_post_tool_use failed open: {e}")
         return 0

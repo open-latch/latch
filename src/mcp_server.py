@@ -44,6 +44,11 @@ def _repair_cursor_wiring_from_mcp_startup() -> None:
 # MCP/NumPy/ONNX imports so each host context stays a small stdio proxy.  Imports
 # of this module (tests and the shared daemon) still expose the tool registry.
 if __name__ == "__main__":
+    import vault_policy as _vault_policy  # noqa: E402
+
+    # The Cursor wiring repair below can write project files, so bind the
+    # protected root before even that compatibility setup runs.
+    _vault_policy.enforce(os.getcwd())
     from windows_stdio import ensure_windows_standard_streams  # noqa: E402
 
     ensure_windows_standard_streams()
@@ -133,7 +138,9 @@ PROJECT_SESSION_ID = _resolve_project_session_id()
 
 def _project_cwd() -> str:
     context = mcp_runtime.current_connection()
-    return context.project_cwd if context is not None else PROJECT_CWD
+    cwd = context.project_cwd if context is not None else PROJECT_CWD
+    paths.enforce_vault_policy(cwd)
+    return cwd
 
 
 def _project_session_id() -> str | None:
@@ -1745,6 +1752,7 @@ def initialize_runtime(project_cwd: str, *, start_embed_listener: bool) -> None:
     calls the same path, preserving availability when broker startup fails.
     """
     global _RUNTIME_INITIALIZED
+    paths.enforce_vault_policy(project_cwd)
     if paths.is_unlatched_mode() or _RUNTIME_INITIALIZED:
         return
     with _RUNTIME_INIT_LOCK:

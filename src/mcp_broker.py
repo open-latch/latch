@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, BinaryIO
 
 import paths
+import vault_policy
 
 
 PROTOCOL_VERSION = 1
@@ -76,6 +77,7 @@ def _runtime_key() -> str:
         root / "mcp_daemon.py",
         root / "mcp_server.py",
         root / "mcp_runtime.py",
+        root / "vault_policy.py",
         paths.KB_ROOT / "vendor" / "config.json",
         paths.KB_ROOT / "vendor" / "tokenizer.json",
         paths.KB_ROOT / "vendor" / "tokenizer_config.json",
@@ -100,6 +102,27 @@ def _runtime_key() -> str:
 
 
 RUNTIME_KEY = _runtime_key()
+
+
+def _vault_prelude_fields(project_cwd: str | None = None) -> dict[str, Any]:
+    cwd = os.path.abspath(
+        project_cwd
+        or os.environ.get("LATCH_MCP_INITIAL_PROJECT_CWD")
+        or os.getcwd()
+    )
+    try:
+        binding = vault_policy.enforce(cwd)
+    except vault_policy.VaultPolicyError as exc:
+        raise BrokerError(f"consultant vault blocked MCP runtime: {exc}") from exc
+    fields: dict[str, Any] = {"project_cwd": cwd}
+    if binding is not None:
+        fields["vault_binding"] = binding.connection_metadata()
+    return fields
+
+
+def _validate_discovery_vault(payload: dict[str, Any]) -> bool:
+    expected = _vault_prelude_fields().get("vault_binding")
+    return payload.get("vault_binding") == expected
 
 
 def runtime_dir() -> Path:
@@ -585,6 +608,8 @@ def read_discovery(runtime_key: str | None = None) -> dict[str, Any] | None:
         return None
     if payload.get("runtime_key") != key:
         return None
+    if not _validate_discovery_vault(payload):
+        return None
     error = payload.get("error")
     if isinstance(error, str):
         try:
@@ -669,12 +694,14 @@ def probe_discovery(
             (payload["host"], int(payload["port"])), timeout=timeout
         ) as sock:
             sock.settimeout(timeout)
+            fields = _vault_prelude_fields()
             _send_prelude(
                 sock,
                 {
                     "token": payload["token"],
                     "runtime_key": payload["runtime_key"],
                     "proxy_pid": os.getpid(),
+                    **fields,
                 },
                 op="probe",
             )
@@ -688,11 +715,15 @@ def probe_discovery(
 def publish_start_failure(runtime_key: str, message: str) -> Path:
     """Publish a short-lived actionable startup failure for a retained proxy."""
     path = discovery_path(runtime_key)
-    _atomic_json(path, {
+    failure = {
         "runtime_key": runtime_key,
         "created_epoch": time.time(),
         "error": message,
-    })
+    }
+    vault_binding = _vault_prelude_fields().get("vault_binding")
+    if vault_binding is not None:
+        failure["vault_binding"] = vault_binding
+    _atomic_json(path, failure)
     return path
 
 
@@ -792,6 +823,7 @@ def _start_reason(value: str) -> str:
 
 
 def _spawn_daemon(project_cwd: str, *, start_reason: str) -> int:
+    _vault_prelude_fields(project_cwd)
     daemon_py = Path(__file__).resolve().parent / "mcp_daemon.py"
     env = os.environ.copy()
     env["LATCH_KB_DIR"] = str(runtime_dir())
@@ -840,6 +872,7 @@ def _spawn_daemon(project_cwd: str, *, start_reason: str) -> int:
 def ensure_daemon(
     project_cwd: str, *, start_reason: str = "proxy_connect"
 ) -> dict[str, Any]:
+    _vault_prelude_fields(project_cwd)
     payload = _checked_discovery()
     if payload is not None and probe_discovery(payload):
         return payload
@@ -872,6 +905,7 @@ def ensure_daemon(
 
 def request_daemon_start(project_cwd: str) -> bool:
     """Request a detached single-flight startup without blocking a hook."""
+    _vault_prelude_fields(project_cwd)
     payload = read_discovery()
     if payload is not None and probe_discovery(payload, timeout=0.02):
         return False
@@ -914,6 +948,10 @@ def connect_mcp(
     metadata: dict[str, Any], *, start_reason: str = "proxy_connect"
 ) -> tuple[socket.socket, dict[str, Any]]:
     project_cwd = str(metadata.get("project_cwd") or os.getcwd())
+    try:
+        vault_policy.validate_connection_metadata(metadata)
+    except vault_policy.VaultPolicyError as exc:
+        raise BrokerError(f"consultant vault rejected MCP connection: {exc}") from exc
     payload = ensure_daemon(project_cwd, start_reason=start_reason)
     last_error: Exception | None = None
     for _attempt in range(2):
@@ -962,6 +1000,9 @@ def publish_discovery(
         "pid": int(pid),
         "started_at": started_at,
     }
+    vault_binding = _vault_prelude_fields().get("vault_binding")
+    if vault_binding is not None:
+        payload["vault_binding"] = vault_binding
     path = legacy_discovery_path() if legacy_path else discovery_path(key)
     _atomic_json(path, payload)
     return path

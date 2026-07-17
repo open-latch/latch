@@ -11,6 +11,7 @@ sys.path.insert(0, str(SRC))
 sys.path.insert(0, str(SRC / "hooks"))
 
 import cursor_gate_state  # noqa: E402
+import vault_policy  # noqa: E402
 from _common import log, read_hook_input  # noqa: E402
 from paths import is_disabled, is_in_compact, is_unlatched_mode  # noqa: E402
 
@@ -43,6 +44,9 @@ def main() -> int:
         if context:
             response["additional_context"] = context
         print(json.dumps(response))
+    except vault_policy.VaultPolicyError:
+        # Never route protected-root details into the ordinary hooks log.
+        return 1
     except Exception as e:
         log(f"cursor_before_submit failed: {e}")
         # Non-zero plus failClosed=true prevents a stale prior receipt from

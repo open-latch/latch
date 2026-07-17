@@ -35,14 +35,14 @@ def emit_cursor_context(context: str) -> None:
 
 
 def main() -> int:
+    payload = read_hook_input()
+    cwd = cursor_project_cwd(payload)
     if is_in_compact() or is_disabled():
         return 0
     if is_unlatched_mode():
         emit_cursor_context(_build_unlatched_brief())
         return 0
 
-    payload = read_hook_input()
-    cwd = cursor_project_cwd(payload)
     sid = cursor_session_id(payload)
     tpath = transcript_path(payload)
     surfaced_ids: list[int] = []

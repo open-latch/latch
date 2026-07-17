@@ -32,13 +32,24 @@ import os
 import re
 from pathlib import Path
 
+import vault_policy
+
 
 def _default_kb_root() -> Path:
     # paths.py lives at <KB_ROOT>/src/paths.py
     return Path(__file__).resolve().parent.parent
 
 
-KB_ROOT = Path(os.environ.get("LATCH_HOME") or os.environ.get("CLAUDE_KB_HOME") or _default_kb_root())
+_VAULT_BINDING = vault_policy.enforce()
+KB_ROOT = (
+    _VAULT_BINDING.home_dir
+    if _VAULT_BINDING is not None
+    else Path(
+        os.environ.get("LATCH_HOME")
+        or os.environ.get("CLAUDE_KB_HOME")
+        or _default_kb_root()
+    )
+)
 PROJECTS_ROOT = KB_ROOT / "projects"
 SCHEMA_PATH = KB_ROOT / "src" / "schema.sql"
 DISABLE_FILE = KB_ROOT / "DISABLE"
@@ -63,7 +74,7 @@ KB_LOCATION_FILE = KB_ROOT / "kb_location.json"
 _PINNED_DIR: "Path | None | bool" = False
 
 
-def _resolve_pinned_dir() -> Path | None:
+def _resolve_pinned_dir(cwd: str | os.PathLike | None = None) -> Path | None:
     """The single fixed KB directory, or None when no pin is configured.
 
     Resolution order (id=1556): LATCH_KB_DIR / CLAUDE_KB_DIR env >
@@ -74,6 +85,14 @@ def _resolve_pinned_dir() -> Path | None:
     missing or malformed pin file falls through to None (legacy per-cwd), never
     raises."""
     global _PINNED_DIR
+    binding = vault_policy.enforce(cwd)
+    if binding is not None:
+        if _PINNED_DIR not in (False, binding.kb_dir):
+            raise vault_policy.VaultPolicyError(
+                "cached KB path does not match the active consultant vault"
+            )
+        _PINNED_DIR = binding.kb_dir
+        return binding.kb_dir
     if _PINNED_DIR is not False:
         return _PINNED_DIR  # type: ignore[return-value]
     env = os.environ.get("LATCH_KB_DIR") or os.environ.get("CLAUDE_KB_DIR")
@@ -206,7 +225,7 @@ def project_dir(cwd: str | os.PathLike | None = None) -> Path:
     one fixed KB directory is returned — this is what makes the wrong-DB bug
     class structurally impossible. ``cwd`` is honored only in legacy
     (unconfigured) mode, where it selects a per-project dir as before."""
-    pinned = _resolve_pinned_dir()
+    pinned = _resolve_pinned_dir(cwd)
     if pinned is not None:
         return pinned
     cwd = cwd or os.getcwd()
@@ -221,3 +240,16 @@ def ensure_project_dir(cwd: str | os.PathLike | None = None) -> Path:
     d = project_dir(cwd)
     d.mkdir(parents=True, exist_ok=True)
     return d
+
+
+def enforce_vault_policy(
+    cwd: str | os.PathLike | None = None,
+) -> vault_policy.VaultBinding | None:
+    """Public lightweight tripwire for hooks and runtime entry points."""
+    return vault_policy.enforce(cwd)
+
+
+def require_vault_operation_allowed(
+    operation: str, cwd: str | os.PathLike | None = None
+) -> None:
+    vault_policy.require_operation_allowed(operation, cwd)

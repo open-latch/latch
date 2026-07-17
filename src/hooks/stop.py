@@ -47,6 +47,10 @@ def _load_runtime() -> None:
 
 
 def main() -> int:
+    # Validate the hook payload before any global disable/unlatched sentinel
+    # lookup so a forgotten vault launcher cannot touch outer Latch state.
+    payload = read_hook_input()
+    cwd = project_cwd(payload)
     # is_write_disabled() implies is_disabled(); covers both kill-switches.
     if is_unlatched_mode():
         _print_unlatched_context("Stop")
@@ -54,11 +58,9 @@ def main() -> int:
     if is_write_disabled() or is_in_compact():
         return 0
     _load_runtime()
-    payload = read_hook_input()
     sid = session_id(payload)
     if not sid:
         return 0
-    cwd = project_cwd(payload)
     tpath = transcript_path(payload)
 
     try:

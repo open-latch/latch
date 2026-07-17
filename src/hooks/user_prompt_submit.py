@@ -129,14 +129,16 @@ GUIDELINE_SIGNAL = re.compile(
 
 
 def main() -> int:
+    # Payload authority comes before install controls: the host process cwd is
+    # not a trustworthy project boundary.
+    payload = read_hook_input()
+    cwd = project_cwd(payload)
     if is_unlatched_mode():
         _print_context(UNLATCHED_MESSAGE)
         return 0
     if is_disabled() or is_in_compact():
         return 0
-    payload = read_hook_input()
     sid = session_id(payload)
-    cwd = project_cwd(payload)
     prompt = (hook_field(payload, "prompt", "user_prompt") or "").strip()
 
     correction_signal = bool(CORRECTION_SIGNAL.search(prompt))

@@ -12,6 +12,7 @@ sys.path.insert(0, str(SRC / "hooks"))
 
 import cursor_gate_state  # noqa: E402
 import cursor_session  # noqa: E402
+import vault_policy  # noqa: E402
 from _common import log, read_hook_input, transcript_path  # noqa: E402
 from paths import is_disabled, is_in_compact, is_unlatched_mode  # noqa: E402
 
@@ -54,12 +55,22 @@ def decision(payload: dict) -> dict:
 
 
 def main() -> int:
+    payload = read_hook_input()
+    try:
+        # Validate before control reads; Cursor's process cwd need not be the
+        # workspace named by this request.
+        cursor_gate_state.project_cwd(payload)
+    except vault_policy.VaultPolicyError:
+        print(json.dumps({"permission": "deny", "user_message": DENY_MESSAGE}))
+        return 1
     if is_disabled() or is_in_compact() or is_unlatched_mode():
         print("{}")
         return 0
-    payload = read_hook_input()
     try:
         print(json.dumps(decision(payload)))
+    except vault_policy.VaultPolicyError:
+        print(json.dumps({"permission": "deny", "user_message": DENY_MESSAGE}))
+        return 1
     except Exception as e:
         log(f"cursor_pre_tool_use failed closed: {e}")
         print(json.dumps({"permission": "deny", "user_message": DENY_MESSAGE}))

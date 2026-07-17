@@ -26,6 +26,10 @@ def _load_runtime() -> None:
 
 
 def main() -> int:
+    # The payload project is authoritative even when the hook executable was
+    # started from an unrelated directory.
+    payload = read_hook_input()
+    cwd = project_cwd(payload)
     # is_write_disabled() implies is_disabled(); covers both kill-switches.
     if is_unlatched_mode():
         _print_unlatched_context("SessionEnd")
@@ -33,11 +37,9 @@ def main() -> int:
     if is_write_disabled() or is_in_compact():
         return 0
     _load_runtime()
-    payload = read_hook_input()
     sid = session_id(payload)
     if not sid:
         return 0
-    cwd = project_cwd(payload)
     tpath = transcript_path(payload)
 
     try:

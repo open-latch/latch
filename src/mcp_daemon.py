@@ -21,6 +21,8 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
+import vault_policy
+
 
 _PROCESS_STARTED_MONOTONIC = time.monotonic()
 
@@ -48,6 +50,10 @@ if (
     and os.name != "nt"
     and os.environ.get("LATCH_MCP_DAEMONIZE")
 ):
+    # Reject an unbound protected root before creating any background process.
+    vault_policy.enforce(
+        os.environ.get("LATCH_MCP_INITIAL_PROJECT_CWD") or os.getcwd()
+    )
     if _daemonize_posix():
         raise SystemExit(0)
 
@@ -394,6 +400,11 @@ async def _run_mcp_connection(
                     line, buffer = await _read_line(
                         stream, buffer, limit=MAX_MCP_LINE_BYTES
                     )
+                    # Re-read the marker and compare the immutable connection
+                    # prelude before every request.  Marker tampering or a
+                    # cross-root connection can therefore never become a tool
+                    # call merely because the socket was already established.
+                    vault_policy.validate_connection_metadata(metadata)
                     try:
                         message = mcp_types.JSONRPCMessage.model_validate_json(line)
                     except Exception as exc:
@@ -549,6 +560,11 @@ async def _handle_connection(stream: SocketStream, state: DaemonState, token: st
         if metadata.get("protocol") != mcp_broker.PROTOCOL_VERSION:
             await stream.send(b'{"ok":false,"error":"protocol_mismatch"}\n')
             return
+        try:
+            vault_policy.validate_connection_metadata(metadata)
+        except vault_policy.VaultPolicyError:
+            await stream.send(b'{"ok":false,"error":"vault_policy_rejected"}\n')
+            return
         runtime_key = metadata.get("runtime_key")
         # The private discovery token authenticates compatible aliases; the key
         # remains connection attribution rather than a second security secret.
@@ -621,6 +637,7 @@ async def _main_async() -> None:
     initialized = False
     try:
         initial_cwd = os.environ.get("LATCH_MCP_INITIAL_PROJECT_CWD") or os.getcwd()
+        vault_policy.enforce(initial_cwd)
         mcp_server.initialize_runtime(initial_cwd, start_embed_listener=True)
         initialized = True
         async with anyio.create_task_group() as tg:

@@ -18,6 +18,9 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+import vault_policy  # noqa: E402
+
 KB_HOME = Path(os.environ.get("LATCH_HOME") or os.environ.get("CLAUDE_KB_HOME") or Path(__file__).resolve().parent.parent)
 LOG_PATH = KB_HOME / "mcp_stderr.log"
 MCP_SCRIPT = str(KB_HOME / "src" / "mcp_server.py")
@@ -51,6 +54,9 @@ def _tee(pipe, log_file, tag: str) -> None:
 
 
 def main() -> int:
+    # The wrapper opens its log before starting the server, so it owns the same
+    # protected-root tripwire as the server itself.
+    vault_policy.enforce(os.getcwd())
     tag = _slug_for_cwd()
     LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
 

@@ -92,6 +92,9 @@ def _load_vec(conn: sqlite3.Connection) -> bool:
     """Load the sqlite-vec extension. Returns True on success, False otherwise
     (e.g. package missing, platform DLL mismatch). Callers should honour
     `vec_loaded(conn)` and fall back to brute-force cosine when it returns False."""
+    if os.environ.get("LATCH_VAULT_DISABLE_SQLITE_VEC") == "1":
+        conn._kb_vec_loaded = False
+        return False
     try:
         import sqlite_vec  # type: ignore
         conn.enable_load_extension(True)

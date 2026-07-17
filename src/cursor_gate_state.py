@@ -125,17 +125,23 @@ def project_cwd(payload: dict[str, Any]) -> str:
     if isinstance(roots, list) and roots:
         first = roots[0]
         if isinstance(first, str) and first.strip():
+            paths.enforce_vault_policy(first)
             return first
         if isinstance(first, dict):
             for key in ("path", "uri", "root"):
                 value = first.get(key)
                 if isinstance(value, str) and value.strip():
-                    return value.removeprefix("file://")
+                    cwd = value.removeprefix("file://")
+                    paths.enforce_vault_policy(cwd)
+                    return cwd
     for key in ("workspaceRoot", "cwd", "workingDirectory", "workdir"):
         value = payload.get(key)
         if isinstance(value, str) and value.strip():
+            paths.enforce_vault_policy(value)
             return value
-    return os.getcwd()
+    cwd = os.getcwd()
+    paths.enforce_vault_policy(cwd)
+    return cwd
 
 
 def session_id(payload: dict[str, Any], project_path: str | None = None) -> str | None:
