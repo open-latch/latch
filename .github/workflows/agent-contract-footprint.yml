@@ -42,4 +42,4 @@ jobs:
           if [[ "$GROWTH_APPROVED" == "true" ]]; then
             args+=(--allow-growth)
           fi
-          python src/agent_contract_footprint.py "${args[@]}"
+          python .github/scripts/agent_contract_footprint.py "${args[@]}"

@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Callable
 
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parents[2]
 POLICY_PATH = "tests/fixtures/agent_contract_obligations.json"
 METRICS = ("lines", "words", "bytes")
 
