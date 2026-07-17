@@ -169,6 +169,16 @@ Rendering tests can prove footprint, required wording, target substitution, and
 safe update behavior. They cannot prove that a model will follow every rule or
 that graph relations will remain healthy over time.
 
+The dedicated `agent-contract-footprint` pull-request check compares the raw
+shared snippet and the rendered Claude, Codex, and Cursor always-loaded surfaces
+with the PR base. Any increase in lines, words, or UTF-8 bytes—and any loosening
+of an absolute budget—requires a maintainer to apply the
+`agent-contract-growth-approved` label. The label acknowledges reviewed growth;
+it does not bypass the current hard ceilings, and raising a ceiling is itself a
+review-signaled change. Prefer replacing or relocating existing detail into
+this reference, tool receipts, hooks, or tests before asking agents to carry
+more text on every prompt.
+
 The contract evidence packet therefore separates deterministic contract and
 authority cases from live-host scenarios. Long-running relation-use trends and
 behavioral quality belong in the later verification pass, not in the installed

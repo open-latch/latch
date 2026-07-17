@@ -27,7 +27,11 @@ def _block(begin: str, rendered: str, end: str) -> str:
 
 
 def _metric(text: str) -> dict[str, int]:
-    return {"lines": len(text.splitlines()), "words": len(text.split())}
+    return {
+        "lines": len(text.splitlines()),
+        "words": len(text.split()),
+        "bytes": len(text.encode("utf-8")),
+    }
 
 
 def _evidence_metric(text: str) -> dict[str, int | str]:
@@ -69,14 +73,21 @@ def test_machine_reviewable_obligations_and_footprint_budgets() -> None:
                     assert marker in text, (obligation["id"], surface, marker)
 
     measured = {
+        "source_snippet": _metric(
+            (ROOT / "claude_md_snippet.md").read_text(encoding="utf-8")
+        ),
         "claude_managed": _metric(claude),
         "agents_managed": _metric(agents),
         "cursor_rule": _metric(cursor_rule),
         "cursor_always_loaded": _metric(agents + "\n" + cursor_rule),
     }
     for surface, budget in matrix["budgets"].items():
-        assert measured[surface]["lines"] <= budget["max_lines"], (surface, measured[surface])
-        assert measured[surface]["words"] <= budget["max_words"], (surface, measured[surface])
+        for metric_name in ("lines", "words", "bytes"):
+            assert measured[surface][metric_name] <= budget[f"max_{metric_name}"], (
+                surface,
+                metric_name,
+                measured[surface],
+            )
 
 
 def test_scenario_corpus_covers_every_obligation_and_host() -> None:

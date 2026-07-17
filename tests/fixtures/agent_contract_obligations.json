@@ -1,11 +1,13 @@
 {
   "schema_version": 1,
   "counting_rule": "Count the complete always-loaded surface, including managed begin/end and wiring markers.",
+  "growth_review_label": "agent-contract-growth-approved",
   "budgets": {
-    "claude_managed": {"max_lines": 100, "max_words": 650},
-    "agents_managed": {"max_lines": 100, "max_words": 650},
-    "cursor_rule": {"max_lines": 50, "max_words": 350},
-    "cursor_always_loaded": {"max_lines": 150, "max_words": 1000}
+    "source_snippet": {"max_lines": 90, "max_words": 580, "max_bytes": 4400},
+    "claude_managed": {"max_lines": 100, "max_words": 650, "max_bytes": 4800},
+    "agents_managed": {"max_lines": 100, "max_words": 650, "max_bytes": 4800},
+    "cursor_rule": {"max_lines": 50, "max_words": 350, "max_bytes": 2500},
+    "cursor_always_loaded": {"max_lines": 150, "max_words": 1000, "max_bytes": 7300}
   },
   "host_surfaces": {
     "claude": {
