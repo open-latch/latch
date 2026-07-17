@@ -44,6 +44,8 @@ import time
 from pathlib import Path
 
 _SRC = Path(__file__).resolve().parent.parent / "src"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _isolation  # noqa: E402,F401
 sys.path.insert(0, str(_SRC))
 
 import db          # noqa: E402

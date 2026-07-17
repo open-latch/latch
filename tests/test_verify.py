@@ -78,9 +78,8 @@ def _cleanup(tmp, conn):
 
 
 def _wipe_project_dir(tmp):
-    proj_dir = paths.project_dir(tmp)
-    if proj_dir.exists():
-        shutil.rmtree(proj_dir, ignore_errors=True)
+    # The pytest capability root owns resolved vault teardown.
+    del tmp
 
 
 def _read_correction_rows(tmp):

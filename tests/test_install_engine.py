@@ -488,6 +488,31 @@ def test_resolve_python_override_and_env():
     print("PASS resolve_python_override_and_env")
 
 
+def test_windows_mcp_launch_uses_windowless_supervisor_when_complete():
+    root = Path(tempfile.mkdtemp(prefix="latch-windowless-mcp-"))
+    try:
+        python = root / "python.exe"
+        pythonw = root / "pythonw.exe"
+        server = root / "src" / "mcp_server.py"
+        launcher = root / "src" / "mcp_launcher_win.py"
+        server.parent.mkdir()
+        for path in (python, pythonw, server, launcher):
+            path.write_bytes(b"")
+        assert ie.mcp_launch_command(
+            str(python), str(server), system="Windows"
+        ) == (str(pythonw), str(launcher))
+        launcher.unlink()
+        assert ie.mcp_launch_command(
+            str(python), str(server), system="Windows"
+        ) == (str(python), str(server))
+        assert ie.mcp_launch_command(
+            str(python), str(server), system="Linux"
+        ) == (str(python), str(server))
+    finally:
+        import shutil
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def test_resolve_python_preserves_virtualenv_symlink():
     if os.name == "nt":
         return

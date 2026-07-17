@@ -43,7 +43,6 @@ def test_prompt_state_requires_exact_successful_gate_and_resets_each_turn():
         assert next_state["gate_receipt"] is None
         assert cgs.mutation_authorized(root, "conversation-1")[0] is False
     finally:
-        shutil.rmtree(project_dir, ignore_errors=True)
         shutil.rmtree(root, ignore_errors=True)
 
 
@@ -67,7 +66,6 @@ def test_gate_rejects_rephrased_skipped_and_cross_session_receipts():
         )
         assert not ok and "no current Cursor prompt state" in detail
     finally:
-        shutil.rmtree(project_dir, ignore_errors=True)
         shutil.rmtree(root, ignore_errors=True)
 
 
@@ -90,7 +88,6 @@ def test_cursor_session_identity_never_falls_back_to_project_marker():
         marker.write_text(json.dumps({"session_id": "other-conversation"}), encoding="utf-8")
         assert cgs.session_id({"workspaceRoot": root}, root) is None
     finally:
-        shutil.rmtree(project_dir, ignore_errors=True)
         shutil.rmtree(root, ignore_errors=True)
 
 
@@ -119,7 +116,6 @@ def test_interleaved_cursor_sessions_fail_closed():
         )[0]
         assert not cgs.mutation_authorized(root, None)[0]
     finally:
-        shutil.rmtree(project_dir, ignore_errors=True)
         shutil.rmtree(root, ignore_errors=True)
 
 
@@ -149,7 +145,6 @@ def test_gate_state_atomic_writes_survive_concurrent_hooks():
             assert isinstance(state, dict)
             assert state.get("session_id") == f"conversation-{index}"
     finally:
-        shutil.rmtree(project_dir, ignore_errors=True)
         shutil.rmtree(root, ignore_errors=True)
 
 
@@ -165,7 +160,6 @@ def test_session_start_initialization_preserves_a_concurrent_first_prompt():
         assert initialized["turn"] == 1
         assert initialized["prompt_hash"] == cgs.prompt_hash(prompt)
     finally:
-        shutil.rmtree(project_dir, ignore_errors=True)
         shutil.rmtree(root, ignore_errors=True)
 
 
@@ -291,7 +285,6 @@ def test_managed_operation_receipts_are_exact_and_single_use():
         )
         assert cpre.decision(_shell(powershell, root, sid)) == {}
     finally:
-        shutil.rmtree(project_dir, ignore_errors=True)
         shutil.rmtree(root, ignore_errors=True)
 
 
@@ -328,7 +321,6 @@ def test_managed_operations_reject_attacker_interpreter_paths(monkeypatch):
             f"{configured} {maintenance} nightly {root}", root, sid,
         )) == {}
     finally:
-        shutil.rmtree(project_dir, ignore_errors=True)
         shutil.rmtree(root, ignore_errors=True)
 
 
@@ -423,7 +415,6 @@ def test_seed_operation_requires_preview_then_explicit_apply():
         cgs.begin_prompt(root, sid, "/latch-seed apply all")
         assert cpre.decision(apply_payload)["permission"] == "deny"
     finally:
-        shutil.rmtree(project_dir, ignore_errors=True)
         shutil.rmtree(root, ignore_errors=True)
 
 
@@ -690,7 +681,6 @@ def test_seed_operation_binds_scoped_apply_ids_to_preview():
             state = cgs.begin_prompt(root, invalid_sid, invalid_confirmation)
             assert state["operation_receipt"] is None
     finally:
-        shutil.rmtree(project_dir, ignore_errors=True)
         shutil.rmtree(root, ignore_errors=True)
 
 
@@ -784,7 +774,6 @@ def test_seed_operation_binds_reject_all_to_nonempty_preview():
         )
         assert cpre.decision(powershell_none) == {}
     finally:
-        shutil.rmtree(project_dir, ignore_errors=True)
         shutil.rmtree(root, ignore_errors=True)
 
 
@@ -876,7 +865,6 @@ def test_pm_operation_receipt_binds_exact_previewed_content():
             cgs.begin_prompt(root, sid, "/latch-pm apply")
             assert cpre.decision(insert)["permission"] == "deny"
     finally:
-        shutil.rmtree(project_dir, ignore_errors=True)
         shutil.rmtree(root, ignore_errors=True)
 
 
@@ -959,7 +947,6 @@ def test_managed_operation_intent_never_falls_through_to_general_gate():
         assert cpre.decision(valid) == {}
         assert cpre.decision(valid)["permission"] == "deny"
     finally:
-        shutil.rmtree(project_dir, ignore_errors=True)
         shutil.rmtree(root, ignore_errors=True)
 
 
@@ -1000,7 +987,6 @@ def test_other_managed_operations_match_only_expected_wrappers():
         cgs.begin_prompt(root, sid, "Explain the status")
         assert cpre.decision(_shell(f"bash {compact} {sid}", root, sid))["permission"] == "deny"
     finally:
-        shutil.rmtree(project_dir, ignore_errors=True)
         shutil.rmtree(root, ignore_errors=True)
 
 
@@ -1038,7 +1024,6 @@ def test_managed_maintenance_receipt_rejects_wrong_project_and_script_path():
             attacker_dir.rmdir()
         except OSError:
             pass
-        shutil.rmtree(project_dir, ignore_errors=True)
         shutil.rmtree(root, ignore_errors=True)
         shutil.rmtree(other_root, ignore_errors=True)
 
@@ -1086,6 +1071,5 @@ def test_managed_budget_receipt_rejects_wrong_project_and_script_path():
             attacker_dir.rmdir()
         except OSError:
             pass
-        shutil.rmtree(project_dir, ignore_errors=True)
         shutil.rmtree(root, ignore_errors=True)
         shutil.rmtree(other_root, ignore_errors=True)

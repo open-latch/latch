@@ -8,7 +8,7 @@ Covers:
 - maybe_trigger guards: kill switch, reentrancy env, not-due => no spawn.
 - single-flight: run_selfheal skips when the compactor lock is held.
 - op stamping: only ops that ran advance their stamp; a raising op does not.
-- backup + prune: snapshot created, newest BACKUPS_KEPT retained.
+- backup + prune: protected external snapshots survive count-based pruning.
 - spawn argv + per-OS detach flags.
 """
 from __future__ import annotations
@@ -18,7 +18,6 @@ import os
 import shutil
 import sys
 import tempfile
-import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -403,15 +402,16 @@ def test_backup_creates_and_prunes():
     proj = _fresh_project()
     try:
         _seed_db(proj)
-        # Make BACKUPS_KEPT + 2 backups, spaced so mtimes differ.
-        for _ in range(selfheal.BACKUPS_KEPT + 2):
+        backup_root = paths.validated_test_root() / "backups"
+        before = set(backup_root.rglob("*.json")) if backup_root.exists() else set()
+        for _ in range(5):
             _assert(selfheal._backup_db(proj) is True, "backup should succeed")
-            time.sleep(1.05)  # second-resolution timestamp in filename
         selfheal._prune_backups(proj)
-        baks = list(paths.project_dir(proj).glob("kb.db.bak.*"))
-        _assert(len(baks) == selfheal.BACKUPS_KEPT,
-                f"expected {selfheal.BACKUPS_KEPT} backups after prune, got {len(baks)}")
-        print(f"PASS backup_creates_and_prunes (kept {len(baks)})")
+        manifests = set(backup_root.rglob("*.json")) - before
+        _assert(len(manifests) == 5, f"all protected snapshots must survive: {manifests}")
+        _assert(not list(paths.project_dir(proj).glob("kb.db.bak.*")),
+                "legacy in-vault backups must not be created")
+        print(f"PASS backup_creates_and_prunes (protected {len(manifests)})")
     finally:
         shutil.rmtree(proj, ignore_errors=True)
 

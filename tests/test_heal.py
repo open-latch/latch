@@ -752,11 +752,8 @@ def _read_heal_log_rows(tmp):
 
 
 def _cleanup_emission_artifacts(tmp):
-    """Heal emission writes to project_dir(tmp). Remove the whole project_dir
-    so test isolation holds across runs."""
-    proj_dir = paths.project_dir(tmp)
-    if proj_dir.exists():
-        shutil.rmtree(proj_dir, ignore_errors=True)
+    """The pytest capability root owns resolved vault teardown."""
+    del tmp
 
 
 def test_heal_log_emit_keep_both_via_no_llm():

@@ -16,6 +16,7 @@ from typing import Any, Iterable, Mapping, Sequence
 
 import log_utils
 import schema_version
+import vault_identity
 from paths import SCHEMA_PATH, db_path, ensure_project_dir
 
 
@@ -180,6 +181,24 @@ def connect(cwd: str | None = None) -> sqlite3.Connection:
                 from_version=installed_schema,
                 to_version=schema_version.KB_SCHEMA_VERSION,
             )
+        elif had_nodes and vault_identity.read_identity(Path(path)) is None:
+            # Identity adoption is itself a mutation. Freeze an external,
+            # verified production baseline first even when no schema migration
+            # is due.
+            import vault_backup
+
+            vault_backup.create_pre_migration_snapshot(
+                conn,
+                Path(path),
+                from_version=installed_schema,
+                to_version=installed_schema,
+                reason="identity-adoption",
+            )
+        conn._kb_vault_identity = vault_identity.ensure_identity(
+            conn, Path(path).parent, new_vault=not had_nodes
+        )
+        # Validate immutable identity and its external registry before any
+        # general schema migration or optional native extension load.
         _load_vec(conn)
         _ensure_schema(conn)
         schema_version.stamp_current(

@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import subprocess
 import sys
 import threading
@@ -39,9 +38,10 @@ import lockfile  # noqa: E402
 import maintenance  # noqa: E402
 import mcp_runtime  # noqa: E402
 import paths  # noqa: E402
+import vault_backup  # noqa: E402
 
 # ---- cadence (hours). Defaults preserve the old schtask cadence. ----
-BACKUP_INTERVAL_H = 12     # local kb.db.bak rotation
+BACKUP_INTERVAL_H = 6      # protected online snapshots
 HEAL_INTERVAL_H = 48       # was every-2-days day-of-year parity (~48h)
 WEEKLY_INTERVAL_H = 168    # decay + tree, weekly
 WORKSTREAM_SHADOW_INTERVAL_H = 24
@@ -50,7 +50,6 @@ STATE_FILENAME = "maintenance_state.json"
 SPAWN_LOG_FILENAME = "selfheal_spawn.log"
 SPAWN_LOG_MAX_BYTES = 1_000_000  # truncate the detached-child stdout log past this
 
-BACKUPS_KEPT = 3           # kb.db.bak.* retained, newest by mtime
 LEGACY_LOG_MAX_AGE_DAYS = 3
 
 # Reentrancy guard env var. Set on the detached maintenance child so that any
@@ -364,35 +363,26 @@ def run_selfheal(project_path: str | None) -> dict:
 
 
 def _backup_db(project_path: str | None) -> bool:
-    """Copy kb.db -> kb.db.bak.<ts>. Returns False (no-op) if no kb.db yet."""
-    proj_dir = paths.project_dir(project_path)
-    src = proj_dir / "kb.db"
-    if not src.exists():
-        _log(f"no kb.db at {src} — skipping backup")
+    """Create a protected online snapshot outside the live vault."""
+    if not paths.db_path(project_path).exists():
+        _log(f"no kb.db at {paths.db_path(project_path)} — skipping backup")
         return False
-    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    dst = proj_dir / f"kb.db.bak.{ts}"
     try:
-        shutil.copy2(src, dst)
+        receipt = vault_backup.create_snapshot(project_path, reason="selfheal")
+        _log(f"protected backup created: {receipt['manifest']}")
         return True
-    except OSError as e:
-        _log(f"backup copy failed: {e}")
+    except Exception as e:
+        _log(f"protected backup failed: {e}")
         return False
 
 
-def _prune_backups(project_path: str | None, keep: int = BACKUPS_KEPT) -> None:
-    """Keep the `keep` newest kb.db.bak.* by mtime; delete the rest."""
-    proj_dir = paths.project_dir(project_path)
-    baks = sorted(
-        proj_dir.glob("kb.db.bak.*"),
-        key=lambda p: p.stat().st_mtime,
-        reverse=True,
-    )
-    for old in baks[keep:]:
-        try:
-            old.unlink()
-        except OSError:
-            pass
+def _prune_backups(project_path: str | None, keep: int | None = None) -> None:
+    """Prune only snapshots whose signed-in-code protection window expired."""
+    del keep  # compatibility with older focused tests; count retention is gone.
+    try:
+        vault_backup.prune_expired(project_path)
+    except Exception as e:
+        _log(f"protected backup prune failed: {e}")
 
 
 def _prune_legacy_logs(project_path: str | None) -> None:

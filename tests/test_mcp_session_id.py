@@ -82,7 +82,6 @@ def test_resolve_project_session_id_uses_codex_marker_when_env_lacks_thread():
             "Codex MCP env without CODEX_THREAD_ID should read the SessionStart marker",
         )
     finally:
-        shutil.rmtree(project_dir, ignore_errors=True)
         shutil.rmtree(tmp, ignore_errors=True)
     print("PASS resolve_project_session_id_uses_codex_marker_when_env_lacks_thread")
 
@@ -105,7 +104,6 @@ def test_resolve_project_session_id_leaves_cursor_mcp_calls_unattributed():
         _assert(mcp_server._resolve_project_session_id(env, project_cwd=tmp) is None,
                 "backend/process ids must not override the Cursor request boundary")
     finally:
-        shutil.rmtree(project_dir, ignore_errors=True)
         shutil.rmtree(tmp, ignore_errors=True)
     print("PASS resolve_project_session_id_leaves_cursor_mcp_calls_unattributed")
 
@@ -130,7 +128,6 @@ def test_project_session_id_never_attributes_cursor_marker_changes():
                 "a missing current Cursor marker must not fall back to stale provenance",
             )
     finally:
-        shutil.rmtree(project_dir, ignore_errors=True)
         shutil.rmtree(tmp, ignore_errors=True)
     print("PASS project_session_id_never_attributes_cursor_marker_changes")
 
@@ -153,7 +150,6 @@ def test_project_session_id_interleaved_cursor_conversations_are_unattributed():
             _assert(mcp_server._project_session_id() is None,
                     "last-marker-wins must not be treated as request identity")
     finally:
-        shutil.rmtree(project_dir, ignore_errors=True)
         shutil.rmtree(tmp, ignore_errors=True)
     print("PASS project_session_id_interleaved_cursor_conversations_are_unattributed")
 

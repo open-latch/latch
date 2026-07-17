@@ -30,9 +30,7 @@ def _fresh_project():
 
 
 def _cleanup(tmp):
-    proj_dir = paths.project_dir(tmp)
-    if proj_dir.exists():
-        shutil.rmtree(proj_dir, ignore_errors=True)
+    # The pytest capability root owns resolved vault teardown.
     shutil.rmtree(tmp, ignore_errors=True)
 
 
@@ -218,8 +216,7 @@ def test_emit_event_creates_project_dir_lazily():
     try:
         proj_dir = paths.project_dir(tmp)
         # Ensure the dir is missing at the start.
-        if proj_dir.exists():
-            shutil.rmtree(proj_dir, ignore_errors=True)
+        _assert(not proj_dir.exists(), f"fresh test vault unexpectedly exists: {proj_dir}")
         log_utils.emit_event("heal", {"x": 1}, project_path=tmp, session_id=None)
         _assert(proj_dir.is_dir(), f"project_dir not created: {proj_dir}")
         _assert(log_utils.today_log_path("heal", tmp).exists(), "log not created")
@@ -334,8 +331,7 @@ def test_retention_handles_missing_project_dir():
     try:
         # Don't create the project dir.
         proj_dir = paths.project_dir(tmp)
-        if proj_dir.exists():
-            shutil.rmtree(proj_dir, ignore_errors=True)
+        _assert(not proj_dir.exists(), f"fresh test vault unexpectedly exists: {proj_dir}")
         out = log_utils.maintain_log_retention(tmp)
         _assert(out == {"gzipped": 0, "deleted": 0, "skipped": 0}, out)
         print("PASS retention_handles_missing_project_dir")

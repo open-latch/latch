@@ -42,7 +42,6 @@ def test_resolve_current_uses_only_explicit_scoped_marker_pair():
         )
         assert sid == "cursor-session" and path == transcript.resolve()
     finally:
-        shutil.rmtree(project_dir, ignore_errors=True)
         shutil.rmtree(root, ignore_errors=True)
 
 
@@ -72,7 +71,6 @@ def test_resolve_current_fails_closed_without_exact_marker_pair():
             else:
                 raise AssertionError(f"expected failure for {kwargs}")
     finally:
-        shutil.rmtree(project_dir, ignore_errors=True)
         shutil.rmtree(root, ignore_errors=True)
 
 
@@ -87,7 +85,6 @@ def test_resolve_current_refuses_marker_without_transcript_path():
         else:
             raise AssertionError("missing transcript_path must fail")
     finally:
-        shutil.rmtree(project_dir, ignore_errors=True)
         shutil.rmtree(root, ignore_errors=True)
 
 
@@ -120,7 +117,6 @@ def test_cursor_compact_main_passes_current_pair_to_shared_compactor(capsys):
         assert captured["transcript_path"] == str(transcript.resolve())
     finally:
         cursor_compact.compactor.run_compaction = original
-        shutil.rmtree(project_dir, ignore_errors=True)
         shutil.rmtree(root, ignore_errors=True)
 
 
@@ -132,5 +128,4 @@ def test_shared_compactor_flattens_hook_provided_cursor_jsonl():
         assert "[user] remember this decision" in text
         assert "[assistant] captured" in text
     finally:
-        shutil.rmtree(project_dir, ignore_errors=True)
         shutil.rmtree(root, ignore_errors=True)

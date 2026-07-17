@@ -307,6 +307,19 @@ def test_private_child_environment_is_validated_and_never_in_runtime_snapshot():
         )
 
 
+def test_windows_daemon_creation_flags_are_defense_in_depth():
+    flags = mcp_broker._windows_creation_flags()
+    assert flags & mcp_broker.WINDOWS_CREATE_NO_WINDOW
+    assert flags & mcp_broker.WINDOWS_DETACHED_PROCESS
+    assert flags & mcp_broker.WINDOWS_CREATE_NEW_PROCESS_GROUP
+
+
+def test_windows_launcher_diagnostic_records_process_lineage():
+    source = (ROOT / "src" / "mcp_launcher_win.py").read_text(encoding="utf-8")
+    for field in ("parent_pid=", "executable=", "argv=", "launching child="):
+        assert field in source
+
+
 def test_blue_green_registry_is_keyed_for_v1_v2_v1(monkeypatch, tmp_path):
     vault = tmp_path / "registry"
     monkeypatch.setattr(mcp_broker, "runtime_dir", lambda: vault)
@@ -334,7 +347,7 @@ def test_blue_green_registry_is_keyed_for_v1_v2_v1(monkeypatch, tmp_path):
 def test_daemon_owner_fence_survives_broker_death_and_releases_with_owner(
     monkeypatch, tmp_path
 ):
-    vault = tmp_path / "owner-fence"
+    vault = mcp_broker.paths.project_dir(str(tmp_path / "owner-fence"))
     monkeypatch.setattr(mcp_broker, "runtime_dir", lambda: vault)
     env = os.environ.copy()
     env.update({"LATCH_KB_DIR": str(vault), "PYTHONPATH": str(ROOT / "src")})
@@ -382,7 +395,7 @@ def test_daemon_owner_fence_survives_broker_death_and_releases_with_owner(
 def test_incompatible_upgrade_fails_before_owner_fence_and_heavy_imports(
     monkeypatch, tmp_path
 ):
-    vault = tmp_path / "incompatible-upgrade"
+    vault = mcp_broker.paths.project_dir(str(tmp_path / "incompatible-upgrade"))
     site_dir = tmp_path / "site"
     site_dir.mkdir()
     (site_dir / "sitecustomize.py").write_text(

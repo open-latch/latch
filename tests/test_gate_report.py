@@ -36,7 +36,6 @@ def _cleanup(tmp, conn):
         if conn is not None:
             conn.close()
     finally:
-        shutil.rmtree(paths.project_dir(tmp), ignore_errors=True)
         shutil.rmtree(tmp, ignore_errors=True)
 
 

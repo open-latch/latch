@@ -4,6 +4,27 @@
 PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
 
+-- Creation-time vault identity.  Runtime migration creates this table for
+-- legacy DBs and classifies every unknown existing DB as production.  The
+-- triggers make all supported SQLite write paths immutable after creation.
+CREATE TABLE IF NOT EXISTS vault_identity (
+    slot                 INTEGER PRIMARY KEY CHECK (slot = 1),
+    vault_uuid           TEXT    NOT NULL UNIQUE,
+    classification       TEXT    NOT NULL CHECK (classification IN ('production', 'test')),
+    created_at           TEXT    NOT NULL,
+    registry_fingerprint TEXT    NOT NULL
+);
+
+CREATE TRIGGER IF NOT EXISTS vault_identity_no_update
+BEFORE UPDATE ON vault_identity BEGIN
+    SELECT RAISE(ABORT, 'vault identity is immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS vault_identity_no_delete
+BEFORE DELETE ON vault_identity BEGIN
+    SELECT RAISE(ABORT, 'vault identity is immutable');
+END;
+
 CREATE TABLE IF NOT EXISTS nodes (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
     kind                TEXT    NOT NULL,

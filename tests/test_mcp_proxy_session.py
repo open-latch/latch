@@ -41,7 +41,13 @@ def _clean_env(**overrides):
     the test runner's own ``CLAUDE_CODE_SESSION_ID`` (present when this suite is
     run from inside a Claude Code session) from leaking into the fallback cases.
     """
-    return mock.patch.dict(mcp_proxy.os.environ, overrides, clear=True)
+    isolated = {
+        name: mcp_proxy.os.environ[name]
+        for name in (paths.TEST_ROOT_ENV, paths.TEST_CAPABILITY_ENV)
+        if name in mcp_proxy.os.environ
+    }
+    isolated.update(overrides)
+    return mock.patch.dict(mcp_proxy.os.environ, isolated, clear=True)
 
 
 def test_resolve_session_prefers_neutral_latch_override():
@@ -107,7 +113,6 @@ def test_resolve_session_leaves_cursor_mcp_calls_unattributed():
                 "Cursor MCP calls must not inherit process ids or Codex markers",
             )
     finally:
-        shutil.rmtree(project_dir, ignore_errors=True)
         shutil.rmtree(tmp, ignore_errors=True)
     print("PASS resolve_session_leaves_cursor_mcp_calls_unattributed")
 
@@ -125,7 +130,6 @@ def test_resolve_session_reads_codex_marker_when_env_lacks_thread():
                 "SessionStart marker",
             )
     finally:
-        shutil.rmtree(project_dir, ignore_errors=True)
         shutil.rmtree(tmp, ignore_errors=True)
     print("PASS resolve_session_reads_codex_marker_when_env_lacks_thread")
 
@@ -141,7 +145,6 @@ def test_resolve_session_reports_missing_codex_marker():
                 "instead of guessing an id",
             )
     finally:
-        shutil.rmtree(project_dir, ignore_errors=True)
         shutil.rmtree(tmp, ignore_errors=True)
     print("PASS resolve_session_reports_missing_codex_marker")
 

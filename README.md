@@ -310,7 +310,9 @@ bash bin/unlatch.sh --confirm unlatch
 bash bin/unlatch.sh --confirm latch
 ```
 
-**Uninstall.** Preview or remove latch wiring. KB data is kept unless you pass `--purge`:
+**Uninstall.** Preview or remove latch wiring. Production KB data and protected
+backups are always retained. `--purge` removes only kill-switch files; it has no
+KB deletion path:
 
 ```bash
 bash bin/uninstall.sh --dry-run
@@ -437,8 +439,31 @@ bash bin/latch_update.sh --yes
 The updater operates only on a clean official `open-latch/latch` clone, backs up every discovered KB
 before a schema upgrade, and refuses to open a KB written by a newer schema.
 
-**Python >= 3.11** (3.12 and 3.13 also work), native architecture. On Apple Silicon use a native
-arm64 Python — a Rosetta/Intel venv can crash sqlite-vec at extension-load time. Verify with:
+Already-wired projects carry a small wiring version in their latch-owned marker.
+On the next SessionStart, the agent performs a local marker-only comparison:
+current wiring is silent and write-free, older managed wiring is repaired once
+with a receipt and backup, and newer wiring is never downgraded. Unmanaged repos
+remain untouched. Cursor without hooks performs the same check when its existing
+project MCP server starts. Restart the relevant agent when a receipt says hooks
+or MCP configuration changed.
+
+Release tags are forward updates. Pre-migration snapshots are written to the
+external durability root with hashes, integrity receipts, and a thirty-day
+protection deadline; they are never stored beside the live KB.
+
+## Platform Notes
+
+- **Python >= 3.11**, native-architecture. Python 3.12 and 3.13 also work.
+- **uv** is the recommended venv/dependency installer. In Git Bash on Windows,
+  activate the venv with `source .venv/Scripts/activate`.
+- A working `python` must be on `PATH`, or set `LATCH_PYTHON` to its absolute
+  path (`CLAUDE_KB_PYTHON` remains a legacy alias).
+
+### Apple Silicon Arm64
+
+Use a native arm64 Python. A venv built with an Intel Python under Rosetta
+installs x86_64 wheels, and sqlite-vec's prebuilt x86_64 binary can crash at
+extension-load time. Verify with:
 
 ```bash
 python3 -c "import platform; print(platform.machine())"

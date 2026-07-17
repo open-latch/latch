@@ -49,7 +49,9 @@ def _pinned_vault(path: str):
     saved_env = os.environ.get("LATCH_KB_DIR")
     saved_pin = paths._PINNED_DIR
     mcp_server.shutdown_runtime()
-    os.environ["LATCH_KB_DIR"] = path
+    # Resolve the logical scope through pytest's authenticated test root before
+    # exercising explicit pin behavior.
+    os.environ["LATCH_KB_DIR"] = str(paths.project_dir(path))
     paths._PINNED_DIR = False
     try:
         yield

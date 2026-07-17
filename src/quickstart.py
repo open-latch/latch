@@ -481,7 +481,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                           "--cursor-history is explicitly enabled)"))
     ap.add_argument("--kb-dir",
                     help=("pin this installation to one explicit KB directory; "
-                          "fresh installs otherwise use <LATCH_HOME>/store"))
+                          "fresh installs otherwise use the platform data root "
+                          "outside the source checkout"))
     ap.add_argument("--lookback-days", type=int, default=90,
                     help="history horizon for initial-KB seeding (default: 90)")
     ap.add_argument("--last-sessions", type=int, default=50,

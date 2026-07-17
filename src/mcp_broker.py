@@ -50,6 +50,7 @@ START_REASONS = frozenset({
     "prompt_hook",
 })
 WINDOWS_CREATE_NO_WINDOW = 0x08000000
+WINDOWS_DETACHED_PROCESS = 0x00000008
 WINDOWS_CREATE_NEW_PROCESS_GROUP = 0x00000200
 DAEMON_OS_ENV_VARS = mcp_runtime.PROCESS_OS_ENV_VARS
 DAEMON_OWNER_ENV_VARS: tuple[str, ...] = ()
@@ -804,6 +805,7 @@ def _start_reason(value: str) -> str:
 def _windows_creation_flags() -> int:
     return (
         getattr(subprocess, "CREATE_NO_WINDOW", WINDOWS_CREATE_NO_WINDOW)
+        | getattr(subprocess, "DETACHED_PROCESS", WINDOWS_DETACHED_PROCESS)
         | getattr(
             subprocess,
             "CREATE_NEW_PROCESS_GROUP",
