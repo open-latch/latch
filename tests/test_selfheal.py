@@ -335,6 +335,57 @@ def test_only_run_ops_advance_stamps():
         shutil.rmtree(proj, ignore_errors=True)
 
 
+def test_heal_due_forces_backup_when_backup_timer_is_fresh():
+    proj = _fresh_project()
+    calls = []
+    orig_backup = selfheal._backup_db
+    orig_prune = selfheal._prune_backups
+    orig_heal = selfheal.maintenance.run_nightly_heal
+    orig_weekly = selfheal.maintenance.run_weekly_maintenance
+    orig_tree = selfheal.maintenance.run_tree_rebuild
+    try:
+        _seed_db(proj)
+        now = datetime.now(timezone.utc)
+        selfheal._save_state(proj, {
+            "last_backup_at": _iso(now - timedelta(hours=1)),  # fresh 6h cadence
+            "last_heal_at": _iso(now - timedelta(hours=49)),  # due 48h heal
+            "last_weekly_at": _iso(now - timedelta(hours=1)),
+        })
+        selfheal._backup_db = lambda p: calls.append(("backup", p)) or True
+        selfheal._prune_backups = lambda p: calls.append(("prune", p))
+        selfheal.maintenance.run_nightly_heal = (
+            lambda p, **k: calls.append(("heal", p))
+        )
+        selfheal.maintenance.run_weekly_maintenance = (
+            lambda p, **k: (_ for _ in ()).throw(
+                AssertionError("weekly should NOT run")
+            )
+        )
+        selfheal.maintenance.run_tree_rebuild = lambda p, **k: None
+
+        result = selfheal.run_selfheal(proj)
+
+        _assert(result["ran"] == ["backup", "heal"], result)
+        _assert(calls == [("backup", proj), ("prune", proj), ("heal", proj)], calls)
+        state = selfheal._load_state(proj)
+        _assert(
+            selfheal._parse(state["last_backup_at"]) > now,
+            "48h heal must refresh the backup stamp even when the 6h timer is fresh",
+        )
+        _assert(
+            selfheal._parse(state["last_heal_at"]) > now,
+            "successful heal should refresh the heal stamp",
+        )
+        print("PASS heal_due_forces_backup_when_backup_timer_is_fresh")
+    finally:
+        selfheal._backup_db = orig_backup
+        selfheal._prune_backups = orig_prune
+        selfheal.maintenance.run_nightly_heal = orig_heal
+        selfheal.maintenance.run_weekly_maintenance = orig_weekly
+        selfheal.maintenance.run_tree_rebuild = orig_tree
+        shutil.rmtree(proj, ignore_errors=True)
+
+
 def test_raising_op_does_not_advance_its_stamp():
     proj = _fresh_project()
     orig_heal = selfheal.maintenance.run_nightly_heal

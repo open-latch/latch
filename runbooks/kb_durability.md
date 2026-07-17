@@ -25,6 +25,8 @@ database/manifest pair atomically in the independent durability root:
 
 The first verified point each UTC day is protected for 30 days. Other cadence
 points are protected for five days; self-heal attempts one every six hours.
+Every due 48-hour nightly heal also forces a new protected snapshot before the
+heal mutates the KB, even when the independent six-hour backup timer is fresh.
 Pruning has no force option, never removes the newest point, and deletes only an
 expired pair whose vault UUID and SHA-256 match its readable manifest. Corrupt,
 unknown, incomplete, or still-protected artifacts are retained.
