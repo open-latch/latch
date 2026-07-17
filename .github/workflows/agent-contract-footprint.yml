@@ -1,0 +1,45 @@
+name: Agent contract footprint
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  agent-contract-footprint:
+    name: agent-contract-footprint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out contract history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install focused test runner
+        run: python -m pip install pytest
+
+      - name: Test footprint policy
+        run: >-
+          python -m pytest -q
+          tests/test_agent_contract_footprint.py
+          tests/test_agent_contract_artifacts.py
+
+      - name: Compare always-loaded surfaces with PR base
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || 'origin/main' }}
+          GROWTH_APPROVED: ${{ contains(github.event.pull_request.labels.*.name, 'agent-contract-growth-approved') }}
+        run: |
+          args=(--base "$BASE_SHA")
+          if [[ "$GROWTH_APPROVED" == "true" ]]; then
+            args+=(--allow-growth)
+          fi
+          python .github/scripts/agent_contract_footprint.py "${args[@]}"
