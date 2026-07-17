@@ -12,6 +12,7 @@ from dataclasses import dataclass
 import os
 from pathlib import Path
 import shlex
+import shutil
 import subprocess
 import sys
 from typing import Callable, Mapping, Sequence
@@ -71,6 +72,33 @@ def normalize_agents(value: str) -> tuple[str, ...]:
     if value in ("claude", "codex", "cursor"):
         return (value,)
     raise ValueError(f"unsupported agent selection: {value}")
+
+
+def agent_preflight_errors(
+    agents: Sequence[str],
+    *,
+    which: Callable[[str], str | None] = shutil.which,
+) -> list[str]:
+    """Return all missing selected-agent CLIs before any config mutation.
+
+    The outer one-command bootstrap can install Latch's own runtime, but it
+    must not silently install or guess a user's coding-agent product. Keeping
+    this preflight in quickstart protects direct and remote-bootstrap callers
+    alike and avoids the historical half-installed state.
+    """
+    selected = set(agents)
+    errors: list[str] = []
+    if "claude" in selected and which("claude") is None:
+        errors.append("Claude Code CLI (`claude`) is not on PATH")
+    if "codex" in selected and which("codex") is None:
+        errors.append("Codex CLI (`codex`) is not on PATH")
+    if (
+        "cursor" in selected
+        and which("agent") is None
+        and which("cursor-agent") is None
+    ):
+        errors.append("Cursor Agent CLI (`agent` or `cursor-agent`) is not on PATH")
+    return errors
 
 
 def resolve_agents(
@@ -408,6 +436,16 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
+
+    preflight_errors = agent_preflight_errors(agents)
+    if preflight_errors:
+        stream = sys.stdout if args.dry_run else sys.stderr
+        label = "warning" if args.dry_run else "error"
+        for message in preflight_errors:
+            print(f"{label}: {message}", file=stream)
+        if not args.dry_run:
+            print("No agent configuration changes were written.", file=sys.stderr)
+            return 2
 
     source = seed_source_for_agents(agents, args.seed_source)
     steps = build_install_steps(

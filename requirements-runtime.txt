@@ -1,0 +1,13 @@
+# Direct runtime inputs for the one-command installer. Keep these aligned with
+# the dependency-complete CI environment in requirements-ci.txt, then compile
+# the production-only graph against that tested lock:
+#
+# uvx --from uv==0.11.28 uv pip compile requirements-runtime.txt \
+#   --constraint requirements-ci.lock \
+#   --generate-hashes --python-version 3.11 --universal \
+#   --output-file requirements.lock
+mcp==1.28.1
+onnxruntime==1.23.2
+tokenizers==0.22.2
+numpy==2.4.6
+sqlite-vec==0.1.9
