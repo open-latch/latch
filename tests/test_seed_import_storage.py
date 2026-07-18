@@ -251,6 +251,96 @@ def test_source_import_ledger_is_idempotent_and_retryable(tmp_path):
         conn.close()
 
 
+def test_source_import_batch_rolls_back_when_pending_precondition_changes(
+    tmp_path, monkeypatch,
+):
+    project = str(tmp_path / "source-batch-precondition")
+
+    class PreconditionRaceConnection(db._Connection):
+        race_injected = False
+
+        def execute(self, sql, parameters=(), /):
+            normalized = " ".join(sql.split())
+            guarded_source_finish = (
+                normalized.startswith(
+                    "UPDATE seed_source_import SET state = ?, error_code = ?"
+                )
+                and "WHERE import_key = ? AND state = 'pending'" in normalized
+            )
+            if guarded_source_finish \
+                    and parameters[-1] == "source-key-1" \
+                    and not self.race_injected:
+                self.race_injected = True
+                # Simulate another connection winning the second transition
+                # after validation but before this batch starts writing.
+                with sqlite3.connect(str(db.db_path(project))) as racer:
+                    cur = racer.execute(
+                        "UPDATE seed_source_import "
+                        "SET state = 'applied', error_code = NULL, "
+                        "updated_at = ?, completed_at = ? "
+                        "WHERE import_key = 'source-key-2' "
+                        "AND state = 'pending'",
+                        (parameters[2], parameters[3]),
+                    )
+                    assert cur.rowcount == 1
+            return super().execute(sql, parameters)
+
+    monkeypatch.setattr(db, "_Connection", PreconditionRaceConnection)
+    conn = db.connect(project)
+    try:
+        db.begin_seed_source_import(conn, **_source_args())
+        db.begin_seed_source_import(
+            conn,
+            **_source_args(
+                import_key="source-key-2",
+                source_id="claude:session-2",
+                source_path="/local/history/session-2.jsonl",
+                source_digest="b" * 64,
+            ),
+        )
+
+        with pytest.raises(
+            db.SeedImportStateError,
+            match="must remain pending through batch finalization",
+        ):
+            db.finish_seed_source_imports(
+                conn,
+                {
+                    "source-key-1": ("applied", None),
+                    "source-key-2": ("applied", None),
+                },
+            )
+
+        assert conn.race_injected is True
+        rolled_back = {
+            key: db.get_seed_source_import(conn, key)
+            for key in ("source-key-1", "source-key-2")
+        }
+        assert rolled_back["source-key-1"]["state"] == "pending"
+        assert rolled_back["source-key-1"]["error_code"] is None
+        assert rolled_back["source-key-1"]["completed_at"] is None
+        assert rolled_back["source-key-2"]["state"] == "applied"
+        assert rolled_back["source-key-2"]["completed_at"] is not None
+
+        applied = db.finish_seed_source_imports(
+            conn,
+            {
+                "source-key-1": ("applied", None),
+                "source-key-2": ("applied", None),
+            },
+        )
+        assert {row["state"] for row in applied.values()} == {"applied"}
+        assert db.finish_seed_source_imports(
+            conn,
+            {
+                "source-key-1": ("applied", None),
+                "source-key-2": ("applied", None),
+            },
+        ) == applied
+    finally:
+        conn.close()
+
+
 def test_candidate_ledger_preserves_provenance_node_and_failure_resume(tmp_path):
     conn = db.connect(str(tmp_path / "candidate-ledger"))
     try:

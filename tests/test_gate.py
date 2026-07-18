@@ -770,6 +770,32 @@ def test_render_ranking_recency_tilt():
     print("PASS render_ranking_recency_tilt")
 
 
+def test_capped_authority_ranking_is_scoped_to_equal_hop_and_relation():
+    evidence = [
+        _ev(101, hop=1, via="supersedes", status="staging"),
+        _ev(102, hop=1, via="supersedes", status="canonical"),
+        _ev(103, hop=1, via="related_to", status="canonical"),
+        _ev(104, hop=2, via="supersedes", status="canonical"),
+    ]
+
+    ranked = gate._evidence_sort_for_relevance(evidence)
+    _assert(
+        [node["id"] for node in ranked] == [102, 101, 103, 104],
+        "canonical must beat staging only inside an equal hop/relation tier; "
+        "a nearer or higher-signal staging node must retain its stronger tier",
+    )
+
+    selected = gate._select_chain_evidence(
+        evidence, max_evidence=2, stale_budget=0,
+    )
+    _assert(
+        {node["id"] for node in selected} == {101, 102},
+        "the cap should retain the equal-tier canonical winner and the other "
+        "high-signal staging evidence before lower-relation/far canonical nodes",
+    )
+    print("PASS capped_authority_ranking_is_scoped_to_equal_hop_and_relation")
+
+
 def test_render_preserves_stale_budget():
     active = [_ev(100 + i, status="canonical", via="supersedes") for i in range(12)]
     stale = [_ev(800 + i, status="stale", via="supersedes") for i in range(4)]
@@ -848,6 +874,7 @@ if __name__ == "__main__":
     test_render_ranking_prefers_canonical_over_related_to()
     test_render_ranking_prefers_reconciled_by()
     test_render_ranking_recency_tilt()
+    test_capped_authority_ranking_is_scoped_to_equal_hop_and_relation()
     test_render_preserves_stale_budget()
     test_render_global_total_cap()
     test_select_chain_evidence_never_exceeds_cap()

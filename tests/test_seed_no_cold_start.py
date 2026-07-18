@@ -237,6 +237,14 @@ def test_model_calls_are_source_bounded_valid_empty_is_success_and_output_is_cap
         "check_and_record",
         lambda *_args, **_kwargs: (True, {"count_nonheal": 1}),
     )
+    original_selection = seed.balanced_candidate_selection
+    selection_calls: list[tuple[int, int]] = []
+
+    def capture_selection(candidates, *, max_candidates):
+        selection_calls.append((len(candidates), max_candidates))
+        return original_selection(candidates, max_candidates=max_candidates)
+
+    monkeypatch.setattr(seed, "balanced_candidate_selection", capture_selection)
 
     def invoke(prompt: str, **_kwargs):
         prompts.append(prompt)
@@ -266,6 +274,7 @@ def test_model_calls_are_source_bounded_valid_empty_is_success_and_output_is_cap
     assert stats["failed_source_ids"] == [sources[1].id]
     assert stats["accepted_candidates_by_source"][sources[0].id] == 0
     assert stats["accepted_candidates_by_source"][sources[2].id] == 6
+    assert selection_calls == [(6, 20)]
     assert len(candidates) <= seed.MAX_CANDIDATES_PER_SOURCE
     assert all(candidate.source_ids == [sources[2].id] for candidate in candidates)
 
@@ -541,6 +550,114 @@ def test_partial_apply_recovers_checkpointed_nodes_without_duplicates(
             source, project_path=str(project), workstream_scope="project",
         )
         assert db.get_seed_source_import(conn, source_key)["state"] == "applied"
+    finally:
+        conn.close()
+
+
+def test_attached_candidate_write_failure_uses_write_telemetry_and_recovers(
+    tmp_path, monkeypatch,
+):
+    monkeypatch.setattr(paths, "is_unlatched_mode", lambda: False)
+    project = tmp_path / "attached-write-recovery"
+    project.mkdir()
+    conn = db.connect(str(project))
+    try:
+        parent_id = db.insert_node(
+            conn,
+            kind="workstream",
+            title="Reviewed activation lane",
+            body="Existing reviewed workstream.",
+            status="canonical",
+        )
+    finally:
+        conn.close()
+
+    scope = f"existing:{parent_id}"
+    source = _source("codex:attached-write", agent="codex")
+    candidate = _candidate(
+        source,
+        title="Keep attached seed writes retryable",
+        workstream_key=scope,
+    )
+    candidate_key = seed.candidate_import_key(
+        candidate,
+        project_path=str(project),
+        target_workstream_id=parent_id,
+    )
+    source_key = seed.seed_source_import_key(
+        source,
+        project_path=str(project),
+        workstream_scope=scope,
+    )
+    original_capture = artifacts.capture_for_node
+    capture_calls = 0
+
+    def fail_first_capture(*args, **kwargs):
+        nonlocal capture_calls
+        capture_calls += 1
+        if capture_calls == 1:
+            raise RuntimeError("simulated attached artifact checkpoint failure")
+        return original_capture(*args, **kwargs)
+
+    monkeypatch.setattr(artifacts, "capture_for_node", fail_first_capture)
+    failed = seed.apply_candidates(
+        [candidate],
+        project_path=str(project),
+        existing_workstream_id=parent_id,
+        sources=[source],
+        workstream_scope=scope,
+    )
+    assert not failed.complete
+    assert failed.failures == [
+        {"import_key": candidate_key, "error_code": "node_write_failed"},
+        {"import_key": source_key, "error_code": "node_write_failed"},
+    ]
+    assert len(failed.inserted_ids) == 1
+    child_id = failed.inserted_ids[0]
+
+    conn = db.connect(str(project))
+    try:
+        child = db.get_node(conn, child_id)
+        assert child is not None and child["workstream_id"] == parent_id
+        candidate_row = db.get_seed_import(conn, candidate_key)
+        source_row = db.get_seed_source_import(conn, source_key)
+        assert candidate_row is not None
+        assert candidate_row["state"] == "failed"
+        assert candidate_row["error_code"] == "node_write_failed"
+        assert candidate_row["node_id"] == child_id
+        assert source_row is not None
+        assert source_row["state"] == "failed"
+        assert source_row["error_code"] == "node_write_failed"
+        before_count = conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0]
+    finally:
+        conn.close()
+
+    recovered = seed.apply_candidates(
+        [candidate],
+        project_path=str(project),
+        existing_workstream_id=parent_id,
+        sources=[source],
+        workstream_scope=scope,
+    )
+    assert recovered.complete
+    assert recovered.inserted_ids == []
+    assert recovered.resumed_import_keys == [candidate_key]
+    assert recovered.resumed_node_ids == [child_id]
+
+    conn = db.connect(str(project))
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0] == before_count
+        candidate_row = db.get_seed_import(conn, candidate_key)
+        source_row = db.get_seed_source_import(conn, source_key)
+        assert candidate_row is not None
+        assert candidate_row["state"] == "applied"
+        assert candidate_row["error_code"] is None
+        assert candidate_row["attempt_count"] == 2
+        assert source_row is not None
+        assert source_row["state"] == "applied"
+        assert source_row["error_code"] is None
+        assert source_row["attempt_count"] == 2
+        assert len(artifacts.get_node_artifacts(conn, child_id)) == 1
     finally:
         conn.close()
 

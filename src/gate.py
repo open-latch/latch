@@ -739,8 +739,10 @@ def _evidence_sort_for_relevance(evidence: list[dict]) -> list[dict]:
 
     Stable multi-key sort, most→least significant applied last (Python sort is
     stable, so we sort by the weakest key first):
-      hop ascending → canonical relation before `related_to` → active before
-      stale → recency descending.
+      hop ascending → high-signal relation before `related_to` → canonical
+      before staging before stale → recency descending.
+    Authority therefore breaks ties only within an equal hop/relation tier;
+    it never overrides stronger proximity or relation evidence.
     The recency tilt also addresses id=525 (4a had no per-node recency)."""
     ev = list(evidence)
     ev.sort(

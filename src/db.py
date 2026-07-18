@@ -719,7 +719,12 @@ def finish_seed_source_imports(
     conn: sqlite3.Connection,
     outcomes: dict[str, tuple[str, str | None]],
 ) -> dict[str, dict]:
-    """Atomically finalize every source revision in one approved apply batch."""
+    """Atomically finalize every source revision in one approved apply batch.
+
+    Every non-idempotent transition is a compare-and-set from ``pending``.
+    If any row loses that precondition after validation, the entire batch is
+    rolled back so callers can safely retry it.
+    """
     pending: list[tuple[str, str | None, str]] = []
     results: dict[str, dict] = {}
     for import_key, (state, error_code) in outcomes.items():
@@ -751,11 +756,16 @@ def finish_seed_source_imports(
     now = _now()
     try:
         for state, error_code, import_key in pending:
-            conn.execute(
+            cur = conn.execute(
                 "UPDATE seed_source_import SET state = ?, error_code = ?, "
-                "updated_at = ?, completed_at = ? WHERE import_key = ?",
+                "updated_at = ?, completed_at = ? "
+                "WHERE import_key = ? AND state = 'pending'",
                 (state, error_code, now, now, import_key),
             )
+            if cur.rowcount != 1:
+                raise SeedImportStateError(
+                    "source import must remain pending through batch finalization"
+                )
         conn.commit()
     except Exception:
         conn.rollback()

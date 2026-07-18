@@ -45,7 +45,6 @@ MAX_SOURCE_INVENTORY = 200
 MAX_SOURCE_SCAN = 1_000
 RECENT_SOURCE_RESERVE = 0.20
 MAX_CANDIDATES_PER_SOURCE = 6
-LLM_CANDIDATE_POOL_FACTOR = 3
 SEED_EXTRACTOR_VERSION = "seed-v2"
 # Exact-meaning identity is intentionally independent of the extractor release:
 # upgrading extraction must not duplicate an unchanged reviewed claim.
@@ -1333,11 +1332,9 @@ def llm_candidates(
                 stats["failed_source_revision_tokens"].append(
                     source_revision_token(src)
                 )
-    pool_cap = max_candidates * LLM_CANDIDATE_POOL_FACTOR
-    pooled = balanced_candidate_selection(
-        dedupe_candidates(out), max_candidates=pool_cap,
+    return balanced_candidate_selection(
+        dedupe_candidates(out), max_candidates=max_candidates,
     )
-    return balanced_candidate_selection(pooled, max_candidates=max_candidates)
 
 
 def seed_prompt(
@@ -3380,17 +3377,13 @@ def apply_candidates(
                     except Exception:
                         if candidate.kind == "workstream" and key:
                             failed_workstreams.add(key)
-                        error_code = (
-                            "workstream_attach_failed"
-                            if target_workstream_id is not None else "node_write_failed"
-                        )
+                        # Workstream resolution and validation happen before
+                        # this write/checkpoint block.  Failures here describe
+                        # the node write, not attachment selection; unresolved
+                        # parents are rejected above with the distinct
+                        # workstream_attach_failed code.
+                        error_code = "node_write_failed"
                         mark_candidate_sources(candidate, error_code)
-                        if candidate.kind == "workstream" \
-                                and workstream_scope != "project":
-                            for source_key in source_rows:
-                                source_error_by_key.setdefault(
-                                    source_key, "workstream_attach_failed"
-                                )
                         if ledger_row is not None:
                             try:
                                 db.finish_seed_import(
