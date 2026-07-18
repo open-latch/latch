@@ -98,6 +98,13 @@ macOS, Linux, or Windows Git Bash:
 curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/open-latch/latch/main/install.sh | bash
 ```
 
+To forward quickstart options through the piped Bash form, pass them after
+`bash -s --`, for example:
+
+```bash
+curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/open-latch/latch/main/install.sh | bash -s -- --agents both
+```
+
 Windows PowerShell:
 
 ```powershell

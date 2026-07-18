@@ -131,6 +131,7 @@ def invoke_installer(
     extra: tuple[str, ...] = (),
     env_extra: dict[str, str] | None = None,
     use_existing_uv: bool = True,
+    shell: str = "bash",
 ):
     project = tmp_path / "project"
     project.mkdir(exist_ok=True)
@@ -140,7 +141,7 @@ def invoke_installer(
         env.pop("LATCH_UV")
     env.update(env_extra or {})
     result = run(
-        "bash",
+        shell,
         str(INSTALL_SH),
         "--install-dir",
         str(app),
@@ -193,6 +194,29 @@ def test_posix_bootstrap_fresh_then_idempotent_reconcile(tmp_path: Path):
     assert sum(line.startswith("venv ") for line in uv_second) == 1
     assert sum(line.startswith("pip install ") for line in uv_second) == 2
     assert len(read_json_lines(Path(env["FAKE_QUICKSTART_LOG"]))) == 2
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="stock macOS Bash 3.2 regression")
+def test_posix_bootstrap_zero_quickstart_args_on_stock_macos_bash(tmp_path: Path):
+    origin = make_origin(tmp_path)
+    fake_uv = make_fake_uv(tmp_path)
+
+    result, app, project, env = invoke_installer(
+        tmp_path=tmp_path,
+        origin=origin,
+        fake_uv=fake_uv,
+        shell="/bin/bash",
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "Latch activation complete" in result.stdout
+    assert app.is_dir()
+    calls = read_json_lines(Path(env["FAKE_QUICKSTART_LOG"]))
+    assert calls == [{
+        "argv": ["--project", str(project)],
+        "latch_home": str(app),
+        "latch_python": str(app / ".venv" / "bin" / "python"),
+    }]
 
 
 def test_posix_bootstrap_refuses_unowned_existing_directory(tmp_path: Path):
@@ -299,6 +323,17 @@ def test_posix_bootstrap_upgrade_is_explicit_and_dirty_safe(tmp_path: Path):
     )
     assert first.returncode == 0, first.stdout + first.stderr
     old_commit = git(app, "rev-parse", "HEAD")
+
+    refused_ref, _, _, _ = invoke_installer(
+        tmp_path=tmp_path,
+        origin=origin,
+        fake_uv=fake_uv,
+        extra=("--ref", "main", "--agents", "codex", "--no-seed"),
+    )
+    assert refused_ref.returncode != 0
+    assert "--ref does not change an existing install" in refused_ref.stderr
+    assert git(app, "rev-parse", "HEAD") == old_commit
+
     local = app / "local-note.txt"
     local.write_text("preserve me\n", encoding="utf-8")
 
@@ -410,6 +445,26 @@ def test_git_bash_default_converges_on_windows_local_app_data(tmp_path: Path):
     assert "install dir: /c/Users/Test User/AppData/Local/Latch/app" in result.stdout
 
 
+def test_git_bash_drive_letter_install_dir_stays_absolute(tmp_path: Path):
+    project = tmp_path / "project"
+    project.mkdir()
+    result = run(
+        "bash",
+        str(INSTALL_SH),
+        "--dry-run",
+        "--project",
+        str(project),
+        "--install-dir",
+        "C:/tools/latch",
+        cwd=project,
+        env=os.environ.copy(),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "install dir: C:/tools/latch" in result.stdout
+    assert f"{project}/C:/tools/latch" not in result.stdout
+
+
 def test_posix_bootstrap_canonicalizes_equivalent_git_bash_local_origins(
     tmp_path: Path,
 ):
@@ -475,6 +530,8 @@ def test_bootstrap_script_contracts_and_syntax():
         assert "requirements-ci.lock" not in text
     assert "UV_UNMANAGED_INSTALL" in shell
     assert "shasum -a 256" in shell
+    assert "main() {" in shell
+    assert shell.rstrip().endswith('main "$@"')
     assert "UV_UNMANAGED_INSTALL" in powershell
     assert "LOCALAPPDATA" in shell
     assert "LOCALAPPDATA" in powershell
@@ -488,6 +545,16 @@ def test_bootstrap_script_contracts_and_syntax():
     assert (
         "tests/test_bootstrap_install.py::"
         "test_git_bash_bootstrap_fresh_then_idempotent_on_windows"
+    ) in workflow
+    assert (
+        "tests/test_bootstrap_install.py::"
+        "test_powershell_iex_failure_preserves_session_and_environment"
+    ) in workflow
+    assert "one-command-bootstrap-macos:" in workflow
+    assert "one-command-bootstrap (macos-latest Bash 3.2)" in workflow
+    assert (
+        "tests/test_bootstrap_install.py::"
+        "test_posix_bootstrap_zero_quickstart_args_on_stock_macos_bash"
     ) in workflow
     assert "uv==0.11.28" in workflow
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
@@ -514,6 +581,31 @@ def test_bootstrap_script_contracts_and_syntax():
     assert set(ci_versions) - set(runtime_versions) == {
         "iniconfig", "pluggy", "pygments", "pytest", "pytest-asyncio",
     }
+
+
+def test_posix_truncated_bootstrap_without_entrypoint_has_no_side_effect(tmp_path: Path):
+    source = INSTALL_SH.read_text(encoding="utf-8")
+    marker = '\nmain "$@"\n'
+    assert source.endswith(marker)
+    truncated = tmp_path / "truncated-install.sh"
+    truncated.write_text(source[:-len(marker)] + "\n", encoding="utf-8")
+    project = tmp_path / "project"
+    project.mkdir()
+    app = tmp_path / "app"
+
+    result = run(
+        "bash",
+        str(truncated),
+        "--install-dir",
+        str(app),
+        "--project",
+        str(project),
+        cwd=project,
+        env=os.environ.copy(),
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not app.exists()
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows PowerShell acceptance path")
@@ -564,6 +656,7 @@ exit /b 43
     assert first.returncode == 0, first.stdout + first.stderr
     assert "Latch activation complete" in first.stdout
     assert git(app, "rev-parse", "HEAD") == git(origin, "rev-parse", "HEAD")
+    assert git(app, "config", "--local", "--get", "latch.installRef") == "main"
     calls = read_json_lines(Path(env["FAKE_QUICKSTART_LOG"]))
     assert calls[0]["argv"] == [
         "--project", str(project), "--agents", "codex", "--no-seed",
@@ -576,6 +669,80 @@ exit /b 43
     uv_calls = Path(env["FAKE_UV_LOG"]).read_text(encoding="utf-8").splitlines()
     assert sum(line.startswith("venv ") for line in uv_calls) == 1
     assert sum(line.startswith("pip install ") for line in uv_calls) == 2
+
+    refused = run(
+        shell,
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        command.replace("-Ref 'main'", "-Ref 'different-ref'"),
+        cwd=project,
+        env=env,
+    )
+    assert refused.returncode != 0
+    assert "does not change an existing install" in refused.stdout + refused.stderr
+    assert git(app, "rev-parse", "HEAD") == git(origin, "rev-parse", "HEAD")
+    assert len(read_json_lines(Path(env["FAKE_QUICKSTART_LOG"]))) == 2
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows PowerShell iex failure path")
+def test_powershell_iex_failure_preserves_session_and_environment(tmp_path: Path):
+    origin = make_origin(tmp_path)
+    project = tmp_path / "project"
+    project.mkdir()
+    fake_uv = tmp_path / "fake-uv.cmd"
+    fake_uv.write_text(
+        """@echo off
+echo %*>>"%FAKE_UV_LOG%"
+if "%1"=="venv" (
+  "%FAKE_SYSTEM_PYTHON%" -m venv "%~4"
+  exit /b %ERRORLEVEL%
+)
+if "%1"=="pip" exit /b 0
+exit /b 43
+""",
+        encoding="utf-8",
+    )
+    env = installer_env(tmp_path, origin, fake_uv)
+    env.update({
+        "FAKE_SYSTEM_PYTHON": sys.executable,
+        "FAKE_QUICKSTART_FAIL": "7",
+        "LATCH_HOME": "before-home",
+        "LATCH_PYTHON": "before-python",
+        "LOCALAPPDATA": str(tmp_path / "local-app-data"),
+    })
+    shell = shutil.which("pwsh") or shutil.which("powershell")
+    assert shell, "Windows runner has no PowerShell executable"
+
+    def ps_quote(value: str | Path) -> str:
+        return "'" + str(value).replace("'", "''") + "'"
+
+    command = (
+        f"$source = Get-Content -LiteralPath {ps_quote(INSTALL_PS1)} -Raw; "
+        "try { Invoke-Expression $source } catch { "
+        "Write-Host ('CAUGHT=' + $_.Exception.Message) }; "
+        "Write-Host 'SESSION_CONTINUED'; "
+        "Write-Host ('LATCH_HOME_AFTER=' + $env:LATCH_HOME); "
+        "Write-Host ('LATCH_PYTHON_AFTER=' + $env:LATCH_PYTHON); "
+        "exit 0"
+    )
+    result = run(
+        shell,
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        command,
+        cwd=project,
+        env=env,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "CAUGHT=latch install: activation stopped with status 7" in result.stdout
+    assert "SESSION_CONTINUED" in result.stdout
+    assert "LATCH_HOME_AFTER=before-home" in result.stdout
+    assert "LATCH_PYTHON_AFTER=before-python" in result.stdout
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows Git Bash acceptance path")

@@ -24,6 +24,7 @@ param(
   [string[]]$QuickstartArgs = @()
 )
 
+$RefWasExplicit = $PSBoundParameters.ContainsKey("Ref")
 $ErrorActionPreference = "Stop"
 $DefaultRepository = "https://github.com/open-latch/latch.git"
 $Repository = if ($env:LATCH_INSTALL_REPOSITORY) {
@@ -66,6 +67,21 @@ function Invoke-Git {
     Fail("git $($Arguments -join ' ') failed: $($output -join [Environment]::NewLine)")
   }
   return $output
+}
+
+function Get-InstalledRef([string]$App) {
+  $output = @(& git -C $App config --local --get latch.installRef 2>&1)
+  $rc = $LASTEXITCODE
+  if ($rc -eq 1) { return $null }
+  if ($rc -ne 0) {
+    Fail("could not read the recorded install ref from $App`: $($output -join [Environment]::NewLine)")
+  }
+  if ($output.Count -eq 0) { return $null }
+  return ($output | Select-Object -Last 1).Trim()
+}
+
+function Set-InstalledRef([string]$App, [string]$Value) {
+  Invoke-Git -Arguments @("-C", $App, "config", "--local", "latch.installRef", $Value) | Out-Null
 }
 
 function Validate-Checkout([string]$App) {
@@ -127,6 +143,17 @@ if ($DryRun) {
 
 if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
   Fail("Git is required; install Git for Windows and rerun")
+}
+if ($RefWasExplicit -and -not $Upgrade -and
+    (Test-Path -LiteralPath (Join-Path $InstallDir ".git") -PathType Container)) {
+  Validate-Checkout $InstallDir
+  $installedRef = Get-InstalledRef $InstallDir
+  if (-not $installedRef) {
+    Fail("-Ref cannot verify this existing install because it has no recorded source ref; rerun without -Ref to reconcile or add -Upgrade explicitly")
+  }
+  if ($installedRef -ne $Ref) {
+    Fail("-Ref $Ref does not change an existing install recorded at $installedRef; add -Upgrade explicitly")
+  }
 }
 
 function Resolve-Uv {
@@ -212,6 +239,7 @@ function Checkout-Source([string]$Target) {
   Invoke-Git -Arguments @("-C", $Target, "fetch", "--quiet", "--depth", "1", "origin", $Ref) | Out-Null
   Invoke-Git -Arguments @("-C", $Target, "checkout", "--quiet", "--detach", "FETCH_HEAD") | Out-Null
   Validate-Checkout $Target
+  Set-InstalledRef $Target $Ref
 }
 
 New-Item -ItemType Directory -Path $InstallParent -Force | Out-Null
@@ -236,6 +264,7 @@ try {
         [void](Prepare-Runtime $InstallDir $Uv)
         Fail("upgrade rolled back; the previous checkout remains installed")
       }
+      Set-InstalledRef $InstallDir $Ref
     } else {
       Note "Existing Latch checkout found; keeping its source revision"
       if (-not (Prepare-Runtime $InstallDir $Uv)) {
@@ -268,16 +297,34 @@ $Commit = (Invoke-Git -Arguments @("-C", $InstallDir, "rev-parse", "--short=12",
 $Version = (Get-Content -LiteralPath (Join-Path $InstallDir "VERSION") -Raw).Trim()
 
 Note "Running the guided Latch activation"
-$env:LATCH_HOME = $InstallDir
-$env:LATCH_PYTHON = $PythonPath
-& $PythonPath (Join-Path $InstallDir "src\quickstart.py") --project $Project @QuickstartArgs
-$quickstartRc = $LASTEXITCODE
+$hadLatchHome = Test-Path Env:LATCH_HOME
+$hadLatchPython = Test-Path Env:LATCH_PYTHON
+$previousLatchHome = $env:LATCH_HOME
+$previousLatchPython = $env:LATCH_PYTHON
+$quickstartRc = $null
+try {
+  $env:LATCH_HOME = $InstallDir
+  $env:LATCH_PYTHON = $PythonPath
+  & $PythonPath (Join-Path $InstallDir "src\quickstart.py") --project $Project @QuickstartArgs
+  $quickstartRc = $LASTEXITCODE
+} finally {
+  if ($hadLatchHome) {
+    $env:LATCH_HOME = $previousLatchHome
+  } else {
+    Remove-Item Env:LATCH_HOME -ErrorAction SilentlyContinue
+  }
+  if ($hadLatchPython) {
+    $env:LATCH_PYTHON = $previousLatchPython
+  } else {
+    Remove-Item Env:LATCH_PYTHON -ErrorAction SilentlyContinue
+  }
+}
 if ($quickstartRc -ne 0) {
   [Console]::Error.WriteLine(
     "Latch app/runtime installation succeeded, but activation stopped with status $quickstartRc. " +
     "No app files were removed; fix the reported preflight/check and rerun."
   )
-  exit $quickstartRc
+  throw "latch install: activation stopped with status $quickstartRc"
 }
 
 Write-Host ""

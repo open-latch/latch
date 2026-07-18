@@ -16,6 +16,7 @@ readonly DEFAULT_REF="main"
 readonly UV_VERSION="0.11.28"
 readonly UV_INSTALLER_URL_DEFAULT="https://astral.sh/uv/${UV_VERSION}/install.sh"
 
+main() {
 die() {
   printf 'latch install: error: %s\n' "$*" >&2
   exit 1
@@ -120,7 +121,7 @@ done
 [ -d "$PROJECT" ] || die "project directory does not exist: $PROJECT"
 PROJECT="$(cd "$PROJECT" && pwd -P)"
 case "$INSTALL_DIR" in
-  /*) ;;
+  /*|[A-Za-z]:/*) ;;
   *) INSTALL_DIR="$(pwd -P)/$INSTALL_DIR" ;;
 esac
 INSTALL_PARENT="$(dirname "$INSTALL_DIR")"
@@ -349,7 +350,7 @@ note 'Running the guided Latch activation'
 run_quickstart() {
   env LATCH_HOME="$INSTALL_DIR" LATCH_PYTHON="$PYTHON_PATH" \
     "$PYTHON_PATH" "$INSTALL_DIR/src/quickstart.py" \
-    --project "$PROJECT" "${QUICKSTART_ARGS[@]}"
+    --project "$PROJECT" ${QUICKSTART_ARGS[@]+"${QUICKSTART_ARGS[@]}"}
 }
 
 if { exec 3</dev/tty; } 2>/dev/null; then
@@ -380,3 +381,6 @@ printf '  app     : %s\n' "$INSTALL_DIR"
 printf '  project : %s\n' "$PROJECT"
 printf '  unwire  : %s\n' "$INSTALL_DIR/bin/uninstall.sh"
 printf 'The unwire command preserves the production KB and the app checkout.\n'
+}
+
+main "$@"
