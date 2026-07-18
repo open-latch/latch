@@ -371,21 +371,34 @@ def prune_expired(
     candidates = _manifests(snapshot_dir)
     if not candidates:
         return {"deleted": 0, "protected": 0, "skipped": 0}
-    newest = max(
-        candidates,
-        key=lambda item: _parse_timestamp(item[1].get("created_at"), field="created_at"),
-    )[0]
     result = {"deleted": 0, "protected": 0, "skipped": 0}
+    dated_candidates: list[tuple[Path, dict[str, Any], datetime]] = []
     for manifest_path, manifest in candidates:
+        try:
+            created_at = _parse_timestamp(
+                manifest.get("created_at"), field="created_at"
+            )
+        except BackupSafetyError:
+            result["skipped"] += 1
+            continue
+        dated_candidates.append((manifest_path, manifest, created_at))
+    if not dated_candidates:
+        return result
+    newest = max(dated_candidates, key=lambda item: item[2])[0]
+    for manifest_path, manifest, _created_at in dated_candidates:
         if manifest_path == newest:
             result["protected"] += 1
             continue
         if manifest.get("vault_uuid") != identity.vault_uuid:
             result["skipped"] += 1
             continue
-        protected_until = _parse_timestamp(
-            manifest.get("protected_until"), field="protected_until"
-        )
+        try:
+            protected_until = _parse_timestamp(
+                manifest.get("protected_until"), field="protected_until"
+            )
+        except BackupSafetyError:
+            result["skipped"] += 1
+            continue
         if current < protected_until:
             result["protected"] += 1
             continue
@@ -407,16 +420,26 @@ def prune_expired(
     return result
 
 
-def verify_restore(manifest_path: Path, *, work_root: Path | None = None) -> dict[str, Any]:
-    """Restore a snapshot to a new disposable directory and verify it."""
+def _verified_snapshot_source(manifest_path: Path) -> tuple[Path, dict[str, Any], Path]:
     manifest_path = manifest_path.resolve(strict=True)
     manifest = _read_manifest(manifest_path)
-    snapshot = manifest_path.parent / str(manifest.get("snapshot") or "")
+    snapshot_name = str(manifest.get("snapshot") or "")
+    if not snapshot_name or Path(snapshot_name).name != snapshot_name:
+        raise BackupSafetyError("snapshot manifest path is not a direct filename")
+    snapshot = manifest_path.parent / snapshot_name
     if not snapshot.is_file():
         raise BackupSafetyError("snapshot referenced by manifest is missing")
+    if snapshot.absolute() != snapshot.resolve(strict=True):
+        raise BackupSafetyError("refusing snapshot through a symlinked path")
     digest = hashlib.sha256(snapshot.read_bytes()).hexdigest()
     if digest != manifest.get("sha256"):
         raise BackupSafetyError("snapshot hash differs from manifest")
+    return manifest_path, manifest, snapshot
+
+
+def verify_restore(manifest_path: Path, *, work_root: Path | None = None) -> dict[str, Any]:
+    """Restore a snapshot to a new disposable directory and verify it."""
+    manifest_path, manifest, snapshot = _verified_snapshot_source(manifest_path)
     parent = work_root.resolve() if work_root else None
     if parent is not None:
         parent.mkdir(parents=True, exist_ok=True)
@@ -443,6 +466,81 @@ def verify_restore(manifest_path: Path, *, work_root: Path | None = None) -> dic
         shutil.rmtree(restore_dir)
 
 
+def restore_snapshot(manifest_path: Path, *, target_vault: Path) -> dict[str, Any]:
+    """Restore a verified production snapshot and rebuild its missing registry.
+
+    The target must be a new directory outside the source checkout. Existing
+    targets and registry records are refused so recovery cannot overwrite a
+    live vault or silently create a second active copy of the same identity.
+    """
+    manifest_path, manifest, snapshot = _verified_snapshot_source(manifest_path)
+    if manifest.get("classification") != vault_identity.CLASS_PRODUCTION:
+        raise BackupSafetyError("real restore accepts only production snapshots")
+    if manifest.get("identity_state"):
+        raise BackupSafetyError(
+            "pre-identity snapshots require normal migration before registry recovery"
+        )
+
+    requested = Path(target_vault).expanduser()
+    if not requested.is_absolute():
+        requested = Path.cwd() / requested
+    lexical = requested.absolute()
+    parent = lexical.parent.resolve(strict=True)
+    target = parent / lexical.name
+    if lexical.parent != parent:
+        raise BackupSafetyError("refusing restore through a symlinked target parent")
+    if target.exists():
+        raise BackupSafetyError("restore target already exists; refusing overwrite")
+    test_root = paths.validated_test_root()
+    if test_root is None:
+        source_root = paths.KB_ROOT.resolve()
+        if target == source_root or _is_relative_to(target, source_root):
+            raise BackupSafetyError(
+                "production restore target must be outside the source checkout"
+            )
+    else:
+        allowed = (test_root / "vaults").resolve()
+        if target == allowed or not _is_relative_to(target, allowed):
+            raise BackupSafetyError("test restore target must stay inside the disposable root")
+
+    target.mkdir(mode=0o700, exist_ok=False)
+    temp_db = target / ".kb.db.restore.tmp"
+    restored_db = target / "kb.db"
+    source = sqlite3.connect(snapshot.resolve().as_uri() + "?mode=ro", uri=True)
+    destination = sqlite3.connect(str(temp_db))
+    try:
+        source.backup(destination)
+    finally:
+        destination.close()
+        source.close()
+    receipt = _sqlite_receipt(temp_db)
+    for field in (
+        "vault_uuid",
+        "classification",
+        "identity_digest",
+        "nodes",
+        "max_node_id",
+        "edges",
+        "sessions",
+    ):
+        if receipt.get(field) != manifest.get(field):
+            raise BackupSafetyError(f"restored {field} differs from manifest")
+    os.replace(temp_db, restored_db)
+    try:
+        restored_db.chmod(0o600)
+    except OSError:
+        pass
+    registry = vault_identity.register_restored_production_vault(target)
+    return {
+        "ok": True,
+        "manifest": str(manifest_path),
+        "vault": str(target),
+        "database": str(restored_db),
+        "registry": str(registry),
+        **receipt,
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="create and verify protected Latch backups")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -453,13 +551,27 @@ def main(argv: list[str] | None = None) -> int:
     prune.add_argument("--project")
     restore = sub.add_parser("verify-restore")
     restore.add_argument("manifest", type=Path)
+    recover = sub.add_parser("restore")
+    recover.add_argument("manifest", type=Path)
+    recover.add_argument("--target", type=Path, required=True)
+    register = sub.add_parser("register-restored")
+    register.add_argument("vault", type=Path)
     args = parser.parse_args(argv)
     if args.command == "create":
         result = create_snapshot(args.project, reason=args.reason)
     elif args.command == "prune":
         result = prune_expired(args.project)
-    else:
+    elif args.command == "verify-restore":
         result = verify_restore(args.manifest)
+    elif args.command == "restore":
+        result = restore_snapshot(args.manifest, target_vault=args.target)
+    else:
+        registry = vault_identity.register_restored_production_vault(args.vault)
+        result = {
+            "ok": True,
+            "vault": str(args.vault.resolve()),
+            "registry": str(registry),
+        }
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0
 

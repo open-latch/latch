@@ -52,6 +52,11 @@ SPAWN_LOG_MAX_BYTES = 1_000_000  # truncate the detached-child stdout log past t
 
 LEGACY_LOG_MAX_AGE_DAYS = 3
 
+
+class BackupCreationError(RuntimeError):
+    """A live vault existed but its required protected snapshot failed."""
+
+
 # Reentrancy guard env var. Set on the detached maintenance child so that any
 # `claude -p` it spawns (heal/tree arbitration) inherits it and its MCP server
 # refuses to re-trigger maintenance. Mirrors compactor's CLAUDE_KB_IN_COMPACT.
@@ -292,13 +297,23 @@ def run_selfheal(project_path: str | None) -> dict:
 
         # Snapshot before any mutating op, even if the backup cadence alone
         # wasn't due (matches the old wrapper's "backup before any op").
+        backup_failed = False
         if backup_due or heal_due or weekly_due or workstream_shadow_due:
-            if _backup_db(project_path):
+            try:
+                backup_created = _backup_db(project_path)
+            except BackupCreationError:
+                backup_failed = True
+                backup_created = False
+            if backup_created:
                 _prune_backups(project_path)
                 state["last_backup_at"] = now.isoformat()
                 ran.append("backup")
 
-        if heal_due:
+        blocked: list[str] = []
+        if heal_due and backup_failed:
+            blocked.append("heal")
+            _log(f"heal blocked for {project_path}: required protected backup failed")
+        elif heal_due:
             try:
                 maintenance.run_nightly_heal(
                     project_path, already_locked=True,
@@ -308,7 +323,10 @@ def run_selfheal(project_path: str | None) -> dict:
             except Exception as e:
                 _log(f"heal failed for {project_path}: {e}")
 
-        if weekly_due:
+        if weekly_due and backup_failed:
+            blocked.append("weekly")
+            _log(f"weekly/tree blocked for {project_path}: required protected backup failed")
+        elif weekly_due:
             try:
                 maintenance.run_weekly_maintenance(project_path)
                 maintenance.run_tree_rebuild(project_path)
@@ -320,7 +338,13 @@ def run_selfheal(project_path: str | None) -> dict:
         # Independent cadence: lifecycle detection must still run on days when
         # the contradiction healer is not due (or fails). It derives candidates
         # only; governed mutation is a separate trust-ladder stage.
-        if workstream_shadow_due:
+        if workstream_shadow_due and backup_failed:
+            blocked.append("workstream_shadow")
+            _log(
+                f"workstream shadow blocked for {project_path}: "
+                "required protected backup failed"
+            )
+        elif workstream_shadow_due:
             try:
                 maintenance.run_workstream_shadow(
                     project_path, already_locked=True,
@@ -349,7 +373,12 @@ def run_selfheal(project_path: str | None) -> dict:
             _log(f"workstream automation failed for {project_path}: {e}")
 
     _log(f"pass complete for {project_path}: ran={ran}")
-    result = {"ok": True, "ran": ran}
+    result = {"ok": not backup_failed, "ran": ran}
+    if backup_failed:
+        result.update({
+            "reason": "backup_failed",
+            "blocked": blocked,
+        })
     if automation_result is not None:
         result["workstream_automation"] = {
             "ok": bool(automation_result.get("ok")),
@@ -373,7 +402,7 @@ def _backup_db(project_path: str | None) -> bool:
         return True
     except Exception as e:
         _log(f"protected backup failed: {e}")
-        return False
+        raise BackupCreationError("required protected backup failed") from e
 
 
 def _prune_backups(project_path: str | None, keep: int | None = None) -> None:

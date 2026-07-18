@@ -114,6 +114,7 @@ def test_symlink_and_missing_registry_fail_closed(tmp_path):
     assert vault.exists()
 
     registry = paths.validated_test_root() / "registry" / f"{identity.vault_uuid}.json"
+    registry.chmod(0o600)
     registry.unlink()
     with pytest.raises(vault_identity.VaultSafetyError, match="registry"):
         db.connect(str(tmp_path / "symlink"))

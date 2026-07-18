@@ -803,6 +803,10 @@ def _start_reason(value: str) -> str:
 
 
 def _windows_creation_flags() -> int:
+    # Windows documents CREATE_NO_WINDOW as ignored when DETACHED_PROCESS is
+    # also set. Keep both intentionally: DETACHED_PROCESS protects daemon
+    # lifetime semantics, while CREATE_NO_WINDOW remains defense in depth for
+    # launch variants where detachment is unavailable or later narrowed.
     return (
         getattr(subprocess, "CREATE_NO_WINDOW", WINDOWS_CREATE_NO_WINDOW)
         | getattr(subprocess, "DETACHED_PROCESS", WINDOWS_DETACHED_PROCESS)

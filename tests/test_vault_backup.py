@@ -8,6 +8,8 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
@@ -115,8 +117,34 @@ def test_corrupt_snapshot_is_never_pruned(tmp_path):
     assert database.exists()
 
 
+def test_invalid_manifest_timestamp_does_not_block_other_expired_pruning(tmp_path):
+    _seed(tmp_path)
+    start = datetime(2026, 5, 1, 0, 0, tzinfo=UTC)
+    invalid = vault_backup.create_snapshot(str(tmp_path), reason="invalid", now=start)
+    expired = vault_backup.create_snapshot(
+        str(tmp_path), reason="expired", now=start + timedelta(hours=6)
+    )
+    newest = vault_backup.create_snapshot(
+        str(tmp_path), reason="newest", now=start + timedelta(days=1)
+    )
+    manifest_path = Path(invalid["manifest"])
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    payload["created_at"] = "not-a-timestamp"
+    manifest_path.chmod(0o600)
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    result = vault_backup.prune_expired(
+        str(tmp_path), now=start + timedelta(days=40)
+    )
+
+    assert result == {"deleted": 1, "protected": 1, "skipped": 1}
+    assert Path(invalid["database"]).exists()
+    assert not Path(expired["database"]).exists()
+    assert Path(newest["database"]).exists()
+
+
 def test_test_runtime_ignores_durability_root_spoof(tmp_path, monkeypatch):
-    unsafe = ROOT / "would-be-test-backups"
+    unsafe = tmp_path / "would-be-test-backups"
     monkeypatch.setenv(vault_backup.DURABILITY_ROOT_ENV, str(unsafe))
     _seed(tmp_path)
     receipt = vault_backup.create_snapshot(str(tmp_path), reason="spoof")
@@ -148,3 +176,51 @@ def test_production_classified_legacy_copy_still_backs_up_inside_test_root(tmp_p
     assert Path(receipt["database"]).is_relative_to(
         paths.validated_test_root() / "backups"
     )
+
+
+def test_real_restore_recreates_missing_production_registry(tmp_path, monkeypatch):
+    vault = paths.project_dir(str(tmp_path / "source"))
+    vault.mkdir(parents=True)
+    legacy = sqlite3.connect(vault / "kb.db")
+    try:
+        legacy.executescript((ROOT / "src" / "schema.sql").read_text(encoding="utf-8"))
+        legacy.execute(
+            "INSERT INTO nodes(kind,title,body,status) "
+            "VALUES('decision','recoverable','survives restore','canonical')"
+        )
+        legacy.commit()
+    finally:
+        legacy.close()
+    conn = db.connect(str(tmp_path / "source"))
+    try:
+        identity = conn._kb_vault_identity
+    finally:
+        conn.close()
+    assert identity.classification == vault_identity.CLASS_PRODUCTION
+    snapshot = vault_backup.create_snapshot(str(tmp_path / "source"), reason="recovery")
+
+    registry = (
+        paths.validated_test_root()
+        / "production-registry-shadow"
+        / f"{identity.vault_uuid}.json"
+    )
+    registry.chmod(0o600)
+    registry.unlink()
+    target = paths.validated_test_root() / "vaults" / "restored-production"
+
+    restored = vault_backup.restore_snapshot(
+        Path(snapshot["manifest"]), target_vault=target
+    )
+
+    assert restored["ok"] is True
+    assert restored["nodes"] == 1
+    assert Path(restored["registry"]).is_file()
+    monkeypatch.setenv("LATCH_KB_DIR", str(target))
+    reopened = db.connect("ignored-after-restore")
+    try:
+        assert reopened._kb_vault_identity == identity
+        assert reopened.execute("SELECT COUNT(*) FROM nodes").fetchone()[0] == 1
+    finally:
+        reopened.close()
+    with pytest.raises(vault_identity.VaultSafetyError, match="already exists"):
+        vault_identity.register_restored_production_vault(target)

@@ -27,6 +27,8 @@ The first verified point each UTC day is protected for 30 days. Other cadence
 points are protected for five days; self-heal attempts one every six hours.
 Every due 48-hour nightly heal also forces a new protected snapshot before the
 heal mutates the KB, even when the independent six-hour backup timer is fresh.
+If that required snapshot fails, heal and weekly/tree maintenance fail closed,
+advance no mutation stamps, and retry on the next maintenance opportunity.
 Pruning has no force option, never removes the newest point, and deletes only an
 expired pair whose vault UUID and SHA-256 match its readable manifest. Corrupt,
 unknown, incomplete, or still-protected artifacts are retained.
@@ -37,6 +39,31 @@ Create and verify a snapshot:
 .venv/bin/python src/vault_backup.py create
 .venv/bin/python src/vault_backup.py verify-restore /absolute/path/to/snapshot.json
 ```
+
+Recover a verified production snapshot into a new vault outside the source
+checkout. The target and external registry record must both be absent; the
+command refuses overwrites and recreates the missing registry only after the
+restored database passes hash, identity, integrity, foreign-key, and count
+checks:
+
+```bash
+.venv/bin/python src/vault_backup.py restore \
+  /absolute/path/to/snapshot.json \
+  --target /absolute/path/to/new-production-vault
+```
+
+If a verified database was already restored but registry creation was
+interrupted, resume only the missing registry step:
+
+```bash
+.venv/bin/python src/vault_backup.py register-restored \
+  /absolute/path/to/new-production-vault
+```
+
+Both recovery commands accept production identities only. They refuse
+symlinked/source-checkout vaults, existing registry records, test identities,
+and corrupt databases. After recovery, point the installer at the restored
+vault with `--kb-dir`; do not copy the registry by hand.
 
 Run the safety proof:
 

@@ -350,6 +350,7 @@ def test_heal_due_forces_backup_when_backup_timer_is_fresh():
             "last_backup_at": _iso(now - timedelta(hours=1)),  # fresh 6h cadence
             "last_heal_at": _iso(now - timedelta(hours=49)),  # due 48h heal
             "last_weekly_at": _iso(now - timedelta(hours=1)),
+            "last_workstream_shadow_at": _iso(now - timedelta(hours=1)),
         })
         selfheal._backup_db = lambda p: calls.append(("backup", p)) or True
         selfheal._prune_backups = lambda p: calls.append(("prune", p))
@@ -383,6 +384,77 @@ def test_heal_due_forces_backup_when_backup_timer_is_fresh():
         selfheal.maintenance.run_nightly_heal = orig_heal
         selfheal.maintenance.run_weekly_maintenance = orig_weekly
         selfheal.maintenance.run_tree_rebuild = orig_tree
+        shutil.rmtree(proj, ignore_errors=True)
+
+
+def test_failed_forced_backup_blocks_due_mutations_without_advancing_stamps():
+    proj = _fresh_project()
+    calls = []
+    orig_backup = selfheal._backup_db
+    orig_prune = selfheal._prune_backups
+    orig_heal = selfheal.maintenance.run_nightly_heal
+    orig_weekly = selfheal.maintenance.run_weekly_maintenance
+    orig_tree = selfheal.maintenance.run_tree_rebuild
+    try:
+        _seed_db(proj)
+        now = datetime.now(timezone.utc)
+        initial = {
+            "last_backup_at": _iso(now - timedelta(hours=1)),
+            "last_heal_at": _iso(now - timedelta(hours=49)),
+            "last_weekly_at": _iso(now - timedelta(hours=169)),
+            "last_workstream_shadow_at": _iso(now - timedelta(hours=25)),
+        }
+        selfheal._save_state(proj, initial)
+
+        def fail_backup(path):
+            calls.append(("backup", path))
+            raise selfheal.BackupCreationError("simulated snapshot failure")
+
+        selfheal._backup_db = fail_backup
+        selfheal._prune_backups = lambda p: calls.append(("prune", p))
+        selfheal.maintenance.run_nightly_heal = lambda p, **k: calls.append(("heal", p))
+        selfheal.maintenance.run_weekly_maintenance = (
+            lambda p, **k: calls.append(("weekly", p))
+        )
+        selfheal.maintenance.run_tree_rebuild = lambda p, **k: calls.append(("tree", p))
+
+        result = selfheal.run_selfheal(proj)
+
+        _assert(result == {
+            "ok": False,
+            "reason": "backup_failed",
+            "ran": [],
+            "blocked": ["heal", "weekly", "workstream_shadow"],
+        }, result)
+        _assert(calls == [("backup", proj)], calls)
+        _assert(selfheal._load_state(proj) == initial, "failed backup must advance no stamps")
+        print("PASS failed_forced_backup_blocks_heal_and_weekly_without_advancing_stamps")
+    finally:
+        selfheal._backup_db = orig_backup
+        selfheal._prune_backups = orig_prune
+        selfheal.maintenance.run_nightly_heal = orig_heal
+        selfheal.maintenance.run_weekly_maintenance = orig_weekly
+        selfheal.maintenance.run_tree_rebuild = orig_tree
+        shutil.rmtree(proj, ignore_errors=True)
+
+
+def test_backup_snapshot_exception_is_not_downgraded_to_no_database():
+    proj = _fresh_project()
+    original = selfheal.vault_backup.create_snapshot
+    try:
+        _seed_db(proj)
+        selfheal.vault_backup.create_snapshot = (
+            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("storage unavailable"))
+        )
+        try:
+            selfheal._backup_db(proj)
+        except selfheal.BackupCreationError:
+            pass
+        else:
+            raise AssertionError("snapshot failure must raise BackupCreationError")
+        print("PASS backup_snapshot_exception_is_not_downgraded_to_no_database")
+    finally:
+        selfheal.vault_backup.create_snapshot = original
         shutil.rmtree(proj, ignore_errors=True)
 
 

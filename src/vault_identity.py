@@ -16,6 +16,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
 import shutil
 import sqlite3
@@ -130,7 +131,12 @@ def _registry_payload(identity: VaultIdentity) -> dict[str, object]:
     return {"format": 1, **asdict(identity)}
 
 
-def _write_registry_exclusive(identity: VaultIdentity, vault_dir: Path) -> Path:
+def _write_registry_exclusive(
+    identity: VaultIdentity,
+    vault_dir: Path,
+    *,
+    allow_existing: bool = True,
+) -> Path:
     root = _registry_root(identity.classification).resolve()
     resolved_vault = vault_dir.resolve()
     if root == resolved_vault or _is_relative_to(root, resolved_vault):
@@ -152,6 +158,10 @@ def _write_registry_exclusive(identity: VaultIdentity, vault_dir: Path) -> Path:
         except OSError:
             pass
     except FileExistsError:
+        if not allow_existing:
+            raise VaultSafetyError(
+                "registry record already exists; refusing possible duplicate-vault recovery"
+            )
         _validate_registry(identity)
     return destination
 
@@ -301,6 +311,68 @@ def read_identity(db_file: Path) -> VaultIdentity | None:
         return _row_identity(row) if row is not None else None
     finally:
         conn.close()
+
+
+def register_restored_production_vault(vault_dir: Path) -> Path:
+    """Rebuild one missing production registry record from a restored DB.
+
+    This is deliberately narrower than normal identity creation: it accepts
+    only an existing, integrity-clean production database with canonical
+    immutable identity fields, refuses symlinked/source-checkout targets, and
+    never overwrites or repairs an existing registry record.
+    """
+    lexical = Path(vault_dir).expanduser().absolute()
+    resolved = Path(vault_dir).expanduser().resolve(strict=True)
+    if lexical != resolved:
+        raise VaultSafetyError("refusing registry recovery through a symlinked vault path")
+    if not resolved.is_dir():
+        raise VaultSafetyError("restored production vault path is not a directory")
+    if paths.validated_test_root() is None:
+        source_root = paths.KB_ROOT.resolve()
+        if resolved == source_root or _is_relative_to(resolved, source_root):
+            raise VaultSafetyError(
+                "refusing restored production vault inside the source checkout"
+            )
+
+    db_file = resolved / "kb.db"
+    identity = read_identity(db_file)
+    if identity is None:
+        raise VaultSafetyError("restored database has no immutable vault identity")
+    if identity.classification != CLASS_PRODUCTION:
+        raise VaultSafetyError("registry recovery is supported only for production vaults")
+    try:
+        parsed_uuid = str(uuid.UUID(identity.vault_uuid))
+    except ValueError as exc:
+        raise VaultSafetyError("restored vault UUID is invalid") from exc
+    if not hmac.compare_digest(parsed_uuid, identity.vault_uuid):
+        raise VaultSafetyError("restored vault UUID is not canonical")
+    try:
+        created_at = datetime.fromisoformat(identity.created_at)
+    except ValueError as exc:
+        raise VaultSafetyError("restored vault creation timestamp is invalid") from exc
+    if created_at.tzinfo is None:
+        raise VaultSafetyError("restored vault creation timestamp must include a timezone")
+    if re.fullmatch(r"[0-9a-f]{64}", identity.registry_fingerprint) is None:
+        raise VaultSafetyError("restored vault registry fingerprint is invalid")
+
+    conn = sqlite3.connect(db_file.resolve().as_uri() + "?mode=ro", uri=True)
+    try:
+        integrity = str(conn.execute("PRAGMA integrity_check").fetchone()[0])
+        foreign_keys = conn.execute("PRAGMA foreign_key_check").fetchall()
+    finally:
+        conn.close()
+    if integrity != "ok" or foreign_keys:
+        raise VaultSafetyError(
+            f"refusing corrupt restored vault: integrity={integrity}, "
+            f"foreign_keys={len(foreign_keys)}"
+        )
+
+    registry = _registry_path(identity)
+    if registry.exists():
+        raise VaultSafetyError(
+            "registry record already exists; refusing possible duplicate-vault recovery"
+        )
+    return _write_registry_exclusive(identity, resolved, allow_existing=False)
 
 
 def safe_delete_test_vault(
