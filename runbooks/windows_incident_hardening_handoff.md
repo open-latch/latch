@@ -9,11 +9,11 @@ Windows.
 
 - Repository: `https://github.com/open-latch/latch.git`
 - Branch: `agent/kb-incident-hardening`
-- Safety implementation commit: `772a7b4f346134075c4ae65ee1e9475a212b2cff`
+- Reviewed runtime baseline: `1ae49daed3ad4256436919ec66d11e4b4a84e17e`
 
-The branch may contain a later documentation-only handoff commit. Before
-testing, verify that the implementation commit is an ancestor and that every
-file changed after it is documentation:
+The branch may contain later handoff-documentation and generated-proof commits.
+Before testing, verify that the reviewed runtime baseline is an ancestor and
+that every file changed after it is one of those explicitly allowed artifacts:
 
 ```powershell
 git fetch origin
@@ -21,15 +21,29 @@ git switch --force-create agent/kb-incident-hardening `
   --track origin/agent/kb-incident-hardening
 git status --short --branch
 git rev-parse HEAD
+$SafetyCommit = "1ae49daed3ad4256436919ec66d11e4b4a84e17e"
 git merge-base --is-ancestor `
-  772a7b4f346134075c4ae65ee1e9475a212b2cff HEAD
-if ($LASTEXITCODE -ne 0) { throw "Safety implementation commit is not an ancestor" }
-git diff --name-only `
-  772a7b4f346134075c4ae65ee1e9475a212b2cff HEAD
+  $SafetyCommit HEAD
+if ($LASTEXITCODE -ne 0) { throw "Reviewed runtime baseline is not an ancestor" }
+$ChangedAfterSafety = @(git diff --name-only "$SafetyCommit..HEAD")
+$UnexpectedAfterSafety = @(
+  $ChangedAfterSafety | Where-Object {
+    $_ -ne "runbooks/windows_incident_hardening_handoff.md" -and
+    $_ -ne "runbooks/kb_durability.md" -and
+    -not ($_.StartsWith("proof/"))
+  }
+)
+if ($UnexpectedAfterSafety.Count -gt 0) {
+  $UnexpectedAfterSafety | ForEach-Object { Write-Error "Unexpected post-baseline path: $_" }
+  throw "Runtime or test source changed after the reviewed baseline"
+}
+$ChangedAfterSafety
 ```
 
-Expected post-implementation diff: only this handoff file and, if present, its
-link from `runbooks/kb_durability.md`. Stop if runtime or test source differs.
+Expected post-baseline diff: only this handoff file, its optional link from
+`runbooks/kb_durability.md`, and generated files below `proof/`. The PowerShell
+guard stops automatically if any runtime, test, workflow, or other unreviewed
+path differs.
 
 ## Safety boundary
 
