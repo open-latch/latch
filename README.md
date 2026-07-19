@@ -83,51 +83,92 @@ sessions and catch one decision your next agent might plausibly violate.
 
 ## Get Started
 
-Prerequisites: **Claude Code, Codex, or Cursor**, **Python >= 3.11** on a
-native-architecture interpreter, and [`uv`](https://docs.astral.sh/uv/)
-recommended. If `uv` is not installed:
+Prerequisites: **Git** and at least one installed agent CLI: **Claude Code**,
+**Codex**, or **Cursor Agent**. The installer bootstraps a private
+[`uv`](https://docs.astral.sh/uv/) and native Python 3.11 environment; it does
+not modify your shell profile or require a system Python. Release installs use
+the repository's hashed, cross-platform dependency lock.
+
+Open a terminal in the project repo you want latch to protect, then run one
+command.
+
+macOS, Linux, or Windows Git Bash:
 
 ```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh
+curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/open-latch/latch/main/install.sh | bash
 ```
 
-Install latch once in a stable location such as `~/tools/latch` or
-`D:\tools\latch`. From the cloned latch repo root:
+To forward quickstart options through the piped Bash form, pass them after
+`bash -s --`, for example:
 
 ```bash
-cd /path/to/latch
-uv venv --python 3.11 .venv
-source .venv/bin/activate          # Windows Git Bash: source .venv/Scripts/activate
-# Windows PowerShell: .venv\Scripts\Activate.ps1
-uv pip install -r requirements.txt
-
-bash bin/latch_doctor.sh           # Windows: .\bin\latch_doctor.ps1
+curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/open-latch/latch/main/install.sh | bash -s -- --agents both
 ```
 
-Then run the quickstart from the project repo you want latch to wire:
+Windows PowerShell:
 
-```bash
-cd /path/to/your/project
-/path/to/latch/bin/latch_quickstart.sh
-# Windows: C:\path\to\latch\bin\latch_quickstart.ps1
+```powershell
+irm https://raw.githubusercontent.com/open-latch/latch/main/install.ps1 | iex
 ```
 
-The quickstart asks which agents to wire, syncs their behavior contract, runs
-doctor/check commands, and offers one seed handoff. For non-interactive runs,
-choose `claude`, `codex`, `cursor`, `both` (Claude+Codex), or `all`:
+The bootstrap preserves your starting project path, downloads Latch into the
+platform user-data directory, installs its isolated runtime, asks which agent
+surfaces to wire, runs their doctor checks, and offers the bounded initial-KB
+review. Selected local transcripts are listed and redacted before any model
+call; no seed candidate is written until you approve it.
+
+The current pre-release command follows `main` and prints the exact installed
+commit. For a stable release, pin both the downloaded script and the checkout
+ref in the same command so the install cannot drift back to `main`:
 
 ```bash
-/path/to/latch/bin/latch_quickstart.sh --agents both
-/path/to/latch/bin/latch_quickstart.sh --agents cursor --cursor-with-hooks
-/path/to/latch/bin/latch_quickstart.sh --agents all --cursor-with-hooks
+curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/open-latch/latch/vX.Y.Z/install.sh | LATCH_INSTALL_REF=vX.Y.Z bash
+```
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/open-latch/latch/vX.Y.Z/install.ps1))) -Ref vX.Y.Z
+```
+
+To inspect either installer before executing it, download the script first and
+read it locally.
+
+Rerunning the command is a repair/reconcile operation: it keeps the installed
+source revision and idempotently refreshes dependencies and wiring. It never
+silently upgrades. A local script invocation can request an explicit upgrade,
+which refuses dirty source checkouts:
+
+```bash
+bash /path/to/install.sh --upgrade --ref main
+# PowerShell: .\install.ps1 -Upgrade -Ref main
+```
+
+For a non-interactive or local-clone invocation, pass quickstart choices after
+the bootstrap options:
+
+```bash
+bash install.sh --agents both
+bash install.sh --agents cursor --cursor-with-hooks
+bash install.sh --agents all --cursor-with-hooks
+```
+
+Default app locations are `~/.local/share/latch/app` on Linux,
+`~/Library/Application Support/Latch/app` on macOS, and
+`%LOCALAPPDATA%\Latch\app` on Windows. Use `--install-dir PATH` or PowerShell
+`-InstallDir PATH` to choose another stable location. One installation serves
+many repos; rerun its `bin/latch_quickstart` wrapper from each project that
+should receive the agent contract.
+
+If you are developing Latch from this source checkout, the same path works
+without a remote download:
+
+```bash
+bash install.sh --install-dir "$PWD" --project /path/to/your/project --agents codex
+# Existing developer environments can continue to run bin/latch_quickstart directly.
 ```
 
 The initial quickstart defaults to available Claude/Codex history because no
 Cursor conversation exists yet. After opening a hooked Cursor conversation,
 run `/latch-seed`; Cursor uses only that exact hook-provided transcript.
-
-One latch clone can serve many repos. Run the quickstart again from each project
-repo where you want the agent behavior contract.
 
 ## First Value: Seed, Then Gate
 

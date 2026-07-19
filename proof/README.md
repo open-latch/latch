@@ -14,14 +14,14 @@ This packet combines one observed live gate receipt with two small, deterministi
 
 ## Observed live gate
 
-Captured with the `codex` backend on commit `6b115a84f3a8ac3dd401be7d076e04427c262c00`. This is a synthetic no-history fixture and used no personal conversation history.
+Captured with the `codex` backend on commit `f000758f4efd7af3c089023acfd0f6865de5e61b`. This is a synthetic no-history fixture and used no personal conversation history.
 
 ```text
 Request: Implement email sending by adding a Redis-backed background job queue.
 Recommendation: DO_NOT_PROCEED
-Summary: The request directly conflicts with the canonical decision to avoid a background job queue in this no-history demo app (id=1). Redis-backed background jobs are specifically named as the rejected path, while the allowed path is single-process behavior with an inline task runner if background work is needed.
-Risk if proceed: Adding Redis and a worker process would violate the install-light, easy-to-inspect demo constraint already decided for this app.
-Better next action: Implement email sending with an inline task runner and document that it is demo-only and single-process, per id=1.
+Summary: The request directly contradicts the canonical fixture decision (id=1): this no-history demo app must not add a background job queue, and the specifically rejected path is a Redis-backed background job queue. The allowed path is to keep the app single-process and use an inline task runner if background work is needed, documenting that limit.
+Risk if proceed: The demo app would become Redis- and worker-dependent, violating the install-light, easy-to-inspect constraint captured in the canonical decision.
+Better next action: Implement email sending through a single-process inline task runner and document its limitations instead of adding Redis or a worker process.
 Cited evidence:
 - id=1 decision status=canonical: No background job queue for the no-history demo app
 Worktree changed before/after gate: no
@@ -63,7 +63,7 @@ This deterministic fixture eval grades seed-report capture and filtering; it is 
 
 ## Reproduce
 
-The deterministic results were generated from commit `6b115a84f3a8ac3dd401be7d076e04427c262c00`.
+The deterministic results were generated from commit `f000758f4efd7af3c089023acfd0f6865de5e61b`.
 
 ```bash
 bash bin/latch_eval.sh

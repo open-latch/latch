@@ -1,8 +1,8 @@
 {
   "backend": "codex",
-  "better_next_action": "Implement email sending with an inline task runner and document that it is demo-only and single-process, per id=1.",
+  "better_next_action": "Implement email sending through a single-process inline task runner and document its limitations instead of adding Redis or a worker process.",
   "capture_command": "bash bin/latch_proof_packet.sh --capture-live --backend codex",
-  "captured_at_utc": "2026-07-16T03:43:09Z",
+  "captured_at_utc": "2026-07-17T14:01:45Z",
   "demo_kind": "synthetic_no_history_fixture",
   "evidence_nodes": [
     {
@@ -30,10 +30,10 @@
   "observed": true,
   "recommendation": "DO_NOT_PROCEED",
   "request": "Implement email sending by adding a Redis-backed background job queue.",
-  "risk_if_proceed": "Adding Redis and a worker process would violate the install-light, easy-to-inspect demo constraint already decided for this app.",
+  "risk_if_proceed": "The demo app would become Redis- and worker-dependent, violating the install-light, easy-to-inspect constraint captured in the canonical decision.",
   "schema_version": 2,
-  "source_commit": "6b115a84f3a8ac3dd401be7d076e04427c262c00",
-  "summary": "The request directly conflicts with the canonical decision to avoid a background job queue in this no-history demo app (id=1). Redis-backed background jobs are specifically named as the rejected path, while the allowed path is single-process behavior with an inline task runner if background work is needed.",
+  "source_commit": "f000758f4efd7af3c089023acfd0f6865de5e61b",
+  "summary": "The request directly contradicts the canonical fixture decision (id=1): this no-history demo app must not add a background job queue, and the specifically rejected path is a Redis-backed background job queue. The allowed path is to keep the app single-process and use an inline task runner if background work is needed, documenting that limit.",
   "tested_runtime_git_blobs": {
     ".gitattributes": "dfdb8b771ce07609491fa2e83698969fd917a135",
     "benchmarks/fixtures/wedge_v1.jsonl": "f32c5544a247c43490b5b84a6c4c4a057e91716b",
@@ -114,7 +114,7 @@
     "src/project_direction.py": "f1330dd15cec19082f800f9bfa259c090b1542d6",
     "src/proof_packet.py": "0aca4325c7e7d04212999bad253b8ce8b2d430a8",
     "src/public_release_check.py": "50ede3b90b5679c8583410250f4828eea2abcdd8",
-    "src/quickstart.py": "048e5024af5201cba2861d86d8a62e8cc275eb6e",
+    "src/quickstart.py": "f9bf3e280679618a56bfd02fde60b3fff1c73fb1",
     "src/rolling.py": "adfaf109a7d467feb62305cb66a7ec55f8c6dcd5",
     "src/schema.sql": "892cc6c0610306252595d69b3b06c3b6d6dbace5",
     "src/schema_version.py": "697a66ab704439e21143f935b76baa6ec0e24e11",

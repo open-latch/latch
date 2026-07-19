@@ -55,6 +55,49 @@ jobs:
           tests/test_cursor_session.py
           tests/test_windows_stdio.py
 
+  one-command-bootstrap-windows:
+    name: one-command-bootstrap (windows-latest)
+    runs-on: windows-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install test runner and pinned bootstrap runtime manager
+        run: python -m pip install pytest uv==0.11.28
+
+      - name: Test PowerShell and Git Bash fresh installs and reruns
+        shell: pwsh
+        run: >-
+          python -m pytest -q
+          tests/test_bootstrap_install.py::test_powershell_bootstrap_fresh_then_idempotent_on_windows
+          tests/test_bootstrap_install.py::test_powershell_iex_failure_preserves_session_and_environment
+          tests/test_bootstrap_install.py::test_git_bash_bootstrap_fresh_then_idempotent_on_windows
+
+  one-command-bootstrap-macos:
+    name: one-command-bootstrap (macos-latest Bash 3.2)
+    runs-on: macos-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install test runner
+        run: python -m pip install pytest
+
+      - name: Test the zero-argument stock Bash activation path
+        run: >-
+          python -m pytest -q
+          tests/test_bootstrap_install.py::test_posix_bootstrap_zero_quickstart_args_on_stock_macos_bash
+
   proof-packet-windows:
     name: proof-packet-contract (windows-latest)
     runs-on: windows-latest

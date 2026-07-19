@@ -179,6 +179,28 @@ def test_resolve_agents_accepts_cursor_and_all():
     print("PASS resolve_agents_accepts_cursor_and_all")
 
 
+def test_agent_preflight_reports_every_missing_selected_cli():
+    available = {"codex": "/usr/local/bin/codex"}
+    errors = qs.agent_preflight_errors(
+        ("claude", "codex", "cursor"),
+        which=lambda command: available.get(command),
+    )
+    _assert(len(errors) == 2, f"expected Claude and Cursor errors, got {errors}")
+    _assert(any("Claude Code CLI" in error for error in errors), errors)
+    _assert(any("Cursor Agent CLI" in error for error in errors), errors)
+    _assert(not any("Codex CLI" in error for error in errors), errors)
+    print("PASS agent_preflight_reports_every_missing_selected_cli")
+
+
+def test_agent_preflight_accepts_cursor_agent_alias():
+    errors = qs.agent_preflight_errors(
+        ("cursor",),
+        which=lambda command: "/bin/cursor-agent" if command == "cursor-agent" else None,
+    )
+    _assert(errors == [], f"cursor-agent alias should satisfy preflight: {errors}")
+    print("PASS agent_preflight_accepts_cursor_agent_alias")
+
+
 def test_resolve_agents_requires_choice_without_prompt_or_context():
     try:
         qs.resolve_agents("auto", env={}, is_tty=False)
@@ -243,6 +265,8 @@ if __name__ == "__main__":
     test_resolve_agents_requires_choice_noninteractive_even_with_context()
     test_resolve_agents_uses_detected_default_when_interactive()
     test_resolve_agents_accepts_cursor_and_all()
+    test_agent_preflight_reports_every_missing_selected_cli()
+    test_agent_preflight_accepts_cursor_agent_alias()
     test_resolve_agents_requires_choice_without_prompt_or_context()
     test_run_steps_stops_before_later_steps_on_failure()
     test_quickstart_seed_handoff_prints_once_noninteractive()
