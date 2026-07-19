@@ -17,6 +17,7 @@ from _common import log, project_cwd, read_hook_input, session_id, transcript_pa
 
 import budget
 import db
+import feeders
 import priorities
 from paths import KB_ROOT, is_disabled, is_in_compact, is_unlatched_mode
 
@@ -24,6 +25,7 @@ from paths import KB_ROOT, is_disabled, is_in_compact, is_unlatched_mode
 MAX_WORKSTREAMS = 5
 MAX_OPEN_QUESTIONS = 3
 MAX_BRIEFING_IDEAS = 5
+MAX_FEEDERS_PER_WORKSTREAM = 3
 
 # Below this many (non-stale) nodes the KB is treated as new, and the brief
 # leads with a short getting-started block so a first-time user gets value
@@ -287,6 +289,19 @@ def _build_briefing(
                 workstream_prio[int(wid)] = priorities.list_priorities(
                     conn, workstream_id=int(wid),
                 )
+            # Open feeders per workstream (KB 2299): the declared building
+            # blocks of each active goal, surfaced via intent edges and
+            # membership rather than text similarity.
+            workstream_feeders: dict[int, list[dict]] = {}
+            for ws in workstreams:
+                wid = ws.get("workstream_id") or ws.get("id")
+                if wid is None:
+                    continue
+                rows = feeders.open_feeders(
+                    conn, int(wid), limit=MAX_FEEDERS_PER_WORKSTREAM,
+                )
+                if rows:
+                    workstream_feeders[int(wid)] = rows
             # New-user detection: cheap COUNT(*), same connection. Drives the
             # getting-started block below.
             show_getting_started = db.node_count(conn) < NEW_USER_NODE_THRESHOLD
@@ -310,8 +325,12 @@ def _build_briefing(
         scoped_prio = [
             p for rows in workstream_prio.values() for p in rows
         ]
+        scoped_feeders = [
+            f for rows in workstream_feeders.values() for f in rows
+        ]
         for collection in (
             workstreams, open_qs, ideas, latest_progress, prio, scoped_prio,
+            scoped_feeders,
         ):
             surfaced_ids.extend(n["id"] for n in collection)
 
@@ -365,6 +384,15 @@ def _build_briefing(
             parts.append(f"- (id={ws['id']}){marker} **{ws['title']}**")
             parts.append(f"  {_one_line(ws['body'], n=320)}")
             wid = int(ws.get("workstream_id") or ws["id"])
+            feeds = workstream_feeders.get(wid, [])
+            if feeds:
+                parts.append(
+                    "  ↳ open feeders: " + "; ".join(
+                        f"(id={f['id']}, {f['kind']}) "
+                        f"{_one_line(str(f['title']), n=70)}"
+                        for f in feeds
+                    )
+                )
             parts.extend(
                 priorities.render_workstream_for_brief(
                     workstream_prio.get(wid, []),

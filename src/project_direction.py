@@ -19,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 import artifacts as artifact_store  # noqa: E402
 import db  # noqa: E402
+import feeders  # noqa: E402
 
 
 BACKLOG_KINDS = {"open_question", "idea"}
@@ -165,7 +166,9 @@ def _assemble_workstream(conn, ws: dict, *, member_limit: int) -> WorkstreamDire
     members = _workstream_members(conn, wid, limit=member_limit)
     connected = _connected_nodes(conn, wid, members)
     decisions = _governing_decisions(wid, members, connected)
-    backlog = _nodes_for_kinds(members, BACKLOG_KINDS)
+    backlog = _with_edge_feeders(
+        conn, wid, _nodes_for_kinds(members, BACKLOG_KINDS),
+    )
     constraints = _nodes_for_kinds(members, CONSTRAINT_KINDS)
     progress = _nodes_for_kinds(members, PROGRESS_KINDS)
     artifacts = _artifacts_for_nodes(conn, [wid, *[int(n["id"]) for n in members]])
@@ -288,6 +291,29 @@ def _nodes_for_kinds(nodes: list[dict], kinds: set[str]) -> list[DirectionNode]:
             kind=str(node["kind"]),
             title=str(node["title"]),
             status=str(node["status"]),
+        ))
+    return out
+
+
+def _with_edge_feeders(
+    conn,
+    workstream_id: int,
+    backlog: list[DirectionNode],
+) -> list[DirectionNode]:
+    """Extend the membership-derived backlog with declared-intent feeders:
+    nodes pointing at the workstream via advances/motivates/depends_on
+    (KB 2299). Membership rows are already covered by _nodes_for_kinds."""
+    present = {node.id for node in backlog}
+    out = list(backlog)
+    for row in feeders.open_feeders(conn, workstream_id):
+        if int(row["id"]) in present or row["via"] == "member":
+            continue
+        out.append(DirectionNode(
+            id=int(row["id"]),
+            kind=str(row["kind"]),
+            title=str(row["title"]),
+            status=str(row["status"]),
+            relation=str(row["via"]),
         ))
     return out
 
