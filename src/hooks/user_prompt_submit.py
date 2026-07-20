@@ -28,7 +28,9 @@ import sys
 import time
 from datetime import datetime, timezone
 
-from _common import hook_field, log, project_cwd, read_hook_input, session_id
+from _common import (
+    hook_field, log, project_cwd, read_hook_input, session_id, transcript_path,
+)
 
 import mcp_broker
 from paths import UNLATCHED_MESSAGE, is_disabled, is_in_compact, is_unlatched_mode
@@ -114,6 +116,29 @@ CORRECTION_SIGNAL = re.compile(
     re.IGNORECASE,
 )
 
+# The existing correction nudge above is deliberately broad because a false
+# positive is cheap. Automatic incident collection needs a narrower predicate:
+# direct corrections / repeated-breakage language only, with diagnostic
+# questions excluded. This predicate is evaluated only under the dev flag.
+_DETECTOR_CORRECTION_SIGNAL = re.compile(
+    r"(?:\b(?:that|this|your\s+(?:answer|claim|summary|result|implementation))\s+"
+    r"(?:is|was|'s)\s+(?:wrong|incorrect|inaccurate|outdated|stale|broken)\b|"
+    r"\b(?:you\s+are|you'?re)\s+(?:wrong|incorrect|mistaken)\b|"
+    r"\bi\s+already\s+told\s+you\b|"
+    r"\bstill\s+(?:broken|wrong|failing|not\s+working)\b|"
+    r"\byou\s+(?:missed|ignored|forgot)\s+(?:that|the|my)\b)",
+    re.IGNORECASE,
+)
+_DETECTOR_DIAGNOSTIC_QUESTION = re.compile(
+    r"(?:^\s*(?:what\s+is\s+wrong\s+with|is\s+this\s+wrong|"
+    r"could\s+this\s+be\s+wrong|can\s+this\s+be\s+wrong|"
+    r"do\s+you\s+think\b|can\s+you\s+(?:check|tell|verify)\b|"
+    r"tell\s+me\b|i\s+wonder\b)|"
+    r"\b(?:whether|if)\s+(?:this|that|it)\s+(?:is|was)\s+"
+    r"(?:wrong|incorrect|broken)\b)",
+    re.IGNORECASE,
+)
+
 # Deterministic standing-guideline scan (no LLM, sub-millisecond). When a prompt
 # reads like a sweeping/standing directive ("always …", "from now on …"), we
 # prepend a nudge offering to capture it as an overall or workstream priority
@@ -137,9 +162,14 @@ def main() -> int:
     payload = read_hook_input()
     sid = session_id(payload)
     cwd = project_cwd(payload)
+    tpath = transcript_path(payload)
     prompt = (hook_field(payload, "prompt", "user_prompt") or "").strip()
 
     correction_signal = bool(CORRECTION_SIGNAL.search(prompt))
+    detector_enabled = _detector_auto_enabled()
+    detector_correction_signal = (
+        _is_detector_correction(prompt) if detector_enabled else False
+    )
     guideline_signal = (
         bool(GUIDELINE_SIGNAL.search(prompt))
         and "kb_priority" not in prompt.lower()
@@ -167,6 +197,9 @@ def main() -> int:
             "cite_nudge": 0,
             "skip": "embed_daemon_unavailable",
         }
+        if detector_enabled:
+            log_entry["detector_correction_signal"] = detector_correction_signal
+            _set_detector_receipt_status(log_entry, [])
         log_entry["daemon_wake_requested"] = mcp_broker.request_daemon_start(cwd)
         mcp_broker.emit_lifecycle(
             "prompt_retrieval_degraded",
@@ -174,7 +207,12 @@ def main() -> int:
             wake_requested=bool(log_entry["daemon_wake_requested"]),
         )
         _write_log(cwd, log_entry)
-        context = _format_runtime_unavailable()
+        _queue_detector(cwd, sid, tpath, log_entry)
+        context = (
+            _format_detector_retrieval_context([], log_entry)
+            if detector_enabled
+            else _format_runtime_unavailable()
+        )
         nudge = _extra_nudges(correction_signal, guideline_signal)
         if nudge:
             context = nudge + "\n\n" + context
@@ -202,12 +240,16 @@ def main() -> int:
         "guideline_signal": guideline_signal,
         "cite_nudge": cite_count,
     }
+    if detector_enabled:
+        log_entry["detector_correction_signal"] = detector_correction_signal
 
     # Cheap early-outs that need no DB or model. The correction nudge is
     # independent of retrieval — emit it even when retrieval is skipped
     # (short prompts like "that's wrong" are exactly the case to catch).
     if not sid:
         log_entry["skip"] = "no_session_id"
+        if detector_enabled:
+            _set_detector_receipt_status(log_entry, [])
         _write_log(cwd, log_entry)
         nudge = _extra_nudges(correction_signal, guideline_signal, mc_directive, cite_directive)
         if nudge:
@@ -215,7 +257,10 @@ def main() -> int:
         return 0
     if not prompt or len(prompt.split()) < MIN_PROMPT_WORDS:
         log_entry["skip"] = "prompt_too_short"
+        if detector_enabled:
+            _set_detector_receipt_status(log_entry, [])
         _write_log(cwd, log_entry)
+        _queue_detector(cwd, sid, tpath, log_entry)
         nudge = _extra_nudges(correction_signal, guideline_signal, mc_directive, cite_directive)
         if nudge:
             _print_context(nudge)
@@ -231,7 +276,10 @@ def main() -> int:
         )
     except Exception as e:
         log_entry["error"] = f"{type(e).__name__}: {e}"
+        if detector_enabled:
+            _set_detector_receipt_status(log_entry, [])
         _write_log(cwd, log_entry)
+        _queue_detector(cwd, sid, tpath, log_entry)
         log(f"user_prompt_submit error: {e}")
         return 0
     elapsed_ms = (time.perf_counter() - t0) * 1000
@@ -243,9 +291,14 @@ def main() -> int:
         # damage (latency) is already done. Future tuning can decide whether
         # to drop the result instead.
 
+    if detector_enabled:
+        _set_detector_receipt_status(log_entry, injected)
     _write_log(cwd, log_entry)
+    _queue_detector(cwd, sid, tpath, log_entry)
 
-    if log_entry.get("skip") == "embed_daemon_unavailable":
+    if detector_enabled:
+        context = _format_detector_retrieval_context(injected, log_entry)
+    elif log_entry.get("skip") == "embed_daemon_unavailable":
         context = _format_runtime_unavailable()
     else:
         context = _format_injection(injected) if injected else _format_no_hits()
@@ -318,6 +371,8 @@ def _retrieve_and_inject(
 
         active_set = db.get_active_set(conn, session_id=sid, current_turn=turn)
         log_entry["active_set_size"] = len(active_set)
+        if _detector_auto_enabled():
+            log_entry["active_ids"] = sorted(int(n) for n in active_set)
 
         injected: list[dict] = []
         if is_drill:
@@ -331,6 +386,9 @@ def _retrieve_and_inject(
         # No-op if upsert_session is needed first.
         db.upsert_session(conn, sid, cwd, None)
         db.update_last_prompt_embedding(conn, sid, qblob)
+
+        if _detector_auto_enabled():
+            _freeze_detector_node_snapshots(conn, log_entry)
 
         return injected
     finally:
@@ -516,6 +574,43 @@ def _format_runtime_unavailable() -> str:
     )
 
 
+def _format_detector_retrieval_context(items: list[dict], log_entry: dict) -> str:
+    """Truthful dev-detector receipt surface; never conflates no-run with no-hit."""
+    status = log_entry.get("retrieval_status")
+    if status in {"unavailable", "error"}:
+        reason = log_entry.get("skip") or str(log_entry.get("error") or "runtime error").split(":", 1)[0]
+        return (
+            "## KB retrieval unavailable\n\n"
+            f"**Latch retrieval did not produce a result ({reason}).** This is "
+            "distinct from finding no relevant node. Actively query Latch and "
+            "treat the runtime state as degraded."
+        )
+    if status == "not_executed":
+        return (
+            "## KB retrieval not executed\n\n"
+            f"The per-prompt retrieval path did not run ({log_entry.get('skip') or 'unknown reason'}). "
+            "This is not evidence that the KB has no relevant result."
+        )
+    if status == "over_budget":
+        detail = _format_injection(items) if items else (
+            "No context was injected from the recorded top 10."
+        )
+        return (
+            "## KB retrieval completed over budget\n\n"
+            "The retrieval result below was produced, but the runtime exceeded "
+            f"the {HARD_BUDGET_MS} ms hook budget and is recorded as degraded.\n\n"
+            f"{detail}"
+        )
+    if items:
+        return _format_injection(items)
+    return (
+        "## KB hits — no context injected from the recorded top 10\n\n"
+        "Retrieval executed, but no candidate survived the current kind, active-set, "
+        "and similarity filters. This is a top-10 receipt boundary, not proof that "
+        "the KB has no relevant information. Actively query Latch before responding."
+    )
+
+
 def _format_correction_nudge() -> str:
     return (
         "## ⚠ Possible KB correction signal\n\n"
@@ -602,6 +697,113 @@ def _extra_nudges(
     return "\n\n".join(parts)
 
 
+def _is_detector_correction(prompt: str) -> bool:
+    """High-confidence dev-detector predicate, narrower than the nudge."""
+    # Ignore fenced code and quoted log/output lines so pasted failures do not
+    # become user-correction incidents.
+    scrubbed = re.sub(r"```.*?```", " ", prompt or "", flags=re.DOTALL)
+    scrubbed = "\n".join(
+        line for line in scrubbed.splitlines() if not line.lstrip().startswith(">")
+    ).strip()
+    if not scrubbed or _DETECTOR_DIAGNOSTIC_QUESTION.search(scrubbed):
+        return False
+    return bool(
+        _DETECTOR_CORRECTION_SIGNAL.search(scrubbed)
+        or re.search(
+            r"\b(?:that'?s|this\s+is)\s+(?:wrong|incorrect|broken|outdated)\b",
+            scrubbed,
+            re.IGNORECASE,
+        )
+    )
+
+
+def _set_detector_receipt_status(log_entry: dict, injected: list[dict]) -> str:
+    if log_entry.get("error"):
+        status = "error"
+    elif log_entry.get("skip") == "embed_daemon_unavailable":
+        status = "unavailable"
+    elif log_entry.get("skip"):
+        status = "not_executed"
+    elif log_entry.get("overran_budget"):
+        status = "over_budget"
+    elif injected:
+        status = "ok"
+    else:
+        status = "no_injection"
+    log_entry["retrieval_status"] = status
+    return status
+
+
+def _freeze_detector_node_snapshots(conn, log_entry: dict) -> None:
+    """Freeze ranked, injected, then bounded active nodes at event time."""
+    if not _detector_auto_enabled():
+        return
+    try:
+        import detector_snapshot
+
+        scores: dict[int, float] = {}
+        ids: list[int] = []
+        seen: set[int] = set()
+        for item in list(log_entry.get("raw_hits") or []) + list(log_entry.get("injected") or []):
+            if not isinstance(item, (list, tuple)) or not item:
+                continue
+            node_id = int(item[0])
+            if node_id not in seen:
+                seen.add(node_id)
+                ids.append(node_id)
+            if len(item) > 1 and item[1] is not None:
+                scores[node_id] = float(item[1])
+        for raw_id in log_entry.get("active_ids") or []:
+            node_id = int(raw_id)
+            if node_id not in seen:
+                seen.add(node_id)
+                ids.append(node_id)
+        log_entry["node_snapshots"] = detector_snapshot.snapshot_nodes(
+            conn,
+            ids,
+            scores=scores,
+            limit=32,
+        )
+        log_entry["node_snapshot_omitted_count"] = max(0, len(ids) - 32)
+    except Exception as exc:
+        # Truthful partial state: preserve the reason without breaking the hook.
+        log_entry["snapshot_status"] = f"unavailable:{type(exc).__name__}"
+
+
+def _queue_detector(
+    cwd: str, sid: str | None, tpath: str | None, log_entry: dict,
+) -> None:
+    """Queue one background trace only after the retrieval receipt is durable."""
+    if not _detector_auto_enabled() or not sid:
+        return
+    triggers: list[str] = []
+    if log_entry.get("detector_correction_signal"):
+        triggers.append("explicit_correction")
+    if log_entry.get("retrieval_status") in {"unavailable", "error", "over_budget"}:
+        triggers.append("runtime_degraded")
+    if not triggers:
+        return
+    try:
+        import detector_trigger
+
+        detector_trigger.queue(
+            project_path=cwd,
+            session_id=sid,
+            transcript_path=tpath,
+            prompt_hash=log_entry.get("prompt_hash"),
+            event_ts=log_entry.get("detector_event_ts") or log_entry.get("ts"),
+            trigger_types=triggers,
+            node_ids=[
+                int(s["id"])
+                for s in log_entry.get("node_snapshots") or []
+                if isinstance(s, dict) and s.get("id") is not None
+            ],
+            turn=log_entry.get("turn"),
+        )
+    except Exception as exc:
+        log(f"detector queue failed: {exc}")
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
@@ -620,6 +822,10 @@ def _write_log(cwd: str, entry: dict) -> None:
     """
     _load_log_runtime()
     try:
+        if _detector_auto_enabled():
+            # Durable event coordinate: this exact value is persisted in the
+            # receipt and handed to the detached worker after the append.
+            entry.setdefault("detector_event_ts", _detector_now_iso())
         log_utils.emit_event(
             LOG_STREAM, entry,
             project_path=cwd,
@@ -627,6 +833,20 @@ def _write_log(cwd: str, entry: dict) -> None:
         )
     except Exception as e:
         log(f"retrieve.log write failed: {e}")
+
+
+def _detector_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace(
+        "+00:00", "Z"
+    )
+
+
+def _detector_auto_enabled() -> bool:
+    adapter = os.environ.get("LATCH_ADAPTER", "").strip().lower()
+    return (
+        os.environ.get("LATCH_DEV_DETECTOR") == "1"
+        and adapter in {"", "claude-code", "claude_code"}
+    )
 
 
 if __name__ == "__main__":

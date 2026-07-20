@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import re
 import sys
 from pathlib import Path
 
@@ -86,6 +88,15 @@ def main() -> int:
         _cite_presence_check(sid, cwd, tpath)
     except Exception as e:
         log(f"stop hook cite-check error: {e}")
+
+    # Local dev detector: a bounded, deterministic authority assertion scan.
+    # No full trace or model call runs here; evidence is frozen and a detached
+    # worker joins the broader receipts after the hook returns.
+    if _detector_auto_enabled():
+        try:
+            _detector_authority_check(sid, cwd, tpath)
+        except Exception as e:
+            log(f"stop hook detector check error: {e}")
 
     return 0
 
@@ -178,6 +189,177 @@ def _last_assistant_text(tpath: str | None) -> str:
     except Exception:
         return last
     return last
+
+
+_CURRENT_NODE_REF = re.compile(
+    r"\b(?:(?:latch|kb)\s+node(?:\s+id)?\s*[=:]?\s*|"
+    r"node(?:\s+id)?\s*[=:]?\s*)(\d+)\b",
+    re.IGNORECASE,
+)
+_CURRENT_AUTHORITY_WORD = re.compile(
+    r"\b(current|canonical|authoritative|governing|live\s+path|active\s+decision)\b",
+    re.IGNORECASE,
+)
+_NONCURRENT_WORD = re.compile(
+    r"\b(not\s+current|noncurrent|stale|superseded|historical|old\s+path|"
+    r"abandoned|rejected|"
+    r"not\s+(?:currently\s+)?(?:the\s+)?(?:canonical|authoritative|governing|"
+    r"live\s+path|active\s+decision)|"
+    r"no\s+longer\s+(?:the\s+)?(?:current|canonical|authoritative|governing|"
+    r"live\s+path|active\s+decision)|"
+    r"(?:formerly|previously)\s+(?:the\s+)?(?:current|canonical|authoritative|"
+    r"governing|live\s+path|active\s+decision))\b",
+    re.IGNORECASE,
+)
+_NONASSERTIVE_AUTHORITY = re.compile(
+    r"(?:^\s*(?:is|are|was|were|can|could|would|should|do|does)\b|"
+    r"\b(?:if|whether|might|may|could|perhaps|possibly|maybe|"
+    r"cannot\s+tell|can'?t\s+tell|unclear|unknown|check|verify|determine)\b)",
+    re.IGNORECASE,
+)
+
+
+def _current_node_assertions(text: str, *, limit: int = 16) -> list[int]:
+    """IDs affirmatively asserted as current, excluding history/code/quotes."""
+    scrubbed = _scrub_authority_text(text)
+    found: list[int] = []
+    for sentence in re.split(r"(?<=[.!?])\s+|\n+", scrubbed):
+        if (
+            not _CURRENT_AUTHORITY_WORD.search(sentence)
+            or _NONCURRENT_WORD.search(sentence)
+            or _NONASSERTIVE_AUTHORITY.search(sentence)
+            or sentence.rstrip().endswith("?")
+        ):
+            continue
+        for match in _CURRENT_NODE_REF.finditer(sentence):
+            node_id = int(match.group(1))
+            if node_id not in found:
+                found.append(node_id)
+                if len(found) >= limit:
+                    return found
+    return found
+
+
+def _explicit_node_refs(text: str, *, limit: int = 32) -> list[int]:
+    """All explicit Latch/KB/node refs outside quoted or fenced material."""
+    found: list[int] = []
+    for match in _CURRENT_NODE_REF.finditer(_scrub_authority_text(text)):
+        node_id = int(match.group(1))
+        if node_id not in found:
+            found.append(node_id)
+            if len(found) >= limit:
+                break
+    return found
+
+
+def _scrub_authority_text(text: str) -> str:
+    scrubbed = re.sub(r"```.*?```", " ", text or "", flags=re.DOTALL)
+    return "\n".join(
+        line for line in scrubbed.splitlines() if not line.lstrip().startswith(">")
+    )
+
+
+def _detector_authority_check(sid: str, cwd: str, tpath: str | None) -> None:
+    if not _detector_auto_enabled():
+        return
+    text = _last_assistant_text(tpath)
+    node_ids = _current_node_assertions(text)
+    if not node_ids:
+        return
+    _load_runtime()
+    import detector_snapshot
+    import detector_trigger
+    import log_utils
+
+    conn = db.connect(cwd)
+    try:
+        snapshots = detector_snapshot.snapshot_nodes(conn, node_ids, limit=16)
+    finally:
+        conn.close()
+    cited_ids = set(_explicit_node_refs(text))
+    bad: list[dict] = []
+    for snap in snapshots:
+        if snap.get("authority") == "STALE":
+            bad.append(snap)
+        elif snap.get("authority") == "RECONCILED":
+            successors = {int(n) for n in snap.get("reconciled_by") or []}
+            if not successors.intersection(cited_ids):
+                bad.append(snap)
+    if not bad:
+        return
+    prompt_hash = _last_user_prompt_hash(tpath)
+    log_utils.emit_event(
+        "detector_trigger",
+        {
+            "prompt_hash": prompt_hash,
+            "triggers": ["corrected_node_cited_current"],
+            "assistant_hash": hashlib.sha1(
+                text.encode("utf-8", errors="replace")
+            ).hexdigest()[:12],
+            "node_snapshots": bad,
+        },
+        project_path=cwd,
+        session_id=sid,
+    )
+    detector_trigger.queue(
+        project_path=cwd,
+        session_id=sid,
+        transcript_path=tpath,
+        prompt_hash=prompt_hash,
+        trigger_types=["corrected_node_cited_current"],
+        node_ids=[int(s["id"]) for s in bad],
+    )
+
+
+def _detector_auto_enabled() -> bool:
+    adapter = os.environ.get("LATCH_ADAPTER", "").strip().lower()
+    return (
+        os.environ.get("LATCH_DEV_DETECTOR") == "1"
+        and adapter in {"", "claude-code", "claude_code"}
+    )
+
+
+def _last_user_prompt_hash(tpath: str | None) -> str | None:
+    """Hash the last human prompt from the same bounded transcript tail."""
+    if not tpath:
+        return None
+    p = Path(tpath)
+    if not p.exists():
+        return None
+    last = ""
+    try:
+        size = p.stat().st_size
+        with p.open("rb") as handle:
+            if size > _TRANSCRIPT_TAIL_BYTES:
+                handle.seek(size - _TRANSCRIPT_TAIL_BYTES)
+            raw = handle.read()
+        lines = raw.decode("utf-8", errors="replace").splitlines()
+        if size > _TRANSCRIPT_TAIL_BYTES and lines:
+            lines = lines[1:]
+        for line in lines:
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            msg = obj.get("message") if isinstance(obj.get("message"), dict) else None
+            role = (msg or {}).get("role") or obj.get("role") or obj.get("type")
+            if role != "user":
+                continue
+            content = (msg or obj).get("content")
+            # Tool-result-only user rows are not human prompts.
+            if isinstance(content, list) and content and all(
+                isinstance(block, dict) and block.get("type") == "tool_result"
+                for block in content
+            ):
+                continue
+            candidate = _extract_text(content)
+            if candidate.strip():
+                last = candidate
+    except Exception:
+        return None
+    if not last:
+        return None
+    return hashlib.sha1(last.encode("utf-8", errors="replace")).hexdigest()[:12]
 
 
 def _extract_text(content) -> str:

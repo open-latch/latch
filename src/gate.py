@@ -1720,6 +1720,14 @@ def run_gate(
         evidence=evidence,
         elapsed_ms=elapsed_ms,
     )
+    _maybe_queue_detector(
+        conn,
+        project_path=project_path,
+        session_id=session_id,
+        request=request,
+        verdict=verdict,
+        evidence=evidence,
+    )
 
     # Adversarial verdict layer (scope KB id=1343). PROCEED-only, default-off.
     # Advisory/side-note v1: rides along in verdict["adversary"]; the verdict
@@ -1806,6 +1814,16 @@ def _log_invocation(
             "evidence_type_counts": _evidence_type_histogram(verdict),
             "gap_type_counts": _gap_type_histogram(verdict),
         }
+        if _detector_auto_enabled():
+            entry.update({
+                "evidence_statuses": {
+                    str(e["id"]): e.get("status")
+                    for e in sorted(evidence, key=lambda x: x["id"])
+                },
+                "abandoned_paths": list(verdict.get("abandoned_paths") or []),
+                "active_constraints": list(verdict.get("active_constraints") or []),
+                "current_direction": list(verdict.get("current_direction") or []),
+            })
         # Raw query text is opt-in only (structural-only invariant, id=1108
         # §3): query_hash above is the correlation key, query_excerpt is a
         # local human-debug affordance. Default off; CLAUDE_KB_LOG_RAW_QUERY=1
@@ -1826,6 +1844,100 @@ def _log_invocation(
         pass
 
 
+def _maybe_queue_detector(
+    conn: sqlite3.Connection,
+    *,
+    project_path: str | None,
+    session_id: str | None,
+    request: str,
+    verdict: dict,
+    evidence: list[dict],
+) -> None:
+    """Freeze high-confidence gate triggers, then queue the offline trace.
+
+    Stale abandoned-path evidence is deliberately ignored. Only structured
+    current-direction authority and canonical active constraints participate.
+    """
+    if (
+        not _detector_auto_enabled()
+        or not project_path
+        or not session_id
+        or verdict.get("skipped")
+        or verdict.get("error")
+    ):
+        return
+    if not _is_claude_code_session(conn, session_id):
+        return
+    try:
+        import detector_snapshot
+        import detector_trigger
+        cited_ids = {int(e["id"]) for e in evidence}
+        abandoned = {int(n) for n in verdict.get("abandoned_paths") or []}
+        active_constraints = {
+            int(n) for n in verdict.get("active_constraints") or []
+            if int(n) in cited_ids and int(n) not in abandoned
+        }
+        current_direction = {
+            int(n) for n in verdict.get("current_direction") or []
+            if int(n) in cited_ids and int(n) not in abandoned
+        }
+        snapshot_ids = active_constraints | current_direction
+        if not snapshot_ids:
+            return
+        snapshots = detector_snapshot.snapshot_nodes(conn, sorted(snapshot_ids), limit=32)
+        by_id = {int(s["id"]): s for s in snapshots}
+        triggers: list[str] = []
+
+        if verdict.get("recommendation") in {"MODIFY", "DO_NOT_PROCEED"}:
+            canonical_conflicts = [
+                node_id for node_id in active_constraints
+                if by_id.get(node_id, {}).get("status") == "canonical"
+                and by_id.get(node_id, {}).get("authority") == "OK"
+            ]
+            if canonical_conflicts:
+                triggers.append("direct_authority_conflict")
+
+        stale_current: list[int] = []
+        for node_id in current_direction:
+            snap = by_id.get(node_id, {})
+            if snap.get("authority") == "STALE":
+                stale_current.append(node_id)
+            elif snap.get("authority") == "RECONCILED":
+                successors = {int(n) for n in snap.get("reconciled_by") or []}
+                if not successors.intersection(cited_ids):
+                    stale_current.append(node_id)
+        if stale_current:
+            triggers.append("corrected_node_cited_current")
+        if not triggers:
+            return
+
+        prompt_hash = _query_hash(request)
+        log_utils.emit_event(
+            "detector_trigger",
+            {
+                "prompt_hash": prompt_hash,
+                "triggers": sorted(triggers),
+                "gate_recommendation": verdict.get("recommendation"),
+                "active_constraints": sorted(active_constraints),
+                "current_direction": sorted(current_direction),
+                "abandoned_paths": sorted(abandoned),
+                "node_snapshots": snapshots,
+            },
+            project_path=project_path,
+            session_id=session_id,
+        )
+        detector_trigger.queue(
+            project_path=project_path,
+            session_id=session_id,
+            trigger_types=triggers,
+            prompt_hash=prompt_hash,
+            node_ids=snapshot_ids,
+        )
+    except Exception:
+        # Detector dogfood must never alter the gate verdict path.
+        return
+
+
 def _query_hash(request: str) -> str:
     """sha1[:12] of the request — the correlation key shared by gate.log and
     adversary.log so the offline correlator can join an adversary row back to
@@ -1833,6 +1945,28 @@ def _query_hash(request: str) -> str:
     return hashlib.sha1(
         request.encode("utf-8", errors="replace")
     ).hexdigest()[:12]
+
+
+def _detector_auto_enabled() -> bool:
+    adapter = os.environ.get("LATCH_ADAPTER", "").strip().lower()
+    return (
+        os.environ.get("LATCH_DEV_DETECTOR") == "1"
+        and adapter in {"", "claude-code", "claude_code"}
+    )
+
+
+def _is_claude_code_session(conn: sqlite3.Connection, session_id: str) -> bool:
+    """Require a persisted Claude Code transcript before auto-triggering gate."""
+    try:
+        row = conn.execute(
+            "SELECT transcript_path FROM sessions WHERE id = ?", (session_id,)
+        ).fetchone()
+    except sqlite3.Error:
+        return False
+    if not row or not row[0]:
+        return False
+    normalized = str(row[0]).replace("\\", "/")
+    return "/.claude/projects/" in normalized
 
 
 def _log_adversary(
