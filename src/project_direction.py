@@ -7,7 +7,7 @@ primitives into a workstream-centered view without adding a storage rebuild.
 from __future__ import annotations
 
 import argparse
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass
 import json
 import os
 from pathlib import Path
@@ -22,7 +22,6 @@ import db  # noqa: E402
 import feeders  # noqa: E402
 
 
-BACKLOG_KINDS = {"open_question", "idea"}
 DECISION_KINDS = {"decision"}
 CONSTRAINT_KINDS = {"preference"}
 PROGRESS_KINDS = {"progress"}
@@ -166,9 +165,7 @@ def _assemble_workstream(conn, ws: dict, *, member_limit: int) -> WorkstreamDire
     members = _workstream_members(conn, wid, limit=member_limit)
     connected = _connected_nodes(conn, wid, members)
     decisions = _governing_decisions(wid, members, connected)
-    backlog = _with_edge_feeders(
-        conn, wid, _nodes_for_kinds(members, BACKLOG_KINDS),
-    )
+    backlog = _feeder_backlog(conn, wid, member_limit=member_limit)
     constraints = _nodes_for_kinds(members, CONSTRAINT_KINDS)
     progress = _nodes_for_kinds(members, PROGRESS_KINDS)
     artifacts = _artifacts_for_nodes(conn, [wid, *[int(n["id"]) for n in members]])
@@ -298,41 +295,37 @@ def _nodes_for_kinds(nodes: list[dict], kinds: set[str]) -> list[DirectionNode]:
 EDGE_FEEDER_LIMIT = 5
 
 
-def _with_edge_feeders(
+def _feeder_backlog(
     conn,
     workstream_id: int,
-    backlog: list[DirectionNode],
+    *,
+    member_limit: int,
+    edge_limit: int = EDGE_FEEDER_LIMIT,
 ) -> list[DirectionNode]:
-    """Extend the membership-derived backlog with declared-intent feeders:
-    nodes pointing at the workstream via advances/motivates/depends_on
-    (KB 2299). Fetches the feeder set uncapped so member rows cannot crowd
-    edge feeders out of the shared newest-first ranking; EDGE_FEEDER_LIMIT
-    bounds only the appended edge-only rows. A node that is both a member
-    and an edge feeder keeps its backlog slot and gains the declared
+    """Backlog = the workstream's open feeders (KB 2299): unresolved
+    forward-looking members plus declared-intent edge feeders, from the same
+    `feeders.open_feeders` query the brief uses — one source of truth, so a
+    resolution edge hides a row everywhere at once. Member and edge rows are
+    capped independently so neither can crowd the other out; a node that is
+    both member and edge feeder appears once, carrying its declared
     relation."""
-    by_id = {node.id: node for node in backlog}
-    order = [node.id for node in backlog]
-    added = 0
+    member_rows: list[DirectionNode] = []
+    edge_rows: list[DirectionNode] = []
     for row in feeders.open_feeders(conn, workstream_id, limit=0):
-        nid = int(row["id"])
         via = str(row["via"])
-        if via == "member":
-            continue
-        if nid in by_id:
-            by_id[nid] = replace(by_id[nid], relation=via)
-            continue
-        if added >= EDGE_FEEDER_LIMIT:
-            continue
-        by_id[nid] = DirectionNode(
-            id=nid,
+        node = DirectionNode(
+            id=int(row["id"]),
             kind=str(row["kind"]),
             title=str(row["title"]),
             status=str(row["status"]),
-            relation=via,
+            relation=None if via == "member" else via,
         )
-        order.append(nid)
-        added += 1
-    return [by_id[nid] for nid in order]
+        if via == "member":
+            if len(member_rows) < member_limit:
+                member_rows.append(node)
+        elif len(edge_rows) < edge_limit:
+            edge_rows.append(node)
+    return [*member_rows, *edge_rows]
 
 
 def _artifacts_for_nodes(conn, node_ids: list[int]) -> list[DirectionArtifact]:

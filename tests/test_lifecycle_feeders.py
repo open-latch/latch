@@ -209,6 +209,29 @@ def test_project_direction_edge_feeders_survive_member_crowding(tmp_path):
     conn.close()
 
 
+def test_project_direction_backlog_hides_resolved_members(tmp_path):
+    _, conn = _mk_kb(tmp_path)
+    ws = _ws(conn)
+    db.set_focus(conn, ws)
+    resolved = db.insert_node(
+        conn, kind="open_question", title="already handled", body="x",
+        workstream_id=ws,
+    )
+    outcome = db.insert_node(conn, kind="progress", title="handled it", body="x")
+    db.add_edge(conn, outcome, resolved, "resolves")
+    open_member = db.insert_node(
+        conn, kind="open_question", title="still pending", body="x",
+        workstream_id=ws,
+    )
+
+    report = project_direction.assemble_project_direction(conn)
+    ws_row = next(r for r in report["workstreams"] if r["id"] == ws)
+    backlog_ids = {n["id"] for n in ws_row["backlog_items"]}
+    assert open_member in backlog_ids
+    assert resolved not in backlog_ids
+    conn.close()
+
+
 def test_project_direction_dual_member_edge_feeder_keeps_relation(tmp_path):
     _, conn = _mk_kb(tmp_path)
     ws = _ws(conn)
