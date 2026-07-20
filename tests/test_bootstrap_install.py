@@ -635,12 +635,20 @@ exit /b 43
     def ps_quote(value: str | Path) -> str:
         return "'" + str(value).replace("'", "''") + "'"
 
-    command = (
-        f"& {ps_quote(INSTALL_PS1)} -InstallDir {ps_quote(app)} "
-        f"-Project {ps_quote(project)} -Ref 'main' "
-        "-QuickstartArgs @('--agents','codex','--no-seed')"
-    )
-    def invoke_powershell():
+    def invoke_powershell(
+        *,
+        ref: str = "main",
+        project_path: Path = project,
+        dry_run: bool = False,
+    ):
+        dry_run_arg = " -DryRun" if dry_run else ""
+        command = (
+            f"try {{ & {ps_quote(INSTALL_PS1)} -InstallDir {ps_quote(app)} "
+            f"-Project {ps_quote(project_path)} -Ref {ps_quote(ref)}"
+            f"{dry_run_arg} "
+            "-QuickstartArgs @('--agents','codex','--no-seed') } "
+            "catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }"
+        )
         return run(
             shell,
             "-NoProfile",
@@ -651,6 +659,25 @@ exit /b 43
             cwd=project,
             env=env,
         )
+
+    missing_project = tmp_path / "missing-project"
+    missing = invoke_powershell(project_path=missing_project, dry_run=True)
+    assert missing.returncode != 0
+    assert (
+        f"latch install: project directory does not exist: {missing_project}"
+        in missing.stdout + missing.stderr
+    )
+    assert "Resolve-Path" not in missing.stdout + missing.stderr
+
+    project_file = tmp_path / "project-file"
+    project_file.write_text("not a directory\n", encoding="utf-8")
+    not_directory = invoke_powershell(project_path=project_file, dry_run=True)
+    assert not_directory.returncode != 0
+    assert (
+        f"latch install: project directory does not exist: {project_file}"
+        in not_directory.stdout + not_directory.stderr
+    )
+    assert "Resolve-Path" not in not_directory.stdout + not_directory.stderr
 
     first = invoke_powershell()
     assert first.returncode == 0, first.stdout + first.stderr
@@ -670,18 +697,16 @@ exit /b 43
     assert sum(line.startswith("venv ") for line in uv_calls) == 1
     assert sum(line.startswith("pip install ") for line in uv_calls) == 2
 
-    refused = run(
-        shell,
-        "-NoProfile",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-Command",
-        command.replace("-Ref 'main'", "-Ref 'different-ref'"),
-        cwd=project,
-        env=env,
-    )
+    refused = invoke_powershell(ref="different-ref")
     assert refused.returncode != 0
     assert "does not change an existing install" in refused.stdout + refused.stderr
+    assert git(app, "rev-parse", "HEAD") == git(origin, "rev-parse", "HEAD")
+    assert len(read_json_lines(Path(env["FAKE_QUICKSTART_LOG"]))) == 2
+
+    git(app, "config", "--local", "--unset", "latch.installRef")
+    unrecorded = invoke_powershell()
+    assert unrecorded.returncode != 0
+    assert "no recorded source ref" in unrecorded.stdout + unrecorded.stderr
     assert git(app, "rev-parse", "HEAD") == git(origin, "rev-parse", "HEAD")
     assert len(read_json_lines(Path(env["FAKE_QUICKSTART_LOG"]))) == 2
 
