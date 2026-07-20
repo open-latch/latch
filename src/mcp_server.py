@@ -1760,6 +1760,21 @@ def initialize_runtime(project_cwd: str, *, start_embed_listener: bool) -> None:
         _RUNTIME_INITIALIZED = True
 
 
+def prune_kb_tool_aliases(server: FastMCP) -> None:
+    """Hard-remove kb_* aliases for a trimmed-surface install (id=2224).
+
+    Runs ONLY on the legacy one-process-per-session fallback, where this
+    process serves exactly one install and its env is authoritative.  The
+    shared daemon must never call this: its registry serves every install on
+    the machine, so per-install trimming happens in ``mcp_proxy`` instead.
+    """
+    for tool in list(server._tool_manager.list_tools()):
+        if tool.name.startswith("kb_"):
+            server.remove_tool(tool.name)
+
+
 if __name__ == "__main__":
     initialize_runtime(PROJECT_CWD, start_embed_listener=True)
+    if (os.environ.get("LATCH_TOOL_SURFACE") or "").strip().lower() == "latch":
+        prune_kb_tool_aliases(mcp)
     mcp.run()

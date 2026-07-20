@@ -20,6 +20,7 @@ import sys
 import threading
 import time
 import uuid
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -109,6 +110,59 @@ def _message(line: bytes) -> dict[str, Any] | None:
     return value if isinstance(value, dict) else None
 
 
+# --------------------------------------------------------------------------- #
+# Tool-surface trim (KB decision id=2224): fresh installs advertise latch_*
+# only.  The shared daemon's registry serves EVERY install on the machine, so
+# it always keeps both name families; each install's surface is decided here,
+# in its own per-host proxy, from the env the host launched it with.  Existing
+# installs (no flag) pass every frame through byte-identical.
+# --------------------------------------------------------------------------- #
+TOOL_SURFACE_ENV = "LATCH_TOOL_SURFACE"
+_HIDDEN_TOOL_PREFIX = "kb_"
+
+
+def trimmed_tool_surface(env: Mapping[str, str] | None = None) -> bool:
+    """True when this install exposes the latch_* tool names only."""
+    source = os.environ if env is None else env
+    return (source.get(TOOL_SURFACE_ENV) or "").strip().lower() == "latch"
+
+
+def filter_tools_list_result(message: dict[str, Any]) -> dict[str, Any]:
+    """Drop kb_* aliases from a ``tools/list`` result.
+
+    Returns the original message object unchanged when nothing was filtered so
+    callers can preserve the exact daemon bytes on the passthrough path.
+    """
+    result = message.get("result")
+    tools = result.get("tools") if isinstance(result, dict) else None
+    if not isinstance(tools, list):
+        return message
+    kept = [
+        tool
+        for tool in tools
+        if not (
+            isinstance(tool, dict)
+            and str(tool.get("name") or "").startswith(_HIDDEN_TOOL_PREFIX)
+        )
+    ]
+    if len(kept) == len(tools):
+        return message
+    filtered = dict(message)
+    filtered["result"] = {**result, "tools": kept}
+    return filtered
+
+
+def rejected_kb_call(message: dict[str, Any]) -> str | None:
+    """The kb_* tool name a trimmed-surface install must reject, if any."""
+    if message.get("method") != "tools/call":
+        return None
+    params = message.get("params")
+    name = params.get("name") if isinstance(params, dict) else None
+    if isinstance(name, str) and name.startswith(_HIDDEN_TOOL_PREFIX):
+        return name
+    return None
+
+
 class ProxyBridge:
     def __init__(self, metadata: dict[str, Any]):
         self.metadata = metadata
@@ -127,6 +181,7 @@ class ProxyBridge:
         self._replay_id: Any = None
         self._deferred: list[bytes] = []
         self._pending: dict[Any, str] = {}
+        self._trimmed_surface = trimmed_tool_surface()
         self.retired = False
 
     def _stdin_reader(self) -> None:
@@ -228,6 +283,17 @@ class ProxyBridge:
     def _forward(self, line: bytes) -> None:
         message = _message(line)
         if message is not None:
+            if self._trimmed_surface:
+                rejected = rejected_kb_call(message)
+                if rejected is not None:
+                    if "id" in message:
+                        preferred = "latch_" + rejected[len(_HIDDEN_TOOL_PREFIX):]
+                        self._emit_request_error(
+                            message["id"],
+                            f"Tool {rejected!r} is not available on this install; "
+                            f"use {preferred!r} instead.",
+                        )
+                    return
             method = message.get("method")
             if method == "initialize" and "id" in message:
                 self._init_line = line
@@ -314,7 +380,18 @@ class ProxyBridge:
 
         if "id" in message and ("result" in message or "error" in message):
             request_id = message["id"]
-            self._pending.pop(request_id, None)
+            method = self._pending.pop(request_id, None)
+            if (
+                self._trimmed_surface
+                and method == "tools/list"
+                and "result" in message
+            ):
+                filtered = filter_tools_list_result(message)
+                if filtered is not message:
+                    self._emit(
+                        json.dumps(filtered, separators=(",", ":")).encode("utf-8")
+                    )
+                    return
         self._emit(line)
 
     def _read_daemon(self) -> None:

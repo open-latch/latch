@@ -189,8 +189,10 @@ def test_register_mcp_fresh_install_uses_latch_name():
         level, msg = ie.register_mcp("claude", "/PY", "/srv.py", dry_run=False)
         _assert(level == "OK", msg)
         _assert(["claude", "mcp", "add", "latch", "--scope", "user",
+                 "-e", "LATCH_TOOL_SURFACE=latch",
                  "--", "/PY", "/srv.py"] in seen,
-                f"fresh install should register latch, saw {seen}")
+                f"fresh install should register latch with the trimmed "
+                f"tool surface, saw {seen}")
         print("PASS register_mcp_fresh_install_uses_latch_name")
     finally:
         ie._run = old_run
