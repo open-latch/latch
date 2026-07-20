@@ -7,7 +7,7 @@ primitives into a workstream-centered view without adding a storage rebuild.
 from __future__ import annotations
 
 import argparse
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 import json
 import os
 from pathlib import Path
@@ -295,6 +295,9 @@ def _nodes_for_kinds(nodes: list[dict], kinds: set[str]) -> list[DirectionNode]:
     return out
 
 
+EDGE_FEEDER_LIMIT = 5
+
+
 def _with_edge_feeders(
     conn,
     workstream_id: int,
@@ -302,20 +305,34 @@ def _with_edge_feeders(
 ) -> list[DirectionNode]:
     """Extend the membership-derived backlog with declared-intent feeders:
     nodes pointing at the workstream via advances/motivates/depends_on
-    (KB 2299). Membership rows are already covered by _nodes_for_kinds."""
-    present = {node.id for node in backlog}
-    out = list(backlog)
-    for row in feeders.open_feeders(conn, workstream_id):
-        if int(row["id"]) in present or row["via"] == "member":
+    (KB 2299). Fetches the feeder set uncapped so member rows cannot crowd
+    edge feeders out of the shared newest-first ranking; EDGE_FEEDER_LIMIT
+    bounds only the appended edge-only rows. A node that is both a member
+    and an edge feeder keeps its backlog slot and gains the declared
+    relation."""
+    by_id = {node.id: node for node in backlog}
+    order = [node.id for node in backlog]
+    added = 0
+    for row in feeders.open_feeders(conn, workstream_id, limit=0):
+        nid = int(row["id"])
+        via = str(row["via"])
+        if via == "member":
             continue
-        out.append(DirectionNode(
-            id=int(row["id"]),
+        if nid in by_id:
+            by_id[nid] = replace(by_id[nid], relation=via)
+            continue
+        if added >= EDGE_FEEDER_LIMIT:
+            continue
+        by_id[nid] = DirectionNode(
+            id=nid,
             kind=str(row["kind"]),
             title=str(row["title"]),
             status=str(row["status"]),
-            relation=str(row["via"]),
-        ))
-    return out
+            relation=via,
+        )
+        order.append(nid)
+        added += 1
+    return [by_id[nid] for nid in order]
 
 
 def _artifacts_for_nodes(conn, node_ids: list[int]) -> list[DirectionArtifact]:

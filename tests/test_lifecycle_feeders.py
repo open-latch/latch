@@ -153,6 +153,79 @@ def test_session_brief_renders_open_feeders(tmp_path):
     assert "unresolved feeder" in brief
 
 
+def test_open_feeders_excludes_resolved_and_reopens_on_tombstone(tmp_path):
+    _, conn = _mk_kb(tmp_path)
+    ws = _ws(conn)
+    resolved_oq = db.insert_node(
+        conn, kind="open_question", title="answered elsewhere", body="x",
+        workstream_id=ws,
+    )
+    superseded_idea = db.insert_node(
+        conn, kind="idea", title="old direction", body="x", workstream_id=ws,
+    )
+    replaced_fact = db.insert_node(
+        conn, kind="fact", title="abandoned research", body="x",
+    )
+    db.add_edge(conn, replaced_fact, ws, "advances")
+    outcome = db.insert_node(conn, kind="progress", title="closed the loop", body="x")
+    db.add_edge(conn, outcome, resolved_oq, "resolves")
+    db.add_edge(conn, outcome, superseded_idea, "supersedes")
+    db.add_edge(conn, outcome, replaced_fact, "replaces")
+    still_open = db.insert_node(
+        conn, kind="open_question", title="still open", body="x",
+        workstream_id=ws,
+    )
+
+    # Resolution edges close feeders even though every node is still 'staging'.
+    ids = {r["id"] for r in feeders.open_feeders(conn, ws, limit=0)}
+    assert ids == {still_open}
+
+    # Tombstoning the resolution edge re-opens the feeder (audit-stable inverse).
+    db.tombstone_edge(conn, outcome, resolved_oq, "resolves")
+    ids = {r["id"] for r in feeders.open_feeders(conn, ws, limit=0)}
+    assert ids == {still_open, resolved_oq}
+    conn.close()
+
+
+def test_project_direction_edge_feeders_survive_member_crowding(tmp_path):
+    _, conn = _mk_kb(tmp_path)
+    ws = _ws(conn)
+    db.set_focus(conn, ws)
+    feeder_fact = db.insert_node(
+        conn, kind="fact", title="edge-only evidence", body="x",
+    )
+    db.add_edge(conn, feeder_fact, ws, "advances")
+    for i in range(feeders.DEFAULT_LIMIT + 1):
+        db.insert_node(
+            conn, kind="idea", title=f"member idea {i}", body="x",
+            workstream_id=ws,
+        )
+
+    report = project_direction.assemble_project_direction(conn)
+    ws_row = next(r for r in report["workstreams"] if r["id"] == ws)
+    by_id = {n["id"]: n for n in ws_row["backlog_items"]}
+    assert feeder_fact in by_id
+    assert by_id[feeder_fact]["relation"] == "advances"
+    conn.close()
+
+
+def test_project_direction_dual_member_edge_feeder_keeps_relation(tmp_path):
+    _, conn = _mk_kb(tmp_path)
+    ws = _ws(conn)
+    db.set_focus(conn, ws)
+    dual = db.insert_node(
+        conn, kind="idea", title="member with declared intent", body="x",
+        workstream_id=ws,
+    )
+    db.add_edge(conn, dual, ws, "motivates")
+
+    report = project_direction.assemble_project_direction(conn)
+    ws_row = next(r for r in report["workstreams"] if r["id"] == ws)
+    row = next(n for n in ws_row["backlog_items"] if n["id"] == dual)
+    assert row["relation"] == "motivates"
+    conn.close()
+
+
 def test_session_brief_surfaces_feeder_ids_for_dedupe(tmp_path):
     project, conn = _mk_kb(tmp_path)
     ws = _ws(conn)

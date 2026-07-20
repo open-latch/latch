@@ -24,8 +24,24 @@ import db  # noqa: E402
 # Edge relations that declare "X exists to serve Y". Synonyms are canonicalized
 # at insert time (db.canonicalize_relation), so raw equality is enough here.
 FEEDER_RELATIONS = ("advances", "motivates", "depends_on")
+# Incoming relations that close a feeder. Closure-duty writes these edges
+# without touching node status (the node may stay `staging` forever), so the
+# edge — not status — is the authoritative "this was resolved" signal.
+# Tombstoning the resolution edge re-opens the feeder: the audit-stable
+# inverse, never a delete.
+RESOLUTION_RELATIONS = ("resolves", "supersedes", "replaces")
 DEFAULT_LIMIT = 5
 CONTEXT_ROW_CAP = 10
+
+
+# Shared per-row predicate: no active incoming resolution edge. Interpolated
+# into queries where the candidate row is aliased `n`; binds RESOLUTION_RELATIONS.
+_NOT_RESOLVED_SQL = """NOT EXISTS (
+              SELECT 1 FROM edges res
+              WHERE res.dst = n.id
+                AND res.status = 'active'
+                AND res.relation IN (?, ?, ?)
+          )"""
 
 
 def open_feeders(
@@ -41,20 +57,25 @@ def open_feeders(
       * nodes with an active advances/motivates/depends_on edge into the
         workstream node — any kind except workstream, same resolved/stale
         exclusions.
+
+    A feeder with an active incoming resolves/supersedes/replaces edge is
+    closed and excluded regardless of its own status — closure-duty edges
+    land while the node is still `staging`.
     """
     members = conn.execute(
-        """
-        SELECT id, kind, title, status, workstream_id, updated_at
-        FROM nodes
-        WHERE workstream_id = ?
-          AND status != 'stale'
-          AND (kind = 'idea'
-               OR (kind = 'open_question' AND status != 'canonical'))
+        f"""
+        SELECT n.id, n.kind, n.title, n.status, n.workstream_id, n.updated_at
+        FROM nodes n
+        WHERE n.workstream_id = ?
+          AND n.status != 'stale'
+          AND (n.kind = 'idea'
+               OR (n.kind = 'open_question' AND n.status != 'canonical'))
+          AND {_NOT_RESOLVED_SQL}
         """,
-        (workstream_id,),
+        (workstream_id, *RESOLUTION_RELATIONS),
     ).fetchall()
     edge_rows = conn.execute(
-        """
+        f"""
         SELECT n.id, n.kind, n.title, n.status, n.workstream_id, n.updated_at,
                e.relation
         FROM edges e
@@ -65,8 +86,9 @@ def open_feeders(
           AND n.status != 'stale'
           AND n.kind != 'workstream'
           AND NOT (n.kind = 'open_question' AND n.status = 'canonical')
+          AND {_NOT_RESOLVED_SQL}
         """,
-        (workstream_id, *FEEDER_RELATIONS),
+        (workstream_id, *FEEDER_RELATIONS, *RESOLUTION_RELATIONS),
     ).fetchall()
 
     by_id: dict[int, dict] = {}
