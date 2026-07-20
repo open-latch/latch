@@ -1,8 +1,8 @@
 {
   "backend": "claude",
-  "better_next_action": "Implement email sending via an inline task runner inside the single process and document the limitation (e.g. sends block the request path, no retry durability), per the allowed path in id=1.",
+  "better_next_action": "Implement email sending with an inline task runner inside the single process, and document the throughput/durability limit as id=1 prescribes.",
   "capture_command": "bash bin/latch_proof_packet.sh --capture-live --backend claude",
-  "captured_at_utc": "2026-07-20T13:42:43Z",
+  "captured_at_utc": "2026-07-20T14:03:57Z",
   "demo_kind": "synthetic_no_history_fixture",
   "evidence_nodes": [
     {
@@ -30,10 +30,10 @@
   "observed": true,
   "recommendation": "MODIFY",
   "request": "Implement email sending by adding a Redis-backed background job queue.",
-  "risk_if_proceed": "Adding Redis plus a worker process directly unwinds the install-light, single-process constraint the decision exists to protect.",
+  "risk_if_proceed": "Adding Redis plus a worker process unwinds the install-light, single-process constraint the decision exists to protect, reintroducing exactly the rejected dependency.",
   "schema_version": 2,
-  "source_commit": "5d73064c4c1cff7c16d84063649d3462aa44f716",
-  "summary": "The canonical decision (id=1) explicitly rejects a Redis-backed background job queue for this app \u2014 the exact mechanism the request proposes \u2014 to keep the demo install-light and single-process. But the underlying goal, email sending, is not blocked: the same decision names the sanctioned path (inline task runner with a documented limit). Implement email sending; swap the mechanism.",
+  "source_commit": "254db177991acf9d13c3db6593f2800e3c299d09",
+  "summary": "The canonical decision (id=1) explicitly rejects a Redis-backed background job queue for this app \u2014 that is verbatim the rejected path \u2014 while naming the allowed path: keep the app single-process and use an inline task runner for background work, documenting the limit. The goal of email sending is fine; the mechanism is not. Implement email sending via an inline task runner (or synchronous send) with the limitation documented, not via Redis.",
   "tested_runtime_git_blobs": {
     ".gitattributes": "dfdb8b771ce07609491fa2e83698969fd917a135",
     "benchmarks/fixtures/wedge_v1.jsonl": "f32c5544a247c43490b5b84a6c4c4a057e91716b",
@@ -112,7 +112,7 @@
     "src/paths.py": "0eccd4fd75f15b24181bea4ed3a4135e8b941ded",
     "src/priorities.py": "02080741f80d21a678407097208b7e9c6ae10246",
     "src/profiles.py": "84599dc72c9bb32aca54b4779199474f3cc2adf7",
-    "src/project_direction.py": "303fff5bb2d91ece91c89375f3e2cbf7d571d046",
+    "src/project_direction.py": "2bf879fadd4b0906b224a74caf4777b21632cc8d",
     "src/proof_packet.py": "0aca4325c7e7d04212999bad253b8ce8b2d430a8",
     "src/public_release_check.py": "50ede3b90b5679c8583410250f4828eea2abcdd8",
     "src/quickstart.py": "f9bf3e280679618a56bfd02fde60b3fff1c73fb1",

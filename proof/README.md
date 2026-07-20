@@ -14,14 +14,14 @@ This packet combines one observed live gate receipt with two small, deterministi
 
 ## Observed live gate
 
-Captured with the `claude` backend on commit `5d73064c4c1cff7c16d84063649d3462aa44f716`. This is a synthetic no-history fixture and used no personal conversation history.
+Captured with the `claude` backend on commit `254db177991acf9d13c3db6593f2800e3c299d09`. This is a synthetic no-history fixture and used no personal conversation history.
 
 ```text
 Request: Implement email sending by adding a Redis-backed background job queue.
 Recommendation: MODIFY
-Summary: The canonical decision (id=1) explicitly rejects a Redis-backed background job queue for this app — the exact mechanism the request proposes — to keep the demo install-light and single-process. But the underlying goal, email sending, is not blocked: the same decision names the sanctioned path (inline task runner with a documented limit). Implement email sending; swap the mechanism.
-Risk if proceed: Adding Redis plus a worker process directly unwinds the install-light, single-process constraint the decision exists to protect.
-Better next action: Implement email sending via an inline task runner inside the single process and document the limitation (e.g. sends block the request path, no retry durability), per the allowed path in id=1.
+Summary: The canonical decision (id=1) explicitly rejects a Redis-backed background job queue for this app — that is verbatim the rejected path — while naming the allowed path: keep the app single-process and use an inline task runner for background work, documenting the limit. The goal of email sending is fine; the mechanism is not. Implement email sending via an inline task runner (or synchronous send) with the limitation documented, not via Redis.
+Risk if proceed: Adding Redis plus a worker process unwinds the install-light, single-process constraint the decision exists to protect, reintroducing exactly the rejected dependency.
+Better next action: Implement email sending with an inline task runner inside the single process, and document the throughput/durability limit as id=1 prescribes.
 Cited evidence:
 - id=1 decision status=canonical: No background job queue for the no-history demo app
 Worktree changed before/after gate: no
@@ -63,7 +63,7 @@ This deterministic fixture eval grades seed-report capture and filtering; it is 
 
 ## Reproduce
 
-The deterministic results were generated from commit `5d73064c4c1cff7c16d84063649d3462aa44f716`.
+The deterministic results were generated from commit `254db177991acf9d13c3db6593f2800e3c299d09`.
 
 ```bash
 bash bin/latch_eval.sh
