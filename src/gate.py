@@ -1884,6 +1884,9 @@ def _maybe_queue_detector(
         snapshot_ids = active_constraints | current_direction
         if not snapshot_ids:
             return
+        # snapshot_nodes holds a short SAVEPOINT on this shared gate connection
+        # so the authority batch has one read view. It always releases before
+        # detector logging/queueing and never commits the caller's transaction.
         snapshots = detector_snapshot.snapshot_nodes(conn, sorted(snapshot_ids), limit=32)
         by_id = {int(s["id"]): s for s in snapshots}
         triggers: list[str] = []

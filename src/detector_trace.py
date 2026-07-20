@@ -84,7 +84,8 @@ _ASSIGNMENT_SECRET_RE = re.compile(
 )
 _SECRET_KEY_RE = re.compile(
     r"(?i)(?:^|[_.-])(?:api[_-]?key|access[_-]?token|"
-    r"secret(?:[_-]?access[_-]?key)?|token|password|passwd|"
+    r"secret(?:[_-]?access[_-]?key)?|token|"
+    r"(?:(?:db|pg)[_-]?)?(?:pass(?:word|wd)?|pwd|cred(?:ential)?s?)|"
     r"authorization|auth)$"
 )
 _AUTH_HEADER_RE = re.compile(
@@ -639,8 +640,6 @@ def _select_exchange(
     subject = trigger
     if correction_trigger and trigger_pos > 0:
         subject = users[trigger_pos - 1]
-    elif previous and trigger_pos >= previous:
-        subject = users[trigger_pos]
 
     next_user_line = next(
         (u.line for u in users if u.line > subject.line),

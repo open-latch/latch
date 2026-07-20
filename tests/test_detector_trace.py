@@ -167,6 +167,31 @@ def test_explicit_correction_traces_previous_turn(tmp_path):
     assert packet["human_disposition"]["status"] == "unresolved"
 
 
+def test_previous_selects_one_earlier_exchange_without_double_shifting(tmp_path):
+    project, conn = _setup_project(tmp_path)
+    transcript = _write_transcript(tmp_path, [
+        ("user", "first prompt"),
+        ("assistant", "first answer"),
+        ("user", "second prompt"),
+        ("assistant", "second answer"),
+        ("user", "third prompt"),
+        ("assistant", "third answer"),
+    ])
+    db.upsert_session(conn, SID, project, str(transcript))
+    conn.close()
+
+    packet = detector_trace.build_trace(
+        project_path=project,
+        session_id=SID,
+        transcript_path=str(transcript),
+        previous=1,
+    )
+
+    assert packet["transcript_evidence"]["trigger_snippet"] == "second prompt"
+    assert packet["transcript_evidence"]["subject_prompt_snippet"] == "second prompt"
+    assert packet["transcript_evidence"]["assistant_snippet"] == "second answer"
+
+
 def test_missing_prompt_hash_never_falls_back_to_previous_exchange(tmp_path):
     project, conn = _setup_project(tmp_path)
     transcript = _write_transcript(tmp_path, [
@@ -414,7 +439,7 @@ def test_active_node_snapshot_survives_later_mutation(tmp_path, monkeypatch):
     assert snap["snapshot_source"] == "subject_retrieval"
 
 
-def test_snapshot_priority_preserves_ranked_and_high_id_event_nodes(tmp_path, monkeypatch):
+def test_prompt_snapshot_cap_preserves_ranked_and_high_id_event_nodes(tmp_path, monkeypatch):
     monkeypatch.setenv("LATCH_DEV_DETECTOR", "1")
     monkeypatch.delenv("LATCH_ADAPTER", raising=False)
     project, conn = _setup_project(tmp_path)
@@ -432,9 +457,10 @@ def test_snapshot_priority_preserves_ranked_and_high_id_event_nodes(tmp_path, mo
     conn.close()
     captured = [snap["id"] for snap in receipt["node_snapshots"]]
     assert captured[:10] == ranked
-    assert len(captured) == 32
+    assert len(captured) == ups._DETECTOR_PROMPT_SNAPSHOT_LIMIT == 16
     assert set(node_ids[20:25]).issubset(captured)
-    assert receipt["node_snapshot_omitted_count"] == 8
+    assert captured[-1] == node_ids[0]
+    assert receipt["node_snapshot_omitted_count"] == 24
 
 
 def test_write_time_redaction_and_projection_allowlist(tmp_path):
@@ -454,6 +480,8 @@ def test_write_time_redaction_and_projection_allowlist(tmp_path):
         "api_key=sk-supersecret123456 "
         "OPENAI_API_KEY=plainsecret123 GITHUB_TOKEN=plainsecret456 "
         "AWS_SECRET_ACCESS_KEY=abcdef0123456789 "
+        "DB_PASS=db-hunter2 PGPASS=pg-hunter2 DB_PWD=db-pwd-secret "
+        "SERVICE_CRED=service-credential-secret "
         "ghp_abcdefghijklmnopqrstuvwxyz xoxb-1234567890-secret "
         "password=hunter2 {\"password\": \"jsonhunter2\"} "
         "https://dbuser:dbpass@example.test/path "
@@ -464,6 +492,9 @@ def test_write_time_redaction_and_projection_allowlist(tmp_path):
     packet["structured_secret_probe"] = {
         "password": "structuredhunter2",
         "OPENAI_API_KEY": "structured-openai-key",
+        "PGPASSWORD": "structured-pg-password",
+        "SERVICE_CREDENTIAL": "structured-service-credential",
+        "AWS_CREDENTIALS": "structured-aws-credentials",
         "nested": {
             "authorization": "Basic c3RydWN0dXJlZA==",
             "secret": "structured-secret",
@@ -474,6 +505,10 @@ def test_write_time_redaction_and_projection_allowlist(tmp_path):
     for forbidden in (
         "abcdefghijklmnop", "dXNlcjpwYXNz", "sk-supersecret",
         "plainsecret123", "plainsecret456", "abcdef0123456789",
+        "db-hunter2", "pg-hunter2", "db-pwd-secret",
+        "service-credential-secret", "structured-pg-password",
+        "structured-service-credential",
+        "structured-aws-credentials",
         "ghp_abcdefghijklmnopqrstuvwxyz", "xoxb-1234567890-secret",
         "hunter2", "jsonhunter2", "dbuser", "dbpass",
         "AKIA" + "ABCDEFGHIJKLMNOP", "person@example.com",
@@ -482,6 +517,9 @@ def test_write_time_redaction_and_projection_allowlist(tmp_path):
     ):
         assert forbidden not in disk
     assert "<redacted" in disk
+    assert detector_trace.redact_text(
+        "compass=north bypass=allowed"
+    ) == "compass=north bypass=allowed"
 
     projection = json.dumps(packet["sanitized_projection"], sort_keys=True)
     for forbidden in (
@@ -916,6 +954,35 @@ def test_cli_requires_exact_dev_flag(tmp_path, monkeypatch, capsys):
     rc = detector_trace_cli.main(["detector", "review", "--project", str(tmp_path)])
     assert rc == 2
     assert json.loads(capsys.readouterr().out)["reason"] == "detector_disabled"
+
+
+def test_cli_reports_snapshot_churn_as_json(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("LATCH_DEV_DETECTOR", "1")
+    monkeypatch.setattr(
+        detector_trace,
+        "open_readonly",
+        lambda project: (_ for _ in ()).throw(
+            OSError("detector SQLite source changed during snapshot")
+        ),
+    )
+
+    rc = detector_trace_cli.main([
+        "detector",
+        "trace",
+        "--project",
+        str(tmp_path),
+        "--session-id",
+        SID,
+    ])
+
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert captured.err == ""
+    assert json.loads(captured.out) == {
+        "ok": False,
+        "reason": "snapshot_unavailable",
+        "detail": "detector SQLite source changed during snapshot",
+    }
 
 
 def test_unknown_trigger_is_not_copied_to_projection(tmp_path):

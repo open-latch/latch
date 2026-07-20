@@ -56,17 +56,25 @@ def main(argv: list[str]) -> int:
     if not sid:
         print(json.dumps({"ok": False, "reason": "session_id_required"}))
         return 2
-    packet = detector_trace.build_trace(
-        project_path=ns.project,
-        session_id=sid,
-        transcript_path=ns.transcript,
-        prompt_hash=ns.prompt_hash,
-        trigger_types=ns.trigger or ["manual_trace"],
-        event_ts=ns.event_ts,
-        node_ids=ns.node_id,
-        prompt_turn=ns.turn,
-        previous=ns.previous,
-    )
+    try:
+        packet = detector_trace.build_trace(
+            project_path=ns.project,
+            session_id=sid,
+            transcript_path=ns.transcript,
+            prompt_hash=ns.prompt_hash,
+            trigger_types=ns.trigger or ["manual_trace"],
+            event_ts=ns.event_ts,
+            node_ids=ns.node_id,
+            prompt_turn=ns.turn,
+            previous=ns.previous,
+        )
+    except OSError as exc:
+        print(json.dumps({
+            "ok": False,
+            "reason": "snapshot_unavailable",
+            "detail": str(exc),
+        }))
+        return 1
     print(json.dumps({"ok": True, "packet": packet}, default=str))
     return 0
 

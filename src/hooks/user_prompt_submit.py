@@ -52,6 +52,10 @@ DEPTH_KEYWORDS = re.compile(
     re.IGNORECASE,
 )
 HARD_BUDGET_MS = 250
+# Event-time snapshots are valuable detector evidence, but each node requires
+# several local authority queries. Keep this prompt-hook-only cap below the
+# offline trace cap so dev dogfood retains meaningful latency headroom.
+_DETECTOR_PROMPT_SNAPSHOT_LIMIT = 16
 # Windows process/DLL startup is materially slower than POSIX on the supported
 # hosts. Reserve it from the user-visible wall instead of letting the in-hook
 # retrieval deadline consume the entire 250 ms contract.
@@ -762,9 +766,11 @@ def _freeze_detector_node_snapshots(conn, log_entry: dict) -> None:
             conn,
             ids,
             scores=scores,
-            limit=32,
+            limit=_DETECTOR_PROMPT_SNAPSHOT_LIMIT,
         )
-        log_entry["node_snapshot_omitted_count"] = max(0, len(ids) - 32)
+        log_entry["node_snapshot_omitted_count"] = max(
+            0, len(ids) - _DETECTOR_PROMPT_SNAPSHOT_LIMIT
+        )
     except Exception as exc:
         # Truthful partial state: preserve the reason without breaking the hook.
         log_entry["snapshot_status"] = f"unavailable:{type(exc).__name__}"
