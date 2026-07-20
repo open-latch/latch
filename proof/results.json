@@ -1,8 +1,8 @@
 {
   "live_demo": {
-    "backend": "codex",
-    "better_next_action": "Implement email sending through a single-process inline task runner and document its limitations instead of adding Redis or a worker process.",
-    "captured_at_utc": "2026-07-17T14:01:45Z",
+    "backend": "claude",
+    "better_next_action": "Implement email sending via an inline task runner inside the single process and document the limitation (e.g. sends block the request path, no retry durability), per the allowed path in id=1.",
+    "captured_at_utc": "2026-07-20T13:42:43Z",
     "demo_kind": "synthetic_no_history_fixture",
     "evidence_nodes": [
       {
@@ -28,15 +28,15 @@
       "unchanged": true
     },
     "observed": true,
-    "recommendation": "DO_NOT_PROCEED",
+    "recommendation": "MODIFY",
     "request": "Implement email sending by adding a Redis-backed background job queue.",
-    "risk_if_proceed": "The demo app would become Redis- and worker-dependent, violating the install-light, easy-to-inspect constraint captured in the canonical decision.",
-    "source_commit": "f000758f4efd7af3c089023acfd0f6865de5e61b",
-    "summary": "The request directly contradicts the canonical fixture decision (id=1): this no-history demo app must not add a background job queue, and the specifically rejected path is a Redis-backed background job queue. The allowed path is to keep the app single-process and use an inline task runner if background work is needed, documenting that limit."
+    "risk_if_proceed": "Adding Redis plus a worker process directly unwinds the install-light, single-process constraint the decision exists to protect.",
+    "source_commit": "5d73064c4c1cff7c16d84063649d3462aa44f716",
+    "summary": "The canonical decision (id=1) explicitly rejects a Redis-backed background job queue for this app \u2014 the exact mechanism the request proposes \u2014 to keep the demo install-light and single-process. But the underlying goal, email sending, is not blocked: the same decision names the sanctioned path (inline task runner with a documented limit). Implement email sending; swap the mechanism."
   },
   "reproduction": {
     "check_packet": "bash bin/latch_proof_packet.sh --check",
-    "recapture_live_demo": "bash bin/latch_proof_packet.sh --capture-live --backend codex",
+    "recapture_live_demo": "bash bin/latch_proof_packet.sh --capture-live --backend claude",
     "seed_report_eval": "bash bin/latch_seed_report_eval.sh",
     "wedge_eval": "bash bin/latch_eval.sh"
   },
@@ -64,8 +64,8 @@
       "filtered": 4
     }
   },
-  "source_commit": "f000758f4efd7af3c089023acfd0f6865de5e61b",
-  "tested_runtime_manifest_sha256": "fdf3cc0e9daa50cf7951ca273857c45f401422546a55e518d86d5ff2bf519736",
+  "source_commit": "5d73064c4c1cff7c16d84063649d3462aa44f716",
+  "tested_runtime_manifest_sha256": "d64a5acfc15cc1a86dc65a643639a1bc1211f0973b6bd69930b8fa4ee462ff3a",
   "thesis": "Latch preserves project judgment and can surface a rejected path before an agent changes files.",
   "wedge_v1": {
     "baseline_boundary": "memory_like is an internal active-search-only ablation. It is not a benchmark of any third-party memory product.",

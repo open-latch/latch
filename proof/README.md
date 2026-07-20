@@ -8,20 +8,20 @@ This packet combines one observed live gate receipt with two small, deterministi
 
 | Evidence | Result | Meaning |
 | --- | ---: | --- |
-| Live pre-edit gate | `DO_NOT_PROCEED` | Cited canonical decision id=1; worktree unchanged |
+| Live pre-edit gate | `MODIFY` | Cited canonical decision id=1; worktree unchanged |
 | `wedge_v1` | 8/8 | `memory_like` passed 4/8; 4 latch-only wins |
 | Seed-report eval | 16/16 | Deterministic capture/filtering checks; zero model calls |
 
 ## Observed live gate
 
-Captured with the `codex` backend on commit `f000758f4efd7af3c089023acfd0f6865de5e61b`. This is a synthetic no-history fixture and used no personal conversation history.
+Captured with the `claude` backend on commit `5d73064c4c1cff7c16d84063649d3462aa44f716`. This is a synthetic no-history fixture and used no personal conversation history.
 
 ```text
 Request: Implement email sending by adding a Redis-backed background job queue.
-Recommendation: DO_NOT_PROCEED
-Summary: The request directly contradicts the canonical fixture decision (id=1): this no-history demo app must not add a background job queue, and the specifically rejected path is a Redis-backed background job queue. The allowed path is to keep the app single-process and use an inline task runner if background work is needed, documenting that limit.
-Risk if proceed: The demo app would become Redis- and worker-dependent, violating the install-light, easy-to-inspect constraint captured in the canonical decision.
-Better next action: Implement email sending through a single-process inline task runner and document its limitations instead of adding Redis or a worker process.
+Recommendation: MODIFY
+Summary: The canonical decision (id=1) explicitly rejects a Redis-backed background job queue for this app — the exact mechanism the request proposes — to keep the demo install-light and single-process. But the underlying goal, email sending, is not blocked: the same decision names the sanctioned path (inline task runner with a documented limit). Implement email sending; swap the mechanism.
+Risk if proceed: Adding Redis plus a worker process directly unwinds the install-light, single-process constraint the decision exists to protect.
+Better next action: Implement email sending via an inline task runner inside the single process and document the limitation (e.g. sends block the request path, no retry durability), per the allowed path in id=1.
 Cited evidence:
 - id=1 decision status=canonical: No background job queue for the no-history demo app
 Worktree changed before/after gate: no
@@ -63,7 +63,7 @@ This deterministic fixture eval grades seed-report capture and filtering; it is 
 
 ## Reproduce
 
-The deterministic results were generated from commit `f000758f4efd7af3c089023acfd0f6865de5e61b`.
+The deterministic results were generated from commit `5d73064c4c1cff7c16d84063649d3462aa44f716`.
 
 ```bash
 bash bin/latch_eval.sh
@@ -81,7 +81,7 @@ bash bin/latch_proof_packet.sh --check
 Recapturing the live receipt spends a model call and replaces the observed receipt only after it passes the proof checks:
 
 ```bash
-bash bin/latch_proof_packet.sh --capture-live --backend codex
+bash bin/latch_proof_packet.sh --capture-live --backend claude
 ```
 
 The machine-readable summary is in [`results.json`](./results.json), and the observed receipt is in [`live_gate_receipt.json`](./live_gate_receipt.json).
