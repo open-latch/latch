@@ -51,6 +51,30 @@ def test_json_cli_receipt_is_machine_readable(tmp_path: Path, capsys) -> None:
     assert payload["gate_invariant"].startswith("All tiers keep the same gate")
 
 
+def test_candidate_selection_matches_live_hook_policy() -> None:
+    candidates = [
+        {"id": 1, "kind": "fact", "score": 0.61},
+        {"id": 2, "kind": "decision", "score": 0.91},
+        {"id": 3, "kind": "idea", "score": 0.99},
+        {"id": 4, "kind": "progress", "score": 0.59},
+        {"id": 5, "kind": "fact", "score": 0.87},
+        {"id": 6, "kind": "decision", "score": 0.60},
+        {"id": 7, "kind": "fact", "score": 0.605},
+    ]
+    all_eligible = intensity_evals.prompt_hook._select_candidates(
+        candidates,
+        {2},
+        sim_floor=0.60,
+        max_inject=4,
+    )
+    assert [row["id"] for row in all_eligible] == [5, 1, 7, 6]
+
+    chosen = intensity_evals.prompt_hook._select_candidates(
+        candidates, {2}, sim_floor=0.60, max_inject=2,
+    )
+    assert [row["id"] for row in chosen] == [5, 1]
+
+
 def test_checked_in_receipt_matches_current_fixture_and_policy() -> None:
     fixture = ROOT / "benchmarks" / "fixtures" / "intensity_v1.jsonl"
     actual = intensity_evals.run(
@@ -60,24 +84,43 @@ def test_checked_in_receipt_matches_current_fixture_and_policy() -> None:
         (ROOT / "benchmarks" / "results" / "intensity_v1_receipt.json")
         .read_text(encoding="utf-8")
     )
-    assert receipt["fixture_sha256"] == actual["fixture_sha256"]
-    for tier in intensity_evals.TIERS:
-        expected = receipt["tiers"][tier]
-        current = actual["tiers"][tier]
-        assert expected == {
-            "labeled_reference_opportunities": current[
-                "labeled_reference_opportunities"
-            ],
-            "opportunities_with_expected_reference": current[
-                "opportunities_with_expected_reference"
-            ],
-            "prompt_context_chars": current["prompt_context_chars"],
-            "relative_rebuild_risk_weight": current[
-                "relative_rebuild_risk_weight"
-            ],
-            "relative_risk_weight_with_expected_reference": current[
-                "relative_risk_weight_with_expected_reference"
-            ],
-            "topic_similarity_checks": current["topic_similarity_checks"],
-            "vector_retrieval_runs": current["vector_retrieval_runs"],
-        }
+    assert receipt == intensity_evals.portable_receipt(actual)
+    assert "fixture" not in receipt
+    assert all("events" not in row for row in receipt["tiers"].values())
+
+
+def test_write_receipt_cli_emits_exact_portable_artifact(
+    tmp_path: Path, capsys, monkeypatch,
+) -> None:
+    fixture = ROOT / "benchmarks" / "fixtures" / "intensity_v1.jsonl"
+    destination = tmp_path / "results" / "receipt.json"
+    replacements: list[tuple[Path, Path]] = []
+    real_replace = intensity_evals.os.replace
+
+    def replace(source, target) -> None:
+        replacements.append((Path(source), Path(target)))
+        real_replace(source, target)
+
+    monkeypatch.setattr(intensity_evals.os, "replace", replace)
+    assert intensity_evals.main([
+        "--fixture", str(fixture), "--write-receipt", str(destination),
+    ]) == 0
+
+    actual = intensity_evals.run(
+        intensity_evals.load_events(fixture), fixture_path=fixture
+    )
+    rendered = destination.read_text(encoding="utf-8")
+    assert json.loads(rendered) == (
+        intensity_evals.portable_receipt(actual)
+    )
+    checked_in = (
+        ROOT / "benchmarks" / "results" / "intensity_v1_receipt.json"
+    )
+    assert rendered == checked_in.read_text(encoding="utf-8")
+    assert destination.read_bytes() == checked_in.read_bytes()
+    assert str(fixture) not in rendered
+    assert '"events"' not in rendered
+    assert rendered.endswith("\n")
+    assert replacements and replacements[-1][1] == destination
+    assert replacements[-1][0].parent == destination.parent
+    assert "Wrote portable receipt" in capsys.readouterr().out

@@ -193,7 +193,12 @@ def resolve_latch_intensity(
     input_fn: Callable[[str], str] = input,
     output_fn: Callable[[str], None] = print,
 ) -> tuple[str, str]:
-    """Resolve the saved tier, preserving legacy Full and prompting when possible."""
+    """Choose the tier quickstart will persist, prompting when possible.
+
+    A valid ``LATCH_INTENSITY`` is normally a process-scoped runtime override.
+    During quickstart it is also treated as an explicit installation choice;
+    an applying run writes the selected value to ``latch_settings.json``.
+    """
     values = os.environ if env is None else env
     raw_env = values.get("LATCH_INTENSITY")
     env_choice = None
@@ -224,8 +229,8 @@ def resolve_latch_intensity(
     ):
         _value, _source, warning = paths.latch_intensity_state(env={})
         raise ValueError(
-            f"cannot safely choose a tier while {paths.LATCH_SETTINGS_FILE} is "
-            f"invalid ({warning or 'missing a valid intensity'}); repair or remove "
+            f"cannot safely choose a tier because {warning or paths.LATCH_SETTINGS_FILE}; "
+            "repair or remove "
             "the file, then rerun quickstart"
         )
     if saved is not None:
@@ -266,6 +271,12 @@ def resolve_latch_intensity(
         "Scope: this intensity applies to every project and host using this "
         "Latch install."
     )
+    if env_choice is not None:
+        output_fn(
+            "LATCH_INTENSITY is normally a process-only override. Quickstart treats "
+            "this valid value as the requested install-wide choice and persists it "
+            f"to {paths.LATCH_SETTINGS_FILE} on apply; dry-run makes no change."
+        )
     if value is None and env_choice is None and is_tty:
         output_fn("")
         output_fn("How proactively should Latch surface project judgment?")
@@ -671,8 +682,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument("--last-sessions", type=int, default=50,
                     help="maximum sessions selected for initial-KB seeding (default: 50)")
     ap.add_argument("--latch-intensity", choices=paths.LATCH_INTENSITIES,
-                    help=("how proactively Latch surfaces project judgment; fresh installs "
-                          "default to standard and legacy installs preserve full"))
+                    help=("how proactively Latch surfaces project judgment; quickstart "
+                          "defaults genuinely fresh installs to standard, while a "
+                          "settings-less runtime retains legacy full"))
     ap.add_argument("--dry-run", action="store_true",
                     help="show the install/check/seed plan without writing anything")
     ap.add_argument("--skip-doctor", action="store_true",

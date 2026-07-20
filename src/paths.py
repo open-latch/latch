@@ -105,10 +105,13 @@ def latch_intensity_state(
     try:
         if path.is_file():
             data = json.loads(path.read_text(encoding="utf-8"))
-            raw_file = data.get("intensity") if isinstance(data, dict) else None
-            saved_value = normalize_latch_intensity(raw_file)
-            if saved_value is None:
-                saved_warning = f"invalid intensity in {path}"
+            if isinstance(data, dict) and "intensity" not in data:
+                saved_warning = f"missing intensity key in {path}"
+            else:
+                raw_file = data.get("intensity") if isinstance(data, dict) else None
+                saved_value = normalize_latch_intensity(raw_file)
+                if saved_value is None:
+                    saved_warning = f"invalid intensity value {raw_file!r} in {path}"
         elif path.exists() or path.is_symlink():
             saved_warning = f"{path} exists but is not a regular file"
     except (OSError, ValueError) as exc:

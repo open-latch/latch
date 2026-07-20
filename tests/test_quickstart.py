@@ -311,6 +311,7 @@ def test_intensity_interactive_copy_and_full_choice_are_honest(monkeypatch):
 def test_intensity_environment_override_is_effective_and_persistable(monkeypatch):
     monkeypatch.setattr(qs.paths, "configured_latch_intensity", lambda: "standard")
     monkeypatch.setattr(qs.paths, "kb_has_evidence", lambda _project: True)
+    output: list[str] = []
     selected, reason = qs.resolve_latch_intensity(
         None,
         project=Path("/tmp/project"),
@@ -320,10 +321,15 @@ def test_intensity_environment_override_is_effective_and_persistable(monkeypatch
         input_fn=lambda _prompt: (_ for _ in ()).throw(
             AssertionError("an explicit environment choice must not prompt")
         ),
-        output_fn=lambda _line: None,
+        output_fn=output.append,
     )
     _assert((selected, reason) == ("full", "environment override"),
             f"environment override not honored: {(selected, reason)}")
+    text = "\n".join(output)
+    _assert("normally a process-only override" in text, text)
+    _assert("requested install-wide choice" in text, text)
+    _assert("persists it" in text and "on apply" in text, text)
+    _assert("dry-run makes no change" in text, text)
 
 
 def test_intensity_conflicting_environment_and_cli_choice_is_rejected(monkeypatch):

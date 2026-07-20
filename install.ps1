@@ -18,7 +18,6 @@ param(
   [string]$InstallDir,
   [string]$Project = (Get-Location).Path,
   [string]$Ref = $(if ($env:LATCH_INSTALL_REF) { $env:LATCH_INSTALL_REF } else { "main" }),
-  [ValidateSet("quiet", "standard", "full")]
   [string]$LatchIntensity,
   [switch]$Upgrade,
   [switch]$DryRun,
@@ -27,6 +26,7 @@ param(
 )
 
 $RefWasExplicit = $PSBoundParameters.ContainsKey("Ref")
+$LatchIntensityWasExplicit = $PSBoundParameters.ContainsKey("LatchIntensity")
 $ErrorActionPreference = "Stop"
 $DefaultRepository = "https://github.com/open-latch/latch.git"
 $Repository = if ($env:LATCH_INSTALL_REPOSITORY) {
@@ -45,23 +45,8 @@ function Fail([string]$Message) {
 }
 
 function Note([string]$Message) {
-    Write-Host ""
-    Write-Host "==> $Message"
-}
-
-if ($LatchIntensity) {
-  $LatchIntensity = $LatchIntensity.ToLowerInvariant()
-}
-$forwardedIntensityArgs = @(
-  $QuickstartArgs | Where-Object {
-    $_ -eq "--latch-intensity" -or $_ -like "--latch-intensity=*"
-  }
-)
-if ($LatchIntensity -and $forwardedIntensityArgs.Count -gt 0) {
-  Fail("-LatchIntensity cannot be combined with --latch-intensity in -QuickstartArgs")
-}
-if ($forwardedIntensityArgs.Count -gt 1) {
-  Fail("pass --latch-intensity at most once in -QuickstartArgs")
+  Write-Host ""
+  Write-Host "==> $Message"
 }
 
 function Normalize-Repository([string]$Value) {
@@ -120,67 +105,6 @@ function Validate-Checkout([string]$App) {
     if (-not (Test-Path -LiteralPath (Join-Path $App $relative) -PathType Leaf)) {
       Fail("checkout is missing required Latch file: $relative")
     }
-  }
-}
-
-if (-not $InstallDir) {
-  $dataRoot = if ($env:LOCALAPPDATA) {
-    Join-Path $env:LOCALAPPDATA "Latch"
-  } elseif ($env:APPDATA) {
-    Join-Path $env:APPDATA "Latch"
-  } else {
-    Join-Path $HOME "AppData\Local\Latch"
-  }
-  $InstallDir = Join-Path $dataRoot "app"
-}
-if (-not (Test-Path -LiteralPath $Project -PathType Container)) {
-  Fail("project directory does not exist: $Project")
-}
-$Project = (Resolve-Path -LiteralPath $Project).Path
-if (-not [IO.Path]::IsPathRooted($InstallDir)) {
-  $InstallDir = Join-Path (Get-Location).Path $InstallDir
-}
-$InstallDir = [IO.Path]::GetFullPath($InstallDir)
-$InstallParent = Split-Path -Parent $InstallDir
-$UvDir = if ($env:LATCH_UV_DIR) { $env:LATCH_UV_DIR } else { Join-Path $InstallParent "bin" }
-
-if ($DryRun) {
-  Write-Host "Latch one-command bootstrap plan (no writes)"
-  Write-Host "  repository : $Repository"
-  Write-Host "  ref        : $Ref"
-  Write-Host "  install dir: $InstallDir"
-  Write-Host "  project    : $Project"
-  $mode = if (Test-Path -LiteralPath (Join-Path $InstallDir ".git")) {
-    if ($Upgrade) { "explicit upgrade" } else { "keep current revision and reconcile" }
-  } else {
-    "staged fresh checkout"
-  }
-  Write-Host "  source mode: $mode"
-  Write-Host "  runtime    : private uv + Python 3.11 virtual environment"
-  Write-Host "  activation : guided quickstart, checks, then consented initial-KB review"
-  $previewArgs = @()
-  if ($LatchIntensity) { $previewArgs += @("--latch-intensity", $LatchIntensity) }
-  $previewArgs += $QuickstartArgs
-  if ($previewArgs.Count -gt 0) {
-    Write-Host "  quickstart : $($previewArgs -join ' ')"
-  } else {
-    Write-Host "  quickstart : interactive choices / safe defaults"
-  }
-  return
-}
-
-if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
-  Fail("Git is required; install Git for Windows and rerun")
-}
-if ($RefWasExplicit -and -not $Upgrade -and
-    (Test-Path -LiteralPath (Join-Path $InstallDir ".git") -PathType Container)) {
-  Validate-Checkout $InstallDir
-  $installedRef = Get-InstalledRef $InstallDir
-  if (-not $installedRef) {
-    Fail("-Ref cannot verify this existing install because it has no recorded source ref; rerun without -Ref to reconcile or add -Upgrade explicitly")
-  }
-  if ($installedRef -ne $Ref) {
-    Fail("-Ref $Ref does not change an existing install recorded at $installedRef; add -Upgrade explicitly")
   }
 }
 
@@ -268,6 +192,91 @@ function Checkout-Source([string]$Target) {
   Invoke-Git -Arguments @("-C", $Target, "checkout", "--quiet", "--detach", "FETCH_HEAD") | Out-Null
   Validate-Checkout $Target
   Set-InstalledRef $Target $Ref
+}
+
+# Validate after helper definitions. A ValidateSet parameter attribute can fail
+# before this script runs when `irm ... | iex` reuses an empty caller-scope
+# variable named LatchIntensity.
+if ($LatchIntensityWasExplicit) {
+  if ([string]::IsNullOrWhiteSpace($LatchIntensity)) {
+    Fail("unsupported -LatchIntensity ''; choose quiet, standard, or full")
+  }
+  $LatchIntensity = $LatchIntensity.ToLowerInvariant()
+  if ($LatchIntensity -notin @("quiet", "standard", "full")) {
+    Fail("unsupported -LatchIntensity '$LatchIntensity'; choose quiet, standard, or full")
+  }
+}
+$forwardedIntensityArgs = @(
+  $QuickstartArgs | Where-Object {
+    $_ -eq "--latch-intensity" -or $_ -like "--latch-intensity=*"
+  }
+)
+if ($LatchIntensity -and $forwardedIntensityArgs.Count -gt 0) {
+  Fail("-LatchIntensity cannot be combined with --latch-intensity in -QuickstartArgs")
+}
+if ($forwardedIntensityArgs.Count -gt 1) {
+  Fail("pass --latch-intensity at most once in -QuickstartArgs")
+}
+
+if (-not $InstallDir) {
+  $dataRoot = if ($env:LOCALAPPDATA) {
+    Join-Path $env:LOCALAPPDATA "Latch"
+  } elseif ($env:APPDATA) {
+    Join-Path $env:APPDATA "Latch"
+  } else {
+    Join-Path $HOME "AppData\Local\Latch"
+  }
+  $InstallDir = Join-Path $dataRoot "app"
+}
+if (-not (Test-Path -LiteralPath $Project -PathType Container)) {
+  Fail("project directory does not exist: $Project")
+}
+$Project = (Resolve-Path -LiteralPath $Project).Path
+if (-not [IO.Path]::IsPathRooted($InstallDir)) {
+  $InstallDir = Join-Path (Get-Location).Path $InstallDir
+}
+$InstallDir = [IO.Path]::GetFullPath($InstallDir)
+$InstallParent = Split-Path -Parent $InstallDir
+$UvDir = if ($env:LATCH_UV_DIR) { $env:LATCH_UV_DIR } else { Join-Path $InstallParent "bin" }
+
+if ($DryRun) {
+  Write-Host "Latch one-command bootstrap plan (no writes)"
+  Write-Host "  repository : $Repository"
+  Write-Host "  ref        : $Ref"
+  Write-Host "  install dir: $InstallDir"
+  Write-Host "  project    : $Project"
+  $mode = if (Test-Path -LiteralPath (Join-Path $InstallDir ".git")) {
+    if ($Upgrade) { "explicit upgrade" } else { "keep current revision and reconcile" }
+  } else {
+    "staged fresh checkout"
+  }
+  Write-Host "  source mode: $mode"
+  Write-Host "  runtime    : private uv + Python 3.11 virtual environment"
+  Write-Host "  activation : guided quickstart, checks, then consented initial-KB review"
+  $previewArgs = @()
+  if ($LatchIntensity) { $previewArgs += @("--latch-intensity", $LatchIntensity) }
+  $previewArgs += $QuickstartArgs
+  if ($previewArgs.Count -gt 0) {
+    Write-Host "  quickstart : $($previewArgs -join ' ')"
+  } else {
+    Write-Host "  quickstart : interactive choices / safe defaults"
+  }
+  return
+}
+
+if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
+  Fail("Git is required; install Git for Windows and rerun")
+}
+if ($RefWasExplicit -and -not $Upgrade -and
+    (Test-Path -LiteralPath (Join-Path $InstallDir ".git") -PathType Container)) {
+  Validate-Checkout $InstallDir
+  $installedRef = Get-InstalledRef $InstallDir
+  if (-not $installedRef) {
+    Fail("-Ref cannot verify this existing install because it has no recorded source ref; rerun without -Ref to reconcile or add -Upgrade explicitly")
+  }
+  if ($installedRef -ne $Ref) {
+    Fail("-Ref $Ref does not change an existing install recorded at $installedRef; add -Upgrade explicitly")
+  }
 }
 
 New-Item -ItemType Directory -Path $InstallParent -Force | Out-Null

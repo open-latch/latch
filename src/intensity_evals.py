@@ -19,7 +19,9 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -35,12 +37,33 @@ import user_prompt_submit as prompt_hook  # noqa: E402
 
 
 DEFAULT_FIXTURE = paths.KB_ROOT / "benchmarks" / "fixtures" / "intensity_v1.jsonl"
+DEFAULT_RECEIPT = paths.KB_ROOT / "benchmarks" / "results" / "intensity_v1_receipt.json"
 TIERS = paths.LATCH_INTENSITIES
 CLAIM_BOUNDARY = (
     "Frozen synthetic policy scenarios, not measured hours, dollars, universal "
     "catch rates, or a retrieval-quality benchmark. Rebuild-risk units are "
     "relative fixture weights only. This vector/rank envelope omits graph "
     "drill-down and long-session active-set expiry."
+)
+RECEIPT_CLAIM_BOUNDARY = (
+    "Synthetic policy regression contract. Authored scores and relative risk "
+    "weights make the result true by construction; this is not measured "
+    "developer time, retrieval quality, or empirical rebuild savings."
+)
+RECEIPT_GATE_INVARIANT = "same gate check and configuration when invoked"
+RECEIPT_OMISSIONS = (
+    "graph drill-down",
+    "long-session active-set expiry",
+    "observed task reconstruction time",
+)
+RECEIPT_TIER_FIELDS = (
+    "labeled_reference_opportunities",
+    "opportunities_with_expected_reference",
+    "prompt_context_chars",
+    "relative_rebuild_risk_weight",
+    "relative_risk_weight_with_expected_reference",
+    "topic_similarity_checks",
+    "vector_retrieval_runs",
 )
 
 
@@ -165,7 +188,7 @@ def run(events: list[dict[str, Any]], *, fixture_path: Path | None = None) -> di
 def _run_tier(
     events: list[dict[str, Any]], *, tier: str, ref_ids: dict[str, int],
 ) -> dict:
-    active_by_session: dict[str, set[str]] = {}
+    active_by_session: dict[str, set[int]] = {}
     event_results: list[dict] = []
     topic_similarity_checks = 0
     vector_retrieval_runs = 0
@@ -193,16 +216,7 @@ def _run_tier(
                 prompt_hook.STANDARD_MAX_INJECT
                 if tier == "standard" else prompt_hook.MAX_INJECT
             )
-            candidates = sorted(
-                event["candidates"], key=lambda row: -float(row["score"])
-            )
-            selected = [
-                row for row in candidates
-                if row["kind"] not in prompt_hook.EXCLUDED_KINDS
-                and row["ref"] not in active
-                and float(row["score"]) >= floor
-            ][:limit]
-            chosen = [
+            candidates = [
                 {
                     "id": ref_ids[row["ref"]],
                     "ref": row["ref"],
@@ -210,9 +224,15 @@ def _run_tier(
                     "title": row["title"],
                     "score": float(row["score"]),
                 }
-                for row in selected
+                for row in event["candidates"]
             ]
-            active.update(row["ref"] for row in chosen)
+            chosen = prompt_hook._select_candidates(
+                candidates,
+                active,
+                sim_floor=floor,
+                max_inject=limit,
+            )
+            active.update(row["id"] for row in chosen)
 
         if chosen:
             context = prompt_hook._format_injection(chosen, intensity=tier)
@@ -223,7 +243,7 @@ def _run_tier(
         context_chars += len(context)
         injected_items += len(chosen)
 
-        expected = set(event["expected_refs"])
+        expected = {ref_ids[ref] for ref in event["expected_refs"]}
         reference_present = bool(expected) and expected <= active
         if reference_present:
             opportunities_with_reference += 1
@@ -263,6 +283,54 @@ def _run_tier(
         ),
         "events": event_results,
     }
+
+
+def portable_receipt(result: dict) -> dict:
+    """Project the full diagnostic result into the checked-in receipt schema.
+
+    The portable form intentionally excludes the machine-specific fixture
+    path and per-event diagnostics. Its fixture digest and aggregate policy
+    fields are sufficient for the repository's deterministic drift guard.
+    """
+    return {
+        "claim_boundary": RECEIPT_CLAIM_BOUNDARY,
+        "fixture_sha256": result["fixture_sha256"],
+        "gate_invariant": RECEIPT_GATE_INVARIANT,
+        "omissions": list(RECEIPT_OMISSIONS),
+        "schema_version": result["schema_version"],
+        "suite": result["suite"],
+        "tiers": {
+            tier: {
+                field: result["tiers"][tier][field]
+                for field in RECEIPT_TIER_FIELDS
+            }
+            for tier in TIERS
+        },
+    }
+
+
+def _write_text_atomic(path: Path, text: str) -> None:
+    """Atomically replace ``path`` with UTF-8 ``text`` in the same directory."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        target_mode = path.stat().st_mode & 0o777
+    except OSError:
+        target_mode = 0o644
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
+    tmp = Path(tmp_name)
+    try:
+        # Pin LF so --write-receipt is byte-for-byte reproducible on Windows
+        # as well as POSIX checkouts.
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(text)
+        os.chmod(tmp, target_mode)
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
 
 
 def _brief_caps() -> dict[str, dict[str, int]]:
@@ -321,22 +389,40 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--fixture", type=Path, default=DEFAULT_FIXTURE)
     parser.add_argument("--format", choices=("markdown", "json"), default="markdown")
-    parser.add_argument("--output", type=Path)
+    destination = parser.add_mutually_exclusive_group()
+    destination.add_argument("--output", type=Path)
+    destination.add_argument(
+        "--write-receipt",
+        nargs="?",
+        type=Path,
+        const=DEFAULT_RECEIPT,
+        metavar="PATH",
+        help=(
+            "atomically write the trimmed portable JSON receipt; defaults to "
+            "benchmarks/results/intensity_v1_receipt.json"
+        ),
+    )
     args = parser.parse_args(argv)
     try:
         events = load_events(args.fixture)
         result = run(events, fixture_path=args.fixture)
+        if args.write_receipt is not None:
+            rendered = json.dumps(
+                portable_receipt(result), indent=2, sort_keys=True
+            ) + "\n"
+            _write_text_atomic(args.write_receipt, rendered)
+            print(f"Wrote portable receipt: {args.write_receipt}")
+            return 0
+        rendered = (
+            json.dumps(result, indent=2, sort_keys=True) + "\n"
+            if args.format == "json" else render_markdown(result)
+        )
+        if args.output:
+            _write_text_atomic(args.output, rendered)
     except (OSError, IntensityEvalError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
-    rendered = (
-        json.dumps(result, indent=2, sort_keys=True) + "\n"
-        if args.format == "json" else render_markdown(result)
-    )
-    if args.output:
-        args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(rendered, encoding="utf-8")
-    else:
+    if not args.output:
         print(rendered, end="")
     return 0
 

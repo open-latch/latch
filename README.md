@@ -151,9 +151,17 @@ Host capabilities bound what intensity can change:
 | Cursor with hooks | Startup brief; the mechanical pre-edit gate remains enabled |
 | Cursor without hooks | No current intensity-controlled runtime surface; managed guidance remains unchanged |
 
-Fresh installs default to Standard. A settings-less install with existing KB
-evidence preserves the previously shipped Full behavior. You can choose Full
-non-interactively:
+Quickstart and the installers default a genuinely fresh install to Standard and
+save that choice in `latch_settings.json`. During quickstart, a settings-less
+install with existing KB evidence is treated as an older install and its
+previously shipped Full behavior is saved. A manually wired, settings-less
+runtime does not inspect KB evidence; it resolves to legacy Full.
+
+At ordinary runtime, `LATCH_INTENSITY` is a process-scoped override and does not
+edit the saved choice. If a valid `LATCH_INTENSITY` is present while quickstart
+runs, however, quickstart treats it as an explicit installation choice and
+persists it install-wide on apply. Unset it before quickstart if the override
+was only a temporary experiment. You can choose Full non-interactively:
 
 ```bash
 bash install.sh --agents both --latch-intensity full
@@ -182,11 +190,11 @@ policy regression contract, not a retrieval-quality benchmark, observed
 developer savings, or proof that the agent noticed or used the reference.
 Read the checked-in
 [`intensity_v1` receipt](./benchmarks/results/intensity_v1_receipt.json) or
-reproduce it with:
+regenerate that exact portable artifact atomically with:
 
 ```bash
-bash bin/latch_intensity_eval.sh
-# Windows: .\bin\latch_intensity_eval.ps1
+bash bin/latch_intensity_eval.sh --write-receipt
+# Windows: .\bin\latch_intensity_eval.ps1 --write-receipt
 ```
 
 The existing decision-evidence benchmark separately tests whether gate

@@ -538,6 +538,7 @@ def test_bootstrap_script_contracts_and_syntax():
     assert "LOCALAPPDATA" in powershell
     assert "-LatchIntensity cannot be combined" in powershell
     assert "$LatchIntensity.ToLowerInvariant()" in powershell
+    assert "choose quiet, standard, or full" in powershell
     workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
     assert "one-command-bootstrap-windows:" in workflow
     assert "runs-on: windows-latest" in workflow
@@ -632,11 +633,35 @@ exit /b 43
     )
     env = installer_env(tmp_path, origin, fake_uv)
     env["FAKE_SYSTEM_PYTHON"] = sys.executable
+    env["LOCALAPPDATA"] = str(tmp_path / "local-app-data")
     shell = shutil.which("pwsh") or shutil.which("powershell")
     assert shell, "Windows runner has no PowerShell executable"
 
     def ps_quote(value: str | Path) -> str:
         return "'" + str(value).replace("'", "''") + "'"
+
+    invalid_command = (
+        f"$source = Get-Content -LiteralPath {ps_quote(INSTALL_PS1)} -Raw; "
+        "try { & ([scriptblock]::Create($source)) -LatchIntensity '' -DryRun "
+        "} catch { Write-Host ('CAUGHT=' + $_.Exception.Message) }; "
+        "exit 0"
+    )
+    invalid = run(
+        shell,
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        invalid_command,
+        cwd=project,
+        env=env,
+    )
+    assert invalid.returncode == 0, invalid.stdout + invalid.stderr
+    assert (
+        "CAUGHT=latch install: unsupported -LatchIntensity ''; "
+        "choose quiet, standard, or full"
+    ) in invalid.stdout
+    assert not Path(env["LOCALAPPDATA"]).exists()
 
     def invoke_powershell(
         *,

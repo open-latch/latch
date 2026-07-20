@@ -94,6 +94,24 @@ def test_standard_same_topic_is_silent(monkeypatch, tmp_path: Path, capsys) -> N
     assert logs[-1]["intensity"] == "standard"
 
 
+def test_standard_suppresses_guideline_nudge(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    logs = _stub_main(
+        monkeypatch,
+        tmp_path,
+        intensity="standard",
+        prompt="always keep our database migrations backward compatible",
+    )
+    monkeypatch.setattr(ups.mcp_broker, "read_discovery", lambda: {"ready": True})
+    monkeypatch.setattr(ups, "_retrieve_and_inject", lambda *_args, **_kwargs: [])
+
+    assert ups.main() == 0
+    assert capsys.readouterr().out == ""
+    assert logs[-1]["guideline_signal"] is False
+    assert logs[-1]["context_chars"] == 0
+
+
 def test_standard_degraded_notice_is_short_and_visible(
     monkeypatch, tmp_path: Path, capsys
 ) -> None:

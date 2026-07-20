@@ -41,12 +41,20 @@ rules belong in `AGENTS.md` so the two surfaces do not repeat a full contract.
 Quiet, Standard, and Full change automatic surfacing, not the managed
 read/reconcile/gate/resolve/capture/report contract. The saved choice is
 install-wide and is resolved without process caching from
-`latch_settings.json`, with `LATCH_INTENSITY` as an explicit environment
-override. A missing setting preserves Full for older installs. A malformed
-saved setting falls back to Quiet; an invalid environment override uses a
-valid saved setting when one exists and otherwise falls back to Quiet.
-Quickstart rejects invalid explicit input, while status/doctor surface resolver
-warnings.
+`latch_settings.json`, with `LATCH_INTENSITY` as a process-scoped environment
+override during ordinary runtime. Quickstart and the installers default a
+genuinely fresh install to Standard and persist the selection. During
+quickstart only, existing KB evidence identifies a settings-less install as
+legacy and preserves Full. A manually wired runtime with no settings file does
+not inspect KB evidence and resolves to legacy Full.
+
+If a valid `LATCH_INTENSITY` is present while quickstart runs, quickstart treats
+it as an explicit installation choice and persists that value install-wide on
+apply; unset a temporary override before quickstart. A malformed saved setting,
+a missing `intensity` key, or an invalid saved value falls back to Quiet with a
+specific warning. An invalid environment override uses a valid saved setting
+when one exists and otherwise falls back to Quiet. Quickstart rejects invalid
+explicit input, while status/doctor surface resolver warnings.
 
 Claude Code can vary both its SessionStart brief and similarity-based
 UserPromptSubmit surfacing. Codex can vary its SessionStart brief but has no

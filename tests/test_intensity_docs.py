@@ -12,6 +12,15 @@ def test_readme_states_tier_tradeoffs_scope_and_evidence_boundary() -> None:
     assert "same-topic injection" in normalized
     assert "topic-similarity check on each eligible prompt" in normalized
     assert "install-wide" in normalized
+    assert (
+        "Quickstart and the installers default a genuinely fresh install" in normalized
+    )
+    assert (
+        "manually wired, settings-less runtime does not inspect KB evidence"
+        in normalized
+    )
+    assert "process-scoped override" in normalized
+    assert "persists it install-wide on apply" in normalized
     assert "Intensity controls hook-added briefs and prompt context" in normalized
     assert "same gate check and configuration run when invoked" in normalized
     assert "does **not** promise identical evidence, catches, or outcomes" in normalized
@@ -47,5 +56,9 @@ def test_contract_reference_keeps_intensity_out_of_gate_logic() -> None:
     assert "managed contract remains static at all tiers" in normalized
     assert "live Latch read before each response" in normalized
     assert "controls hook-added briefs and prompt context" in normalized
+    assert "process-scoped environment override during ordinary runtime" in normalized
+    assert "manually wired runtime with no settings file" in normalized
+    assert "persists that value install-wide on apply" in normalized
+    assert "missing `intensity` key" in normalized
     assert "Tier telemetry is observational" in normalized
     assert "When a supported prompt hook injects `## KB hits`" in normalized

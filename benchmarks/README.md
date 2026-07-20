@@ -75,7 +75,15 @@ measured hours, dollars, universal catch rates, or observed developer savings.
 The result is true by construction and acts as a policy regression contract,
 not empirical proof that Full prevents a particular amount of rebuild work. It
 models the vector/rank envelope but omits graph drill-down and long-session
-active-set expiry. The checked-in
+active-set expiry. Regenerate the checked-in portable receipt atomically with:
+
+```bash
+bash bin/latch_intensity_eval.sh --write-receipt
+# Windows: .\bin\latch_intensity_eval.ps1 --write-receipt
+```
+
+The receipt-emitting mode intentionally omits absolute fixture paths and
+per-event diagnostics. The checked-in
 [`intensity_v1` receipt](./results/intensity_v1_receipt.json) is guarded against
 fixture and aggregate-summary drift by the test suite. `wedge_v1` remains the
 separate evidence-assembly benchmark.

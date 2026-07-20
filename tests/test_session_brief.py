@@ -21,6 +21,7 @@ sys.path.insert(0, str(_SRC / "hooks"))
 import db  # noqa: E402
 import embeddings  # noqa: E402
 import budget  # noqa: E402
+import paths  # noqa: E402
 import session_start  # noqa: E402
 
 
@@ -161,6 +162,45 @@ def test_intensity_brief_policies_bound_surface_and_copy():
         _assert(full.count("**idea ") == 4, full)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_session_start_main_resolves_intensity_from_settings_file(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    project, conn = _fresh_db()
+    try:
+        for i in range(session_start.NEW_USER_NODE_THRESHOLD):
+            _mk(conn, kind="fact", title=f"background fact {i}")
+        for i in range(3):
+            _mk(
+                conn,
+                kind="workstream",
+                title=f"settings workstream {i}",
+                status="canonical",
+            )
+        conn.close()
+
+        settings = tmp_path / "latch_settings.json"
+        settings.write_text('{"intensity": "quiet"}\n', encoding="utf-8")
+        monkeypatch.setattr(paths, "LATCH_SETTINGS_FILE", settings)
+        monkeypatch.delenv("LATCH_INTENSITY", raising=False)
+        monkeypatch.setattr(session_start, "is_in_compact", lambda: False)
+        monkeypatch.setattr(session_start, "is_unlatched_mode", lambda: False)
+        monkeypatch.setattr(session_start, "is_disabled", lambda: False)
+        monkeypatch.setattr(session_start, "read_hook_input", lambda: {})
+        monkeypatch.setattr(session_start, "project_cwd", lambda _payload: project)
+        monkeypatch.setattr(session_start, "session_id", lambda _payload: None)
+        monkeypatch.setattr(session_start, "transcript_path", lambda _payload: None)
+        monkeypatch.setattr(session_start.budget, "brief_line", lambda _cwd: None)
+        monkeypatch.setattr(session_start, "_auto_sync_claude_md", lambda _cwd: None)
+
+        assert session_start.main() == 0
+        output = json.loads(capsys.readouterr().out)
+        brief = output["hookSpecificOutput"]["additionalContext"]
+        _assert("_Quiet:" in brief, brief)
+        _assert(brief.count("**settings workstream ") == 1, brief)
+    finally:
+        shutil.rmtree(project, ignore_errors=True)
 
 
 def test_brief_surfaces_ideas():

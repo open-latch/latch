@@ -64,6 +64,10 @@ HARD_BUDGET_MS = 250
 # hosts. Reserve it from the user-visible wall instead of letting the in-hook
 # retrieval deadline consume the entire 250 ms contract.
 SUBPROCESS_BUDGET_RESERVE_MS = 125 if os.name == "nt" else 25
+# Mission-control and cite-nudge safety reads may each encounter the writer.
+# Fifty milliseconds tolerates ordinary short transactions while bounding the
+# two-read worst case to 100 ms inside the prompt hook's 250 ms wall.
+LIGHT_DB_BUSY_TIMEOUT_SECONDS = 0.05
 LOG_STREAM = "retrieve"
 
 np = None
@@ -321,6 +325,30 @@ def _should_retrieve_for_intensity(intensity: str, topic_sim: float | None) -> b
     return True
 
 
+def _select_candidates(
+    candidates: list[dict],
+    active_set: set[int],
+    *,
+    sim_floor: float,
+    max_inject: int,
+) -> list[dict]:
+    """Apply the prompt hook's deterministic vector-selection policy.
+
+    Keep this pure: the frozen intensity eval calls the same seam as the live
+    vector path, so ranking, kind filtering, active-set dedupe, the similarity
+    floor, and the tier cap cannot quietly diverge between them. Equal scores
+    preserve the candidate source's order.
+    """
+    eligible = [
+        row for row in candidates
+        if row["kind"] not in EXCLUDED_KINDS
+        and row["id"] not in active_set
+        and float(row["score"]) >= sim_floor
+    ]
+    eligible.sort(key=lambda row: -float(row["score"]))
+    return eligible[:max_inject]
+
+
 def _retrieve_and_inject(
     cwd: str,
     sid: str,
@@ -452,13 +480,12 @@ def _vector_path(
     _load_runtime()
     raw = search.vector_search(conn, qvec=qvec, limit=TOP_K * 3, scope_repo=scope_repo)
     log_entry["raw_hits"] = [(r["id"], round(r["score"], 3), r["kind"]) for r in raw[:10]]
-    candidates = [
-        r for r in raw
-        if r["kind"] not in EXCLUDED_KINDS
-        and r["id"] not in active_set
-        and r["score"] >= sim_floor
-    ]
-    chosen = candidates[:max_inject]
+    chosen = _select_candidates(
+        raw,
+        active_set,
+        sim_floor=sim_floor,
+        max_inject=max_inject,
+    )
     log_entry["path"] = "vector"
     log_entry["filtered_out_kind"] = sum(
         1 for r in raw if r["kind"] in EXCLUDED_KINDS
@@ -598,6 +625,9 @@ def _format_no_hits() -> str:
 
 def _format_runtime_unavailable(intensity: str = "full") -> str:
     if intensity == "standard":
+        # Standard opts into a smaller prompt surface, so keep this degraded
+        # receipt to one plain paragraph. Full retains the prominent heading
+        # because its contract favors explicit per-prompt retrieval receipts.
         return (
             "Latch Standard could not run this prompt's topic-similarity check "
             "because the shared runtime is starting or unavailable, so it could "
@@ -688,7 +718,7 @@ def _open_existing_light_connection(cwd: str) -> sqlite3.Connection | None:
     path = db_path(cwd)
     if not path.is_file():
         return None
-    conn = sqlite3.connect(str(path), timeout=0.03)
+    conn = sqlite3.connect(str(path), timeout=LIGHT_DB_BUSY_TIMEOUT_SECONDS)
     conn.row_factory = sqlite3.Row
     return conn
 

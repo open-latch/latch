@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sqlite3
 import subprocess
 import sys
 from pathlib import Path
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -15,6 +18,34 @@ import paths  # noqa: E402
 import db  # noqa: E402
 import gate  # noqa: E402
 import intensity_cli  # noqa: E402
+
+
+def test_pytest_isolates_install_wide_intensity_settings() -> None:
+    assert paths.LATCH_SETTINGS_FILE != paths.KB_ROOT / "latch_settings.json"
+    assert not paths.LATCH_SETTINGS_FILE.exists()
+    assert os.environ["LATCH_INTENSITY"] == "full"
+
+
+def test_pytest_intensity_isolation_propagates_to_child_process(
+    tmp_path: Path,
+) -> None:
+    settings = tmp_path / "latch_settings.json"
+    settings.write_text('{"intensity": "standard"}\n', encoding="utf-8")
+    code = (
+        "import json, sys; from pathlib import Path; "
+        "sys.path.insert(0, str(Path.cwd() / 'src')); import paths; "
+        "paths.LATCH_SETTINGS_FILE = Path(sys.argv[1]); "
+        "print(json.dumps(paths.latch_intensity_state()))"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", code, str(settings)],
+        cwd=ROOT,
+        env=os.environ.copy(),
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    assert json.loads(proc.stdout) == ["full", "env", None]
 
 
 def test_missing_settings_preserve_legacy_full(tmp_path: Path) -> None:
@@ -57,6 +88,20 @@ def test_invalid_explicit_configuration_falls_back_with_warning(tmp_path: Path) 
     )
     assert (value, source) == ("standard", "settings")
     assert warning and "using saved standard" in warning
+
+
+def test_settings_without_intensity_key_fail_safe_with_specific_warning(
+    tmp_path: Path,
+) -> None:
+    settings = tmp_path / "latch_settings.json"
+    settings.write_text('{"future_key": 7}\n', encoding="utf-8")
+
+    value, source, warning = paths.latch_intensity_state(
+        env={}, settings_file=settings
+    )
+
+    assert (value, source) == ("quiet", "fallback")
+    assert warning and f"missing intensity key in {settings}" in warning
 
 
 def test_non_file_settings_path_fails_safe_with_warning(tmp_path: Path) -> None:
@@ -125,6 +170,7 @@ def test_gate_assembly_does_not_consult_intensity(tmp_path: Path, monkeypatch) -
         conn.close()
 
 
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash is required")
 def test_status_uses_the_runtime_resolver_for_whitespace_env() -> None:
     env = os.environ.copy()
     env["LATCH_HOME"] = str(ROOT)
@@ -139,6 +185,23 @@ def test_status_uses_the_runtime_resolver_for_whitespace_env() -> None:
         check=True,
     )
     assert "Latch intensity: Quiet (env)" in proc.stdout
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash is required")
+def test_status_leads_with_unlatched_state_before_intensity() -> None:
+    env = os.environ.copy()
+    env["LATCH_HOME"] = str(ROOT)
+    env["LATCH_PYTHON"] = sys.executable
+    env["LATCH_UNLATCHED"] = "1"
+    proc = subprocess.run(
+        ["bash", str(ROOT / "bin" / "latch_status.sh")],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    assert proc.stdout.index("[UNLATCHED]") < proc.stdout.index("Latch intensity:")
 
 
 def test_intensity_cli_set_json_is_machine_readable(

@@ -98,14 +98,19 @@ ${LATCH_HOME}/
     prompt but injects only on the first prompt and topic shifts, and Full
     retrieves and injects on every eligible prompt.
 - **Intensity.** The uncached install-wide choice lives in
-  `latch_settings.json`; `LATCH_INTENSITY` overrides it. Fresh quickstarts use
-  Standard, while settings-less installs with KB evidence preserve Full.
-  A malformed saved setting falls back to Quiet. An invalid environment
-  override uses a valid saved setting when present and otherwise falls back to
-  Quiet; quickstart rejects invalid explicit input. The setting changes
-  hook-added briefs and prompt context only. The static managed contract,
-  including its live read, remains the same; gate assembly and classification
-  do not consume intensity.
+  `latch_settings.json`; `LATCH_INTENSITY` is a process-scoped runtime
+  override. Quickstart and the installers default a genuinely fresh install to
+  Standard and persist the result. During quickstart only, existing KB evidence
+  makes a settings-less install preserve Full. A manually wired, settings-less
+  runtime does not inspect KB evidence and resolves to legacy Full. If a valid
+  `LATCH_INTENSITY` is present during quickstart, its value is persisted
+  install-wide on apply. A malformed saved setting, a missing `intensity` key,
+  or an invalid saved value falls back to Quiet with a specific warning. An
+  invalid environment override uses a valid saved setting when present and
+  otherwise falls back to Quiet; quickstart rejects invalid explicit input.
+  The setting changes hook-added briefs and prompt context only. The static
+  managed contract, including its live read, remains the same; gate assembly
+  and classification do not consume intensity.
 - **Decision-chain gate.** `kb_gate` assembles a chain of related
   nodes (decisions, abandoned paths, active constraints) for a coding
   request, then classifies the request as `PROCEED` / `MODIFY` /
