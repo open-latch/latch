@@ -54,7 +54,7 @@ def _write_gate_row(
     tmp: str, *, date_str: str = "2026-05-25", hour: int = 12, minute: int = 0,
     session_id: str | None = DEFAULT_SID, query_hash: str = "abc12345",
     recommendation: str = "PROCEED", evidence_ids: list[int] | None = None,
-    skipped: bool = False,
+    skipped: bool = False, intensity: str | None = "standard",
 ) -> dict:
     """Append a synthetic gate.log row to the daily file."""
     proj_dir = paths.project_dir(tmp)
@@ -79,6 +79,8 @@ def _write_gate_row(
         "elapsed_ms": 100.0,
         "budget_count": 0,
     }
+    if intensity is not None:
+        row["intensity"] = intensity
     with _gate_log_path(tmp, date_str).open("a", encoding="utf-8") as f:
         f.write(json.dumps(row) + "\n")
     return row
@@ -231,6 +233,30 @@ def test_proceed_with_no_insert_classifies_ambiguous():
         rows = _read_outcome_rows(tmp)
         _assert(rows[0]["outcome_category"] == "AMBIGUOUS", rows[0])
         print("PASS proceed_with_no_insert_classifies_ambiguous")
+    finally:
+        _cleanup(tmp, conn)
+
+
+def test_outcome_carries_source_gate_intensity():
+    tmp, conn = _fresh_db()
+    try:
+        _write_gate_row(tmp, recommendation="PROCEED", intensity="quiet")
+        correlator.correlate(tmp, date(2026, 5, 25), date(2026, 5, 25))
+        rows = _read_outcome_rows(tmp)
+        _assert(rows[0]["intensity"] == "quiet", rows[0])
+        print("PASS outcome_carries_source_gate_intensity")
+    finally:
+        _cleanup(tmp, conn)
+
+
+def test_outcome_marks_legacy_gate_intensity_unknown():
+    tmp, conn = _fresh_db()
+    try:
+        _write_gate_row(tmp, recommendation="PROCEED", intensity=None)
+        correlator.correlate(tmp, date(2026, 5, 25), date(2026, 5, 25))
+        rows = _read_outcome_rows(tmp)
+        _assert(rows[0]["intensity"] == "unknown", rows[0])
+        print("PASS outcome_marks_legacy_gate_intensity_unknown")
     finally:
         _cleanup(tmp, conn)
 
@@ -626,6 +652,8 @@ def test_emitted_rows_contain_no_forbidden_fields():
 if __name__ == "__main__":
     test_proceed_with_progress_insert_classifies_accepted()
     test_proceed_with_no_insert_classifies_ambiguous()
+    test_outcome_carries_source_gate_intensity()
+    test_outcome_marks_legacy_gate_intensity_unknown()
     test_modify_with_linked_insert_classifies_accepted()
     test_modify_with_insert_but_no_link_classifies_overridden()
     test_modify_with_no_insert_classifies_ambiguous()

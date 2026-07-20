@@ -23,8 +23,8 @@ project, and it refuses to downgrade a region written by a newer engine.
 
 ## Supported host surfaces
 
-The shared outcomes are the same across hosts, while enforcement and lifecycle
-mechanics follow each host's supported surface.
+The shared contract obligations are the same across hosts, while enforcement
+and lifecycle mechanics follow each host's supported surface.
 
 | Host | Always-loaded contract | Additional supported surfaces |
 | --- | --- | --- |
@@ -35,6 +35,31 @@ mechanics follow each host's supported surface.
 Cursor's always-applied rule should contain Cursor-only gate and operation
 receipt behavior. Shared read, authority, capture, write-hint, and compaction
 rules belong in `AGENTS.md` so the two surfaces do not repeat a full contract.
+
+## Intensity and host boundary
+
+Quiet, Standard, and Full change automatic surfacing, not the managed
+read/reconcile/gate/resolve/capture/report contract. The saved choice is
+install-wide and is resolved without process caching from
+`latch_settings.json`, with `LATCH_INTENSITY` as an explicit environment
+override. A missing setting preserves Full for older installs. A malformed
+saved setting falls back to Quiet; an invalid environment override uses a
+valid saved setting when one exists and otherwise falls back to Quiet.
+Quickstart rejects invalid explicit input, while status/doctor surface resolver
+warnings.
+
+Claude Code can vary both its SessionStart brief and similarity-based
+UserPromptSubmit surfacing. Codex can vary its SessionStart brief but has no
+similarity prompt hook. Cursor with hooks can vary its SessionStart brief while
+keeping its pre-edit gate; Cursor without hooks currently has no
+intensity-controlled runtime surface. The managed contract remains static at
+all tiers, including its live Latch read before each response. Intensity
+controls hook-added briefs and prompt context, not contract-driven tool use.
+
+When invoked, every tier uses the same gate check and configuration. Do not
+upgrade that into a claim of identical evidence, catches, or outcomes: prior
+automatic reads, evolving KB state, and model behavior can differ. Tier
+telemetry is observational and must not enter chain assembly or classification.
 
 ## Tool discovery
 
@@ -57,10 +82,10 @@ project unwired.
 
 ## Read authority
 
-Auto-injected `## KB hits` are similarity-ranked teasers. Fetch the actual node
-before using it as evidence. No silent Latch bypass is allowed: when a read
-returns no relevant rows, say so; never invent node ids, history, verdicts, or
-receipts.
+When a supported prompt hook injects `## KB hits`, they are similarity-ranked
+teasers. Fetch the actual node before using it as evidence. No silent Latch
+bypass is allowed: when a read returns no relevant rows, say so; never invent
+node ids, history, verdicts, or receipts.
 
 Every `latch_get` / `kb_get` result includes `reconciliation_banner`. A
 non-empty banner means the queried node remains true in its own scope but newer

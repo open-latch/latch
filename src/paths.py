@@ -30,6 +30,8 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
+import tempfile
 from pathlib import Path
 
 
@@ -58,9 +60,150 @@ UNLATCHED_MESSAGE = (
 # overrides it.
 KB_LOCATION_FILE = KB_ROOT / "kb_location.json"
 
+# User-selected prompt/brief intensity. Unlike the KB pin, this file is read
+# uncached: retiering should take effect for a long-lived MCP process without a
+# restart. Hooks are short-lived processes, but use the same resolver so every
+# surface agrees. A missing setting falls back to ``full`` to preserve older
+# installs. Invalid explicit configuration never silently escalates beyond a
+# valid saved choice; without one it fails safe to ``quiet`` and is surfaced by
+# doctor/status.
+LATCH_SETTINGS_FILE = KB_ROOT / "latch_settings.json"
+LATCH_INTENSITIES = ("quiet", "standard", "full")
+LEGACY_LATCH_INTENSITY = "full"
+FRESH_INSTALL_LATCH_INTENSITY = "standard"
+INVALID_LATCH_INTENSITY_FALLBACK = "quiet"
+
 # Lazily-resolved, cached pinned KB dir. Sentinel ``False`` = "not yet resolved"
 # (distinct from a resolved ``None`` meaning "no pin configured → legacy mode").
 _PINNED_DIR: "Path | None | bool" = False
+
+
+def normalize_latch_intensity(value: object) -> str | None:
+    """Return a canonical intensity name, or ``None`` for invalid input."""
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().lower()
+    return normalized if normalized in LATCH_INTENSITIES else None
+
+
+def latch_intensity_state(
+    *,
+    env: "dict[str, str] | os._Environ[str] | None" = None,
+    settings_file: Path | None = None,
+) -> tuple[str, str, str | None]:
+    """Resolve ``(intensity, source, warning)`` without caching.
+
+    Resolution order is ``LATCH_INTENSITY`` > ``latch_settings.json`` > the
+    legacy-preserving Full fallback. Invalid explicit configuration never
+    breaks a hook; a valid saved choice beats an invalid env override, otherwise
+    resolution fails safe to Quiet and returns a visible warning.
+    """
+    values = os.environ if env is None else env
+    path = settings_file or LATCH_SETTINGS_FILE
+    saved_value: str | None = None
+    saved_warning: str | None = None
+    try:
+        if path.is_file():
+            data = json.loads(path.read_text(encoding="utf-8"))
+            raw_file = data.get("intensity") if isinstance(data, dict) else None
+            saved_value = normalize_latch_intensity(raw_file)
+            if saved_value is None:
+                saved_warning = f"invalid intensity in {path}"
+        elif path.exists() or path.is_symlink():
+            saved_warning = f"{path} exists but is not a regular file"
+    except (OSError, ValueError) as exc:
+        saved_warning = f"could not read {path}: {exc}"
+
+    raw_env = values.get("LATCH_INTENSITY")
+    if raw_env is not None:
+        normalized = normalize_latch_intensity(raw_env)
+        if normalized is not None:
+            return normalized, "env", None
+        if saved_value is not None:
+            return (
+                saved_value,
+                "settings",
+                f"invalid LATCH_INTENSITY={raw_env!r}; using saved {saved_value}",
+            )
+        return (
+            INVALID_LATCH_INTENSITY_FALLBACK,
+            "fallback",
+            f"invalid LATCH_INTENSITY={raw_env!r}; using safe "
+            f"{INVALID_LATCH_INTENSITY_FALLBACK}",
+        )
+
+    if saved_value is not None:
+        return saved_value, "settings", None
+    if saved_warning is not None:
+        return (
+            INVALID_LATCH_INTENSITY_FALLBACK,
+            "fallback",
+            f"{saved_warning}; using safe {INVALID_LATCH_INTENSITY_FALLBACK}",
+        )
+
+    return LEGACY_LATCH_INTENSITY, "legacy_default", None
+
+
+def latch_intensity(
+    *,
+    env: "dict[str, str] | os._Environ[str] | None" = None,
+    settings_file: Path | None = None,
+) -> str:
+    """Return the effective uncached Quiet/Standard/Full intensity."""
+    return latch_intensity_state(env=env, settings_file=settings_file)[0]
+
+
+def latch_intensity_change_hint() -> str:
+    """Return install-root-qualified, copyable retier commands for doctors."""
+    shell_path = shlex.quote(str(KB_ROOT / "bin" / "latch_intensity.sh"))
+    ps_path = str(KB_ROOT / "bin" / "latch_intensity.ps1").replace("'", "''")
+    return f"change with bash {shell_path} (or & '{ps_path}' on Windows)"
+
+
+def configured_latch_intensity(settings_file: Path | None = None) -> str | None:
+    """Return the valid file-backed choice, excluding env/default fallbacks."""
+    path = settings_file or LATCH_SETTINGS_FILE
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    return normalize_latch_intensity(data.get("intensity"))
+
+
+def write_latch_intensity(value: str, settings_file: Path | None = None) -> Path:
+    """Atomically persist ``value`` while preserving unrelated settings keys."""
+    normalized = normalize_latch_intensity(value)
+    if normalized is None:
+        raise ValueError(
+            f"unsupported Latch intensity {value!r}; choose "
+            + ", ".join(LATCH_INTENSITIES)
+        )
+    path = settings_file or LATCH_SETTINGS_FILE
+    data: dict = {}
+    try:
+        current = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(current, dict):
+            data.update(current)
+    except (OSError, ValueError):
+        pass
+    data["intensity"] = normalized
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(data, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+    return path
 
 
 def _resolve_pinned_dir() -> Path | None:
@@ -215,6 +358,36 @@ def project_dir(cwd: str | os.PathLike | None = None) -> Path:
 
 def db_path(cwd: str | os.PathLike | None = None) -> Path:
     return project_dir(cwd) / "kb.db"
+
+
+def kb_has_evidence(cwd: str | os.PathLike | None = None) -> bool:
+    """Whether the selected KB already contains at least one durable node.
+
+    Used only by installer/retier UX to distinguish a genuinely fresh install
+    from an older install that predates ``latch_settings.json``. The read-only
+    SQLite URI avoids creating a database as a side effect.
+    """
+    import sqlite3
+
+    candidates = {db_path(cwd), KB_ROOT / "store" / "kb.db"}
+    try:
+        candidates.update(PROJECTS_ROOT.glob("*/kb.db"))
+    except OSError:
+        pass
+    for path in candidates:
+        if not path.is_file():
+            continue
+        try:
+            conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+            try:
+                row = conn.execute("SELECT 1 FROM nodes LIMIT 1").fetchone()
+                if row is not None:
+                    return True
+            finally:
+                conn.close()
+        except (OSError, sqlite3.Error):
+            continue
+    return False
 
 
 def ensure_project_dir(cwd: str | os.PathLike | None = None) -> Path:

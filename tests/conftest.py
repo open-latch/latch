@@ -9,6 +9,7 @@ id=1556). It never reads or writes the on-disk pin.
 Directly-executed test scripts (``python tests/test_x.py``) on a pinned machine
 are NOT hermetic unless that script ``import _isolation`` itself — run via pytest.
 """
+import os
 import sys
 from pathlib import Path
 
@@ -16,3 +17,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import _isolation  # noqa: F401,E402  (import side-effect: neutralizes the pin)
+
+# A documented install-wide override must not silently retier legacy tests that
+# are asserting the shipped Full behavior. Tests that exercise the override set
+# it explicitly or pass an env mapping to the resolver.
+os.environ.pop("LATCH_INTENSITY", None)

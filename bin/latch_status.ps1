@@ -10,6 +10,28 @@ $KbHome = if ($env:LATCH_HOME) { $env:LATCH_HOME } `
 
 Write-Host "latch status (KB_HOME=$KbHome)"
 
+$Python = if ($env:LATCH_PYTHON) { $env:LATCH_PYTHON } else { $env:CLAUDE_KB_PYTHON }
+if (-not $Python) {
+  foreach ($candidate in @(
+    (Join-Path $KbHome ".venv\Scripts\python.exe"),
+    (Join-Path $KbHome ".venv\bin\python")
+  )) {
+    if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+      $Python = $candidate
+      break
+    }
+  }
+}
+if (-not $Python) { $Python = "python" }
+try {
+  & $Python (Join-Path $KbHome "src\intensity_cli.py")
+  if ($LASTEXITCODE -gt 1) {
+    Write-Host "  warning: intensity status command exited $LASTEXITCODE; kill-switch status follows"
+  }
+} catch {
+  Write-Host "Latch intensity: unavailable (could not run src\intensity_cli.py)"
+}
+
 $disable = Join-Path $KbHome "DISABLE"
 $unlatched = Join-Path $KbHome "UNLATCHED"
 $disableWrite = Join-Path $KbHome "DISABLE_WRITE"

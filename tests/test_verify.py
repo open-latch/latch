@@ -353,6 +353,7 @@ def test_correction_log_header_and_structural_only():
             _assert(key in r, f"missing header field {key!r}: {r}")
         _assert(r["event_type"] == "correction", r)
         _assert(r["session_id"] == "sess-hdr", r)
+        _assert(r["intensity"] in {"quiet", "standard", "full"}, r)
         _assert(r["trigger"] == verify.TRIGGER_USER_ASSERTION, r)
         _assert(r["prompt_hash"] == "abc123def456", r)
         # Structural-only: no titles, bodies, or free text anywhere in the row.

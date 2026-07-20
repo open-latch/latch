@@ -56,6 +56,30 @@ beats the `memory_like` baseline on cases that require stale rejected paths,
 reconciliation context, or explicit rationale, and whether ablations show what
 capability caused the win.
 
+## Intensity policy envelope
+
+`intensity_v1` is a separate frozen synthetic fixture for the Quiet, Standard,
+and Full prompt-surfacing policies. It reports whether an expected guardrail
+reference is present in ambient context, lightweight topic-similarity checks,
+vector retrieval runs, relative scenario weights, and exact formatted
+prompt-context characters:
+
+```bash
+bash bin/latch_intensity_eval.sh
+# Windows: .\bin\latch_intensity_eval.ps1
+```
+
+It does not load an embedding model or grade retrieval quality. Candidate
+scores and relative rebuild-risk units are authored fixture inputs, not
+measured hours, dollars, universal catch rates, or observed developer savings.
+The result is true by construction and acts as a policy regression contract,
+not empirical proof that Full prevents a particular amount of rebuild work. It
+models the vector/rank envelope but omits graph drill-down and long-session
+active-set expiry. The checked-in
+[`intensity_v1` receipt](./results/intensity_v1_receipt.json) is guarded against
+fixture and aggregate-summary drift by the test suite. `wedge_v1` remains the
+separate evidence-assembly benchmark.
+
 Private/user-provided examples should be anonymized before they enter public
 fixtures. Keep raw transcript paths, project names, and domain-specific details
 out of the repo unless the fixture pack is intentionally private. The sanitized

@@ -27,7 +27,9 @@ ${LATCH_HOME}/
 ├── claude_md_snippet.md      # template block for each project's CLAUDE.md
 ├── src/
 │   ├── schema.sql            # SQLite schema (nodes, edges, sessions, FTS)
-│   ├── paths.py              # CWD -> per-project KB path
+│   ├── paths.py              # pinned/shared KB selection + legacy CWD fallback
+│   ├── intensity_cli.py      # install-wide Quiet/Standard/Full selector
+│   ├── intensity_evals.py    # frozen tier policy/cost envelope eval
 │   ├── db.py                 # SQLite helpers
 │   ├── embeddings.py         # local ONNX MiniLM embedder (vendored all-MiniLM-L6-v2)
 │   ├── search.py             # hybrid FTS + cosine retrieval
@@ -53,19 +55,22 @@ ${LATCH_HOME}/
 │       ├── stop.py           # turn counter + auto-compact every 5 turns
 │       ├── session_end.py    # final compact + promote to canonical
 │       ├── session_start.py  # reconcile orphans + brief new session
-│       └── user_prompt_submit.py  # KB-first context injection per prompt
+│       └── user_prompt_submit.py  # tier-controlled prompt context surfacing
 ├── bin/                      # wrappers: slash commands, installers, latch_doctor
 ├── commands/                 # slash command markdown (copy to ~/.claude/commands/)
 ├── vendor/                   # vendored ONNX MiniLM model + tokenizer (no download)
-└── projects/
+└── projects/                 # legacy unpinned layout only
     └── <sanitized-cwd>/
         └── kb.db
 ```
 
 ## Concepts
 
-- **Per-project KB.** The active project is `os.getcwd()` of the Claude
-  session. KB lives at `projects/<sanitized-cwd>/kb.db`.
+- **Selected local KB.** A configured install pins one KB directory through
+  `LATCH_KB_DIR` or `kb_location.json`; the current working directory scopes
+  artifacts but does not select the database. The historical
+  `projects/<sanitized-cwd>/kb.db` layout remains only as an unconfigured
+  compatibility fallback.
 - **Loose graph.** `nodes(kind, title, body, status, embedding)` +
   `edges(src, dst, relation)`. Relations are free-form strings; common
   patterns will emerge — codify later. Kinds: `fact`, `decision`, `progress`,
@@ -86,9 +91,21 @@ ${LATCH_HOME}/
     the background every 5 turns. Cheap, non-blocking.
   - `SessionEnd` hook — final compact, promotes summary to canonical.
   - `SessionStart` hook — reconciles any prior session that never got a
-    SessionEnd (laptop sleep, VS Code reload, crash), then briefs the new
-    session with workstreams + open questions + parked ideas.
-  - `UserPromptSubmit` hook — KB-first context injection per prompt.
+    SessionEnd (laptop sleep, VS Code reload, crash), then emits a tier-bounded
+    brief with workstreams + open questions + parked ideas.
+  - `UserPromptSubmit` hook — tier-controlled context surfacing: Quiet skips
+    hook-added similarity work, Standard similarity-scores every eligible
+    prompt but injects only on the first prompt and topic shifts, and Full
+    retrieves and injects on every eligible prompt.
+- **Intensity.** The uncached install-wide choice lives in
+  `latch_settings.json`; `LATCH_INTENSITY` overrides it. Fresh quickstarts use
+  Standard, while settings-less installs with KB evidence preserve Full.
+  A malformed saved setting falls back to Quiet. An invalid environment
+  override uses a valid saved setting when present and otherwise falls back to
+  Quiet; quickstart rejects invalid explicit input. The setting changes
+  hook-added briefs and prompt context only. The static managed contract,
+  including its live read, remains the same; gate assembly and classification
+  do not consume intensity.
 - **Decision-chain gate.** `kb_gate` assembles a chain of related
   nodes (decisions, abandoned paths, active constraints) for a coding
   request, then classifies the request as `PROCEED` / `MODIFY` /
@@ -289,19 +306,21 @@ critical tools such as `latch_gate`, the doctor fails.
 - `bash bin/latch_cursor_doctor.sh --model-backend codex` — Cursor adapter
   health check: static config/launch/rule/commands plus optional live
   `agent mcp list` / `agent mcp list-tools latch`.
-- In a new session: the `SessionStart` brief should appear (empty on a
-  brand-new project); tail `projects/<sanitized-cwd>/retrieve.log` after a few
-  prompts — expect `path="vector"`/`"graph"` lines with `elapsed_ms` 100–300
-  (`skip="embed_daemon_unavailable"` is normal only for the very first prompt of
-  a brand-new session); calling `kb_recent` in-session should return nodes (or
-  an empty list).
+- In a new session: inspect the tier-bounded `SessionStart` brief. For Standard
+  or Full on a supported prompt-hook host, tail
+  `<selected-kb-dir>/retrieve.log`; expect intensity-tagged rows and
+  `path="vector"`/`"graph"` when retrieval runs. Quiet should instead record
+  `skip="intensity_quiet"` and must not wake the embedding runtime. A first
+  Standard/Full prompt may record `skip="embed_daemon_unavailable"` while the
+  shared owner starts. Calling `kb_recent` in-session should return nodes (or an
+  empty list).
 
 ## Maintenance (automatic — no setup)
 
 Maintenance (local backup + heal + weekly decay/tree + prune) is
 **self-triggering** off the MCP server lifecycle — no scheduler, no admin
 rights, no cron/Task-Scheduler entry. On session start the MCP server checks an
-elapsed-time cadence (`projects/<cwd>/maintenance_state.json`) and, if anything
+elapsed-time cadence (`<selected-kb-dir>/maintenance_state.json`) and, if anything
 is due, spawns the pass as a detached background process
 (`src/selfheal.py`). It runs off-process so it never blocks your session; KB
 reads stay live and writes briefly wait if they land mid-pass.
@@ -359,15 +378,15 @@ resumes; `bin/latch_status.sh` reports state. Finer:
 `LATCH_DISABLE_WRITE` env var; legacy `CLAUDE_KB_DISABLE_WRITE` still works)
 stops only the write-side hooks
 (Stop / SessionEnd / compactor) while leaving the SessionStart brief +
-per-prompt injection live. `latch_enable.sh` leaves `DISABLE_WRITE` in place by
-default; `--all` removes it too. Windows: the `.ps1` equivalents.
+tier-configured prompt surfacing live. `latch_enable.sh` leaves `DISABLE_WRITE`
+in place by default; `--all` removes it too. Windows: the `.ps1` equivalents.
 
 ### Logs
 
 - `${LATCH_HOME}/hooks.log` — hook events
 - `${LATCH_HOME}/compactor.log` — compactor outcomes
 - `${LATCH_HOME}/maintenance.log` — heal/decay/tree outcomes
-- `${LATCH_HOME}/projects/<sanitized-cwd>/retrieve.log` — per-prompt
+- `<selected-kb-dir>/retrieve.log` — per-prompt
   retrieval timing + path taken
 
 ## Uninstall (full detail)

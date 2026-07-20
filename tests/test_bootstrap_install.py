@@ -405,10 +405,11 @@ def test_posix_bootstrap_dry_run_has_no_install_side_effect(tmp_path: Path):
         tmp_path=tmp_path,
         origin=origin,
         fake_uv=fake_uv,
-        extra=("--dry-run", "--agents", "codex"),
+        extra=("--dry-run", "--agents", "codex", "--latch-intensity", "full"),
     )
     assert result.returncode == 0, result.stderr
     assert "no writes" in result.stdout
+    assert "quickstart : --agents codex --latch-intensity full" in result.stdout
     assert not app.exists()
     assert not Path(env["FAKE_UV_LOG"]).exists()
     assert not Path(env["FAKE_QUICKSTART_LOG"]).exists()
@@ -535,6 +536,8 @@ def test_bootstrap_script_contracts_and_syntax():
     assert "UV_UNMANAGED_INSTALL" in powershell
     assert "LOCALAPPDATA" in shell
     assert "LOCALAPPDATA" in powershell
+    assert "-LatchIntensity cannot be combined" in powershell
+    assert "$LatchIntensity.ToLowerInvariant()" in powershell
     workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
     assert "one-command-bootstrap-windows:" in workflow
     assert "runs-on: windows-latest" in workflow
@@ -644,7 +647,8 @@ exit /b 43
         dry_run_arg = " -DryRun" if dry_run else ""
         command = (
             f"try {{ & {ps_quote(INSTALL_PS1)} -InstallDir {ps_quote(app)} "
-            f"-Project {ps_quote(project_path)} -Ref {ps_quote(ref)}"
+            f"-Project {ps_quote(project_path)} -Ref {ps_quote(ref)} "
+            "-LatchIntensity quiet"
             f"{dry_run_arg} "
             "-QuickstartArgs @('--agents','codex','--no-seed') } "
             "catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }"
@@ -686,7 +690,8 @@ exit /b 43
     assert git(app, "config", "--local", "--get", "latch.installRef") == "main"
     calls = read_json_lines(Path(env["FAKE_QUICKSTART_LOG"]))
     assert calls[0]["argv"] == [
-        "--project", str(project), "--agents", "codex", "--no-seed",
+        "--project", str(project), "--latch-intensity", "quiet",
+        "--agents", "codex", "--no-seed",
     ]
 
     second = invoke_powershell()

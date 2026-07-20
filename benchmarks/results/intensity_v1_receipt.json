@@ -1,0 +1,41 @@
+{
+  "claim_boundary": "Synthetic policy regression contract. Authored scores and relative risk weights make the result true by construction; this is not measured developer time, retrieval quality, or empirical rebuild savings.",
+  "fixture_sha256": "04dc136f01bfae9ad3e18e64cacd4fb7423e6e6db602d6459fbb002436ffd1fa",
+  "gate_invariant": "same gate check and configuration when invoked",
+  "omissions": [
+    "graph drill-down",
+    "long-session active-set expiry",
+    "observed task reconstruction time"
+  ],
+  "schema_version": 1,
+  "suite": "intensity_v1",
+  "tiers": {
+    "full": {
+      "labeled_reference_opportunities": 5,
+      "opportunities_with_expected_reference": 5,
+      "prompt_context_chars": 3056,
+      "relative_rebuild_risk_weight": 17,
+      "relative_risk_weight_with_expected_reference": 17,
+      "topic_similarity_checks": 7,
+      "vector_retrieval_runs": 7
+    },
+    "quiet": {
+      "labeled_reference_opportunities": 5,
+      "opportunities_with_expected_reference": 0,
+      "prompt_context_chars": 0,
+      "relative_rebuild_risk_weight": 17,
+      "relative_risk_weight_with_expected_reference": 0,
+      "topic_similarity_checks": 0,
+      "vector_retrieval_runs": 0
+    },
+    "standard": {
+      "labeled_reference_opportunities": 5,
+      "opportunities_with_expected_reference": 2,
+      "prompt_context_chars": 1712,
+      "relative_rebuild_risk_weight": 17,
+      "relative_risk_weight_with_expected_reference": 6,
+      "topic_similarity_checks": 7,
+      "vector_retrieval_runs": 6
+    }
+  }
+}

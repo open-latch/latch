@@ -18,6 +18,7 @@ import sys
 from typing import Callable, Mapping, Sequence
 
 import install_engine
+import paths
 import versioning
 
 KB_HOME = Path(
@@ -27,6 +28,8 @@ KB_HOME = Path(
 )
 
 AGENT_CHOICES = ("claude", "codex", "cursor", "both", "all")
+
+_INTENSITY_NUMBERS = {"1": "quiet", "2": "standard", "3": "full"}
 
 
 @dataclass(frozen=True)
@@ -147,6 +150,205 @@ def resolve_agents(
         if raw in AGENT_CHOICES:
             return normalize_agents(raw)
         print("Please enter one of: claude, codex, cursor, both, all")
+
+
+def intensity_host_notes(
+    agents: Sequence[str], *, cursor_with_hooks: bool = False,
+) -> list[str]:
+    """Per-host truth for what the shared intensity choice can actually change."""
+    selected = set(agents)
+    notes: list[str] = []
+    if "claude" in selected:
+        notes.append(
+            "Claude Code: intensity changes the startup brief and similarity-based "
+            "prompt surfacing."
+        )
+    if "codex" in selected:
+        notes.append(
+            "Codex: intensity changes the startup brief; Codex does not currently "
+            "support similarity-based prompt retrieval."
+        )
+    if "cursor" in selected:
+        if cursor_with_hooks:
+            notes.append(
+                "Cursor: intensity changes the startup brief; the pre-edit gate stays "
+                "enabled, but Cursor does not similarity-retrieve on each prompt."
+            )
+        else:
+            notes.append(
+                "Cursor: hooks are not selected, so the saved intensity has no current "
+                "runtime effect on this surface; managed guidance remains unchanged."
+            )
+    return notes
+
+
+def resolve_latch_intensity(
+    value: str | None,
+    *,
+    project: Path,
+    agents: Sequence[str],
+    env: Mapping[str, str] | None = None,
+    cursor_with_hooks: bool = False,
+    is_tty: bool | None = None,
+    input_fn: Callable[[str], str] = input,
+    output_fn: Callable[[str], None] = print,
+) -> tuple[str, str]:
+    """Resolve the saved tier, preserving legacy Full and prompting when possible."""
+    values = os.environ if env is None else env
+    raw_env = values.get("LATCH_INTENSITY")
+    env_choice = None
+    if raw_env is not None:
+        env_choice = paths.normalize_latch_intensity(raw_env)
+        if env_choice is None:
+            raise ValueError(
+                f"invalid LATCH_INTENSITY={raw_env!r}; unset it or choose quiet, "
+                "standard, or full before running quickstart"
+            )
+
+    saved = paths.configured_latch_intensity()
+    settings_is_non_file = (
+        (paths.LATCH_SETTINGS_FILE.exists() or paths.LATCH_SETTINGS_FILE.is_symlink())
+        and not paths.LATCH_SETTINGS_FILE.is_file()
+    )
+    if settings_is_non_file:
+        raise ValueError(
+            f"cannot save Latch intensity because {paths.LATCH_SETTINGS_FILE} "
+            "exists but is not a regular file; remove or rename that path, then "
+            "rerun quickstart"
+        )
+    if (
+        saved is None
+        and paths.LATCH_SETTINGS_FILE.is_file()
+        and value is None
+        and env_choice is None
+    ):
+        _value, _source, warning = paths.latch_intensity_state(env={})
+        raise ValueError(
+            f"cannot safely choose a tier while {paths.LATCH_SETTINGS_FILE} is "
+            f"invalid ({warning or 'missing a valid intensity'}); repair or remove "
+            "the file, then rerun quickstart"
+        )
+    if saved is not None:
+        default = saved
+        reason = "saved setting"
+    elif paths.kb_has_evidence(project):
+        default = paths.LEGACY_LATCH_INTENSITY
+        reason = "preserving existing Full behavior"
+    else:
+        default = paths.FRESH_INSTALL_LATCH_INTENSITY
+        reason = "fresh-install default"
+
+    if value is not None:
+        selected = paths.normalize_latch_intensity(value)
+        if selected is None:
+            raise ValueError(
+                f"unsupported Latch intensity {value!r}; choose "
+                + ", ".join(paths.LATCH_INTENSITIES)
+            )
+        reason = "command-line choice"
+    else:
+        selected = default
+
+    if env_choice is not None:
+        if value is not None and selected != env_choice:
+            raise ValueError(
+                f"--latch-intensity {selected} conflicts with "
+                f"LATCH_INTENSITY={env_choice}; unset the environment override "
+                "or make the two choices match"
+            )
+        selected = env_choice
+        reason = "environment override"
+
+    if is_tty is None:
+        is_tty = _stdio_is_tty()
+
+    output_fn(
+        "Scope: this intensity applies to every project and host using this "
+        "Latch install."
+    )
+    if value is None and env_choice is None and is_tty:
+        output_fn("")
+        output_fn("How proactively should Latch surface project judgment?")
+        output_fn("")
+        output_fn(
+            "All levels keep the static project contract, including its live Latch "
+            "read before each response, correction reminders on supported prompt-hook "
+            "hosts, and the same gate check when invoked. Intensity controls "
+            "hook-added briefs and prompt context—not whether the agent can or should "
+            "query Latch."
+        )
+        output_fn("")
+        output_fn("1  Quiet")
+        output_fn(
+            "   Up to 1 workstream and 1 open question at startup; no "
+            "similarity-based prompt retrieval."
+        )
+        output_fn(
+            "   Turns off hook-added similarity hits; prior judgment can still surface "
+            "through contract-driven Latch reads or the gate."
+        )
+        output_fn("2  Standard")
+        output_fn(
+            "   Runs a lightweight local topic-similarity check on each eligible "
+            "prompt, injecting up to 3 KB hits only on the first prompt or a topic "
+            "change; brief up to 3 workstreams, 2 questions, and 2 ideas."
+        )
+        output_fn(
+            "   Gives up same-topic resurfacing, 2 prompt-hit slots, and the broader "
+            "Full brief; explicit search and gate remain available."
+        )
+        output_fn("3  Full — best protection")
+        output_fn(
+            "   Up to 5 KB hits on every eligible prompt, including "
+            "same-topic follow-ups; startup brief up to 5 workstreams, 3 questions, "
+            "and 5 ideas."
+        )
+        output_fn(
+            "   Recommended for long-lived, multi-agent, handoff-heavy, or "
+            "costly-to-rebuild projects; it uses the most prompt context."
+        )
+        output_fn(
+            "   Also keeps explicit no-hit receipts and standing-guideline capture "
+            "nudges on supported prompt-hook hosts."
+        )
+        output_fn("")
+        output_fn(
+            "Evidence boundary: tier-level rebuild savings are not measured yet, so "
+            "Latch makes no universal savings claim."
+        )
+        output_fn(
+            "Frozen synthetic policy check (7 prompt events): the expected guardrail "
+            "reference was present in hook-added context for 0/5 Quiet, 2/5 Standard, "
+            "and 5/5 Full labeled opportunities; emitted context was 0, 1,712, and "
+            "3,056 characters. Authored scores and weights make this true by "
+            "construction—not observed savings."
+        )
+        for note in intensity_host_notes(agents, cursor_with_hooks=cursor_with_hooks):
+            output_fn(note)
+        default_number = {v: k for k, v in _INTENSITY_NUMBERS.items()}[default]
+        while True:
+            try:
+                raw = input_fn(
+                    f"Choose intensity [1 quiet / 2 standard / 3 full] [{default_number}]: "
+                ).strip().lower()
+            except EOFError:
+                raw = ""
+            if not raw:
+                selected = default
+                break
+            candidate = _INTENSITY_NUMBERS.get(raw, raw)
+            normalized = paths.normalize_latch_intensity(candidate)
+            if normalized is not None:
+                selected = normalized
+                reason = "interactive choice"
+                break
+            output_fn("Please choose 1/quiet, 2/standard, or 3/full.")
+    else:
+        for note in intensity_host_notes(agents, cursor_with_hooks=cursor_with_hooks):
+            output_fn(note)
+
+    output_fn(f"Latch intensity: {selected.title()} ({reason}).")
+    return selected, reason
 
 
 def seed_source_for_agents(agents: Sequence[str], requested: str = "auto") -> str:
@@ -468,6 +670,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                     help="history horizon for initial-KB seeding (default: 90)")
     ap.add_argument("--last-sessions", type=int, default=50,
                     help="maximum sessions selected for initial-KB seeding (default: 50)")
+    ap.add_argument("--latch-intensity", choices=paths.LATCH_INTENSITIES,
+                    help=("how proactively Latch surfaces project judgment; fresh installs "
+                          "default to standard and legacy installs preserve full"))
     ap.add_argument("--dry-run", action="store_true",
                     help="show the install/check/seed plan without writing anything")
     ap.add_argument("--skip-doctor", action="store_true",
@@ -513,6 +718,17 @@ def main(argv: list[str] | None = None) -> int:
             print("No agent configuration changes were written.", file=sys.stderr)
             return 2
 
+    try:
+        intensity, intensity_reason = resolve_latch_intensity(
+            args.latch_intensity,
+            project=project,
+            agents=agents,
+            cursor_with_hooks=args.cursor_with_hooks,
+        )
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+
     source = seed_source_for_agents(agents, args.seed_source)
     backend = seed_backend_for_agents(
         agents,
@@ -554,6 +770,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  seed source  : {source}")
     print(f"  seed backend : {backend}")
     print(f"  lookback days: {args.lookback_days}")
+    print(f"  intensity    : {intensity} ({intensity_reason})")
     if "cursor" in agents:
         print(f"  Cursor backend: {args.cursor_model_backend or 'cursor (native default)'}")
         print(f"  Cursor hooks  : {'enabled' if args.cursor_with_hooks else 'not installed'}")
@@ -570,6 +787,14 @@ def main(argv: list[str] | None = None) -> int:
     if args.dry_run:
         print_plan(steps, seed_cmd)
         return 0
+
+    try:
+        settings_path = paths.write_latch_intensity(intensity)
+    except (OSError, ValueError) as e:
+        print(f"error: could not save Latch intensity: {e}", file=sys.stderr)
+        print("No agent configuration changes were written.", file=sys.stderr)
+        return 2
+    print(f"  settings     : {settings_path}")
 
     rc = run_steps(install_steps)
     if rc != 0:

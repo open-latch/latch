@@ -18,6 +18,8 @@ param(
   [string]$InstallDir,
   [string]$Project = (Get-Location).Path,
   [string]$Ref = $(if ($env:LATCH_INSTALL_REF) { $env:LATCH_INSTALL_REF } else { "main" }),
+  [ValidateSet("quiet", "standard", "full")]
+  [string]$LatchIntensity,
   [switch]$Upgrade,
   [switch]$DryRun,
   [Parameter(ValueFromRemainingArguments = $true)]
@@ -43,8 +45,23 @@ function Fail([string]$Message) {
 }
 
 function Note([string]$Message) {
-  Write-Host ""
-  Write-Host "==> $Message"
+    Write-Host ""
+    Write-Host "==> $Message"
+}
+
+if ($LatchIntensity) {
+  $LatchIntensity = $LatchIntensity.ToLowerInvariant()
+}
+$forwardedIntensityArgs = @(
+  $QuickstartArgs | Where-Object {
+    $_ -eq "--latch-intensity" -or $_ -like "--latch-intensity=*"
+  }
+)
+if ($LatchIntensity -and $forwardedIntensityArgs.Count -gt 0) {
+  Fail("-LatchIntensity cannot be combined with --latch-intensity in -QuickstartArgs")
+}
+if ($forwardedIntensityArgs.Count -gt 1) {
+  Fail("pass --latch-intensity at most once in -QuickstartArgs")
 }
 
 function Normalize-Repository([string]$Value) {
@@ -141,6 +158,14 @@ if ($DryRun) {
   Write-Host "  source mode: $mode"
   Write-Host "  runtime    : private uv + Python 3.11 virtual environment"
   Write-Host "  activation : guided quickstart, checks, then consented initial-KB review"
+  $previewArgs = @()
+  if ($LatchIntensity) { $previewArgs += @("--latch-intensity", $LatchIntensity) }
+  $previewArgs += $QuickstartArgs
+  if ($previewArgs.Count -gt 0) {
+    Write-Host "  quickstart : $($previewArgs -join ' ')"
+  } else {
+    Write-Host "  quickstart : interactive choices / safe defaults"
+  }
   return
 }
 
@@ -308,7 +333,12 @@ $quickstartRc = $null
 try {
   $env:LATCH_HOME = $InstallDir
   $env:LATCH_PYTHON = $PythonPath
-  & $PythonPath (Join-Path $InstallDir "src\quickstart.py") --project $Project @QuickstartArgs
+  $effectiveQuickstartArgs = @()
+  if ($LatchIntensity) {
+    $effectiveQuickstartArgs += @("--latch-intensity", $LatchIntensity)
+  }
+  $effectiveQuickstartArgs += $QuickstartArgs
+  & $PythonPath (Join-Path $InstallDir "src\quickstart.py") --project $Project @effectiveQuickstartArgs
   $quickstartRc = $LASTEXITCODE
 } finally {
   if ($hadLatchHome) {
