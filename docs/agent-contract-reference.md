@@ -69,6 +69,15 @@ upgrade that into a claim of identical evidence, catches, or outcomes: prior
 automatic reads, evolving KB state, and model behavior can differ. Tier
 telemetry is observational and must not enter chain assembly or classification.
 
+## Codex skills
+
+The Codex installer syncs Latch's bundled workflows into the user-wide
+`$HOME/.agents/skills` directory, including each skill's `agents/openai.yaml`
+metadata. Invoke them from `/skills` or with an explicit mention such as
+`$source-command-latch-compact`; Codex does not expose these as top-level
+`/latch-*` slash commands. A same-named skill that is neither an exact bundled
+copy nor marked as Latch-owned blocks the sync rather than being overwritten.
+
 ## Tool discovery
 
 Some hosts defer MCP tool schemas until first use. Batch-load the primary tools

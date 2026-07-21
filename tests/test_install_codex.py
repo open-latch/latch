@@ -159,6 +159,85 @@ def test_write_config_backs_up_existing():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_codex_skills_sync_status_and_collision():
+    d = Path(tempfile.mkdtemp(prefix="latch-codex-skills-"))
+    try:
+        skills = d / ".agents" / "skills"
+        changes = ic.sync_codex_skills(skills)
+        _assert(len(changes) == len(ic.CODEX_SKILL_NAMES), changes)
+
+        compact = skills / "source-command-latch-compact" / "SKILL.md"
+        metadata = (
+            skills
+            / "source-command-latch-compact"
+            / "agents"
+            / "openai.yaml"
+        )
+        _assert(ic.CODEX_SKILL_MARKER in compact.read_text(encoding="utf-8"),
+                "installed skill should carry the ownership marker")
+        _assert(metadata.read_text(encoding="utf-8") == (
+            ic.CODEX_SKILLS_SRC
+            / "source-command-latch-compact"
+            / "agents"
+            / "openai.yaml"
+        ).read_text(encoding="utf-8"), "skill metadata should be installed")
+        ok, detail = ic.codex_skills_status(skills)
+        _assert(ok, detail)
+        _assert(ic.sync_codex_skills(skills) == [], "second sync should be idempotent")
+
+        legacy_root = d / "legacy" / "skills"
+        legacy_compact = legacy_root / "source-command-latch-compact"
+        shutil.copytree(
+            ic.CODEX_SKILLS_SRC / "source-command-latch-compact", legacy_compact
+        )
+        ic.sync_codex_skills(legacy_root)
+        adopted = legacy_compact / "SKILL.md"
+        _assert(ic.CODEX_SKILL_MARKER in adopted.read_text(encoding="utf-8"),
+                "an exact manual copy should be adopted as latch-owned")
+        _assert(adopted.with_name("SKILL.md.latchbak").is_file(),
+                "adopting a manual copy should preserve a backup")
+
+        collision_root = d / "collision" / "skills"
+        collision = collision_root / "source-command-latch-gate" / "SKILL.md"
+        collision.parent.mkdir(parents=True)
+        collision.write_text(
+            "---\nname: source-command-latch-gate\ndescription: user owned\n---\n",
+            encoding="utf-8",
+        )
+        try:
+            ic.sync_codex_skills(collision_root)
+        except ic.CodexSkillCollisionError:
+            pass
+        else:
+            raise AssertionError("installer should refuse a user-owned skill collision")
+        _assert(not (collision_root / "source-command-latch-compact").exists(),
+                "collision preflight should prevent partial skill installation")
+        print("PASS codex_skills_sync_status_and_collision")
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_main_installs_and_checks_codex_skills():
+    d = Path(tempfile.mkdtemp(prefix="latch-codex-main-skills-"))
+    try:
+        config = d / "config.toml"
+        skills = d / ".agents" / "skills"
+        common = [
+            "--python", sys.executable,
+            "--config", str(config),
+            "--skills-dir", str(skills),
+            "--skip-agents",
+            "--skip-hooks",
+        ]
+        rc = ic.main(common + ["--no-seed-prompt", "--suppress-seed-output"])
+        _assert(rc == 0, f"Codex skill install should complete, got {rc}")
+        rc = ic.main(common + ["--check"])
+        _assert(rc == 0, f"Codex skill check should pass, got {rc}")
+        print("PASS main_installs_and_checks_codex_skills")
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def test_no_seed_prompt_prints_seed_handoff_unless_suppressed():
     d = Path(tempfile.mkdtemp(prefix="latch-codex-seed-output-"))
     original_pin = ic.install_engine.pin_kb_dir
@@ -181,6 +260,7 @@ def test_no_seed_prompt_prints_seed_handoff_unless_suppressed():
                 str(agents),
                 "--skip-agents",
                 "--skip-hooks",
+                "--skip-skills",
                 "--no-seed-prompt",
             ])
         text = output.getvalue()
@@ -203,6 +283,7 @@ def test_no_seed_prompt_prints_seed_handoff_unless_suppressed():
                 str(agents),
                 "--skip-agents",
                 "--skip-hooks",
+                "--skip-skills",
                 "--no-seed-prompt",
                 "--suppress-seed-output",
             ])
@@ -231,6 +312,8 @@ def test_interactive_seed_offer_uses_codex_backend():
             str(d / "config.toml"),
             "--hooks",
             str(d / "hooks.json"),
+            "--skills-dir",
+            str(d / ".agents" / "skills"),
             "--agents-md",
             str(d / "AGENTS.md"),
             "--skip-agents",
@@ -259,6 +342,7 @@ def test_pin_conflict_stops_before_codex_config_write():
             "--python", sys.executable,
             "--config", str(config),
             "--hooks", str(d / "hooks.json"),
+            "--skills-dir", str(d / ".agents" / "skills"),
             "--agents-md", str(d / "AGENTS.md"),
             "--skip-agents",
             "--skip-hooks",
@@ -280,6 +364,8 @@ if __name__ == "__main__":
     test_config_status_accepts_legacy_server_name()
     test_merge_config_idempotent()
     test_write_config_backs_up_existing()
+    test_codex_skills_sync_status_and_collision()
+    test_main_installs_and_checks_codex_skills()
     test_no_seed_prompt_prints_seed_handoff_unless_suppressed()
     test_interactive_seed_offer_uses_codex_backend()
     test_pin_conflict_stops_before_codex_config_write()
