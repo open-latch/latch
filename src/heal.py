@@ -1176,11 +1176,13 @@ def nightly_heal(
 
     LLM calls (the only expensive step) are gated on the same daily budget the
     compactor uses. If the cap is hit mid-sweep, remaining LLM-bound collisions
-    fall back to keep_both. `budget_blocked_by_tier` surfaces which tier the
-    cap was hit on.
+    are deferred without mutating either node or adding an edge. Structural
+    `heal_deferred` rows preserve the pair ids/tier/similarity for audit and the
+    edge-free pair remains eligible for a later sweep. `budget_blocked_by_tier`
+    surfaces which tier the cap was hit on.
 
-    Idempotent: re-running immediately after should do ~nothing because edges
-    from the first run short-circuit the sweep on subsequent collisions.
+    Adjudicated pairs are idempotent because their edges short-circuit later
+    sweeps. Deferred pairs deliberately reappear until budget is available.
     """
     if paths.is_unlatched_mode():
         return {
@@ -1206,11 +1208,16 @@ def nightly_heal(
         "superseded": 0,
         "kept_both": 0,
         "reconciled": 0,
-        "by_path": {"recency": 0, "ref_count": 0, "llm": 0, "skip": 0},
+        "by_path": {
+            "recency": 0, "ref_count": 0, "llm": 0,
+            "skip": 0, "deferred": 0,
+        },
         "by_tier": {"high": 0, "low": 0},
         "llm_invocations": 0,
         "budget_blocked": 0,
         "budget_blocked_by_tier": {"high": 0, "low": 0},
+        "deferred": 0,
+        "deferred_by_tier": {"high": 0, "low": 0},
         # Evidence contract: high-tier pairs whose disjoint artifact scopes caused
         # the deterministic recency/ref_count supersede to be deferred to the LLM.
         "cross_scope_deferred": 0,
@@ -1355,14 +1362,33 @@ def nightly_heal(
             _apply_verdict(conn, summary, verdict, a_id, b_id, project_path=project_path)
             continue
 
-        allowed, _ = budget.check_and_record(project_path, category="heal")
+        allowed, budget_state = budget.check_and_record(
+            project_path, category="heal",
+        )
         if not allowed:
             summary["budget_blocked"] += 1
             summary["budget_blocked_by_tier"][tier] += 1
-            apply_keep_both(conn, a_id, b_id)
-            summary["by_path"]["skip"] += 1
-            summary["kept_both"] += 1
-            _debug(f"    -> keep_both (heal budget cap hit, tier={tier})")
+            summary["deferred"] += 1
+            summary["deferred_by_tier"][tier] += 1
+            summary["by_path"]["deferred"] += 1
+            pair_a, pair_b = sorted((a_id, b_id))
+            log_utils.emit_event(
+                "heal_deferred",
+                {
+                    "node_a_id": pair_a,
+                    "node_b_id": pair_b,
+                    "similarity": round(float(sim), 6),
+                    "tier": tier,
+                    "reason": "budget_cap",
+                    "budget_date": budget_state.get("date"),
+                    "budget_count_heal": budget_state.get("count_heal"),
+                    "retry_eligible": True,
+                },
+                project_path=project_path,
+                session_id=None,
+            )
+            _debug(f"    -> deferred without edge (heal budget cap hit, "
+                   f"tier={tier})")
             continue
 
         summary["llm_invocations"] += 1

@@ -1,8 +1,8 @@
 {
   "backend": "codex",
-  "better_next_action": "Implement email sending through the allowed inline task runner path and document its single-process limitation.",
+  "better_next_action": "Implement email sending with an inline task runner and document that it is intentionally single-process and not suitable for production-scale background delivery.",
   "capture_command": "bash bin/latch_proof_packet.sh --capture-live --backend codex",
-  "captured_at_utc": "2026-07-21T07:19:07Z",
+  "captured_at_utc": "2026-07-21T07:35:09Z",
   "demo_kind": "synthetic_no_history_fixture",
   "evidence_nodes": [
     {
@@ -30,10 +30,10 @@
   "observed": true,
   "recommendation": "DO_NOT_PROCEED",
   "request": "Implement email sending by adding a Redis-backed background job queue.",
-  "risk_if_proceed": "Adding Redis and a worker process would violate the install-light, easy-to-inspect demo-app constraint.",
+  "risk_if_proceed": "Adding Redis and a worker process would violate the install-light, easy-to-inspect demo constraint already recorded in the KB.",
   "schema_version": 2,
-  "source_commit": "72e0c94ed81051027f19a309cb778d502fb95833",
-  "summary": "The request directly contradicts the canonical fixture decision (id=1): this demo app must not add a background job queue, and the Redis-backed queue is specifically named as the rejected path. The allowed direction is to keep the app single-process and use an inline task runner if background work is needed.",
+  "source_commit": "e5b6d3c4a1adb39968a4b975975ced85dd2a518d",
+  "summary": "The request directly conflicts with the canonical decision for this demo app: do not add a background job queue (id=1). Redis-backed background queue is explicitly named as the rejected path, while the allowed path is single-process behavior with an inline task runner if background work is needed.",
   "tested_runtime_git_blobs": {
     ".gitattributes": "dfdb8b771ce07609491fa2e83698969fd917a135",
     "benchmarks/fixtures/wedge_v1.jsonl": "f32c5544a247c43490b5b84a6c4c4a057e91716b",
@@ -74,7 +74,7 @@
     "src/feeders.py": "90a3563d51884acaf17ec20144c6332408aea6b1",
     "src/gate.py": "75c2e816d7915ce2c9a20f0db765e337d9df648b",
     "src/gate_report.py": "139ee87fc35c2c467df827fead08f258d235711b",
-    "src/heal.py": "f32884a2b5eafb35cabca10c5e02bab09970161c",
+    "src/heal.py": "30f72da6fdaf2c2ac92f23bb79daa76299b57286",
     "src/hooks/_common.py": "81a05bd16e89881978bf69834618531d21edca00",
     "src/hooks/codex_session_start.py": "e5a459a55add1494ee1a9fe8cdc21029b377e840",
     "src/hooks/cursor_before_submit.py": "9c19683b09475171aa106a51512884f0f7d4be37",
