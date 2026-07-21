@@ -45,17 +45,73 @@ class BriefPolicy:
     idea_chars: int
     include_priorities: bool
     include_latest_progress: bool
+    max_feeders_per_workstream: int = MAX_FEEDERS_PER_WORKSTREAM
     compact: bool = False
 
 
 BRIEF_POLICIES = {
-    "quiet": BriefPolicy(1, 1, 0, 0, 0, False, False, compact=True),
-    "standard": BriefPolicy(3, 2, 2, 240, 160, True, True),
+    "quiet": BriefPolicy(
+        1, 1, 0, 0, 0, False, False,
+        max_feeders_per_workstream=1,
+        compact=True,
+    ),
+    "standard": BriefPolicy(
+        3, 2, 2, 240, 160, True, True,
+        max_feeders_per_workstream=2,
+    ),
     # Full preserves the shipped body bounds: 320-char workstream pointers and
     # 160-char idea excerpts. Legacy installs therefore retain their context
     # footprint instead of silently growing when they map to Full.
     "full": BriefPolicy(5, 3, 5, 320, 160, True, True),
 }
+
+
+def _bound_feeder_surface(
+    workstream_feeders: dict[int, list[dict]],
+    open_question_candidates: list[dict],
+    idea_candidates: list[dict],
+    policy: BriefPolicy,
+) -> tuple[dict[int, list[dict]], list[dict], list[dict]]:
+    """Make nested feeders obey the same tier caps as top-level pointers.
+
+    Contextual feeders get first claim on the open-question/idea budgets. The
+    remaining budget is filled by the ordinary recent-node sections, with ids
+    deduped across workstreams and top-level sections.
+    """
+    bounded: dict[int, list[dict]] = {}
+    seen: set[int] = set()
+    question_budget = policy.max_open_questions
+    idea_budget = policy.max_ideas
+
+    for workstream_id, rows in workstream_feeders.items():
+        selected: list[dict] = []
+        for row in rows:
+            if len(selected) >= policy.max_feeders_per_workstream:
+                break
+            node_id = int(row["id"])
+            if node_id in seen:
+                continue
+            kind = str(row.get("kind") or "")
+            if kind == "open_question":
+                if question_budget <= 0:
+                    continue
+                question_budget -= 1
+            elif kind == "idea":
+                if idea_budget <= 0:
+                    continue
+                idea_budget -= 1
+            seen.add(node_id)
+            selected.append(row)
+        if selected:
+            bounded[workstream_id] = selected
+
+    open_questions = [
+        row for row in open_question_candidates if int(row["id"]) not in seen
+    ][:question_budget]
+    ideas = [
+        row for row in idea_candidates if int(row["id"]) not in seen
+    ][:idea_budget]
+    return bounded, open_questions, ideas
 
 # Below this many (non-stale) nodes the KB is treated as new, and the brief
 # leads with a short getting-started block so a first-time user gets value
@@ -311,15 +367,15 @@ def _build_briefing(
             # from the brief so they stop bugging the user. Over-fetch since the
             # API only filters TO a single status; we want everything EXCEPT
             # canonical (and stale, which recent_nodes already excludes by default).
-            open_qs = [
+            open_question_candidates = [
                 n for n in db.recent_nodes(
                     conn, kind="open_question", limit=MAX_OPEN_QUESTIONS * 3,
                     # Over-fetch so resolved canonical questions can be removed.
                 )
                 if n.get("status") != "canonical"
-            ][:policy.max_open_questions]
-            ideas = (
-                db.recent_nodes(conn, kind="idea", limit=policy.max_ideas)
+            ]
+            idea_candidates = (
+                db.recent_nodes(conn, kind="idea", limit=MAX_BRIEFING_IDEAS * 3)
                 if policy.max_ideas else []
             )
             latest_progress = (
@@ -345,10 +401,16 @@ def _build_briefing(
                 if wid is None:
                     continue
                 rows = feeders.open_feeders(
-                    conn, int(wid), limit=MAX_FEEDERS_PER_WORKSTREAM,
+                    conn, int(wid), limit=0,
                 )
                 if rows:
                     workstream_feeders[int(wid)] = rows
+            workstream_feeders, open_qs, ideas = _bound_feeder_surface(
+                workstream_feeders,
+                open_question_candidates,
+                idea_candidates,
+                policy,
+            )
             # New-user detection: cheap COUNT(*), same connection. Drives the
             # getting-started block below.
             show_getting_started = db.node_count(conn) < NEW_USER_NODE_THRESHOLD
