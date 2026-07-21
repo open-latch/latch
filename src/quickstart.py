@@ -77,6 +77,7 @@ def normalize_agents(value: str) -> tuple[str, ...]:
 def agent_preflight_errors(
     agents: Sequence[str],
     *,
+    cursor_model_backend: str | None = None,
     which: Callable[[str], str | None] = shutil.which,
 ) -> list[str]:
     """Return all missing selected-agent CLIs before any config mutation.
@@ -98,6 +99,17 @@ def agent_preflight_errors(
         and which("cursor-agent") is None
     ):
         errors.append("Cursor Agent CLI (`agent` or `cursor-agent`) is not on PATH")
+    if (
+        "cursor" in selected
+        and cursor_model_backend in {"claude", "codex"}
+        and cursor_model_backend not in selected
+        and which(cursor_model_backend) is None
+    ):
+        label = "Claude Code" if cursor_model_backend == "claude" else "Codex"
+        errors.append(
+            f"{label} CLI (`{cursor_model_backend}`) selected as the Cursor model "
+            "backend is not on PATH"
+        )
     return errors
 
 
@@ -149,6 +161,42 @@ def seed_source_for_agents(agents: Sequence[str], requested: str = "auto") -> st
     if seedable == {"codex"}:
         return "codex"
     return "both"
+
+
+def seed_backend_for_agents(
+    agents: Sequence[str],
+    *,
+    cursor_model_backend: str | None = None,
+) -> str:
+    """Choose the extractor from installed surfaces, not transcript source.
+
+    Source selection answers whose history to read. Backend selection answers
+    which installed agent should refine it. Stable Claude > Codex > Cursor
+    precedence preserves the historical mixed-surface default while making
+    Codex-only and Cursor-only first runs use the CLI their preflight proved.
+    """
+    selected = set(agents)
+    if "claude" in selected:
+        return "claude"
+    if "codex" in selected:
+        return "codex"
+    if "cursor" in selected:
+        return cursor_model_backend or "cursor"
+    raise ValueError("at least one agent surface is required")
+
+
+def pin_kb_for_quickstart(
+    kb_dir: str | None,
+    *,
+    dry_run: bool,
+) -> tuple[str, str]:
+    """Persist the one-KB source of truth before any surface is wired."""
+    override = (
+        kb_dir
+        or os.environ.get("LATCH_KB_DIR")
+        or os.environ.get("CLAUDE_KB_DIR")
+    )
+    return install_engine.pin_kb_dir(override, dry_run)
 
 
 def _src(name: str) -> str:
@@ -309,6 +357,7 @@ def seed_command_args(
     python_path: str,
     project: Path,
     source: str,
+    backend: str,
     lookback_days: int = 90,
     last_sessions: int = 50,
 ) -> list[str]:
@@ -319,6 +368,8 @@ def seed_command_args(
         str(project),
         "--source",
         source,
+        "--backend",
+        backend,
         "--lookback-days",
         str(lookback_days),
         "--last-sessions",
@@ -364,6 +415,7 @@ def offer_seed_after_quickstart(
     python_path: str,
     project: Path,
     source: str,
+    backend: str,
     lookback_days: int = 90,
     last_sessions: int = 50,
     run: Callable[..., subprocess.CompletedProcess] = subprocess.run,
@@ -372,6 +424,7 @@ def offer_seed_after_quickstart(
         python_path=python_path,
         project=project,
         source=source,
+        backend=backend,
         lookback_days=lookback_days,
         last_sessions=last_sessions,
     )
@@ -408,6 +461,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                     default="auto",
                     help=("transcript source for seed setup (default follows --agents; "
                           "Cursor requires a current SessionStart marker)"))
+    ap.add_argument("--kb-dir",
+                    help=("pin this installation to one explicit KB directory; "
+                          "fresh installs otherwise use <LATCH_HOME>/store"))
     ap.add_argument("--lookback-days", type=int, default=90,
                     help="history horizon for initial-KB seeding (default: 90)")
     ap.add_argument("--last-sessions", type=int, default=50,
@@ -444,7 +500,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {e}", file=sys.stderr)
         return 2
 
-    preflight_errors = agent_preflight_errors(agents)
+    preflight_errors = agent_preflight_errors(
+        agents,
+        cursor_model_backend=args.cursor_model_backend,
+    )
     if preflight_errors:
         stream = sys.stdout if args.dry_run else sys.stderr
         label = "warning" if args.dry_run else "error"
@@ -455,26 +514,33 @@ def main(argv: list[str] | None = None) -> int:
             return 2
 
     source = seed_source_for_agents(agents, args.seed_source)
-    steps = build_install_steps(
+    backend = seed_backend_for_agents(
+        agents,
+        cursor_model_backend=args.cursor_model_backend,
+    )
+    install_steps = build_install_steps(
         agents=agents,
         python_path=python_path,
         project=project,
         cursor_model_backend=args.cursor_model_backend,
         cursor_with_hooks=args.cursor_with_hooks,
     )
+    doctor_steps: list[Step] = []
     if not args.skip_doctor:
-        steps.extend(build_doctor_steps(
+        doctor_steps = build_doctor_steps(
             agents=agents,
             python_path=python_path,
             project=project,
             full_codex_doctor=args.full_codex_doctor,
             cursor_model_backend=args.cursor_model_backend,
             cursor_with_hooks=args.cursor_with_hooks,
-        ))
+        )
+    steps = [*install_steps, *doctor_steps]
     seed_cmd = seed_command_args(
         python_path=python_path,
         project=project,
         source=source,
+        backend=backend,
         lookback_days=args.lookback_days,
         last_sessions=args.last_sessions,
     )
@@ -486,6 +552,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  interpreter  : {python_path}")
     print(f"  agents       : {', '.join(agents)}")
     print(f"  seed source  : {source}")
+    print(f"  seed backend : {backend}")
     print(f"  lookback days: {args.lookback_days}")
     if "cursor" in agents:
         print(f"  Cursor backend: {args.cursor_model_backend or 'cursor (native default)'}")
@@ -494,11 +561,22 @@ def main(argv: list[str] | None = None) -> int:
     print("  initial KB   : pending review")
     print(f"  mode         : {'DRY-RUN (no writes)' if args.dry_run else 'apply'}")
 
+    pin_level, pin_msg = pin_kb_for_quickstart(args.kb_dir, dry_run=args.dry_run)
+    print(f"  KB pin       : [{pin_level}] {pin_msg}")
+    if pin_level == "ERROR":
+        print("Quickstart stopped before agent configuration or seed writes.", file=sys.stderr)
+        return 2
+
     if args.dry_run:
         print_plan(steps, seed_cmd)
         return 0
 
-    rc = run_steps(steps)
+    rc = run_steps(install_steps)
+    if rc != 0:
+        print("\nSeed setup was not offered because quickstart wiring/checks did not finish.")
+        return rc
+
+    rc = run_steps(doctor_steps)
     if rc != 0:
         print("\nSeed setup was not offered because quickstart wiring/checks did not finish.")
         return rc
@@ -514,6 +592,7 @@ def main(argv: list[str] | None = None) -> int:
         python_path=python_path,
         project=project,
         source=source,
+        backend=backend,
         lookback_days=args.lookback_days,
         last_sessions=args.last_sessions,
     )

@@ -161,7 +161,9 @@ def test_write_config_backs_up_existing():
 
 def test_no_seed_prompt_prints_seed_handoff_unless_suppressed():
     d = Path(tempfile.mkdtemp(prefix="latch-codex-seed-output-"))
+    original_pin = ic.install_engine.pin_kb_dir
     try:
+        ic.install_engine.pin_kb_dir = lambda _value, _dry: ("OK", "pinned")
         config = d / "config.toml"
         hooks = d / "hooks.json"
         agents = d / "AGENTS.md"
@@ -185,6 +187,8 @@ def test_no_seed_prompt_prints_seed_handoff_unless_suppressed():
         _assert(rc == 0, f"Codex installer should complete, got {rc}:\n{text}")
         _assert(text.count("Seed latch from prior work") == 1,
                 f"--no-seed-prompt should still print standalone seed handoff:\n{text}")
+        _assert("--source codex --backend codex --apply" in text,
+                f"Codex handoff must select the Codex model backend:\n{text}")
 
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
@@ -208,7 +212,64 @@ def test_no_seed_prompt_prints_seed_handoff_unless_suppressed():
                 f"--suppress-seed-output should silence Codex seed handoff:\n{text}")
         print("PASS no_seed_prompt_prints_seed_handoff_unless_suppressed")
     finally:
+        ic.install_engine.pin_kb_dir = original_pin
         shutil.rmtree(d, ignore_errors=True)
+
+
+def test_interactive_seed_offer_uses_codex_backend():
+    d = Path(tempfile.mkdtemp(prefix="latch-codex-seed-backend-"))
+    original_offer = ic.install_engine.offer_seed_after_install
+    original_pin = ic.install_engine.pin_kb_dir
+    calls: list[dict] = []
+    try:
+        ic.install_engine.offer_seed_after_install = lambda **kwargs: calls.append(kwargs)
+        ic.install_engine.pin_kb_dir = lambda _value, _dry: ("OK", "pinned")
+        rc = ic.main([
+            "--python",
+            sys.executable,
+            "--config",
+            str(d / "config.toml"),
+            "--hooks",
+            str(d / "hooks.json"),
+            "--agents-md",
+            str(d / "AGENTS.md"),
+            "--skip-agents",
+            "--skip-hooks",
+        ])
+        _assert(rc == 0, f"Codex installer should complete, got {rc}")
+        _assert(len(calls) == 1, f"expected one seed offer, got {calls}")
+        _assert(calls[0]["source"] == "codex", calls[0])
+        _assert(calls[0]["backend"] == "codex", calls[0])
+    finally:
+        ic.install_engine.offer_seed_after_install = original_offer
+        ic.install_engine.pin_kb_dir = original_pin
+        shutil.rmtree(d, ignore_errors=True)
+    print("PASS interactive_seed_offer_uses_codex_backend")
+
+
+def test_pin_conflict_stops_before_codex_config_write():
+    d = Path(tempfile.mkdtemp(prefix="latch-codex-pin-conflict-"))
+    config = d / "config.toml"
+    original_pin = ic.install_engine.pin_kb_dir
+    try:
+        ic.install_engine.pin_kb_dir = lambda _value, _dry: (
+            "ERROR", "effective target conflicts with existing pin"
+        )
+        rc = ic.main([
+            "--python", sys.executable,
+            "--config", str(config),
+            "--hooks", str(d / "hooks.json"),
+            "--agents-md", str(d / "AGENTS.md"),
+            "--skip-agents",
+            "--skip-hooks",
+            "--suppress-seed-output",
+        ])
+        _assert(rc == 2, f"pin conflict should fail with status 2, got {rc}")
+        _assert(not config.exists(), "pin conflict must stop before Codex config writes")
+    finally:
+        ic.install_engine.pin_kb_dir = original_pin
+        shutil.rmtree(d, ignore_errors=True)
+    print("PASS pin_conflict_stops_before_codex_config_write")
 
 
 if __name__ == "__main__":
@@ -220,4 +281,6 @@ if __name__ == "__main__":
     test_merge_config_idempotent()
     test_write_config_backs_up_existing()
     test_no_seed_prompt_prints_seed_handoff_unless_suppressed()
+    test_interactive_seed_offer_uses_codex_backend()
+    test_pin_conflict_stops_before_codex_config_write()
     print("\nAll install_codex tests pass.")

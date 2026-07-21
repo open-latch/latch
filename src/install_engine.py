@@ -172,6 +172,7 @@ def seed_command_args(
     python_path: str,
     project: Path,
     source: str = "auto",
+    backend: str,
 ) -> list[str]:
     return [
         python_path,
@@ -180,6 +181,8 @@ def seed_command_args(
         str(project),
         "--source",
         source,
+        "--backend",
+        backend,
         "--lookback-days",
         "90",
         "--last-sessions",
@@ -208,11 +211,17 @@ def offer_seed_after_install(
     *,
     python_path: str,
     source: str = "auto",
+    backend: str,
     project: Path | None = None,
 ) -> None:
     """Offer review-first initial-KB seeding after installation."""
     project = (project or Path.cwd()).resolve()
-    command = seed_command_args(python_path=python_path, project=project, source=source)
+    command = seed_command_args(
+        python_path=python_path,
+        project=project,
+        source=source,
+        backend=backend,
+    )
     command_text = format_command(command)
 
     print()
@@ -418,12 +427,36 @@ def _read_pin() -> str | None:
         return None
 
 
+def _absolute_kb_dir(value: str) -> Path:
+    """Return a durable absolute KB path without resolving symlinks."""
+    raw = value.strip()
+    if platform.system() == "Windows":
+        # Git Bash/MSYS may pass /c/... or /C:/... to native Python. Convert
+        # those lexical forms before pathlib anchors an apparent root-relative
+        # path to the current drive.
+        if len(raw) >= 4 and raw[0] == "/" and raw[1].isalpha() and raw[2] == "/":
+            raw = f"{raw[1].upper()}:{raw[2:]}"
+        elif (
+            len(raw) >= 4
+            and raw[0] == "/"
+            and raw[1].isalpha()
+            and raw[2] == ":"
+            and raw[3] in {"/", "\\"}
+        ):
+            raw = raw[1:]
+    return Path(raw).expanduser().absolute()
+
+
+def _kb_path_key(path: Path) -> str:
+    return os.path.normcase(os.path.normpath(str(path)))
+
+
 def pin_kb_dir(kb_dir_override: str | None, dry_run: bool) -> tuple[str, str]:
     """Write kb_location.json pinning the single KB directory (id=1556).
 
     Idempotent: an existing pin is never overwritten (re-running install must
     not relocate a user's KB). With no pin yet:
-      * ``--kb-dir`` wins;
+      * ``--kb-dir`` wins, then ``LATCH_KB_DIR`` / ``CLAUDE_KB_DIR``;
       * a FRESH install (no legacy per-cwd KBs) defaults to ``<KB_HOME>/store``;
       * an install that already has per-cwd KBs and no ``--kb-dir`` is LEFT in
         legacy mode — writing a default would silently orphan existing
@@ -431,11 +464,54 @@ def pin_kb_dir(kb_dir_override: str | None, dry_run: bool) -> tuple[str, str]:
         migration stance of id=1556 (new installs pay nothing; existing
         multi-DB users choose their one KB once, by hand).
     """
+    environment_override = next(
+        (
+            value.strip()
+            for value in (
+                os.environ.get("LATCH_KB_DIR"),
+                os.environ.get("CLAUDE_KB_DIR"),
+            )
+            if value and value.strip()
+        ),
+        None,
+    )
+    if kb_dir_override is not None and not kb_dir_override.strip():
+        return "ERROR", "--kb-dir must name a non-empty directory"
+    effective_override = (
+        kb_dir_override.strip()
+        if kb_dir_override is not None
+        else environment_override
+    )
+    if kb_dir_override is not None and environment_override:
+        requested_path = _absolute_kb_dir(kb_dir_override)
+        environment_path = _absolute_kb_dir(environment_override)
+        if _kb_path_key(requested_path) != _kb_path_key(environment_path):
+            return "ERROR", (
+                f"--kb-dir target {str(requested_path)!r} conflicts with the active KB "
+                f"environment target {str(environment_path)!r}; refusing to let seed "
+                "subprocesses override the persisted pin. Unset LATCH_KB_DIR / "
+                "CLAUDE_KB_DIR or pass the same target."
+            )
     existing = _read_pin()
     if existing is not None:
+        existing_path = Path(existing).expanduser()
+        if not existing_path.is_absolute():
+            return "ERROR", (
+                f"existing KB pin is relative ({existing!r}); refusing to continue because "
+                "different process working directories could select different KBs. Replace "
+                f"{KB_LOCATION_PATH.name} with one absolute kb_dir."
+            )
+        if effective_override:
+            requested_path = _absolute_kb_dir(effective_override)
+            if _kb_path_key(existing_path) != _kb_path_key(requested_path):
+                return "ERROR", (
+                    f"effective KB target {str(requested_path)!r} conflicts with existing pin "
+                    f"{str(existing_path)!r}; refusing to seed one KB and later open another. "
+                    "Unset the override to keep the existing pin, or migrate the pin explicitly."
+                )
         return "OK", f"already pinned -> {existing} (left unchanged)"
-    if kb_dir_override:
-        target = Path(_abs(kb_dir_override))
+    if effective_override:
+        target = _absolute_kb_dir(effective_override)
     elif _has_legacy_project_dbs():
         return "WARN", (
             "existing per-cwd KBs found under projects/ and no --kb-dir given - "
@@ -779,7 +855,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  settings    : {SETTINGS_PATH}")
     print(f"  mode        : {'DRY-RUN (no writes)' if args.dry_run else 'apply'}\n")
 
-    # --- 1. MCP registration -------------------------------------------------
+    # --- 1. fail-closed preflight + KB identity ------------------------------
     claude = find_claude()
     preflight_errors = apply_preflight_errors(claude)
     if preflight_errors and not args.dry_run:
@@ -789,6 +865,13 @@ def main(argv: list[str] | None = None) -> int:
         print("\nNo changes written.")
         return 2
 
+    pin_level, pin_msg = pin_kb_dir(args.kb_dir, args.dry_run)
+    print(f"  [{pin_level:4}] KB dir: {pin_msg}")
+    if pin_level == "ERROR":
+        print("\nNo changes written.")
+        return 2
+
+    # --- 2. MCP registration -------------------------------------------------
     if not claude:
         print("  [WARN] claude CLI not found on PATH — cannot register the MCP server.")
         print("         Install Claude Code, then re-run, or register manually:")
@@ -800,7 +883,7 @@ def main(argv: list[str] | None = None) -> int:
         if level == "FAIL":
             return 1
 
-    # --- 2 & 3. settings.json (hooks + permission + dead-block removal) -------
+    # --- 3 & 4. settings.json (hooks + permission + dead-block removal) -------
     snippet = load_snippet(python_path)
     new_settings, changes = merge_settings(snippet)
     if not changes:
@@ -815,7 +898,7 @@ def main(argv: list[str] | None = None) -> int:
         for c in changes:
             print(f"           - {c}")
 
-    # --- 4. slash commands ---------------------------------------------------
+    # --- 5. slash commands ---------------------------------------------------
     cmd_level, cmd_changes = install_commands(args.dry_run)
     if cmd_level == "OK":
         if args.dry_run:
@@ -828,10 +911,6 @@ def main(argv: list[str] | None = None) -> int:
     else:
         print(f"  [WARN] {cmd_changes[0]}")
 
-    # --- 5. pin the KB directory (id=1556) -----------------------------------
-    pin_level, pin_msg = pin_kb_dir(args.kb_dir, args.dry_run)
-    print(f"  [{pin_level:4}] KB dir: {pin_msg}")
-
     # --- next steps ----------------------------------------------------------
     print()
     if args.dry_run:
@@ -842,10 +921,19 @@ def main(argv: list[str] | None = None) -> int:
         if not args.suppress_seed_output:
             if args.no_seed_prompt:
                 print()
-                print(seed_next_step_message())
+                print(seed_next_step_message(format_command(seed_command_args(
+                    python_path=python_path,
+                    project=Path.cwd(),
+                    source="auto",
+                    backend="claude",
+                ))))
                 print()
             else:
-                offer_seed_after_install(python_path=python_path, source="auto")
+                offer_seed_after_install(
+                    python_path=python_path,
+                    source="auto",
+                    backend="claude",
+                )
     return 0
 
 

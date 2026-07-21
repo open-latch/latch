@@ -503,6 +503,92 @@ def test_resolve_python_preserves_virtualenv_symlink():
     print("PASS resolve_python_preserves_virtualenv_symlink")
 
 
+def test_pin_kb_dir_persists_nonexistent_relative_target_as_absolute():
+    root = Path(tempfile.mkdtemp(prefix="latch-pin-relative-"))
+    launch_dir = root / "launcher"
+    launch_dir.mkdir()
+    original = {
+        "KB_LOCATION_PATH": ie.KB_LOCATION_PATH,
+        "PROJECTS_DIR": ie.PROJECTS_DIR,
+        "DEFAULT_STORE_DIR": ie.DEFAULT_STORE_DIR,
+    }
+    old_cwd = Path.cwd()
+    saved_latch = os.environ.pop("LATCH_KB_DIR", None)
+    saved_legacy = os.environ.pop("CLAUDE_KB_DIR", None)
+    try:
+        ie.KB_LOCATION_PATH = root / "kb_location.json"
+        ie.PROJECTS_DIR = root / "projects"
+        ie.DEFAULT_STORE_DIR = root / "store"
+        os.chdir(launch_dir)
+        level, _message = ie.pin_kb_dir("relative vault", False)
+        recorded = json.loads(ie.KB_LOCATION_PATH.read_text(encoding="utf-8"))["kb_dir"]
+        expected = str(Path("relative vault").absolute()).replace("\\", "/")
+        _assert(level == "OK" and recorded == expected,
+                f"relative KB targets must be persisted absolutely: {recorded!r}")
+    finally:
+        os.chdir(old_cwd)
+        ie.KB_LOCATION_PATH = original["KB_LOCATION_PATH"]
+        ie.PROJECTS_DIR = original["PROJECTS_DIR"]
+        ie.DEFAULT_STORE_DIR = original["DEFAULT_STORE_DIR"]
+        if saved_latch is not None:
+            os.environ["LATCH_KB_DIR"] = saved_latch
+        if saved_legacy is not None:
+            os.environ["CLAUDE_KB_DIR"] = saved_legacy
+        shutil.rmtree(root, ignore_errors=True)
+    print("PASS pin_kb_dir_persists_nonexistent_relative_target_as_absolute")
+
+
+def test_pin_kb_dir_rejects_conflicting_effective_target():
+    root = Path(tempfile.mkdtemp(prefix="latch-pin-conflict-"))
+    original_path = ie.KB_LOCATION_PATH
+    saved_latch = os.environ.pop("LATCH_KB_DIR", None)
+    saved_legacy = os.environ.pop("CLAUDE_KB_DIR", None)
+    try:
+        ie.KB_LOCATION_PATH = root / "kb_location.json"
+        pinned = root / "old kb"
+        requested = root / "new kb"
+        ie.KB_LOCATION_PATH.write_text(
+            json.dumps({"kb_dir": str(pinned)}) + "\n",
+            encoding="utf-8",
+        )
+        os.environ["LATCH_KB_DIR"] = str(requested)
+        before = ie.KB_LOCATION_PATH.read_text(encoding="utf-8")
+        level, message = ie.pin_kb_dir(None, False)
+        _assert(level == "ERROR" and "conflicts with existing pin" in message,
+                f"conflicting runtime/file targets must fail closed: {level}, {message}")
+        _assert(ie.KB_LOCATION_PATH.read_text(encoding="utf-8") == before,
+                "conflict handling must not rewrite the existing pin")
+        _assert(not requested.exists(), "conflict handling must not create the new target")
+
+        ie.KB_LOCATION_PATH.unlink()
+        explicit = root / "explicit kb"
+        level, message = ie.pin_kb_dir(str(explicit), False)
+        _assert(level == "ERROR" and "conflicts with the active KB environment" in message,
+                f"CLI/env disagreement must fail before a pin is written: {level}, {message}")
+        _assert(not ie.KB_LOCATION_PATH.exists(),
+                "CLI/env conflict must not persist either competing target")
+    finally:
+        ie.KB_LOCATION_PATH = original_path
+        os.environ.pop("LATCH_KB_DIR", None)
+        os.environ.pop("CLAUDE_KB_DIR", None)
+        if saved_latch is not None:
+            os.environ["LATCH_KB_DIR"] = saved_latch
+        if saved_legacy is not None:
+            os.environ["CLAUDE_KB_DIR"] = saved_legacy
+        shutil.rmtree(root, ignore_errors=True)
+    print("PASS pin_kb_dir_rejects_conflicting_effective_target")
+
+
+def test_absolute_kb_dir_normalizes_git_bash_path_on_windows():
+    if os.name != "nt":
+        return
+    actual = ie._absolute_kb_dir("/c/Users/example/Latch KB")
+    expected = Path("C:/Users/example/Latch KB").absolute()
+    _assert(actual == expected,
+            f"Git Bash KB path should normalize for native Python: {actual} != {expected}")
+    print("PASS absolute_kb_dir_normalizes_git_bash_path_on_windows")
+
+
 def test_seed_next_step_message_names_immediate_value_and_preview():
     msg = ie.seed_next_step_message(
         "bash bin/latch_seed.sh --lookback-days 90 --last-sessions 50 --apply"
@@ -530,13 +616,20 @@ def test_seed_next_step_message_names_immediate_value_and_preview():
 
 def test_seed_command_args_use_llm_apply_and_project():
     project = Path("/tmp/example project")
-    args = ie.seed_command_args(python_path="/py", project=project, source="codex")
+    args = ie.seed_command_args(
+        python_path="/py",
+        project=project,
+        source="codex",
+        backend="codex",
+    )
     _assert(args[:2] == ["/py", str(ie.KB_HOME / "src" / "seed.py")],
             f"seed command should run seed.py with chosen python: {args}")
     _assert("--project" in args and str(project) in args,
             f"seed command should target the project path: {args}")
     _assert("--source" in args and "codex" in args,
             f"seed command should preserve source selection: {args}")
+    _assert(args.count("--backend") == 1 and "codex" in args,
+            f"Codex install-time seed must select its model backend: {args}")
     _assert("--lookback-days" in args and "90" in args,
             f"install-time seed should use the 90-day initial-KB horizon: {args}")
     _assert("--last-sessions" in args and "50" in args,
@@ -563,6 +656,7 @@ def test_offer_seed_after_install_noninteractive_does_not_run():
             ie.offer_seed_after_install(
                 python_path="/py",
                 source="auto",
+                backend="codex",
                 project=Path("/tmp/example-project"),
             )
         _assert(calls == [], f"noninteractive seed offer must not run subprocess: {calls}")
@@ -574,6 +668,8 @@ def test_offer_seed_after_install_noninteractive_does_not_run():
             f"noninteractive install must truthfully report the unbuilt initial KB:\n{text}")
     _assert("--lookback-days 90" in text and "--last-sessions 50" in text,
             f"noninteractive handoff should include explicit stronger defaults:\n{text}")
+    _assert("--backend codex" in text,
+            f"noninteractive handoff should preserve the selected backend:\n{text}")
     print("PASS offer_seed_after_install_noninteractive_does_not_run")
 
 
@@ -600,6 +696,8 @@ def test_no_seed_prompt_prints_seed_handoff_unless_suppressed():
         _assert(rc == 0, f"installer should complete in patched test path, got {rc}:\n{text}")
         _assert(text.count("Build latch's initial decision KB") == 1,
                 f"--no-seed-prompt should still print standalone seed handoff:\n{text}")
+        _assert("--backend claude" in text,
+                f"Claude handoff must select the Claude backend explicitly:\n{text}")
 
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
@@ -702,6 +800,9 @@ if __name__ == "__main__":
     test_command_change_summary_separates_migration_actions()
     test_resolve_python_override_and_env()
     test_resolve_python_preserves_virtualenv_symlink()
+    test_pin_kb_dir_persists_nonexistent_relative_target_as_absolute()
+    test_pin_kb_dir_rejects_conflicting_effective_target()
+    test_absolute_kb_dir_normalizes_git_bash_path_on_windows()
     test_seed_next_step_message_names_immediate_value_and_preview()
     test_seed_command_args_use_llm_apply_and_project()
     test_offer_seed_after_install_noninteractive_does_not_run()
