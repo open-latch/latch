@@ -119,6 +119,16 @@ def _message(line: bytes) -> dict[str, Any] | None:
 # --------------------------------------------------------------------------- #
 TOOL_SURFACE_ENV = "LATCH_TOOL_SURFACE"
 _HIDDEN_TOOL_PREFIX = "kb_"
+# latch_* tools kept in the daemon registry (the shared-runtime invariant test
+# and daemon debugging call them directly) but never advertised on a trimmed
+# install.  Their kb_* aliases are already hidden by the prefix rule.  Unlike
+# kb_* aliases these are NOT rejected on call — they stay reachable by name for
+# diagnostics; they are only dropped from tools/list.
+_SURFACE_HIDDEN_TOOLS = frozenset({"latch_runtime_status"})
+
+
+def _is_hidden_from_listing(name: str) -> bool:
+    return name.startswith(_HIDDEN_TOOL_PREFIX) or name in _SURFACE_HIDDEN_TOOLS
 
 
 def trimmed_tool_surface(env: Mapping[str, str] | None = None) -> bool:
@@ -142,7 +152,7 @@ def filter_tools_list_result(message: dict[str, Any]) -> dict[str, Any]:
         for tool in tools
         if not (
             isinstance(tool, dict)
-            and str(tool.get("name") or "").startswith(_HIDDEN_TOOL_PREFIX)
+            and _is_hidden_from_listing(str(tool.get("name") or ""))
         )
     ]
     if len(kept) == len(tools):

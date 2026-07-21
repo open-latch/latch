@@ -97,10 +97,15 @@ def main() -> int:
         for index in range(args.requests):
             client = clients[index % len(clients)]
             before = time.perf_counter()
-            vector = client.call_tool("latch_embed", {"text": f"latency sample {index % 5}"})
+            # latch_embed was removed from the tool surface; latch_search is a
+            # representative daemon request that also exercises the shared
+            # embedding owner (it embeds the query).
+            response = client.call_tool(
+                "latch_search", {"query": f"latency sample {index % 5}", "limit": 1}
+            )
             latencies_ms.append((time.perf_counter() - before) * 1000.0)
-            if len(vector) != 384:
-                raise AssertionError(f"unexpected embedding shape: {len(vector)}")
+            if response is None:
+                raise AssertionError("latch_search returned no result")
 
         proxy_rss = [_rss_bytes(pid) for pid in proxy_pids]
         proxy_footprints = [_footprint_bytes(pid) for pid in proxy_pids]
@@ -118,7 +123,7 @@ def main() -> int:
             "summed_proxy_footprint_bytes": sum(
                 value for value in proxy_footprints if value is not None
             ),
-            "embed_latency_ms": {
+            "request_latency_ms": {
                 "mean": round(statistics.fmean(latencies_ms), 4),
                 "p50": round(_percentile(latencies_ms, 0.50), 4),
                 "p95": round(_percentile(latencies_ms, 0.95), 4),
@@ -134,18 +139,18 @@ def main() -> int:
                 legacy_latencies: list[float] = []
                 for index in range(args.requests):
                     before = time.perf_counter()
-                    vector = legacy.call_tool(
-                        "latch_embed", {"text": f"latency sample {index % 5}"}
+                    response = legacy.call_tool(
+                        "latch_search", {"query": f"latency sample {index % 5}", "limit": 1}
                     )
                     legacy_latencies.append((time.perf_counter() - before) * 1000.0)
-                    if len(vector) != 384:
-                        raise AssertionError(f"unexpected legacy embedding shape: {len(vector)}")
+                    if response is None:
+                        raise AssertionError("legacy latch_search returned no result")
                 shared_p95 = _percentile(latencies_ms, 0.95)
                 legacy_p95 = _percentile(legacy_latencies, 0.95)
                 result["legacy_baseline"] = {
                     "process_rss_bytes": _rss_bytes(legacy.process.pid),
                     "process_footprint_bytes": _footprint_bytes(legacy.process.pid),
-                    "embed_latency_ms": {
+                    "request_latency_ms": {
                         "mean": round(statistics.fmean(legacy_latencies), 4),
                         "p50": round(_percentile(legacy_latencies, 0.50), 4),
                         "p95": round(legacy_p95, 4),

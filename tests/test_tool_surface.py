@@ -65,6 +65,21 @@ def test_filter_tools_list_drops_kb_aliases_only():
     print("PASS filter_tools_list_drops_kb_aliases_only")
 
 
+def test_filter_tools_list_drops_hidden_latch_diagnostics():
+    # latch_runtime_status is kept in the registry but hidden from the surface.
+    message = _tools_list_response(
+        ["latch_search", "latch_runtime_status", "latch_gate"])
+    filtered = mcp_proxy.filter_tools_list_result(message)
+    names = [t["name"] for t in filtered["result"]["tools"]]
+    _assert(names == ["latch_search", "latch_gate"], names)
+    # ...but it is NOT rejected on call (diagnostics stay reachable by name).
+    call = {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "latch_runtime_status", "arguments": {}}}
+    _assert(mcp_proxy.rejected_kb_call(call) is None,
+            "latch_runtime_status must stay callable, only unlisted")
+    print("PASS filter_tools_list_drops_hidden_latch_diagnostics")
+
+
 def test_filter_tools_list_identity_when_nothing_to_drop():
     message = _tools_list_response(["latch_search", "latch_get"])
     _assert(mcp_proxy.filter_tools_list_result(message) is message,
@@ -193,6 +208,7 @@ def test_legacy_prune_removes_kb_aliases_from_registry():
 def main():
     test_trimmed_tool_surface_flag_parsing()
     test_filter_tools_list_drops_kb_aliases_only()
+    test_filter_tools_list_drops_hidden_latch_diagnostics()
     test_filter_tools_list_identity_when_nothing_to_drop()
     test_rejected_kb_call_detection()
     test_daemon_tools_list_response_is_filtered_when_trimmed()

@@ -1592,14 +1592,11 @@ def kb_priority_retire(node_id: int) -> dict:
 # hooks.  Its experimental kb_/latch_profile_* MCP verbs were removed from the
 # tool surface: profile bindings are a deliberate per-user configuration
 # mutation, not something an agent should reach for mid-session.
-@mcp.tool(name="latch_embed")
-@mcp.tool(name="kb_embed")
-def kb_embed(text: str) -> dict | list[float]:
-    """Embed `text` through the shared runtime's model owner. Mainly here for
-    parity with the TCP embed listener — agents should rarely call it directly."""
-    if paths.is_unlatched_mode():
-        return _unlatched_response("latch_embed")
-    return embeddings.embed(text).tolist()
+#
+# The standalone latch_/kb_embed MCP verb was also removed from the surface:
+# embedding is automatic on every write and through the TCP embed listener, so
+# no agent ever needs to call it directly.  The listener and write-path embed
+# calls are unaffected.
 
 
 def _peak_rss_bytes() -> int | None:
