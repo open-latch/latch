@@ -16,12 +16,24 @@ import os
 import sys
 from pathlib import Path
 
+import pytest
+
 # tests/ on sys.path so the shared _isolation shim imports under pytest too.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import _isolation  # noqa: F401,E402  (import side-effect: isolates configuration)
+import _isolation  # noqa: E402  (import side-effect: isolates configuration)
 
 # _isolation forces the shipped Full behavior and propagates it to child hooks.
 # Tests that exercise another tier set it explicitly or pass an env mapping to
 # the resolver.
 assert os.environ["LATCH_INTENSITY"] == "full"
+
+_ISOLATED_SETTINGS_FILE = _isolation.paths.LATCH_SETTINGS_FILE
+
+
+@pytest.fixture(autouse=True)
+def _reset_install_wide_intensity_between_tests():
+    """Keep one test's quickstart apply from retiering later tests."""
+    _ISOLATED_SETTINGS_FILE.unlink(missing_ok=True)
+    yield
+    _ISOLATED_SETTINGS_FILE.unlink(missing_ok=True)

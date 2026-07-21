@@ -427,8 +427,8 @@ def _read_pin() -> str | None:
         return None
 
 
-def _absolute_kb_dir(value: str) -> Path:
-    """Return a durable absolute KB path without resolving symlinks."""
+def absolute_kb_dir(value: str) -> Path:
+    """Return the canonical install target without resolving symlinks."""
     raw = value.strip()
     if platform.system() == "Windows":
         # Git Bash/MSYS may pass /c/... or /C:/... to native Python. Convert
@@ -445,6 +445,10 @@ def _absolute_kb_dir(value: str) -> Path:
         ):
             raw = raw[1:]
     return Path(raw).expanduser().absolute()
+
+
+# Compatibility for callers/tests that predate the public shared normalizer.
+_absolute_kb_dir = absolute_kb_dir
 
 
 def _kb_path_key(path: Path) -> str:
@@ -483,8 +487,8 @@ def pin_kb_dir(kb_dir_override: str | None, dry_run: bool) -> tuple[str, str]:
         else environment_override
     )
     if kb_dir_override is not None and environment_override:
-        requested_path = _absolute_kb_dir(kb_dir_override)
-        environment_path = _absolute_kb_dir(environment_override)
+        requested_path = absolute_kb_dir(kb_dir_override)
+        environment_path = absolute_kb_dir(environment_override)
         if _kb_path_key(requested_path) != _kb_path_key(environment_path):
             return "ERROR", (
                 f"--kb-dir target {str(requested_path)!r} conflicts with the active KB "
@@ -502,7 +506,7 @@ def pin_kb_dir(kb_dir_override: str | None, dry_run: bool) -> tuple[str, str]:
                 f"{KB_LOCATION_PATH.name} with one absolute kb_dir."
             )
         if effective_override:
-            requested_path = _absolute_kb_dir(effective_override)
+            requested_path = absolute_kb_dir(effective_override)
             if _kb_path_key(existing_path) != _kb_path_key(requested_path):
                 return "ERROR", (
                     f"effective KB target {str(requested_path)!r} conflicts with existing pin "
@@ -511,7 +515,7 @@ def pin_kb_dir(kb_dir_override: str | None, dry_run: bool) -> tuple[str, str]:
                 )
         return "OK", f"already pinned -> {existing} (left unchanged)"
     if effective_override:
-        target = _absolute_kb_dir(effective_override)
+        target = absolute_kb_dir(effective_override)
     elif _has_legacy_project_dbs():
         return "WARN", (
             "existing per-cwd KBs found under projects/ and no --kb-dir given - "

@@ -363,16 +363,24 @@ def db_path(cwd: str | os.PathLike | None = None) -> Path:
     return project_dir(cwd) / "kb.db"
 
 
-def kb_has_evidence(cwd: str | os.PathLike | None = None) -> bool:
+def kb_has_evidence(
+    cwd: str | os.PathLike | None = None,
+    *,
+    kb_dir: str | os.PathLike | None = None,
+) -> bool:
     """Whether the selected KB already contains at least one durable node.
 
     Used only by installer/retier UX to distinguish a genuinely fresh install
     from an older install that predates ``latch_settings.json``. The read-only
-    SQLite URI avoids creating a database as a side effect.
+    SQLite URI avoids creating a database as a side effect. ``kb_dir`` lets an
+    installer inspect an explicit target before persisting its pin; otherwise
+    a CLI-only ``--kb-dir`` would be invisible to the normal path resolver.
     """
     import sqlite3
 
     candidates = {db_path(cwd), KB_ROOT / "store" / "kb.db"}
+    if kb_dir is not None:
+        candidates.add(Path(kb_dir) / "kb.db")
     try:
         candidates.update(PROJECTS_ROOT.glob("*/kb.db"))
     except OSError:

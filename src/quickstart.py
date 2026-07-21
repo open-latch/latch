@@ -187,6 +187,7 @@ def resolve_latch_intensity(
     *,
     project: Path,
     agents: Sequence[str],
+    kb_dir: str | os.PathLike[str] | None = None,
     env: Mapping[str, str] | None = None,
     cursor_with_hooks: bool = False,
     is_tty: bool | None = None,
@@ -200,6 +201,11 @@ def resolve_latch_intensity(
     an applying run writes the selected value to ``latch_settings.json``.
     """
     values = os.environ if env is None else env
+    evidence_kb_dir = (
+        install_engine.absolute_kb_dir(os.fspath(kb_dir))
+        if kb_dir is not None
+        else None
+    )
     raw_env = values.get("LATCH_INTENSITY")
     env_choice = None
     if raw_env is not None:
@@ -236,7 +242,7 @@ def resolve_latch_intensity(
     if saved is not None:
         default = saved
         reason = "saved setting"
-    elif paths.kb_has_evidence(project):
+    elif paths.kb_has_evidence(project, kb_dir=evidence_kb_dir):
         default = paths.LEGACY_LATCH_INTENSITY
         reason = "preserving existing Full behavior"
     else:
@@ -735,6 +741,7 @@ def main(argv: list[str] | None = None) -> int:
             args.latch_intensity,
             project=project,
             agents=agents,
+            kb_dir=args.kb_dir,
             cursor_with_hooks=args.cursor_with_hooks,
         )
     except ValueError as e:
