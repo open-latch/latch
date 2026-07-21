@@ -633,8 +633,13 @@ def test_fa162bd_pre_registry_proxy_requires_fresh_task_after_upgrade() -> None:
 
 @pytest.mark.parametrize(
     ("pre_registry", "capability_epoch"),
-    ((False, None), (False, 1), (True, None)),
-    ids=("keyed-pre-capability", "keyed-epoch-1", "fa162bd-pre-registry"),
+    ((False, None), (False, 1), (False, 2), (True, None)),
+    ids=(
+        "keyed-pre-capability",
+        "keyed-epoch-1",
+        "keyed-epoch-2",
+        "fa162bd-pre-registry",
+    ),
 )
 def test_historical_transport_receives_fresh_task_error_cross_platform(
     pre_registry: bool,
@@ -909,6 +914,91 @@ def test_prompt_after_idle_exit_wakes_owner_and_emits_truthful_bounded_receipt()
             client.close()
         _stop_daemon(kb_dir)
         shutil.rmtree(kb_dir, ignore_errors=True)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="uses a POSIX fake backend executable")
+def test_compaction_guard_is_connection_local_across_shared_gate_owner() -> None:
+    kb_dir = _temp_vault()
+    fake_dir = Path(tempfile.mkdtemp(prefix="latch_fake_gate_backend_"))
+    fake_claude = fake_dir / "fake-claude"
+    clients: list[McpClient] = []
+    verdict = {
+        "recommendation": "PROCEED",
+        "summary": "Ordinary connection reached the classifier.",
+        "decision_chain": [],
+        "abandoned_paths": [],
+        "active_constraints": [],
+        "current_direction": [],
+        "risk_if_proceed": "",
+        "better_next_action": "",
+        "evidence_nodes": [],
+        "load_bearing_claims": [],
+        "uncovered_claims": [],
+    }
+    envelope = json.dumps({"result": json.dumps(verdict)})
+    fake_claude.write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys\n"
+        "sys.stdin.read()\n"
+        f"print({envelope!r})\n",
+        encoding="utf-8",
+    )
+    fake_claude.chmod(0o755)
+    common = {
+        "LATCH_GATE_BACKEND": "claude",
+        "CLAUDE_BIN": str(fake_claude),
+        "CLAUDE_KB_ADVERSARY": "0",
+    }
+    saved = {
+        name: os.environ.pop(name, None)
+        for name in ("LATCH_IN_COMPACT", "CLAUDE_KB_IN_COMPACT")
+    }
+
+    try:
+        compact = McpClient(
+            kb_dir,
+            "compact-session",
+            env_overrides={
+                **common,
+                "LATCH_IN_COMPACT": "1",
+                "CLAUDE_KB_IN_COMPACT": "1",
+            },
+        )
+        clients.append(compact)
+        ordinary = McpClient(kb_dir, "ordinary-session", env_overrides=common)
+        clients.append(ordinary)
+
+        compact_first = compact.call_tool(
+            "latch_gate", {"request": "Compact child gate must skip."},
+        )
+        ordinary_first = ordinary.call_tool(
+            "latch_gate", {"request": "Ordinary gate must classify."},
+        )
+        compact_second = compact.call_tool(
+            "latch_gate", {"request": "Compact child must still skip."},
+        )
+        ordinary_second = ordinary.call_tool(
+            "latch_gate", {"request": "Ordinary gate must still classify."},
+        )
+
+        for result in (compact_first, compact_second):
+            _assert(result["verdict"]["error"] == "in-compact", str(result))
+            _assert(result["verdict"].get("skipped") is True, str(result))
+            _assert("compaction/model subprocess" in result["gate_status"], str(result))
+        for result in (ordinary_first, ordinary_second):
+            _assert(result["gate_status"] == "OK", str(result))
+            _assert(result["verdict"]["recommendation"] == "PROCEED", str(result))
+            _assert(result["verdict"].get("skipped") is not True, str(result))
+        print("PASS compaction_guard_is_connection_local_across_shared_gate_owner")
+    finally:
+        for client in clients:
+            client.close()
+        _stop_daemon(kb_dir)
+        shutil.rmtree(kb_dir, ignore_errors=True)
+        shutil.rmtree(fake_dir, ignore_errors=True)
+        for name, value in saved.items():
+            if value is not None:
+                os.environ[name] = value
 
 
 def test_over_cap_idle_proxy_retires_itself_without_killing_peers() -> None:

@@ -132,10 +132,13 @@ sections.
   runtime key. Broker death or a slow-start timeout can launch a contender, but
   the contender exits before model loading; only the fenced owner may warm or
   publish normal discovery.
-- Capability epoch 2 includes registry-wide lease participation. Epoch 1 proved
-  transport and migration compatibility but did not observe idle, unaliased
-  historical keys, so it is rejected with the same bounded fresh-task path
-  rather than grandfathered under a capacity contract it cannot enforce.
+- Capability epoch 3 adds connection-local compaction guards so a classifier or
+  compactor proxy cannot poison the shared owner while still suppressing its own
+  recursive gate work. Epoch 2 includes registry-wide lease participation.
+  Epoch 1 proved transport and migration compatibility but did not observe idle,
+  unaliased historical keys. Each older epoch is rejected with the same bounded
+  fresh-task path rather than grandfathered under a connection contract it
+  cannot enforce.
 - Discovery and election locks live in a runtime-keyed registry beneath the
   pinned vault. Files are atomically replaced and mode 0600. The daemon binds
   only `127.0.0.1`; connections authenticate with a 256-bit random token.
@@ -167,9 +170,11 @@ sections.
 ### Connection isolation
 
 Each proxy sends an authenticated prelude containing cwd, session identity and
-source, proxy PID, connection ID, and runtime key. The daemon binds these values
-to `contextvars`; concurrent FastMCP sessions therefore use their own cwd and
-session attribution even though tool code runs in one process.
+source, proxy PID, connection ID, runtime key, and whether that connection is a
+compaction/model subprocess. The daemon binds these values to `contextvars`;
+concurrent FastMCP sessions therefore use their own cwd, session attribution,
+and reentrancy guard even though tool code runs in one process. The long-lived
+owner explicitly drops transient compaction environment variables at startup.
 
 Codex SessionStart markers are now keyed by canonical workspace beneath the
 pinned vault. This fixes the prior failure where a single pinned marker could

@@ -34,6 +34,10 @@ SESSION_ENV_VARS = (
     "CLAUDE_CODE_SESSION_ID",
     "CODEX_THREAD_ID",
 )
+COMPACT_ENV_VARS = (
+    "LATCH_IN_COMPACT",
+    "CLAUDE_KB_IN_COMPACT",
+)
 
 
 def _utc_now() -> str:
@@ -99,6 +103,7 @@ def connection_metadata(project_cwd: str | None = None) -> dict[str, Any]:
         "proxy_started_at": _utc_now(),
         "runtime_key": mcp_broker.RUNTIME_KEY,
         "proxy_capability_epoch": mcp_broker.PROXY_CAPABILITY_EPOCH,
+        "in_compact": any(os.environ.get(name) for name in COMPACT_ENV_VARS),
     }
 
 

@@ -24,7 +24,7 @@ import paths
 
 
 PROTOCOL_VERSION = 1
-PROXY_CAPABILITY_EPOCH = 2
+PROXY_CAPABILITY_EPOCH = 3
 DISCOVERY_FILE = "mcp-daemon.json"
 START_LOCK_FILE = "mcp-daemon.start.lock"
 OWNER_FENCE_FILE = "mcp-daemon.owner.lock"
@@ -49,6 +49,10 @@ START_REASONS = frozenset({
 })
 WINDOWS_CREATE_NO_WINDOW = 0x08000000
 WINDOWS_CREATE_NEW_PROCESS_GROUP = 0x00000200
+DAEMON_TRANSIENT_ENV_VARS = (
+    "LATCH_IN_COMPACT",
+    "CLAUDE_KB_IN_COMPACT",
+)
 
 
 class BrokerError(RuntimeError):
@@ -830,9 +834,17 @@ def _windows_base_command(env: dict[str, str]) -> str:
     return executable
 
 
+def _daemon_environment() -> dict[str, str]:
+    """Build a long-lived owner environment without connection-local guards."""
+    env = os.environ.copy()
+    for name in DAEMON_TRANSIENT_ENV_VARS:
+        env.pop(name, None)
+    return env
+
+
 def _spawn_daemon(project_cwd: str, *, start_reason: str) -> int:
     daemon_py = Path(__file__).resolve().parent / "mcp_daemon.py"
-    env = os.environ.copy()
+    env = _daemon_environment()
     env["LATCH_KB_DIR"] = str(runtime_dir())
     env["LATCH_MCP_DAEMON_PROCESS"] = "1"
     env["LATCH_MCP_RUNTIME_KEY"] = RUNTIME_KEY
@@ -918,7 +930,7 @@ def request_daemon_start(project_cwd: str) -> bool:
     payload = read_discovery()
     if payload is not None and probe_discovery(payload, timeout=0.02):
         return False
-    env = os.environ.copy()
+    env = _daemon_environment()
     env["LATCH_KB_DIR"] = str(runtime_dir())
     kwargs: dict[str, Any] = {
         "stdin": subprocess.DEVNULL,

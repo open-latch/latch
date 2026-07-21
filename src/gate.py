@@ -1388,6 +1388,14 @@ def unlatched_verdict() -> dict:
     }
 
 
+def _skip_guard_reason() -> str | None:
+    if paths.is_disabled():
+        return "disabled"
+    if paths.is_in_compact():
+        return "in-compact"
+    return None
+
+
 def _classifier_backend(name: str | None = None, *, default: str = "claude") -> str:
     """Resolve the gate model backend.
 
@@ -1572,8 +1580,9 @@ def classify_gate(
     """
     if paths.is_unlatched_mode():
         return unlatched_verdict()
-    if paths.is_disabled() or paths.is_in_compact():
-        return {**_classifier_error("disabled/in-compact"), "skipped": True}
+    skip_reason = _skip_guard_reason()
+    if skip_reason is not None:
+        return {**_classifier_error(skip_reason), "skipped": True}
     if not use_llm:
         return {**_classifier_error("use_llm=False"), "skipped": True}
 
@@ -1851,8 +1860,9 @@ def adversary_classify(
             "message": paths.UNLATCHED_MESSAGE,
             "skipped": True,
         }
-    if paths.is_disabled() or paths.is_in_compact():
-        return {**_adversary_error("disabled/in-compact"), "skipped": True}
+    skip_reason = _skip_guard_reason()
+    if skip_reason is not None:
+        return {**_adversary_error(skip_reason), "skipped": True}
     if not use_llm:
         return {**_adversary_error("use_llm=False"), "skipped": True}
 
@@ -1905,6 +1915,17 @@ def _gate_receipt_summary(verdict: dict, evidence: list[dict]) -> str:
             "Latch gate was skipped because Latch is currently UNLATCHED. "
             "Run /unlatch to re-latch. If LATCH_UNLATCHED is set, unset it too."
         )
+    if verdict.get("recommendation") is None:
+        error = str(verdict.get("error") or "unknown error").strip().rstrip(".")
+        if verdict.get("skipped"):
+            return (
+                "Latch assembled KB context but skipped classifier judgment "
+                f"because {error}; no gate verdict was produced."
+            )
+        return (
+            "Latch assembled KB context but the classifier did not produce a "
+            f"gate verdict ({error})."
+        )
     counts = []
     if evidence:
         counts.append(_counted(len(evidence), "cited KB node"))
@@ -1951,27 +1972,35 @@ def format_gate_findings(
             if error else
             "Gate did not produce a recommendation."
         )
-    authority = (
-        "No KB evidence was read while latch was unlatched."
-        if verdict.get("reason") == "unlatched"
-        else (
+    if verdict.get("reason") == "unlatched":
+        authority = "No KB evidence was read while latch was unlatched."
+        display_guidance = (
+            "Show this as an explicit Latch gate block before acting: say Latch gate "
+            "was skipped because latch is currently UNLATCHED, show the unlatched "
+            "message, and tell the user to run /unlatch to re-latch."
+        )
+    elif verdict.get("recommendation") is None:
+        authority = (
+            "No evidence nodes were cited because no gate verdict was produced; "
+            "the assembled chain is diagnostic context only."
+        )
+        display_guidance = (
+            "Show this as an explicit Latch gate block before acting: say the gate "
+            "was skipped or degraded, name the exact error, and state that no gate "
+            "recommendation or approval was produced."
+        )
+    else:
+        authority = (
             "Use evidence_nodes[].status as the visible current-authority "
             "surface; decision_chain, abandoned_paths, current_direction, "
             "and load_bearing_claims explain the rationale and source basis."
         )
-    )
-    display_guidance = (
-        "Show this as an explicit Latch gate block before acting: say Latch gate "
-        "was skipped because latch is currently UNLATCHED, show the unlatched "
-        "message, and tell the user to run /unlatch to re-latch."
-        if verdict.get("reason") == "unlatched"
-        else (
+        display_guidance = (
             "Show this as an explicit Latch gate block before acting: say Latch "
             "ran the gate on the request, then show verdict, summary/rationale, "
             "cited KB evidence nodes with status/current authority, source/basis, "
             "next action when present, and uncovered claims/gaps when present."
         )
-    )
     out = {
         "label": "Latch gate findings",
         "must_display_to_user": True,

@@ -47,6 +47,44 @@ def test_windows_base_command_bypasses_venv_redirector(monkeypatch, tmp_path):
     assert env["PYTHONPATH"] == str(site_packages)
 
 
+def test_daemon_start_paths_drop_transient_compaction_guards(monkeypatch, tmp_path):
+    captured_envs = []
+
+    class FakeProcess:
+        pid = 12345
+
+        def wait(self, timeout=None):
+            return 0
+
+    def fake_popen(*_args, **kwargs):
+        captured_envs.append(dict(kwargs["env"]))
+        return FakeProcess()
+
+    monkeypatch.setenv("LATCH_IN_COMPACT", "1")
+    monkeypatch.setenv("CLAUDE_KB_IN_COMPACT", "1")
+    monkeypatch.setenv("LATCH_DISABLE", "1")
+    monkeypatch.setattr(mcp_broker, "runtime_dir", lambda: tmp_path)
+    monkeypatch.setattr(mcp_broker, "read_discovery", lambda: None)
+    monkeypatch.setattr(mcp_broker.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(mcp_broker, "emit_lifecycle", lambda *_args, **_kwargs: None)
+
+    mcp_broker._spawn_daemon(str(ROOT), start_reason="proxy_connect")
+    assert mcp_broker.request_daemon_start(str(ROOT)) is True
+
+    assert len(captured_envs) == 2
+    for env in captured_envs:
+        assert "LATCH_IN_COMPACT" not in env
+        assert "CLAUDE_KB_IN_COMPACT" not in env
+        assert env["LATCH_DISABLE"] == "1"
+
+
+def test_daemon_context_accepts_only_boolean_compaction_metadata():
+    guarded = mcp_daemon._context_from({"in_compact": True}, "guarded")
+    stringly = mcp_daemon._context_from({"in_compact": "true"}, "stringly")
+    assert guarded.in_compact is True
+    assert stringly.in_compact is False
+
+
 def test_blue_green_registry_is_keyed_for_v1_v2_v1(monkeypatch, tmp_path):
     vault = tmp_path / "registry"
     monkeypatch.setattr(mcp_broker, "runtime_dir", lambda: vault)

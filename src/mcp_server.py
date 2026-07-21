@@ -1399,8 +1399,22 @@ def _gate_status(verdict: dict) -> str:
                 "skipped. If this recurs, the gate prompt may be oversized for "
                 "this KB (id=1415).")
     if verdict.get("skipped"):
-        return ("SKIPPED — gate disabled, daily budget cap, or in-compact; no "
-                "gate judgment. Proceed on KB-first context.")
+        reason = str(verdict.get("error") or "unknown reason").strip().rstrip(".")
+        if reason == "disabled":
+            return "SKIPPED - Latch gate is disabled; no gate judgment."
+        if reason == "in-compact":
+            return (
+                "SKIPPED - gate is inside a compaction/model subprocess; "
+                "no gate judgment."
+            )
+        if reason == "daily budget cap hit":
+            return (
+                "SKIPPED - daily non-maintenance model budget cap reached; "
+                "no gate judgment."
+            )
+        if reason == "use_llm=False":
+            return "SKIPPED - model classification was disabled for this call."
+        return f"SKIPPED - no gate judgment ({reason})."
     return (f"DEGRADED — no verdict ({verdict.get('error') or 'unknown error'}); "
             "proceed on KB-first context and note the gate was unavailable.")
 

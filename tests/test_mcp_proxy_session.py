@@ -145,6 +145,25 @@ def test_resolve_session_reports_missing_codex_marker():
     print("PASS resolve_session_reports_missing_codex_marker")
 
 
+def test_connection_metadata_carries_compaction_guard_per_proxy():
+    with _clean_env(LATCH_IN_COMPACT="1"):
+        _assert(
+            mcp_proxy.connection_metadata("/tmp/x")["in_compact"] is True,
+            "neutral compact guard must travel with the proxy connection",
+        )
+    with _clean_env(CLAUDE_KB_IN_COMPACT="1"):
+        _assert(
+            mcp_proxy.connection_metadata("/tmp/x")["in_compact"] is True,
+            "legacy compact guard must travel with the proxy connection",
+        )
+    with _clean_env():
+        _assert(
+            mcp_proxy.connection_metadata("/tmp/x")["in_compact"] is False,
+            "ordinary proxy connections must remain unguarded",
+        )
+    print("PASS connection_metadata_carries_compaction_guard_per_proxy")
+
+
 if __name__ == "__main__":
     test_resolve_session_prefers_neutral_latch_override()
     test_resolve_session_uses_claude_session_ahead_of_codex()
@@ -153,4 +172,5 @@ if __name__ == "__main__":
     test_resolve_session_leaves_cursor_mcp_calls_unattributed()
     test_resolve_session_reads_codex_marker_when_env_lacks_thread()
     test_resolve_session_reports_missing_codex_marker()
+    test_connection_metadata_carries_compaction_guard_per_proxy()
     print("\nAll mcp_proxy._resolve_session tests pass.")

@@ -27,6 +27,7 @@ class ConnectionContext:
     proxy_pid: int
     proxy_started_at: str
     runtime_key: str
+    in_compact: bool
 
 
 class RuntimeState(Protocol):
@@ -51,6 +52,11 @@ def bind_connection(context: ConnectionContext) -> Iterator[None]:
 
 def current_connection() -> ConnectionContext | None:
     return _CONNECTION.get()
+
+
+def connection_is_in_compact() -> bool:
+    context = current_connection()
+    return bool(context is not None and context.in_compact)
 
 
 def connection_snapshot() -> dict[str, Any] | None:

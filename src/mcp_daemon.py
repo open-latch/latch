@@ -372,6 +372,7 @@ def _context_from(metadata: dict[str, Any], connection_id: str) -> mcp_runtime.C
         proxy_pid=proxy_pid,
         proxy_started_at=str(metadata.get("proxy_started_at") or "unknown"),
         runtime_key=str(metadata.get("runtime_key") or "unknown"),
+        in_compact=metadata.get("in_compact") is True,
     )
 
 

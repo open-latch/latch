@@ -34,6 +34,8 @@ import shlex
 import tempfile
 from pathlib import Path
 
+import mcp_runtime
+
 
 def _default_kb_root() -> Path:
     # paths.py lives at <KB_ROOT>/src/paths.py
@@ -278,9 +280,14 @@ def is_write_disabled() -> bool:
 
 def is_in_compact() -> bool:
     """Reentrancy guard: true if running inside a compactor-spawned `claude -p`
-    session. Hooks must no-op so the compactor's own claude invocation cannot
-    recursively trigger further compactions."""
-    return bool(os.environ.get("LATCH_IN_COMPACT") or os.environ.get("CLAUDE_KB_IN_COMPACT"))
+    session. Hooks use the local process environment; shared MCP tools use the
+    authenticated connection context so one proxy cannot poison the daemon for
+    every other client."""
+    return bool(
+        os.environ.get("LATCH_IN_COMPACT")
+        or os.environ.get("CLAUDE_KB_IN_COMPACT")
+        or mcp_runtime.connection_is_in_compact()
+    )
 
 
 _MINGW_PATH_RE = re.compile(r"^/([a-zA-Z])/")

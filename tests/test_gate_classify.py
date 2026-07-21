@@ -284,8 +284,8 @@ def test_classify_skipped_when_in_compact_env():
         )
         _assert(out.get("skipped") is True,
                 f"in-compact reentrancy should skip: {out}")
-        _assert("disabled/in-compact" in (out.get("error") or ""),
-                f"reason should mention in-compact: {out}")
+        _assert(out.get("error") == "in-compact",
+                f"reason should identify in-compact exactly: {out}")
     finally:
         if prev is None:
             del os.environ["CLAUDE_KB_IN_COMPACT"]
@@ -326,6 +326,18 @@ def test_error_findings_keep_displayable_summary():
     legacy_findings = gate.format_gate_findings(legacy_empty, [])
     _assert("budget cap hit" in legacy_findings["summary"], legacy_findings)
     print("PASS error_findings_keep_displayable_summary")
+
+
+def test_skipped_findings_do_not_claim_a_verdict_was_produced():
+    verdict = {**gate._classifier_error("in-compact"), "skipped": True}
+    findings = gate.format_gate_findings(verdict, [], gate_status="SKIPPED")
+    receipt = findings["receipt"]
+    _assert("skipped classifier judgment" in receipt["summary"], findings)
+    _assert("no gate verdict was produced" in receipt["summary"], findings)
+    _assert("to produce the verdict" not in receipt["summary"], findings)
+    _assert("diagnostic context only" in receipt["authority"], findings)
+    _assert("no gate recommendation or approval" in findings["display_guidance"], findings)
+    print("PASS skipped_findings_do_not_claim_a_verdict_was_produced")
 
 
 # ---------- run_gate (4c wiring) ----------

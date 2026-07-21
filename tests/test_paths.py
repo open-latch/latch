@@ -9,6 +9,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import _isolation  # noqa: F401,E402  (hermetic on a pinned KB for direct runs; see conftest)
+import mcp_runtime  # noqa: E402
 import paths  # noqa: E402
 
 
@@ -244,6 +245,32 @@ def test_latch_kb_dir_precedes_legacy_env_pin():
             os.environ["CLAUDE_KB_DIR"] = saved_legacy
 
 
+def test_in_compact_uses_connection_context_without_process_poisoning():
+    saved_latch = os.environ.pop("LATCH_IN_COMPACT", None)
+    saved_legacy = os.environ.pop("CLAUDE_KB_IN_COMPACT", None)
+    context = mcp_runtime.ConnectionContext(
+        connection_id="compact-connection",
+        project_cwd="/tmp/project",
+        session_id=None,
+        session_source="test",
+        proxy_pid=123,
+        proxy_started_at="now",
+        runtime_key="test-runtime",
+        in_compact=True,
+    )
+    try:
+        _assert(paths.is_in_compact() is False, "daemon process starts clean")
+        with mcp_runtime.bind_connection(context):
+            _assert(paths.is_in_compact() is True, "connection guard must apply")
+        _assert(paths.is_in_compact() is False, "guard must not leak after request")
+    finally:
+        if saved_latch is not None:
+            os.environ["LATCH_IN_COMPACT"] = saved_latch
+        if saved_legacy is not None:
+            os.environ["CLAUDE_KB_IN_COMPACT"] = saved_legacy
+    print("PASS in_compact_uses_connection_context_without_process_poisoning")
+
+
 if __name__ == "__main__":
     test_normalize_mingw_drive_letter()
     test_normalize_preserves_native_windows()
@@ -257,4 +284,5 @@ if __name__ == "__main__":
     test_is_write_disabled_via_env_var()
     test_unlatched_mode_disables_full_latch()
     test_latch_kb_dir_precedes_legacy_env_pin()
+    test_in_compact_uses_connection_context_without_process_poisoning()
     print("\nAll paths tests pass.")
