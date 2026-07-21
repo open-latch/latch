@@ -116,6 +116,9 @@ if (-not $InstallDir) {
   }
   $InstallDir = Join-Path $dataRoot "app"
 }
+if (-not (Test-Path -LiteralPath $Project -PathType Container)) {
+  Fail("project directory does not exist: $Project")
+}
 $Project = (Resolve-Path -LiteralPath $Project).Path
 if (-not [IO.Path]::IsPathRooted($InstallDir)) {
   $InstallDir = Join-Path (Get-Location).Path $InstallDir

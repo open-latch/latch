@@ -20,6 +20,32 @@ from paths import SCHEMA_PATH, db_path, ensure_project_dir
 
 VEC_DIM = 384  # all-MiniLM-L6-v2
 
+# Closed, privacy-safe outcomes for the seed import ledgers.  Store the code,
+# never raw exception text (which can contain transcript excerpts or secrets).
+SEED_IMPORT_STATES = frozenset({"pending", "applied", "failed"})
+SEED_IMPORT_ERROR_CODES = frozenset({
+    "source_unavailable",
+    "source_invalid",
+    "extractor_failed",
+    "candidate_invalid",
+    "node_write_failed",
+    "workstream_attach_failed",
+    "interrupted",
+    "internal",
+})
+
+
+class SeedImportLedgerError(ValueError):
+    """Base class for invalid seed-ledger operations."""
+
+
+class SeedImportConflictError(SeedImportLedgerError):
+    """An import key was reused with different immutable metadata."""
+
+
+class SeedImportStateError(SeedImportLedgerError):
+    """A requested seed-ledger state transition is invalid."""
+
 
 def _resolve_actor() -> str:
     """Identify the OS user running this process. Stamped on every user-facing
@@ -378,6 +404,642 @@ def _migrate_artifacts(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_artifact_repo ON artifact(repo)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_artifact_path ON artifact(path)")
     conn.commit()
+    _migrate_seed_import_ledgers(conn)
+
+
+def _migrate_seed_import_ledgers(conn: sqlite3.Connection) -> None:
+    """Add the history-seeding idempotency ledgers without a version bump.
+
+    These tables are additive side state: legacy databases need no row
+    backfill and reconnecting is a no-op.  ``seed_source_import`` tracks one
+    exact transcript revision through extraction; ``seed_import`` tracks one
+    exact reviewed candidate through node creation.  The latter may retain a
+    ``node_id`` while failed so a retry can finish attachment without creating
+    a duplicate node.
+    """
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS seed_source_import (
+            import_key        TEXT PRIMARY KEY,
+            source_id         TEXT NOT NULL,
+            source_agent      TEXT NOT NULL,
+            source_path       TEXT NOT NULL,
+            source_mtime      TEXT NOT NULL,
+            source_digest     TEXT NOT NULL,
+            project_path      TEXT NOT NULL,
+            workstream_key    TEXT,
+            extractor_name    TEXT NOT NULL,
+            extractor_version TEXT NOT NULL,
+            state             TEXT NOT NULL DEFAULT 'pending'
+                                      CHECK (state IN ('pending', 'applied', 'failed')),
+            error_code        TEXT CHECK (error_code IN (
+                                      'source_unavailable', 'source_invalid',
+                                      'extractor_failed', 'candidate_invalid',
+                                      'node_write_failed', 'workstream_attach_failed',
+                                      'interrupted', 'internal'
+                                  )),
+            attempt_count     INTEGER NOT NULL DEFAULT 1 CHECK (attempt_count >= 1),
+            created_at        TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at        TEXT NOT NULL DEFAULT (datetime('now')),
+            completed_at      TEXT,
+            CHECK (
+                (state = 'failed' AND error_code IS NOT NULL AND completed_at IS NOT NULL)
+                OR (state = 'applied' AND error_code IS NULL AND completed_at IS NOT NULL)
+                OR (state = 'pending' AND error_code IS NULL AND completed_at IS NULL)
+            )
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_seed_source_import_state
+            ON seed_source_import(state);
+        CREATE INDEX IF NOT EXISTS idx_seed_source_import_source
+            ON seed_source_import(source_id, source_digest);
+        CREATE INDEX IF NOT EXISTS idx_seed_source_import_scope
+            ON seed_source_import(project_path, workstream_key);
+
+        CREATE TABLE IF NOT EXISTS seed_import (
+            import_key              TEXT PRIMARY KEY,
+            claim_key               TEXT,
+            source_import_keys_json TEXT NOT NULL DEFAULT '[]',
+            source_ids_json         TEXT NOT NULL DEFAULT '[]',
+            project_path            TEXT NOT NULL,
+            workstream_key          TEXT,
+            workstream_id           INTEGER REFERENCES nodes(id) ON DELETE SET NULL,
+            extractor_name          TEXT NOT NULL,
+            extractor_version       TEXT NOT NULL,
+            observed_at             TEXT,
+            state                   TEXT NOT NULL DEFAULT 'pending'
+                                          CHECK (state IN ('pending', 'applied', 'failed')),
+            error_code              TEXT CHECK (error_code IN (
+                                          'source_unavailable', 'source_invalid',
+                                          'extractor_failed', 'candidate_invalid',
+                                          'node_write_failed', 'workstream_attach_failed',
+                                          'interrupted', 'internal'
+                                      )),
+            node_id                 INTEGER REFERENCES nodes(id),
+            attempt_count           INTEGER NOT NULL DEFAULT 1 CHECK (attempt_count >= 1),
+            created_at              TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at              TEXT NOT NULL DEFAULT (datetime('now')),
+            completed_at            TEXT,
+            CHECK (
+                (state = 'failed' AND error_code IS NOT NULL AND completed_at IS NOT NULL)
+                OR (state = 'applied' AND error_code IS NULL AND completed_at IS NOT NULL
+                                   AND node_id IS NOT NULL)
+                OR (state = 'pending' AND error_code IS NULL AND completed_at IS NULL)
+            )
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_seed_import_state ON seed_import(state);
+        CREATE INDEX IF NOT EXISTS idx_seed_import_node ON seed_import(node_id);
+        CREATE INDEX IF NOT EXISTS idx_seed_import_scope
+            ON seed_import(project_path, workstream_key);
+        """
+    )
+    seed_import_cols = {
+        row["name"] for row in conn.execute("PRAGMA table_info(seed_import)").fetchall()
+    }
+    if "observed_at" not in seed_import_cols:
+        conn.execute("ALTER TABLE seed_import ADD COLUMN observed_at TEXT")
+    if "claim_key" not in seed_import_cols:
+        conn.execute("ALTER TABLE seed_import ADD COLUMN claim_key TEXT")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_seed_import_claim "
+        "ON seed_import(claim_key, state)"
+    )
+    conn.commit()
+
+
+# ---------- history seed import ledgers ----------
+
+def _required_seed_metadata(name: str, value: str) -> str:
+    text = str(value)
+    if not text.strip():
+        raise SeedImportLedgerError(f"{name} must be non-empty")
+    return text
+
+
+def _optional_seed_metadata(value: str | None) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _seed_observed_at(value: str | None) -> str | None:
+    """Validate and UTC-normalize timestamps used for evidence recency."""
+    text = _optional_seed_metadata(value)
+    if text is None:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise SeedImportLedgerError("observed_at must be an ISO-8601 timestamp") from exc
+    if parsed.tzinfo is None:
+        raise SeedImportLedgerError("observed_at must include a timezone")
+    return parsed.astimezone(timezone.utc).isoformat()
+
+
+def _seed_string_list(values: Sequence[str]) -> str:
+    """Canonical JSON for set-like seed provenance fields."""
+    normalized = sorted({str(value) for value in values if str(value)})
+    return json.dumps(normalized, ensure_ascii=False, separators=(",", ":"))
+
+
+def _seed_ledger_row(
+    conn: sqlite3.Connection, table: str, import_key: str,
+) -> dict | None:
+    # ``table`` is always one of the two internal constants supplied below;
+    # it is never caller-controlled input.
+    row = conn.execute(
+        f"SELECT * FROM {table} WHERE import_key = ?", (import_key,)
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def _assert_seed_metadata(
+    row: dict, expected: dict[str, Any], *, table: str,
+) -> None:
+    mismatched = [name for name, value in expected.items() if row[name] != value]
+    if mismatched:
+        # Do not include values: paths are local provenance and should not leak
+        # into exception/log output.  Field names are enough to diagnose a key
+        # construction bug.
+        raise SeedImportConflictError(
+            f"{table} import_key metadata mismatch: {', '.join(mismatched)}"
+        )
+
+
+def _retry_seed_ledger(
+    conn: sqlite3.Connection,
+    *,
+    table: str,
+    import_key: str,
+    retry_failed: bool,
+    retry_pending: bool,
+) -> bool:
+    row = _seed_ledger_row(conn, table, import_key)
+    if row is None:
+        raise KeyError(f"unknown {table} import_key")
+    retry = (
+        (row["state"] == "failed" and retry_failed)
+        or (row["state"] == "pending" and retry_pending)
+    )
+    if not retry:
+        return False
+    conn.execute(
+        f"UPDATE {table} SET state = 'pending', error_code = NULL, "
+        "completed_at = NULL, updated_at = ?, attempt_count = attempt_count + 1 "
+        "WHERE import_key = ?",
+        (_now(), import_key),
+    )
+    conn.commit()
+    return True
+
+
+def get_seed_source_import(
+    conn: sqlite3.Connection, import_key: str,
+) -> dict | None:
+    """Return one source-extraction ledger row without changing it."""
+    return _seed_ledger_row(conn, "seed_source_import", import_key)
+
+
+def begin_seed_source_import(
+    conn: sqlite3.Connection,
+    *,
+    import_key: str,
+    source_id: str,
+    source_agent: str,
+    source_path: str,
+    source_mtime: str,
+    source_digest: str,
+    project_path: str,
+    extractor_name: str,
+    extractor_version: str,
+    workstream_key: str | None = None,
+    retry_failed: bool = False,
+    retry_pending: bool = False,
+) -> dict:
+    """Idempotently create (or fetch) a pending source import.
+
+    ``import_key`` identity metadata is immutable. Reusing a key with different
+    source digest, scope, or extractor identity raises
+    ``SeedImportConflictError``; path/mtime are retained provenance observations
+    and may differ after an unchanged source is moved or touched.
+    Failed or crash-left pending rows are reset only when the matching explicit
+    retry flag is set; successful rows are terminal.  The returned dict adds
+    transient ``created`` and ``retry_started`` booleans.
+    """
+    metadata = {
+        "source_id": _required_seed_metadata("source_id", source_id),
+        "source_agent": _required_seed_metadata("source_agent", source_agent),
+        "source_path": _required_seed_metadata("source_path", source_path),
+        "source_mtime": _required_seed_metadata("source_mtime", source_mtime),
+        "source_digest": _required_seed_metadata("source_digest", source_digest),
+        "project_path": _required_seed_metadata("project_path", project_path),
+        "workstream_key": _optional_seed_metadata(workstream_key),
+        "extractor_name": _required_seed_metadata("extractor_name", extractor_name),
+        "extractor_version": _required_seed_metadata(
+            "extractor_version", extractor_version
+        ),
+    }
+    key = _required_seed_metadata("import_key", import_key)
+    cur = conn.execute(
+        """
+        INSERT INTO seed_source_import (
+            import_key, source_id, source_agent, source_path, source_mtime,
+            source_digest, project_path, workstream_key, extractor_name,
+            extractor_version, state, error_code, attempt_count,
+            created_at, updated_at, completed_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, 1, ?, ?, NULL)
+        ON CONFLICT(import_key) DO NOTHING
+        """,
+        (
+            key,
+            metadata["source_id"],
+            metadata["source_agent"],
+            metadata["source_path"],
+            metadata["source_mtime"],
+            metadata["source_digest"],
+            metadata["project_path"],
+            metadata["workstream_key"],
+            metadata["extractor_name"],
+            metadata["extractor_version"],
+            _now(),
+            _now(),
+        ),
+    )
+    created = bool(cur.rowcount)
+    conn.commit()
+    row = get_seed_source_import(conn, key)
+    if row is None:  # pragma: no cover - SQLite acknowledged the insert/read
+        raise SeedImportLedgerError("seed_source_import insert was not readable")
+    # Path and mtime are provenance observations, not source identity. An exact
+    # redacted digest may be touched or moved between an applied run and an
+    # explicit force-reimport; retain the original receipt without turning that
+    # harmless locator change into an identity collision.
+    immutable_metadata = {
+        name: value for name, value in metadata.items()
+        if name not in {"source_path", "source_mtime"}
+    }
+    _assert_seed_metadata(row, immutable_metadata, table="seed_source_import")
+    retry_started = False
+    if not created:
+        retry_started = _retry_seed_ledger(
+            conn,
+            table="seed_source_import",
+            import_key=key,
+            retry_failed=retry_failed,
+            retry_pending=retry_pending,
+        )
+        if retry_started:
+            row = get_seed_source_import(conn, key)
+            assert row is not None
+    row["created"] = created
+    row["retry_started"] = retry_started
+    return row
+
+
+def finish_seed_source_import(
+    conn: sqlite3.Connection,
+    import_key: str,
+    *,
+    state: str,
+    error_code: str | None = None,
+) -> dict:
+    """Move a pending source import to terminal ``applied`` or ``failed``.
+
+    Repeating the exact terminal transition is idempotent.  Other transitions
+    from a terminal row require a new ``begin_*`` call with ``retry_failed``.
+    """
+    return finish_seed_source_imports(
+        conn, {import_key: (state, error_code)}
+    )[import_key]
+
+
+def finish_seed_source_imports(
+    conn: sqlite3.Connection,
+    outcomes: dict[str, tuple[str, str | None]],
+) -> dict[str, dict]:
+    """Atomically finalize every source revision in one approved apply batch.
+
+    Every non-idempotent transition is a compare-and-set from ``pending``.
+    If any row loses that precondition after validation, the entire batch is
+    rolled back so callers can safely retry it.
+    """
+    pending: list[tuple[str, str | None, str]] = []
+    results: dict[str, dict] = {}
+    for import_key, (state, error_code) in outcomes.items():
+        if state not in {"applied", "failed"}:
+            raise SeedImportStateError(
+                "source import can finish only applied or failed"
+            )
+        if state == "failed":
+            if error_code not in SEED_IMPORT_ERROR_CODES:
+                raise SeedImportStateError(
+                    "failed source import needs a closed error_code"
+                )
+        elif error_code is not None:
+            raise SeedImportStateError(
+                "applied source import cannot carry error_code"
+            )
+        row = get_seed_source_import(conn, import_key)
+        if row is None:
+            raise KeyError("unknown seed_source_import import_key")
+        if row["state"] == state and row["error_code"] == error_code:
+            results[import_key] = row
+            continue
+        if row["state"] != "pending":
+            raise SeedImportStateError(
+                f"cannot transition seed_source_import {row['state']} to {state}"
+            )
+        pending.append((state, error_code, import_key))
+
+    now = _now()
+    try:
+        for state, error_code, import_key in pending:
+            cur = conn.execute(
+                "UPDATE seed_source_import SET state = ?, error_code = ?, "
+                "updated_at = ?, completed_at = ? "
+                "WHERE import_key = ? AND state = 'pending'",
+                (state, error_code, now, now, import_key),
+            )
+            if cur.rowcount != 1:
+                raise SeedImportStateError(
+                    "source import must remain pending through batch finalization"
+                )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    for _state, _error_code, import_key in pending:
+        row = get_seed_source_import(conn, import_key)
+        assert row is not None
+        results[import_key] = row
+    return results
+
+
+def get_seed_import(conn: sqlite3.Connection, import_key: str) -> dict | None:
+    """Return one reviewed-candidate ledger row without changing it."""
+    return _seed_ledger_row(conn, "seed_import", import_key)
+
+
+def find_seed_workstream_nodes(
+    conn: sqlite3.Connection, *, project_path: str, workstream_key: str,
+) -> list[dict]:
+    """Return distinct workstream checkpoints previously bound to a seed key."""
+    rows = conn.execute(
+        """
+        SELECT DISTINCT n.id, n.kind, n.status
+        FROM seed_import si
+        JOIN nodes n ON n.id = si.node_id
+        WHERE si.project_path = ?
+          AND si.workstream_key = ?
+          AND n.kind = 'workstream'
+        ORDER BY n.id
+        """,
+        (project_path, workstream_key),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def find_seed_claim_nodes(
+    conn: sqlite3.Connection, *, claim_key: str,
+) -> list[dict]:
+    """Return nodes checkpointed by any import of one exact seeded claim.
+
+    Pending and failed checkpoints matter: ignoring them permits a later source
+    batch to create a duplicate during recovery.
+    """
+    rows = conn.execute(
+        """
+        SELECT DISTINCT n.id, n.kind, n.status, n.workstream_id,
+                        n.title, n.body
+        FROM seed_import si
+        JOIN nodes n ON n.id = si.node_id
+        WHERE si.claim_key = ?
+        ORDER BY n.id
+        """,
+        (claim_key,),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def begin_seed_import(
+    conn: sqlite3.Connection,
+    *,
+    import_key: str,
+    claim_key: str | None = None,
+    project_path: str,
+    extractor_name: str,
+    extractor_version: str,
+    observed_at: str | None = None,
+    source_import_keys: Sequence[str] = (),
+    source_ids: Sequence[str] = (),
+    workstream_key: str | None = None,
+    workstream_id: int | None = None,
+    retry_failed: bool = False,
+    retry_pending: bool = False,
+) -> dict:
+    """Idempotently create (or fetch) a pending reviewed-candidate import."""
+    metadata = {
+        "claim_key": _optional_seed_metadata(claim_key),
+        "source_import_keys_json": _seed_string_list(source_import_keys),
+        "source_ids_json": _seed_string_list(source_ids),
+        "project_path": _required_seed_metadata("project_path", project_path),
+        "workstream_key": _optional_seed_metadata(workstream_key),
+        "workstream_id": workstream_id,
+        "extractor_name": _required_seed_metadata("extractor_name", extractor_name),
+        "extractor_version": _required_seed_metadata(
+            "extractor_version", extractor_version
+        ),
+        "observed_at": _seed_observed_at(observed_at),
+    }
+    key = _required_seed_metadata("import_key", import_key)
+    now = _now()
+    cur = conn.execute(
+        """
+        INSERT INTO seed_import (
+            import_key, claim_key, source_import_keys_json, source_ids_json, project_path,
+            workstream_key, workstream_id, extractor_name, extractor_version,
+            observed_at, state, error_code, node_id, attempt_count,
+            created_at, updated_at, completed_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, 1, ?, ?, NULL)
+        ON CONFLICT(import_key) DO NOTHING
+        """,
+        (
+            key,
+            metadata["claim_key"],
+            metadata["source_import_keys_json"],
+            metadata["source_ids_json"],
+            metadata["project_path"],
+            metadata["workstream_key"],
+            metadata["workstream_id"],
+            metadata["extractor_name"],
+            metadata["extractor_version"],
+            metadata["observed_at"],
+            now,
+            now,
+        ),
+    )
+    created = bool(cur.rowcount)
+    conn.commit()
+    row = get_seed_import(conn, key)
+    if row is None:  # pragma: no cover - SQLite acknowledged the insert/read
+        raise SeedImportLedgerError("seed_import insert was not readable")
+    # Validate every pre-existing immutable field before mutating a legacy row.
+    # ``claim_key`` is omitted only when the old schema could not have stored it.
+    pre_backfill_metadata = {
+        name: value
+        for name, value in metadata.items()
+        if name != "observed_at"
+        and not (name == "claim_key" and row.get("claim_key") is None)
+    }
+    _assert_seed_metadata(
+        row, pre_backfill_metadata, table="seed_import",
+    )
+    # The columns were added after the original seed-v2 ledger shipped. An
+    # exact import key plus matching original metadata is sufficient to safely
+    # backfill their previously-NULL values on first reuse.
+    backfill = {
+        name: metadata[name]
+        for name in ("claim_key", "observed_at")
+        if row.get(name) is None and metadata[name] is not None
+    }
+    if backfill:
+        assignments = ", ".join(f"{name} = ?" for name in backfill)
+        conn.execute(
+            f"UPDATE seed_import SET {assignments}, updated_at = ? "
+            "WHERE import_key = ?",
+            [*backfill.values(), _now(), key],
+        )
+        conn.commit()
+        row = get_seed_import(conn, key)
+        assert row is not None
+    immutable_metadata = {
+        name: value for name, value in metadata.items() if name != "observed_at"
+    }
+    _assert_seed_metadata(row, immutable_metadata, table="seed_import")
+    retry_started = False
+    if not created:
+        retry_started = _retry_seed_ledger(
+            conn,
+            table="seed_import",
+            import_key=key,
+            retry_failed=retry_failed,
+            retry_pending=retry_pending,
+        )
+        if retry_started:
+            row = get_seed_import(conn, key)
+            assert row is not None
+    row["created"] = created
+    row["retry_started"] = retry_started
+    return row
+
+
+def backfill_seed_import_receipt(
+    conn: sqlite3.Connection,
+    import_key: str,
+    *,
+    claim_key: str,
+    observed_at: str | None = None,
+) -> dict:
+    """Fill additive receipt columns for an already-applied legacy row."""
+    row = get_seed_import(conn, import_key)
+    if row is None:
+        raise KeyError("unknown seed_import import_key")
+    normalized_claim = _required_seed_metadata("claim_key", claim_key)
+    normalized_observed = _seed_observed_at(observed_at)
+    if row.get("claim_key") not in {None, normalized_claim}:
+        raise SeedImportConflictError("seed_import claim_key metadata mismatch")
+    updates: dict[str, str] = {}
+    if row.get("claim_key") is None:
+        updates["claim_key"] = normalized_claim
+    if row.get("observed_at") is None and normalized_observed is not None:
+        updates["observed_at"] = normalized_observed
+    if updates:
+        assignments = ", ".join(f"{name} = ?" for name in updates)
+        conn.execute(
+            f"UPDATE seed_import SET {assignments}, updated_at = ? "
+            "WHERE import_key = ?",
+            [*updates.values(), _now(), import_key],
+        )
+        conn.commit()
+        row = get_seed_import(conn, import_key)
+        assert row is not None
+    return row
+
+
+def set_seed_import_node(
+    conn: sqlite3.Connection, import_key: str, node_id: int,
+) -> dict:
+    """Attach a created node to a pending import before later batch work.
+
+    This checkpoint lets a failed workstream-attachment step resume without
+    creating the node twice.  The same node is idempotent; changing the node is
+    a collision and is rejected.
+    """
+    row = get_seed_import(conn, import_key)
+    if row is None:
+        raise KeyError("unknown seed_import import_key")
+    if row["node_id"] is not None:
+        if row["node_id"] != node_id:
+            raise SeedImportConflictError("seed_import already references another node")
+        return row
+    if row["state"] != "pending":
+        raise SeedImportStateError("node_id can be attached only while pending")
+    conn.execute(
+        "UPDATE seed_import SET node_id = ?, updated_at = ? WHERE import_key = ?",
+        (node_id, _now(), import_key),
+    )
+    conn.commit()
+    result = get_seed_import(conn, import_key)
+    assert result is not None
+    return result
+
+
+def finish_seed_import(
+    conn: sqlite3.Connection,
+    import_key: str,
+    *,
+    state: str,
+    node_id: int | None = None,
+    error_code: str | None = None,
+) -> dict:
+    """Move a pending candidate import to terminal ``applied`` or ``failed``."""
+    if state not in {"applied", "failed"}:
+        raise SeedImportStateError("candidate import can finish only applied or failed")
+    if state == "failed":
+        if error_code not in SEED_IMPORT_ERROR_CODES:
+            raise SeedImportStateError("failed candidate import needs a closed error_code")
+    elif error_code is not None:
+        raise SeedImportStateError("applied candidate import cannot carry error_code")
+    row = get_seed_import(conn, import_key)
+    if row is None:
+        raise KeyError("unknown seed_import import_key")
+    if row["node_id"] is not None and node_id is not None and row["node_id"] != node_id:
+        raise SeedImportConflictError("seed_import already references another node")
+    resolved_node_id = node_id if node_id is not None else row["node_id"]
+    if state == "applied" and resolved_node_id is None:
+        raise SeedImportStateError("applied candidate import needs node_id")
+    if (
+        row["state"] == state
+        and row["error_code"] == error_code
+        and row["node_id"] == resolved_node_id
+    ):
+        return row
+    if row["state"] != "pending":
+        raise SeedImportStateError(
+            f"cannot transition seed_import {row['state']} to {state}"
+        )
+    now = _now()
+    conn.execute(
+        "UPDATE seed_import SET state = ?, error_code = ?, node_id = ?, "
+        "updated_at = ?, completed_at = ? WHERE import_key = ?",
+        (state, error_code, resolved_node_id, now, now, import_key),
+    )
+    conn.commit()
+    result = get_seed_import(conn, import_key)
+    assert result is not None
+    return result
 
 
 # ---------- nodes ----------
@@ -602,12 +1264,18 @@ def promote_by_ref_count(
     *,
     min_ref_count: int = 3,
 ) -> list[int]:
-    """Promote staging nodes to canonical when ref_count >= threshold.
+    """Promote eligible staging nodes when ref_count reaches the threshold.
 
-    Status change IS an edit, so updated_at bumps here (unlike bump_ref_count).
-    Stale nodes are untouched. Returns promoted ids."""
+    Imported seed nodes remain staging until explicit review; citation volume
+    is relevance evidence, not user authority. Status change IS an edit, so
+    updated_at bumps here (unlike bump_ref_count). Stale nodes are untouched.
+    """
     rows = conn.execute(
-        "SELECT id FROM nodes WHERE status = 'staging' AND ref_count >= ?",
+        "SELECT n.id FROM nodes n "
+        "WHERE n.status = 'staging' AND n.ref_count >= ? "
+        "AND instr(COALESCE(n.body, ''), 'Latch-Seed-Import-Key:') = 0 "
+        "AND NOT EXISTS (SELECT 1 FROM seed_import si "
+        "WHERE si.node_id = n.id)",
         (min_ref_count,),
     ).fetchall()
     ids = [r["id"] for r in rows]

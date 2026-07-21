@@ -170,6 +170,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="confirm first-time AGENTS.md wiring")
     ap.add_argument("--dry-run", action="store_true", help="print what would change")
     ap.add_argument("--check", action="store_true", help="verify wiring only")
+    ap.add_argument("--kb-dir", help="pin one KB directory for every Codex project; "
+                                     "fresh installs otherwise use <LATCH_HOME>/store")
     ap.add_argument("--no-seed-prompt", action="store_true",
                     help="do not offer the post-install cold-start seed prompt")
     ap.add_argument("--suppress-seed-output", action="store_true", help=argparse.SUPPRESS)
@@ -212,6 +214,12 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  hooks      : {'skipped' if args.skip_hooks else hooks_path}")
     print(f"  AGENTS.md  : {'skipped' if args.skip_agents else agents_path}")
     print(f"  mode       : {'DRY-RUN (no writes)' if args.dry_run else 'apply'}\n")
+
+    pin_level, pin_msg = install_engine.pin_kb_dir(args.kb_dir, args.dry_run)
+    print(f"  [{pin_level:4}] KB dir: {pin_msg}")
+    if pin_level == "ERROR":
+        print("\nNo Codex configuration changes were written.")
+        return 2
 
     if changes:
         if args.dry_run:
@@ -259,13 +267,17 @@ def main(argv: list[str] | None = None) -> int:
     if not args.suppress_seed_output:
         if args.dry_run or args.no_seed_prompt:
             print(install_engine.seed_next_step_message(
-                command=f"{KB_HOME / 'bin' / 'latch_seed.sh'} --source codex --apply"
+                command=(
+                    f"{KB_HOME / 'bin' / 'latch_seed.sh'} "
+                    "--source codex --backend codex --apply"
+                )
             ))
             print()
         elif not args.dry_run:
             install_engine.offer_seed_after_install(
                 python_path=python_path,
                 source="codex",
+                backend="codex",
                 project=Path.cwd(),
             )
     return 0

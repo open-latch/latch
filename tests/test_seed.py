@@ -337,8 +337,8 @@ def test_seed_help_hides_internal_no_llm_switch():
     _assert(args.llm == "yes", f"seed should default to LLM-backed mode: {args.llm}")
     defaulted = parser(["--lookback-days", "5", "--source", "codex"])
     seed.prompt_choices(defaulted)
-    _assert(defaulted.max_sessions == 20,
-            f"seed should default to last 20 sessions: {defaulted.max_sessions}")
+    _assert(defaulted.max_sessions == 50,
+            f"seed should default to last 50 sessions: {defaulted.max_sessions}")
     last_sessions = parser(["--lookback-days", "5", "--last-sessions", "10"])
     _assert(last_sessions.max_sessions == 10,
             f"--last-sessions should set max_sessions: {last_sessions.max_sessions}")
@@ -821,12 +821,12 @@ def test_seed_report_groups_candidates_into_demo_sections():
             f"alignment direction should synthesize from source-backed candidates: {report}")
 
     out = seed.render_text(args=args, sources=[], candidates=candidates, llm_estimate=0)
-    _assert("Latch receipt:" in out and "proof receipt, not a dashboard" in out,
-            f"rendered report should include a visible latch receipt: {out}")
+    _assert("Latch initial-KB receipt:" in out and "initial decision-KB review" in out,
+            f"rendered report should include a visible initial-KB receipt: {out}")
     _assert("Why this mattered:" in out and "future gates can cite" in out,
             f"receipt should explain why the report matters: {out}")
-    _assert("Next proof:" in out and "latch_gate challenge the strongest rejected path" in out,
-            f"receipt should point to the rejected-path proof loop: {out}")
+    _assert("Next step:" in out and "separate gate-check" in out,
+            f"receipt should point to the post-apply rejected-path gate check: {out}")
     _assert("Seed report:" in out and "## Decisions and rejected paths" in out,
             f"rendered report should lead with decisions/rejected paths: {out}")
     _assert("## Continuity notes" in out and "Ongoing workstreams" not in out,
@@ -843,8 +843,8 @@ def test_seed_report_groups_candidates_into_demo_sections():
             f"rendered report should not expose numeric confidence scores: {out}")
     _assert("strongest-first" in out,
             f"rendered report should explain score-free ranking: {out}")
-    _assert("Try the catch demo:" in out and "/latch-gate" in out and "run_latch_gate.sh" in out,
-            f"rendered report should include a rejected-path catch demo: {out}")
+    _assert("Optional gate check:" in out and "/latch-gate" in out and "run_latch_gate.sh" in out,
+            f"rendered report should include a rejected-path gate check: {out}")
     _assert("After you apply this seed" in out,
             f"catch demo should not imply preview-only candidates are already in the KB: {out}")
     _assert("Revive this rejected path" in out and "We decided not to use Redis" in out,
@@ -853,7 +853,7 @@ def test_seed_report_groups_candidates_into_demo_sections():
     payload = json.loads(seed.render_json(args=args, sources=[], candidates=candidates, llm_estimate=0))
     _assert("report" in payload and payload["report"][0]["key"] == "decisions_and_rejected_paths",
             f"json report should be structured: {payload}")
-    _assert(payload["receipt"]["label"] == "Latch seed receipt",
+    _assert(payload["receipt"]["label"] == "Latch initial-KB receipt",
             f"json report should include a seed receipt: {payload}")
     _assert(payload["receipt"]["must_display_to_user"] is True,
             f"receipt should be displayable: {payload}")
@@ -1016,18 +1016,18 @@ def test_render_text_explains_immediate_value():
         "--project", os.getcwd(),
     ])
     out = seed.render_text(args=args, sources=[], candidates=[], llm_estimate=0)
-    _assert("immediate judgment value from latch" in out,
+    _assert("immediate judgment value" in out,
             "rendered seed report should name immediate judgment value")
     _assert("selected local agent chats" in out,
             "rendered seed report should explain what gets read")
     _assert("first new compacted session" in out,
             "rendered seed report should explain cold-start benefit")
-    _assert("Session cap: last 20 session(s)" in out,
+    _assert("Selection cap: 50 session(s)" in out,
             "rendered seed report should make the default session cap visible")
     _assert("higher --last-sessions" in out,
             "empty result guidance should show how to widen the last-N cap")
-    _assert("Try the catch demo:" not in out,
-            "empty reports should not render a catch demo")
+    _assert("Optional gate check:" not in out,
+            "empty reports should not render a gate check")
     payload = json.loads(seed.render_json(args=args, sources=[], candidates=[], llm_estimate=0))
     _assert(payload["receipt"] is None,
             f"empty json report should not claim a proof receipt: {payload}")
@@ -1080,8 +1080,8 @@ def test_apply_success_message_surfaces_post_write_proof():
     out = seed.apply_success_message([101, 102], [rejected])
     _assert("Wrote 2 staging seed candidate(s): 101, 102" in out,
             f"apply success should keep the write receipt: {out}")
-    _assert("Latch proof ready:" in out and "The seed is now in the KB" in out,
-            f"apply success should name the post-write proof state: {out}")
+    _assert("Latch gate check ready:" in out and "approved staging seed is now in the KB" in out,
+            f"apply success should name the post-write gate-check state: {out}")
     _assert("/latch-gate" in out and "run_latch_gate.sh" in out,
             f"apply success should repeat both catch-demo commands: {out}")
     _assert("before files change" in out and "Expected:" in out,
@@ -1097,8 +1097,8 @@ def test_apply_success_message_surfaces_post_write_proof():
         source_paths=["/tmp/b.jsonl"],
     )
     no_demo = seed.apply_success_message([103], [preference])
-    _assert("Latch proof note:" in no_demo and "no clean rejected path" in no_demo,
-            f"apply success should explain missing catch-demo: {no_demo}")
+    _assert("Latch gate-check note:" in no_demo and "no clean rejected path" in no_demo,
+            f"apply success should explain missing gate check: {no_demo}")
     print("PASS apply_success_message_surfaces_post_write_proof")
 
 

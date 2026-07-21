@@ -1,8 +1,8 @@
 {
   "live_demo": {
     "backend": "codex",
-    "better_next_action": "Implement email sending through the allowed inline task runner path and document that it is suitable only for demo-scale/background-light use.",
-    "captured_at_utc": "2026-07-21T06:25:29Z",
+    "better_next_action": "Implement email sending through the allowed inline task runner path and document its single-process limitation.",
+    "captured_at_utc": "2026-07-21T07:19:07Z",
     "demo_kind": "synthetic_no_history_fixture",
     "evidence_nodes": [
       {
@@ -30,9 +30,9 @@
     "observed": true,
     "recommendation": "DO_NOT_PROCEED",
     "request": "Implement email sending by adding a Redis-backed background job queue.",
-    "risk_if_proceed": "Adding Redis and a worker process would violate the demo app's install-light, single-process constraint.",
-    "source_commit": "34b6dd35267b24f124b543f213ddd44b4b2612fe",
-    "summary": "The KB contains a canonical decision explicitly saying not to add a background job queue to this no-history demo app (id=1). It specifically rejects the Redis-backed background job queue path and directs background work, if needed, to an inline task runner with the limit documented."
+    "risk_if_proceed": "Adding Redis and a worker process would violate the install-light, easy-to-inspect demo-app constraint.",
+    "source_commit": "72e0c94ed81051027f19a309cb778d502fb95833",
+    "summary": "The request directly contradicts the canonical fixture decision (id=1): this demo app must not add a background job queue, and the Redis-backed queue is specifically named as the rejected path. The allowed direction is to keep the app single-process and use an inline task runner if background work is needed."
   },
   "reproduction": {
     "check_packet": "bash bin/latch_proof_packet.sh --check",
@@ -64,8 +64,8 @@
       "filtered": 4
     }
   },
-  "source_commit": "34b6dd35267b24f124b543f213ddd44b4b2612fe",
-  "tested_runtime_manifest_sha256": "989d31072c752c92efe1d10290e76763a7456118512d6a9f1922a9021c77e81f",
+  "source_commit": "72e0c94ed81051027f19a309cb778d502fb95833",
+  "tested_runtime_manifest_sha256": "61e8839ae6dd61bdc74d33cfc004ed223e6b0f86ee177da484f8529a7694423f",
   "thesis": "Latch preserves project judgment and can surface a rejected path before an agent changes files.",
   "wedge_v1": {
     "baseline_boundary": "memory_like is an internal active-search-only ablation. It is not a benchmark of any third-party memory product.",

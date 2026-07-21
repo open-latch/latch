@@ -9,14 +9,16 @@ preview-first.
 from __future__ import annotations
 
 import argparse
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
 import shlex
+import sqlite3
 import sys
 from typing import Any
 
@@ -26,25 +28,84 @@ import codex_transcript  # noqa: E402
 import cursor_transcript  # noqa: E402
 import paths  # noqa: E402
 
-DEFAULT_LOOKBACK_DAYS = 14
-LOOKBACK_CHOICES = (5, 14, 30)
-DEFAULT_MAX_SESSIONS = 20
+DEFAULT_LOOKBACK_DAYS = 90
+LOOKBACK_CHOICES = (5, 14, 30, 90)
+DEFAULT_MAX_SESSIONS = 50
 DEFAULT_MAX_CANDIDATES = 20
-DEFAULT_MAX_LLM_CALLS = int(os.environ.get("LATCH_SEED_MAX_LLM_CALLS") or 20)
+HARD_MAX_LLM_CALLS = 20
+DEFAULT_MAX_LLM_CALLS = min(
+    int(os.environ.get("LATCH_SEED_MAX_LLM_CALLS") or HARD_MAX_LLM_CALLS),
+    HARD_MAX_LLM_CALLS,
+)
 DEFAULT_LLM_WARNING_THRESHOLD = int(os.environ.get("LATCH_SEED_LLM_CONFIRM_THRESHOLD") or 10)
 NO_LLM_INTERNAL_ENV = "LATCH_SEED_ALLOW_NO_LLM"
 MAX_SOURCE_CHARS = 120_000
 MAX_LLM_SOURCE_CHARS = 28_000
+MAX_SOURCE_INVENTORY = 200
+MAX_SOURCE_SCAN = 1_000
+RECENT_SOURCE_RESERVE = 0.20
+MAX_CANDIDATES_PER_SOURCE = 6
+SEED_EXTRACTOR_VERSION = "seed-v2"
+# Exact-meaning identity is intentionally independent of the extractor release:
+# upgrading extraction must not duplicate an unchanged reviewed claim.
+SEED_CLAIM_KEY_VERSION = 1
+MAX_INLINE_CORROBORATIONS = 8
 SOURCE_CHOICES = ("claude", "codex", "cursor", "both", "all")
 AGENT_MISTAKE_MIN_CONFIDENCE = 0.85
 KB_HOME = Path(__file__).resolve().parent.parent
 
-SEED_INTRO = "Seed latch from prior work for immediate judgment value from latch."
+SEED_INTRO = "Build Latch's initial decision KB for immediate judgment value."
+SEED_CANDIDATE_PREAMBLE = (
+    "Seed candidate from prior local agent history. Treat as low-authority "
+    "staging evidence until reviewed/promoted."
+)
 
 ROLE_LINE_RE = re.compile(r"^\[([A-Za-z0-9_?. -]+)\]\s*(.*)")
 CURSOR_USER_QUERY_RE = re.compile(r"<user_query>\s*(.*?)\s*</user_query>", re.DOTALL)
 USER_ROLES = {"user", "human"}
 WHITESPACE_RE = re.compile(r"\s+")
+
+# High-confidence patterns only. This is a bounded safety layer, not a claim of
+# exhaustive DLP. Redaction happens immediately after transcript flattening and
+# is repeated on model output before it can enter candidates or caches.
+SEED_SECRET_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    (
+        "private-key",
+        re.compile(
+            r"-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----.*?"
+            r"-----END (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----",
+            re.DOTALL,
+        ),
+    ),
+    (
+        "private-key-boundary",
+        re.compile(
+            r"-----(?:BEGIN|END) (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----"
+        ),
+    ),
+    ("aws-access-key", re.compile(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b")),
+    ("github-token", re.compile(r"\bgh[pousr]_[A-Za-z0-9_]{20,}\b")),
+    ("openai-key", re.compile(r"\bsk-(?:proj-)?[A-Za-z0-9_-]{20,}\b")),
+    ("anthropic-key", re.compile(r"\bsk-ant-[A-Za-z0-9_-]{20,}\b")),
+    ("slack-token", re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{20,}\b")),
+    (
+        "jwt",
+        re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b"),
+    ),
+    (
+        "bearer-token",
+        re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/-]{20,}={0,2}"),
+    ),
+)
+SEED_SECRET_ASSIGNMENT_RE = re.compile(
+    r"(?i)\b(?P<name>api[_-]?key|access[_-]?token|auth[_-]?token|client[_-]?secret|"
+    r"password|passwd|secret)\b(?P<sep>\s*[:=]\s*)"
+    r"(?P<quote>['\"]?)(?P<value>[^\s'\";,]{8,})(?P=quote)"
+)
+SEED_CREDENTIAL_URL_RE = re.compile(
+    r"(?i)\b(?P<scheme>[a-z][a-z0-9+.-]*://)"
+    r"(?P<user>[^\s/@:]+):(?P<password>[^\s/@]+)@"
+)
 
 SIGNAL_PATTERNS: list[tuple[str, str, str, float]] = [
     ("rejected_path", "decision", r"\b(ruled out|we rejected|i rejected|project rejected|team rejected|do not use|don't use|not to use|avoid|not going to|shouldn't)\b", 0.72),
@@ -145,6 +206,9 @@ class SeedSource:
     path: str
     mtime: str
     text: str
+    content_digest: str = ""
+    value_score: float = 0.0
+    redaction_count: int = 0
 
 
 @dataclass
@@ -157,10 +221,19 @@ class SeedCandidate:
     source_ids: list[str]
     source_paths: list[str]
     llm_used: bool = False
+    source_mtimes: list[str] = field(default_factory=list)
+    source_digests: list[str] = field(default_factory=list)
+    workstream_key: str | None = None
 
 
 class CursorSeedPreviewError(RuntimeError):
     pass
+
+
+class SeedWriteBlocked(RuntimeError):
+    def __init__(self, reason: str, message: str):
+        super().__init__(message)
+        self.reason = reason
 
 
 @dataclass
@@ -171,13 +244,49 @@ class SeedReportSection:
     items: list[SeedCandidate]
 
 
+@dataclass
+class SeedApplyResult:
+    inserted_ids: list[int] = field(default_factory=list)
+    skipped_import_keys: list[str] = field(default_factory=list)
+    skipped_node_ids: list[int] = field(default_factory=list)
+    corroborated_import_keys: list[str] = field(default_factory=list)
+    corroborated_node_ids: list[int] = field(default_factory=list)
+    resumed_import_keys: list[str] = field(default_factory=list)
+    resumed_node_ids: list[int] = field(default_factory=list)
+    failures: list[dict[str, str]] = field(default_factory=list)
+    workstream_attachments: dict[str, int] = field(default_factory=dict)
+
+    @property
+    def complete(self) -> bool:
+        return not self.failures
+
+
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def normalize_seed_observed_at(value: str) -> str:
+    """Return one comparable UTC timestamp or reject malformed provenance."""
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError("source observed_at must be an ISO-8601 timestamp") from exc
+    if parsed.tzinfo is None:
+        raise ValueError("source observed_at must include a timezone")
+    return parsed.astimezone(timezone.utc).isoformat()
+
+
+def latest_candidate_observed_at(candidate: SeedCandidate) -> str | None:
+    values = [
+        normalize_seed_observed_at(value)
+        for value in candidate.source_mtimes if str(value).strip()
+    ]
+    return max(values, default=None)
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap = argparse.ArgumentParser(
-        description="Seed latch from prior local agent work.",
+        description="Build Latch's initial decision KB from prior local agent work.",
         epilog=(
             "Default mode is preview-only and LLM-backed. The seed pass may use "
             "model calls, capped by --max-llm-calls, and asks for confirmation "
@@ -191,7 +300,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                     help=("transcript source to scan. 'both' means Claude+Codex; "
                           "'all' also includes the exact current/explicit Cursor transcript"))
     ap.add_argument("--lookback-days", type=int, choices=LOOKBACK_CHOICES,
-                    help="retention horizon to scan: 5, 14, or 30 days")
+                    help="retention horizon to scan: 5, 14, 30, or 90 days")
     ap.add_argument("--llm", choices=("yes", "no"), default="yes",
                     help=argparse.SUPPRESS)
     ap.add_argument("--allow-internal-no-llm", action="store_true",
@@ -205,15 +314,29 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                     help=("require a second confirmation above this estimated call count "
                           f"(default: {DEFAULT_LLM_WARNING_THRESHOLD})"))
     ap.add_argument("--calls-per-session", type=int, default=1,
-                    help="heuristic LLM calls per selected session for the estimate")
+                    help=argparse.SUPPRESS)
     ap.add_argument("--last-sessions", "--max-sessions", dest="max_sessions",
                     type=int,
-                    help=("last N recent sessions to scan "
+                    help=("maximum selected sessions after bounded value/recency ranking "
                           f"(default: {DEFAULT_MAX_SESSIONS}; configurable with --last-sessions N)"))
     ap.add_argument("--max-candidates", type=int, default=DEFAULT_MAX_CANDIDATES,
                     help=f"maximum candidates to show/write (default: {DEFAULT_MAX_CANDIDATES})")
     ap.add_argument("--all-projects", action="store_true",
                     help="scan all recent local transcripts instead of filtering to --project")
+    workstream = ap.add_mutually_exclusive_group()
+    workstream.add_argument(
+        "--workstream-id", type=int,
+        help="attach approved candidates to an existing Latch workstream id",
+    )
+    workstream.add_argument(
+        "--new-workstream", metavar="TITLE",
+        help=("initialize a reviewed staging workstream with this title and limit "
+              "extraction to evidence relevant to it"),
+    )
+    ap.add_argument(
+        "--force-reimport", action="store_true",
+        help="re-run extraction even when the same source digest was already fully applied",
+    )
     ap.add_argument("--apply", action="store_true",
                     help="write the approved seed candidates to the KB as staging evidence")
     ap.add_argument("--yes", "-y", action="store_true",
@@ -244,7 +367,7 @@ def prompt_choices(args: argparse.Namespace) -> None:
             raise SystemExit(f"Explicit Cursor transcript is not a readable file: {path}")
     if args.lookback_days is None:
         args.lookback_days = _prompt_int(
-            "Retention horizon in days [5/14/30]",
+            "Retention horizon in days [5/14/30/90]",
             default=DEFAULT_LOOKBACK_DAYS,
             choices=LOOKBACK_CHOICES,
         )
@@ -252,7 +375,7 @@ def prompt_choices(args: argparse.Namespace) -> None:
         args.source = _prompt_source(args)
     if args.max_sessions is None:
         args.max_sessions = _prompt_positive_int(
-            "Recent sessions to scan (last N)",
+            "Maximum sessions to select after value/recency ranking",
             default=DEFAULT_MAX_SESSIONS,
         )
 
@@ -356,6 +479,130 @@ def _prompt_yes_no(prompt: str, *, default: bool) -> bool:
     return raw in {"y", "yes"}
 
 
+def redact_seed_text(text: str) -> tuple[str, int]:
+    """Remove high-confidence secrets and return only an aggregate count.
+
+    The replacement labels identify the detector class without retaining any
+    portion of the secret value. Callers should treat this as defense in depth,
+    not as an exhaustive secret scanner.
+    """
+    redacted = text
+    total = 0
+    for label, pattern in SEED_SECRET_PATTERNS:
+        redacted, count = pattern.subn(f"<redacted:{label}>", redacted)
+        total += count
+
+    def replace_assignment(match: re.Match[str]) -> str:
+        return f"{match.group('name')}{match.group('sep')}<redacted:credential>"
+
+    redacted, count = SEED_SECRET_ASSIGNMENT_RE.subn(replace_assignment, redacted)
+    total += count
+
+    def replace_url(match: re.Match[str]) -> str:
+        return f"{match.group('scheme')}<redacted:url-credentials>@"
+
+    redacted, count = SEED_CREDENTIAL_URL_RE.subn(replace_url, redacted)
+    total += count
+    return redacted, total
+
+
+def public_source_id(source_id: str) -> str:
+    """Redact a source locator before model, report, or retrieval exposure."""
+    redacted = redact_seed_text(str(source_id))[0]
+    return WHITESPACE_RE.sub(" ", redacted).strip()
+
+
+def source_content_digest(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()
+
+
+def source_revision_token(source: SeedSource) -> str:
+    """Privacy-safe in-memory key for one exact source revision."""
+    payload = json.dumps(
+        [source.id, source.content_digest], ensure_ascii=False, separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def source_value_score(text: str, *, focus_query: str | None = None) -> float:
+    """Score explicit human judgment before spending model calls.
+
+    This deliberately reads only the already-redacted flattened transcript.
+    It is a selection heuristic, never an authority score.
+    """
+    signal_weights = {
+        "rejected_path": 6.0,
+        "decision": 5.0,
+        "correction": 4.5,
+        "preference": 4.0,
+        "ongoing_workstream": 3.0,
+        "open_question": 2.0,
+    }
+    lines = user_signal_lines(text)
+    score = 0.0
+    seen: set[str] = set()
+    for line in lines:
+        match = classify_excerpt(line)
+        if match is None:
+            continue
+        signal = match[0]
+        score += signal_weights.get(signal, 1.0)
+        seen.add(signal)
+    score += min(len(seen), 5) * 0.75
+
+    focus_terms = {
+        term for term in normalize_excerpt(focus_query or "").split()
+        if len(term) >= 3
+    }
+    if focus_terms:
+        normalized = re.sub(
+            r"[^a-z0-9 ]+", " ", WHITESPACE_RE.sub(" ", text.lower())
+        )
+        matched = sum(1 for term in focus_terms if term in normalized)
+        coverage = matched / len(focus_terms)
+        score += coverage * 10.0
+    return round(score, 4)
+
+
+def select_sources(
+    sources: list[SeedSource], *, max_sessions: int,
+) -> list[SeedSource]:
+    """Reserve recent coverage, then fill by durable-signal value.
+
+    The returned order is value-first because it is also the order in which the
+    bounded model-call budget is spent. Recent sources remain in the selected
+    set even when their judgment score is low.
+    """
+    if max_sessions <= 0 or not sources:
+        return []
+    cap = min(max_sessions, len(sources))
+    mandatory = sorted(
+        (source for source in sources if source.agent == "cursor"),
+        key=lambda src: src.mtime,
+        reverse=True,
+    )[:cap]
+    mandatory_ids = {(src.agent, src.id, src.content_digest) for src in mandatory}
+    optional = [
+        source for source in sources
+        if (source.agent, source.id, source.content_digest) not in mandatory_ids
+    ]
+    recent_count = min(cap, max(1, math.ceil(cap * RECENT_SOURCE_RESERVE)))
+    recent = sorted(optional, key=lambda src: src.mtime, reverse=True)[
+        : min(recent_count, max(0, cap - len(mandatory)))
+    ]
+    recent_ids = mandatory_ids | {
+        (src.agent, src.id, src.content_digest) for src in recent
+    }
+    remainder = [
+        src for src in sources
+        if (src.agent, src.id, src.content_digest) not in recent_ids
+    ]
+    remainder.sort(key=lambda src: (src.value_score, src.mtime, src.id), reverse=True)
+    selected = mandatory + recent + remainder[: max(0, cap - len(mandatory) - len(recent))]
+    selected.sort(key=lambda src: (src.value_score, src.mtime, src.id), reverse=True)
+    return selected
+
+
 def discover_sources(
     *,
     source: str,
@@ -367,8 +614,17 @@ def discover_sources(
     cursor_transcripts: list[str] | tuple[str, ...] = (),
     cursor_session_id: str | None = None,
     all_projects: bool = False,
+    focus_query: str | None = None,
+    stats: dict[str, Any] | None = None,
     now: datetime | None = None,
 ) -> list[SeedSource]:
+    if stats is not None:
+        stats.update({
+            "inventory_considered": 0,
+            "source_unavailable": 0,
+            "source_invalid": 0,
+            "project_excluded": 0,
+        })
     cutoff = (now or utc_now()) - timedelta(days=lookback_days)
     roots: list[tuple[str, Path, str]] = []
     selected_agents = source_agents(source)
@@ -430,23 +686,63 @@ def discover_sources(
             if mtime >= cutoff:
                 paths.append((mtime, "cursor", path, sid))
 
-    out: list[SeedSource] = []
-    for mtime, agent, path, session_id in sorted(paths, key=lambda item: item[0], reverse=True):
-        if len(out) >= max_sessions:
+    ordered = sorted(paths, key=lambda item: item[0], reverse=True)
+    # Exact current/explicit Cursor inputs are user-selected and must not be
+    # crowded out by provider history, but even explicit inventory remains
+    # bounded so a generated path list cannot cause an unbounded scan.
+    cursor_items = [item for item in ordered if item[1] == "cursor"][
+        :MAX_SOURCE_INVENTORY
+    ]
+    history_items = [item for item in ordered if item[1] != "cursor"]
+    scan_items = cursor_items + history_items[
+        : max(0, MAX_SOURCE_SCAN - len(cursor_items))
+    ]
+
+    eligible: list[SeedSource] = []
+    for mtime, agent, path, session_id in scan_items:
+        if len(eligible) >= MAX_SOURCE_INVENTORY:
             break
-        text = read_source_text(agent, path)
-        if not text.strip():
+        if stats is not None:
+            stats["inventory_considered"] += 1
+        if not path.is_file():
+            if stats is not None:
+                stats["source_unavailable"] += 1
             continue
-        if agent != "cursor" and not all_projects and not source_matches_project(path, text, project_path):
+        try:
+            raw_text = read_source_text(agent, path)
+        except OSError:
+            if stats is not None:
+                stats["source_unavailable"] += 1
             continue
-        out.append(SeedSource(
+        if not raw_text.strip():
+            if stats is not None:
+                stats["source_invalid"] += 1
+            continue
+        if agent != "cursor" and not all_projects \
+                and not source_matches_project(path, raw_text, project_path):
+            if stats is not None:
+                stats["project_excluded"] += 1
+            continue
+        # Redact before truncation so a token/private-key envelope straddling
+        # the retention boundary cannot leak an unrecognizable suffix.
+        redacted_text, redaction_count = redact_seed_text(raw_text)
+        text = redacted_text[-MAX_SOURCE_CHARS:]
+        digest = source_content_digest(text)
+        eligible.append(SeedSource(
             id=source_id(agent, path, text, session_id=session_id),
             agent=agent,
             path=str(path),
             mtime=mtime.isoformat(timespec="seconds"),
-            text=text[-MAX_SOURCE_CHARS:],
+            text=text,
+            content_digest=digest,
+            value_score=source_value_score(text, focus_query=focus_query),
+            redaction_count=redaction_count,
         ))
-    return out[:max_sessions]
+    selected = select_sources(eligible, max_sessions=max_sessions)
+    if stats is not None:
+        stats["eligible"] = len(eligible)
+        stats["selected"] = len(selected)
+    return selected
 
 
 def source_agents(source: str) -> tuple[str, ...]:
@@ -491,10 +787,10 @@ def _encoded_claude_project_path(project: str) -> str:
 
 def read_source_text(agent: str, path: Path) -> str:
     if agent == "codex":
-        return codex_transcript.read_transcript(path)[-MAX_SOURCE_CHARS:]
+        return codex_transcript.read_transcript(path)
     if agent == "cursor":
-        return read_cursor_transcript(path)[-MAX_SOURCE_CHARS:]
-    return read_claude_transcript(path)[-MAX_SOURCE_CHARS:]
+        return read_cursor_transcript(path)
+    return read_claude_transcript(path)
 
 
 def read_cursor_transcript(path: Path) -> str:
@@ -623,6 +919,8 @@ def deterministic_candidates(sources: list[SeedSource], *, max_candidates: int) 
                 confidence=confidence,
                 source_paths=[src.path],
                 source_ids=[src.id],
+                source_mtimes=[src.mtime],
+                source_digests=[src.content_digest],
                 llm_used=False,
             )
             existing = by_excerpt.get(key)
@@ -630,16 +928,40 @@ def deterministic_candidates(sources: list[SeedSource], *, max_candidates: int) 
                 existing.confidence = min(0.95, existing.confidence + 0.05)
                 if signal not in existing.signals:
                     existing.signals.append(signal)
-                if src.id not in existing.source_ids:
+                existing_revisions = {
+                    (ref["id"], ref["digest"])
+                    for ref in candidate_source_refs(existing)
+                }
+                if (src.id, src.content_digest) not in existing_revisions:
                     existing.source_ids.append(src.id)
-                if src.path not in existing.source_paths:
                     existing.source_paths.append(src.path)
+                    existing.source_mtimes.append(src.mtime)
+                    existing.source_digests.append(src.content_digest)
+                else:
+                    idx = next(
+                        idx for idx, ref in enumerate(candidate_source_refs(existing))
+                        if (ref["id"], ref["digest"])
+                        == (src.id, src.content_digest)
+                    )
+                    while len(existing.source_paths) <= idx:
+                        existing.source_paths.append("")
+                    while len(existing.source_mtimes) <= idx:
+                        existing.source_mtimes.append("")
+                    while len(existing.source_digests) <= idx:
+                        existing.source_digests.append("")
+                    existing.source_paths[idx] = existing.source_paths[idx] or src.path
+                    existing.source_mtimes[idx] = existing.source_mtimes[idx] or src.mtime
+                    existing.source_digests[idx] = (
+                        existing.source_digests[idx] or src.content_digest
+                    )
                 existing.body = candidate_body(
                     excerpt=excerpt,
                     signals=existing.signals,
                     confidence=existing.confidence,
                     source_paths=existing.source_paths,
                     source_ids=existing.source_ids,
+                    source_mtimes=existing.source_mtimes,
+                    source_digests=existing.source_digests,
                     llm_used=False,
                 )
                 continue
@@ -651,13 +973,12 @@ def deterministic_candidates(sources: list[SeedSource], *, max_candidates: int) 
                 signals=[signal, "deterministic_seed"],
                 source_ids=[src.id],
                 source_paths=[src.path],
+                source_mtimes=[src.mtime],
+                source_digests=[src.content_digest],
             )
-    candidates = sorted(
-        by_excerpt.values(),
-        key=lambda c: (c.confidence, len(c.source_ids)),
-        reverse=True,
+    return balanced_candidate_selection(
+        list(by_excerpt.values()), max_candidates=max_candidates,
     )
-    return candidates[:max_candidates]
 
 
 def user_signal_lines(text: str) -> list[str]:
@@ -805,13 +1126,22 @@ def candidate_body(
     confidence: float,
     source_paths: list[str],
     source_ids: list[str],
+    source_mtimes: list[str],
+    source_digests: list[str],
     llm_used: bool,
 ) -> str:
-    sources = "\n".join(f"- {sid} ({path})" for sid, path in zip(source_ids, source_paths))
+    del source_paths  # exact local locators stay in structured provenance, not retrieval text
+    sources = "\n".join(
+        f"- {public_source_id(sid)}; "
+        f"observed_at={WHITESPACE_RE.sub(' ', mtime).strip() or 'unknown'}; "
+        f"digest={digest[:16] or 'unknown'}"
+        for sid, mtime, digest in _aligned_source_values(
+            source_ids, source_mtimes, source_digests,
+        )
+    )
     mode = "LLM-refined seed pass" if llm_used else "deterministic seed pass"
     return (
-        "Seed candidate from prior local agent history. Treat as low-authority "
-        "staging evidence until reviewed/promoted.\n\n"
+        f"{SEED_CANDIDATE_PREAMBLE}\n\n"
         f"Mode: {mode}\n"
         f"Signals: {', '.join(sorted(set(signals)))}\n\n"
         "Why this helps: it gives latch initial decisions, preferences, rejected "
@@ -824,6 +1154,18 @@ def candidate_body(
     )
 
 
+def _aligned_source_values(
+    source_ids: list[str], source_mtimes: list[str], source_digests: list[str],
+) -> list[tuple[str, str, str]]:
+    """Keep provenance arrays aligned even for legacy/test candidates."""
+    out: list[tuple[str, str, str]] = []
+    for idx, source_id in enumerate(source_ids):
+        mtime = source_mtimes[idx] if idx < len(source_mtimes) else ""
+        digest = source_digests[idx] if idx < len(source_digests) else ""
+        out.append((source_id, mtime, digest))
+    return out
+
+
 def estimate_llm_calls(session_count: int, *, calls_per_session: int, max_llm_calls: int) -> int:
     if session_count <= 0 or calls_per_session <= 0 or max_llm_calls <= 0:
         return 0
@@ -833,7 +1175,7 @@ def estimate_llm_calls(session_count: int, *, calls_per_session: int, max_llm_ca
 def confirm_llm_budget(args: argparse.Namespace, source_count: int) -> bool:
     estimate = estimate_llm_calls(
         source_count,
-        calls_per_session=args.calls_per_session,
+        calls_per_session=1,
         max_llm_calls=args.max_llm_calls,
     )
     if args.llm != "yes" or estimate == 0:
@@ -847,6 +1189,45 @@ def confirm_llm_budget(args: argparse.Namespace, source_count: int) -> bool:
     return _prompt_yes_no("Continue with LLM refinement", default=False)
 
 
+def source_review_lines(sources: list[SeedSource]) -> list[str]:
+    lines = [
+        "Selected local source receipts (transcript text is redacted before model use):"
+    ]
+    for source in sources:
+        lines.append(
+            f"- {public_source_id(source.id)}; provider={source.agent}; "
+            f"observed_at={source.mtime}; "
+            f"digest={source.content_digest[:16]}; redactions={source.redaction_count}"
+        )
+    return lines
+
+
+def confirm_source_use(args: argparse.Namespace, sources: list[SeedSource]) -> bool:
+    if args.llm != "yes" or not sources:
+        return True
+    print("\n" + "\n".join(source_review_lines(sources)))
+    if args.yes:
+        return True
+    return _prompt_yes_no(
+        "Use these redacted sources for LLM-backed initial-KB extraction",
+        default=False,
+    )
+
+
+def planned_llm_sources(
+    sources: list[SeedSource], *, max_calls: int,
+) -> list[SeedSource]:
+    """Choose the exact sources that may cross the model boundary this run.
+
+    Re-selecting at the call cap preserves the recent reserve inside the actual
+    model plan, rather than merely inside the larger acquisition window.
+    """
+    max_calls = min(max_calls, HARD_MAX_LLM_CALLS)
+    if max_calls <= 0:
+        return []
+    return select_sources(sources, max_sessions=min(len(sources), max_calls))
+
+
 def llm_candidates(
     sources: list[SeedSource],
     *,
@@ -854,7 +1235,24 @@ def llm_candidates(
     max_calls: int,
     max_candidates: int,
     backend: str | None,
+    focus_workstream: str | None = None,
+    stats: dict[str, Any] | None = None,
 ) -> list[SeedCandidate]:
+    max_calls = min(max_calls, HARD_MAX_LLM_CALLS)
+    if stats is not None:
+        stats.update({
+            "attempted": 0,
+            "succeeded": 0,
+            "failed": 0,
+            "source_ids": [],
+            "source_revision_tokens": [],
+            "succeeded_source_ids": [],
+            "failed_source_ids": [],
+            "succeeded_source_revision_tokens": [],
+            "failed_source_revision_tokens": [],
+            "accepted_candidates_by_source": {},
+            "accepted_candidates_by_revision": {},
+        })
     if max_calls <= 0:
         return []
     import budget  # noqa: WPS433
@@ -870,7 +1268,15 @@ def llm_candidates(
                 file=sys.stderr,
             )
             break
-        prompt = seed_prompt(project_path=project_path, source=src)
+        prompt = seed_prompt(
+            project_path=project_path,
+            source=src,
+            focus_workstream=focus_workstream,
+        )
+        if stats is not None:
+            stats["attempted"] += 1
+            stats["source_ids"].append(src.id)
+            stats["source_revision_tokens"].append(source_revision_token(src))
         result = model_backends.invoke_prompt(
             prompt,
             backend=backend,
@@ -880,19 +1286,71 @@ def llm_candidates(
             purpose="seed refinement",
         )
         if result.error or not result.text:
-            print(f"LLM seed refinement skipped {src.id}: {result.error}", file=sys.stderr)
+            if stats is not None:
+                stats["failed"] += 1
+                stats["failed_source_ids"].append(src.id)
+                stats["failed_source_revision_tokens"].append(
+                    source_revision_token(src)
+                )
+            print(
+                f"LLM seed refinement skipped {public_source_id(src.id)}: "
+                "extractor_failed "
+                "(backend details withheld; retryable).",
+                file=sys.stderr,
+            )
             continue
-        parsed = parse_json_envelope(result.text)
-        for item in parsed.get("seed_candidates", []) if isinstance(parsed, dict) else []:
+        safe_output, output_redactions = redact_seed_text(result.text)
+        if stats is not None and output_redactions:
+            stats["output_redactions"] = stats.get("output_redactions", 0) + output_redactions
+        parsed = parse_json_envelope(safe_output)
+        valid_envelope = (
+            isinstance(parsed, dict) and isinstance(parsed.get("seed_candidates"), list)
+        )
+        items = parsed.get("seed_candidates", []) if valid_envelope else []
+        accepted = 0
+        for item in items:
             cand = candidate_from_llm_item(item, src)
             if cand:
                 out.append(cand)
-        if len(out) >= max_candidates:
-            break
-    return dedupe_candidates(out)[:max_candidates]
+                accepted += 1
+                if accepted >= MAX_CANDIDATES_PER_SOURCE:
+                    break
+        if stats is not None:
+            if valid_envelope:
+                stats["succeeded"] += 1
+                stats["succeeded_source_ids"].append(src.id)
+                stats["succeeded_source_revision_tokens"].append(
+                    source_revision_token(src)
+                )
+                stats["accepted_candidates_by_source"][src.id] = accepted
+                stats["accepted_candidates_by_revision"][
+                    source_revision_token(src)
+                ] = accepted
+            else:
+                stats["failed"] += 1
+                stats["failed_source_ids"].append(src.id)
+                stats["failed_source_revision_tokens"].append(
+                    source_revision_token(src)
+                )
+    return balanced_candidate_selection(
+        dedupe_candidates(out), max_candidates=max_candidates,
+    )
 
 
-def seed_prompt(*, project_path: str, source: SeedSource) -> str:
+def seed_prompt(
+    *, project_path: str, source: SeedSource, focus_workstream: str | None = None,
+) -> str:
+    focus = ""
+    if focus_workstream:
+        safe_focus, _ = redact_seed_text(focus_workstream)
+        focus = (
+            "\nThis is a targeted new-workstream initialization. Extract only evidence "
+            f"materially relevant to this user-supplied workstream: {safe_focus!r}. "
+            "Use workstream_key=\"requested\" for every returned candidate. Skip "
+            "otherwise durable but unrelated history.\n"
+        )
+    safe_project, _ = redact_seed_text(Path(project_path).name)
+    safe_source_text, _ = redact_seed_text(source.text)
     return (
         "You are helping bootstrap latch, a local KB that preserves a user's "
         "decisions, preferences, rejected paths, and corrections for future coding agents.\n\n"
@@ -916,6 +1374,7 @@ def seed_prompt(*, project_path: str, source: SeedSource) -> str:
         "rejected alternatives, rationale, reopen conditions, and progress. Treat "
         "this as a suggested staging workstream, not confirmed authority. Do not "
         "invent a workstream from a one-off task.\n\n"
+        f"{focus}"
         "Do NOT extract transient session bookkeeping: branch/worktree state, dirty "
         "files, commit/PR logistics, local path trivia, main fast-forwards, or "
         "temporary install/debug status unless it captures a durable product lesson. "
@@ -933,11 +1392,14 @@ def seed_prompt(*, project_path: str, source: SeedSource) -> str:
         '{"seed_candidates":[{"kind":"workstream|decision|preference|fact|idea|open_question",'
         '"title":"short title","body":"evidence-backed markdown body",'
         '"confidence":0.0,"signals":["decision","rejected_path"],'
-        '"rejected_path":"affirmative description of disallowed approach"}]}\n\n'
-        f"Project path: {project_path}\n"
-        f"Source: {source.id} {source.path}\n\n"
+        '"rejected_path":"affirmative description of disallowed approach",'
+        '"workstream_key":"optional stable key matching a returned workstream"}]}\n\n'
+        f"Project: {safe_project}\n"
+        f"Source: {public_source_id(source.id)}; provider={source.agent}; "
+        f"observed_at={source.mtime}; "
+        f"digest={source.content_digest[:16]}\n\n"
         "--- TRANSCRIPT ---\n"
-        f"{source.text[-MAX_LLM_SOURCE_CHARS:]}"
+        f"{safe_source_text[-MAX_LLM_SOURCE_CHARS:]}"
     )
 
 
@@ -984,6 +1446,9 @@ def candidate_from_llm_item(item: Any, src: SeedSource) -> SeedCandidate | None:
     raw_signals = item.get("signals") if isinstance(item.get("signals"), list) else []
     signals = [str(s) for s in raw_signals if str(s).strip()]
     rejected_path = clip(str(item.get("rejected_path") or "").strip(), 180)
+    workstream_key = normalize_workstream_key(item.get("workstream_key"))
+    if kind == "workstream" and not workstream_key:
+        workstream_key = normalize_workstream_key(title)
     if "rejected_path" in normalized_signals(signals) and not rejected_path:
         signals = [signal for signal in signals if signal.strip().lower() != "rejected_path"]
     if "llm_seed" not in signals:
@@ -999,7 +1464,7 @@ def candidate_from_llm_item(item: Any, src: SeedSource) -> SeedCandidate | None:
         f"{body_text}{rejected_path_block}\n\n"
         f"Signals: {', '.join(sorted(set(signals)))}\n\n"
         "Source evidence:\n"
-        f"- {src.id} ({src.path})"
+        f"- {src.id}; observed_at={src.mtime}; digest={src.content_digest[:16]}"
     )
     return SeedCandidate(
         kind=kind,
@@ -1010,7 +1475,18 @@ def candidate_from_llm_item(item: Any, src: SeedSource) -> SeedCandidate | None:
         source_ids=[src.id],
         source_paths=[src.path],
         llm_used=True,
+        source_mtimes=[src.mtime],
+        source_digests=[src.content_digest],
+        workstream_key=workstream_key,
     )
+
+
+def normalize_workstream_key(value: Any) -> str | None:
+    raw = WHITESPACE_RE.sub(" ", str(value or "")).strip().lower()
+    if not raw:
+        return None
+    normalized = re.sub(r"[^a-z0-9._:-]+", "-", raw).strip("-:._")
+    return normalized[:80] or None
 
 
 def llm_candidate_skip_reason(
@@ -1048,13 +1524,17 @@ def _matches_any(text: str, patterns: tuple[str, ...]) -> bool:
 
 
 def dedupe_candidates(candidates: list[SeedCandidate]) -> list[SeedCandidate]:
-    by_key: dict[str, SeedCandidate] = {}
-    for cand in candidates:
-        key = normalize_excerpt(cand.title + "\n" + cand.body[:400])
-        existing = by_key.get(key)
-        if not existing or cand.confidence > existing.confidence:
-            by_key[key] = cand
-    return sorted(by_key.values(), key=lambda c: c.confidence, reverse=True)
+    merged: list[SeedCandidate] = []
+    for cand in sorted(candidates, key=candidate_rank_score, reverse=True):
+        existing = next(
+            (item for item in merged if safe_candidates_equivalent(cand, item)),
+            None,
+        )
+        if existing is None:
+            merged.append(cand)
+            continue
+        merge_candidate_provenance(existing, cand)
+    return sorted(merged, key=candidate_rank_score, reverse=True)
 
 
 def merge_candidate_sets(
@@ -1063,13 +1543,13 @@ def merge_candidate_sets(
     *,
     max_candidates: int,
 ) -> list[SeedCandidate]:
-    # LLM candidates lead when present; deterministic candidates fill coverage.
-    merged = list(llm)
-    for cand in deterministic:
-        if any(candidates_overlap(cand, existing) for existing in merged):
-            continue
-        merged.append(cand)
-    return dedupe_candidates(merged)[:max_candidates]
+    # LLM candidates lead in quality, while deterministic candidates can add
+    # coverage or corroborating provenance. The public no-LLM boundary remains
+    # enforced by choose_seed_candidates.
+    return balanced_candidate_selection(
+        dedupe_candidates([*llm, *deterministic]),
+        max_candidates=max_candidates,
+    )
 
 
 def choose_seed_candidates(
@@ -1083,21 +1563,406 @@ def choose_seed_candidates(
     return merge_candidate_sets(llm, deterministic, max_candidates=args.max_candidates), False
 
 
+def requested_workstream_key(title: str) -> str:
+    digest = hashlib.sha256(
+        normalize_for_quality_filter(title).encode("utf-8")
+    ).hexdigest()[:16]
+    return f"requested:{digest}"
+
+
+def workstream_scope_key(args: argparse.Namespace) -> str:
+    if getattr(args, "workstream_id", None):
+        return f"existing:{int(args.workstream_id)}"
+    if getattr(args, "new_workstream", None):
+        return requested_workstream_key(str(args.new_workstream))
+    return "project"
+
+
+def new_workstream_candidate(title: str) -> SeedCandidate:
+    key = requested_workstream_key(title)
+    digest = hashlib.sha256(normalize_for_quality_filter(title).encode("utf-8")).hexdigest()
+    safe_title, _ = redact_seed_text(clip(title, 120))
+    body = (
+        "User-requested workstream initialization. Treat this anchor as staging "
+        "until reviewed/promoted; imported child judgments remain independently "
+        "reviewable low-authority evidence.\n\n"
+        f"Requested workstream: {safe_title}\n\n"
+        "Signals: requested_workstream, ongoing_workstream\n\n"
+        "Source evidence:\n"
+        f"- user:new-workstream; observed_at=review-time; digest={digest[:16]}"
+    )
+    return SeedCandidate(
+        kind="workstream",
+        title=safe_title,
+        body=body,
+        confidence=0.95,
+        signals=["requested_workstream", "ongoing_workstream"],
+        source_ids=["user:new-workstream"],
+        source_paths=[""],
+        llm_used=False,
+        source_mtimes=[""],
+        source_digests=[digest],
+        workstream_key=key,
+    )
+
+
+def apply_requested_workstream_scope(
+    candidates: list[SeedCandidate], *, new_workstream: str | None,
+    workstream_id: int | None, max_candidates: int | None = None,
+) -> list[SeedCandidate]:
+    if new_workstream:
+        key = requested_workstream_key(new_workstream)
+        # Targeted initialization relies on the model's relevance judgment;
+        # deterministic regex fill can contain unrelated project-wide signals.
+        targeted = [
+            candidate for candidate in candidates
+            if candidate.llm_used
+            and candidate.kind != "workstream"
+            and candidate.workstream_key == "requested"
+        ]
+        for candidate in targeted:
+            candidate.workstream_key = key
+        cap = max_candidates if max_candidates is not None else len(targeted) + 1
+        parent = new_workstream_candidate(new_workstream)
+        return [parent, *balanced_candidate_selection(
+            targeted, max_candidates=max(0, cap - 1),
+        )]
+    if workstream_id:
+        key = f"existing:{int(workstream_id)}"
+        targeted = [
+            candidate for candidate in candidates if candidate.kind != "workstream"
+        ]
+        for candidate in targeted:
+            candidate.workstream_key = key
+        return targeted
+    return candidates
+
+
+def sanitize_reserved_workstream_keys(
+    candidates: list[SeedCandidate], *, existing_workstream_id: int | None,
+) -> list[SeedCandidate]:
+    """Reserve ``existing:ID`` for the user's explicit CLI target only."""
+    allowed = (
+        f"existing:{int(existing_workstream_id)}"
+        if existing_workstream_id is not None else None
+    )
+    for candidate in candidates:
+        key = candidate.workstream_key
+        if candidate.kind != "workstream" and key \
+                and key.startswith("existing:") and key != allowed:
+            candidate.workstream_key = None
+    return candidates
+
+
+def resolve_unambiguous_workstream_links(
+    candidates: list[SeedCandidate],
+) -> list[SeedCandidate]:
+    """Attach an unkeyed child only when provenance and topic resolve one parent.
+
+    Source co-location alone is insufficient because one transcript can discuss
+    several lanes. Duplicate parents for a key are ambiguous and remain for the
+    apply boundary to reject without creating either parent.
+    """
+    parents_by_key: dict[str, list[SeedCandidate]] = {}
+    for candidate in candidates:
+        if candidate.kind != "workstream":
+            continue
+        if not candidate.workstream_key:
+            candidate.workstream_key = normalize_workstream_key(candidate.title)
+        if candidate.workstream_key:
+            parents_by_key.setdefault(candidate.workstream_key, []).append(candidate)
+
+    unique_parents = {
+        key: values[0] for key, values in parents_by_key.items() if len(values) == 1
+    }
+    keys_by_source: dict[tuple[str, str], set[str]] = {}
+    for key, parent in unique_parents.items():
+        for ref in candidate_source_refs(parent):
+            keys_by_source.setdefault((ref["id"], ref["digest"]), set()).add(key)
+
+    generic_parent_terms = {
+        "seeded", "continuity", "note", "workstream", "ongoing", "project",
+        "requested", "initialization",
+    }
+    for child in candidates:
+        if child.kind == "workstream" or child.workstream_key:
+            continue
+        resolved: list[str] = []
+        for ref in candidate_source_refs(child):
+            keys = keys_by_source.get((ref["id"], ref["digest"]), set())
+            if len(keys) != 1:
+                resolved = []
+                break
+            resolved.append(next(iter(keys)))
+        if not resolved or len(set(resolved)) != 1:
+            continue
+        key = resolved[0]
+        parent = unique_parents.get(key)
+        if parent is None:
+            continue
+        parent_terms = candidate_terms(parent) - generic_parent_terms
+        key_terms = {
+            term for term in re.split(r"[^a-z0-9]+", key.lower())
+            if len(term) > 3 and term not in generic_parent_terms
+        }
+        if not (candidate_terms(child) & (parent_terms | key_terms)):
+            continue
+        child.workstream_key = key
+    return candidates
+
+
 def candidates_overlap(a: SeedCandidate, b: SeedCandidate) -> bool:
+    return safe_candidates_equivalent(a, b)
+
+
+def candidate_core_text(
+    candidate: SeedCandidate, *, persisted_body: bool = False,
+) -> str:
+    """Claim-bearing text only; treat only Latch-owned scaffold as structure."""
+    body = candidate.body
+    if persisted_body:
+        # Only persisted nodes are known to contain Latch's trusted receipt.
+        # The last receipt is generated by body_with_import_receipt; model text
+        # cannot place content after it. Trim the adjacent source block too.
+        receipt_at = body.rfind(
+            "\n\nSeed import receipt:\n- Latch-Seed-Import-Key: "
+        )
+        if receipt_at >= 0:
+            source_at = body.rfind(
+                "\n\nSeed source receipts:\n", 0, receipt_at,
+            )
+            body = body[:source_at if source_at >= 0 else receipt_at]
+
+    core = body
+    trusted_wrapper = (
+        body.startswith(f"{SEED_CANDIDATE_PREAMBLE}\n\nMode: ")
+        and "\n\nWhy this helps:" in body
+    )
+    if trusted_wrapper:
+        source_at = body.find("\n\nSource evidence:\n")
+        excerpt_at = (
+            body.find("\n\nExcerpt:\n> ", source_at)
+            if source_at >= 0 else -1
+        )
+        if excerpt_at >= 0:
+            core = body[excerpt_at + len("\n\nExcerpt:\n> "):]
+    elif body.startswith(SEED_CANDIDATE_PREAMBLE):
+        core = body[len(SEED_CANDIDATE_PREAMBLE):]
+        core = core.split("\n\nSignals:", 1)[0]
+        core = core.split("\n\nSource evidence:", 1)[0]
+    return WHITESPACE_RE.sub(" ", core).strip()
+
+
+def durable_signal_set(candidate: SeedCandidate) -> set[str]:
+    return normalized_signals(candidate.signals) - {
+        "llm_seed", "deterministic_seed", "seed", "corroborated",
+    }
+
+
+def candidate_negation_signature(candidate: SeedCandidate) -> tuple[bool, bool]:
+    text = normalize_for_quality_filter(candidate.title + " " + candidate_core_text(candidate))
+    negated = bool(re.search(r"\b(no|not|never|avoid|reject(?:ed)?|ruled out|don'?t)\b", text))
+    rejected = "rejected_path" in normalized_signals(candidate.signals)
+    return rejected, negated
+
+
+def candidate_term_polarities(candidate: SeedCandidate) -> dict[str, str]:
+    """Extract only explicit local direction around durable claim terms.
+
+    This is intentionally narrow: it exists to prevent destructive semantic
+    merges such as "use SQLite, not Postgres" with the inverse ruling. Unknown
+    terms remain unclassified and therefore cannot create authority.
+    """
+    text = normalize_for_quality_filter(
+        candidate_core_text(candidate)
+    ).replace("don't", "dont")
+    tokens = re.findall(r"[a-z0-9]+", text)
+    durable_terms = candidate_terms(candidate)
+    negative_before = {
+        "not", "never", "dont", "avoid", "avoiding", "reject", "rejected",
+        "without", "forbid", "forbidden", "disallow", "disallowed",
+    }
+    negative_after = {"forbidden", "disallowed", "rejected"}
+    positive = {"use", "choose", "keep", "prefer", "adopt", "require", "required"}
+    out: dict[str, str] = {}
+    for idx, token in enumerate(tokens):
+        if token not in durable_terms:
+            continue
+        before = set(tokens[max(0, idx - 3):idx])
+        after = set(tokens[idx + 1:idx + 3])
+        is_negative = bool(before & negative_before or after & negative_after)
+        if "over" in before or ("instead" in before and "of" in before):
+            is_negative = True
+        is_positive = bool(before & positive or after & {"required"})
+        polarity = "negative" if is_negative else "positive" if is_positive else ""
+        if not polarity:
+            continue
+        previous = out.get(token)
+        if previous is None:
+            out[token] = polarity
+        elif previous != polarity:
+            out.pop(token, None)
+    return out
+
+
+def candidates_directionally_conflict(a: SeedCandidate, b: SeedCandidate) -> bool:
+    left = candidate_term_polarities(a)
+    right = candidate_term_polarities(b)
+    return any(
+        left[term] != right[term]
+        for term in left.keys() & right.keys()
+    )
+
+
+def safe_candidates_equivalent(a: SeedCandidate, b: SeedCandidate) -> bool:
+    """Conservative semantic dedup; conflicting polarity always stays separate."""
     if report_section_key(a) != report_section_key(b):
         return False
-    if not (set(a.source_ids) & set(b.source_ids)):
+    if a.workstream_key and b.workstream_key and a.workstream_key != b.workstream_key:
         return False
-    a_terms = candidate_terms(a)
-    b_terms = candidate_terms(b)
+    if candidate_negation_signature(a) != candidate_negation_signature(b):
+        return False
+    if candidates_directionally_conflict(a, b):
+        return False
+    a_signals, b_signals = durable_signal_set(a), durable_signal_set(b)
+    if a_signals and b_signals and not (a_signals & b_signals):
+        return False
+    exact_a = normalize_excerpt(a.title + " " + candidate_core_text(a))
+    exact_b = normalize_excerpt(b.title + " " + candidate_core_text(b))
+    if exact_a == exact_b:
+        return True
+    a_terms, b_terms = candidate_terms(a), candidate_terms(b)
     if not a_terms or not b_terms:
         return False
     overlap = len(a_terms & b_terms) / min(len(a_terms), len(b_terms))
-    return overlap >= 0.55
+    threshold = 0.72 if candidate_revision_keys(a) & candidate_revision_keys(b) else 0.82
+    return overlap >= threshold
+
+
+def candidate_source_refs(candidate: SeedCandidate) -> list[dict[str, str]]:
+    refs: list[dict[str, str]] = []
+    for idx, source_id in enumerate(candidate.source_ids):
+        refs.append({
+            "id": source_id,
+            "path": candidate.source_paths[idx] if idx < len(candidate.source_paths) else "",
+            "mtime": candidate.source_mtimes[idx] if idx < len(candidate.source_mtimes) else "",
+            "digest": candidate.source_digests[idx] if idx < len(candidate.source_digests) else "",
+        })
+    return refs
+
+
+def candidate_revision_keys(candidate: SeedCandidate) -> set[tuple[str, str]]:
+    return {
+        (ref["id"], ref["digest"]) for ref in candidate_source_refs(candidate)
+    }
+
+
+def merge_candidate_provenance(target: SeedCandidate, incoming: SeedCandidate) -> None:
+    refs = {
+        (ref["id"], ref["digest"]): ref for ref in candidate_source_refs(target)
+    }
+    for ref in candidate_source_refs(incoming):
+        revision = (ref["id"], ref["digest"])
+        current = refs.get(revision)
+        if current is None:
+            refs[revision] = ref
+        else:
+            for key in ("path", "mtime", "digest"):
+                if not current.get(key) and ref.get(key):
+                    current[key] = ref[key]
+    ordered = [refs[key] for key in sorted(refs)]
+    target.source_ids = [ref["id"] for ref in ordered]
+    target.source_paths = [ref["path"] for ref in ordered]
+    target.source_mtimes = [ref["mtime"] for ref in ordered]
+    target.source_digests = [ref["digest"] for ref in ordered]
+    target.signals = sorted(set(target.signals) | set(incoming.signals) | {"corroborated"})
+    target.confidence = min(0.95, max(target.confidence, incoming.confidence) + 0.03)
+    target.llm_used = target.llm_used or incoming.llm_used
+    if not target.workstream_key:
+        target.workstream_key = incoming.workstream_key
+    target.body = refresh_candidate_provenance(target)
+
+
+def refresh_candidate_provenance(candidate: SeedCandidate) -> str:
+    marker = "Source evidence:\n"
+    if marker not in candidate.body:
+        return candidate.body
+    prefix, rest = candidate.body.split(marker, 1)
+    suffix = ""
+    if "\n\nExcerpt:" in rest:
+        suffix = "\n\nExcerpt:" + rest.split("\n\nExcerpt:", 1)[1]
+    lines = "\n".join(
+        f"- {ref['id']}; observed_at={ref['mtime'] or 'unknown'}; "
+        f"digest={(ref['digest'][:16] if ref['digest'] else 'unknown')}"
+        for ref in candidate_source_refs(candidate)
+    )
+    return prefix + marker + lines + suffix
+
+
+def candidate_rank_score(candidate: SeedCandidate) -> tuple[float, float, int, float, str]:
+    signals = normalized_signals(candidate.signals)
+    kind_weight = {
+        "decision": 5.0,
+        "preference": 4.0,
+        "workstream": 3.5,
+        "open_question": 2.5,
+        "idea": 2.0,
+        "fact": 1.5,
+    }.get(candidate.kind, 1.0)
+    signal_weight = 0.0
+    for signal, weight in {
+        "rejected_path": 4.0,
+        "decision": 3.0,
+        "correction": 2.8,
+        "preference": 2.3,
+        "ongoing_workstream": 1.8,
+        "open_question": 1.0,
+        "possible_agent_mistake": 1.5,
+    }.items():
+        if signal in signals:
+            signal_weight += weight
+    revision_count = len(candidate_revision_keys(candidate))
+    corroboration = min(max(revision_count - 1, 0), 4) * 0.8
+    model_bonus = 0.25 if candidate.llm_used else 0.0
+    recency = latest_candidate_observed_at(candidate) or ""
+    return (
+        kind_weight + signal_weight + corroboration + model_bonus,
+        candidate.confidence,
+        revision_count,
+        model_bonus,
+        recency,
+    )
+
+
+def balanced_candidate_selection(
+    candidates: list[SeedCandidate], *, max_candidates: int,
+) -> list[SeedCandidate]:
+    if max_candidates <= 0:
+        return []
+    ranked = sorted(candidates, key=candidate_rank_score, reverse=True)
+    selected: list[SeedCandidate] = []
+    selected_ids: set[int] = set()
+    # Preserve one strongest item from every non-empty report section before a
+    # single abundant class consumes the cap.
+    for key, _title, _summary in REPORT_SECTION_DEFS:
+        candidate = next((item for item in ranked if report_section_key(item) == key), None)
+        if candidate is None:
+            continue
+        selected.append(candidate)
+        selected_ids.add(id(candidate))
+        if len(selected) >= max_candidates:
+            return selected
+    for candidate in ranked:
+        if id(candidate) in selected_ids:
+            continue
+        selected.append(candidate)
+        if len(selected) >= max_candidates:
+            break
+    return selected
 
 
 def candidate_terms(candidate: SeedCandidate) -> set[str]:
-    text = normalize_excerpt(candidate.title + " " + candidate.body)
+    text = normalize_excerpt(candidate.title + " " + candidate_core_text(candidate))
     stop = {
         "seed", "seeded", "candidate", "local", "agent", "history", "treat",
         "staging", "evidence", "confidence", "signals", "source", "from",
@@ -1113,6 +1978,8 @@ def build_seed_report(candidates: list[SeedCandidate]) -> list[SeedReportSection
     }
     for cand in candidates:
         by_key[report_section_key(cand)].items.append(cand)
+    for section in by_key.values():
+        section.items.sort(key=candidate_rank_score, reverse=True)
     return [by_key[key] for key, _, _ in REPORT_SECTION_DEFS]
 
 
@@ -1145,7 +2012,10 @@ def candidate_evidence_line(candidate: SeedCandidate) -> str:
             break
     if excerpt:
         return clip(excerpt, 180)
-    first_source = candidate.source_ids[0] if candidate.source_ids else "source"
+    first_source = (
+        public_source_id(candidate.source_ids[0])
+        if candidate.source_ids else "source"
+    )
     return f"receipt: {first_source}"
 
 
@@ -1226,11 +2096,11 @@ def high_confidence_agent_mistake_candidate(candidate: SeedCandidate) -> bool:
 
 
 def catch_demo_candidate(candidates: list[SeedCandidate]) -> SeedCandidate | None:
-    """The strongest candidate for the first-wow gate demo.
+    """The strongest candidate for the separate post-apply gate check.
 
     Clean rejected paths stay first because they make the gate loop easiest to
     inspect. If no clean rejected path exists, a high-confidence prior agent
-    mistake can carry the same proof loop without adding a second demo surface.
+    mistake can carry the same gate-check loop without adding another surface.
     """
     rejected = [
         cand for cand in candidates
@@ -1270,7 +2140,7 @@ def slash_command_quote(value: str) -> str:
 def catch_demo_payload(candidate: SeedCandidate) -> dict[str, Any]:
     request = catch_demo_request(candidate)
     gate_script = KB_HOME / "bin" / "run_latch_gate.sh"
-    proof_target = (
+    evidence_target = (
         "prior agent-mistake evidence"
         if high_confidence_agent_mistake_candidate(candidate)
         else "seeded rejected path"
@@ -1282,7 +2152,7 @@ def catch_demo_payload(candidate: SeedCandidate) -> dict[str, Any]:
         "shell_command": "bash " + shlex.quote(str(gate_script)) + " " + shlex.quote(request),
         "requires_apply": True,
         "expected_outcome": (
-            f"After you apply the seed, Latch should cite this {proof_target} "
+            f"After you apply the seed, Latch should cite this {evidence_target} "
             "and ask whether to hold the line, redirect, or override it."
         ),
     }
@@ -1293,7 +2163,7 @@ def seed_report_receipt(
     sources: list[SeedSource],
     candidates: list[SeedCandidate],
 ) -> dict[str, Any]:
-    """Compact proof receipt for the visible seed-report surface."""
+    """Compact initial-KB receipt for the visible review surface."""
     report = build_seed_report(candidates)
     section_counts = {section.key: len(section.items) for section in report}
     source_total = len(sources)
@@ -1305,18 +2175,19 @@ def seed_report_receipt(
     mistakes = section_counts.get("agent_alignment_check", 0)
     direction_items = len(alignment_direction_items(candidates))
     demo = catch_demo_candidate(candidates)
-    next_proof = (
-        "After applying this seed, run the catch-demo command below to watch "
-        "latch_gate challenge the strongest rejected path or prior agent mistake "
-        "before files change."
+    next_step = (
+        "Review and apply the staging candidates, then use the separate gate-check "
+        "command below to verify the strongest rejected path or prior agent mistake "
+        "is available before files change."
         if demo else
-        "Review/apply the useful candidates first; a catch demo appears when "
-        "the report contains a clean rejected path or high-confidence prior "
+        "Review and apply the useful candidates. A gate-check command appears when "
+        "the initial KB contains a clean rejected path or high-confidence prior "
         "agent mistake."
     )
     summary = (
-        f"Latch built this first-wow report from {source_total} selected local "
-        f"{source_label}; it is a proof receipt, not a dashboard."
+        f"Latch assembled this initial decision-KB review from {source_total} "
+        f"selected local {source_label}; transcripts remain evidence inputs, "
+        "not the product surface."
     )
     why = (
         "It surfaced "
@@ -1327,12 +2198,12 @@ def seed_report_receipt(
         "gates can cite before code changes."
     )
     return {
-        "label": "Latch seed receipt",
+        "label": "Latch initial-KB receipt",
         "source": "latch_seed",
         "must_display_to_user": True,
         "summary": summary,
         "why_it_matters": why,
-        "next_proof": next_proof,
+        "next_step": next_step,
         "used": {
             "sources": source_total,
             "source_counts": source_counts(sources),
@@ -1340,6 +2211,7 @@ def seed_report_receipt(
             "direction_priorities": direction_items,
             "sections": section_counts,
             "catch_demo": bool(demo),
+            "redactions": sum(source.redaction_count for source in sources),
         },
     }
 
@@ -1358,29 +2230,56 @@ def write_boundary_message(args: argparse.Namespace) -> str:
     )
 
 
-def apply_success_message(inserted: list[int], candidates: list[SeedCandidate]) -> str:
+def apply_success_message(
+    inserted: list[int] | SeedApplyResult, candidates: list[SeedCandidate],
+) -> str:
+    apply_result = inserted if isinstance(inserted, SeedApplyResult) else SeedApplyResult(
+        inserted_ids=list(inserted)
+    )
+    inserted_ids = apply_result.inserted_ids
     lines = [
-        f"Wrote {len(inserted)} staging seed candidate(s): {', '.join(map(str, inserted))}",
+        f"Wrote {len(inserted_ids)} staging seed candidate(s): "
+        f"{', '.join(map(str, inserted_ids)) or 'none'}",
+        f"Exact import no-ops: {len(apply_result.skipped_import_keys)}",
+        f"Provenance corroborations: {len(apply_result.corroborated_import_keys)}",
+        f"Resumed incomplete imports: {len(apply_result.resumed_import_keys)}",
     ]
-    demo = catch_demo_candidate(candidates)
+    if apply_result.workstream_attachments:
+        lines.append(
+            "Staging workstream attachments: "
+            + ", ".join(
+                f"{key} -> {node_id}"
+                for key, node_id in sorted(apply_result.workstream_attachments.items())
+            )
+        )
+    if apply_result.failures:
+        lines.append(
+            f"Retryable failures: {len(apply_result.failures)} (rerun resumes incomplete items)"
+        )
+    demo = catch_demo_candidate(candidates) if apply_result.complete else None
     if demo:
         payload = catch_demo_payload(demo)
         lines.extend([
             "",
-            "Latch proof ready:",
-            "The seed is now in the KB. Run the catch demo to watch latch "
+            "Latch gate check ready:",
+            "The approved staging seed is now in the KB. Run the gate check to watch Latch "
             "challenge the strongest rejected path or prior agent mistake "
             "before files change:",
             f"- Claude Code / Cursor: {payload['slash_command']}",
             f"- Shell: {payload['shell_command']}",
             f"Expected: {payload['expected_outcome']}",
         ])
+    elif apply_result.complete:
+        lines.extend([
+            "",
+            "Latch gate-check note: no clean rejected path or high-confidence prior "
+            "agent mistake was applied in this seed run, so there is no "
+            "catch-demo command yet.",
+        ])
     else:
         lines.extend([
             "",
-            "Latch proof note: no clean rejected path or high-confidence prior "
-            "agent mistake was applied in this seed run, so there is no "
-            "catch-demo command yet.",
+            "Latch gate check is pending until the retryable import failures are resolved.",
         ])
     return "\n".join(lines)
 
@@ -1409,21 +2308,42 @@ def render_text(
     lines = [
         SEED_INTRO,
         "",
-        "Seeding reads selected local agent chats for this project and "
+        "Initial-KB setup reads selected local agent chats for this project and "
         "proposes decisions, rejected paths, preferences, and concrete follow-ups "
         "that latch can judge against before the first new compacted session.",
         "",
         f"Project: {Path(args.project).resolve()}",
         f"Transcript source: {args.source}",
         f"Lookback: {args.lookback_days} day(s)",
-        f"Session cap: last {session_cap} session(s) (change with --last-sessions N)",
-        f"Sources scanned: {len(sources)} ({format_source_counts(sources)})",
+        f"Selection cap: {session_cap} session(s) after value/recency ranking",
+        f"Sources selected: {len(sources)} ({format_source_counts(sources)})",
+        f"Exact unchanged sources already applied: "
+        f"{int(getattr(args, 'sources_skipped_unchanged', 0))}",
+        f"Secrets redacted before downstream use: "
+        f"{sum(source.redaction_count for source in sources)}",
         f"LLM-backed seed: {args.llm or 'yes'}"
         + (f" (estimated/capped calls: {llm_estimate})" if args.llm == "yes" else ""),
         f"Candidates: {len(candidates)}",
-        "Ranking: sections are ordered for install-time value; items within each "
+        "Ranking: sections preserve high-value coverage; items within each "
         "section are strongest-first.",
     ]
+    if args.llm == "yes":
+        stats = dict(getattr(args, "llm_stats", {}) or {})
+        lines.append(
+            "LLM source outcomes: "
+            f"attempted={int(stats.get('attempted', 0))}, "
+            f"succeeded={int(stats.get('succeeded', 0))}, "
+            f"failed={int(stats.get('failed', 0))}, "
+            f"deferred={int(getattr(args, 'sources_deferred', 0))}."
+        )
+    discovery = dict(getattr(args, "discovery_stats", {}) or {})
+    if discovery:
+        lines.append(
+            "Discovery outcomes: "
+            f"unavailable={int(discovery.get('source_unavailable', 0))}, "
+            f"invalid={int(discovery.get('source_invalid', 0))}, "
+            f"project_excluded={int(discovery.get('project_excluded', 0))}."
+        )
     if not candidates:
         lines.extend([
             "",
@@ -1432,6 +2352,8 @@ def render_text(
                 "not write deterministic fallback candidates in the user-facing "
                 "path. Fix the model backend or try a wider source/window and rerun."
             ) if getattr(args, "llm_refinement_empty", False) else (
+                "Initial KB is already current for the selected unchanged sources."
+                if getattr(args, "sources_skipped_unchanged", 0) else
                 "No seed candidates found. Try a wider lookback, higher "
                 "--last-sessions, or --all-projects."
             ),
@@ -1440,10 +2362,10 @@ def render_text(
     receipt = seed_report_receipt(sources=sources, candidates=candidates)
     lines.extend([
         "",
-        "Latch receipt:",
+        "Latch initial-KB receipt:",
         receipt["summary"],
         f"Why this mattered: {receipt['why_it_matters']}",
-        f"Next proof: {receipt['next_proof']}",
+        f"Next step: {receipt['next_step']}",
     ])
     lines.extend(["", "Seed report:"])
     for section in build_seed_report(candidates):
@@ -1483,7 +2405,7 @@ def render_text(
         payload = catch_demo_payload(demo)
         lines.extend([
             "",
-            "Try the catch demo:",
+            "Optional gate check:",
             "After you apply this seed, run one of these to watch latch challenge "
             "the strongest rejected path or prior agent mistake from the report:",
             f"- Claude Code / Cursor: {payload['slash_command']}",
@@ -1513,12 +2435,31 @@ def render_json(
         "lookback_days": args.lookback_days,
         "max_sessions": session_cap,
         "sources_scanned": len(sources),
+        "sources_selected": int(getattr(args, "sources_selected", len(sources))),
+        "sources_deferred": int(getattr(args, "sources_deferred", 0)),
+        "sources_skipped_unchanged": int(
+            getattr(args, "sources_skipped_unchanged", 0)
+        ),
         "source_counts": source_counts(sources),
+        "source_receipts": [
+            {
+                "id": public_source_id(source.id),
+                "agent": source.agent,
+                "mtime": source.mtime,
+                "digest": source.content_digest,
+                "redaction_count": source.redaction_count,
+            }
+            for source in sources
+        ],
         "llm": args.llm or "no",
         "llm_call_estimate": llm_estimate,
+        "llm_calls": public_seed_stats(
+            dict(getattr(args, "llm_stats", {}) or {})
+        ),
+        "discovery": dict(getattr(args, "discovery_stats", {}) or {}),
         "llm_refinement_empty": bool(getattr(args, "llm_refinement_empty", False)),
         "ranking": (
-            "Sections are ordered for install-time value; items within each "
+            "Sections preserve high-value coverage; items within each "
             "section are strongest-first using an internal score."
         ),
         "report": [
@@ -1555,7 +2496,23 @@ def public_report_section_dict(
 def public_candidate_dict(candidate: SeedCandidate) -> dict[str, Any]:
     data = asdict(candidate)
     data.pop("confidence", None)
+    data.pop("source_paths", None)
+    data["source_ids"] = [public_source_id(value) for value in candidate.source_ids]
+    data["title"] = redact_seed_text(str(data.get("title") or ""))[0]
+    data["body"] = redact_seed_text(str(data.get("body") or ""))[0]
     return data
+
+
+def public_seed_stats(stats: dict[str, Any]) -> dict[str, Any]:
+    """Redact source identifiers in otherwise aggregate extraction telemetry."""
+    out = dict(stats)
+    for key, value in list(out.items()):
+        if key.endswith("_by_source"):
+            out.pop(key, None)
+            continue
+        if key.endswith("source_ids") and isinstance(value, list):
+            out[key] = [public_source_id(str(item)) for item in value]
+    return out
 
 
 def source_counts(sources: list[SeedSource]) -> dict[str, int]:
@@ -1592,16 +2549,32 @@ def write_cursor_seed_preview(
     sources: list[SeedSource],
     candidates: list[SeedCandidate],
     llm_estimate: int,
+    apply_sources: list[SeedSource] | None = None,
+    source_failure_codes: dict[str, str] | None = None,
+    workstream_scope: str = "project",
+    llm_stats: dict[str, Any] | None = None,
+    discovery_stats: dict[str, Any] | None = None,
+    llm_refinement_empty: bool = False,
 ) -> str:
     """Cache the exact reviewed Cursor set without retaining transcript text."""
     payload = {
-        "version": 1,
+        "version": 2,
+        "extractor_version": SEED_EXTRACTOR_VERSION,
         "project": str(Path(project_path).resolve()),
         "session_id": session_id,
         "sources": [
             {**asdict(source), "text": ""}
             for source in sources
         ],
+        "apply_sources": [
+            {**asdict(source), "text": ""}
+            for source in (apply_sources if apply_sources is not None else sources)
+        ],
+        "source_failure_codes": dict(source_failure_codes or {}),
+        "workstream_scope": workstream_scope,
+        "llm_stats": dict(llm_stats or {}),
+        "discovery_stats": dict(discovery_stats or {}),
+        "llm_refinement_empty": bool(llm_refinement_empty),
         "candidates": [asdict(candidate) for candidate in candidates],
         "llm_estimate": int(llm_estimate),
     }
@@ -1620,7 +2593,8 @@ def write_cursor_seed_preview(
 
 def load_cursor_seed_preview(
     *, project_path: str, session_id: str, preview_digest: str,
-) -> tuple[list[SeedSource], list[SeedCandidate], int]:
+    include_apply_state: bool = False,
+) -> Any:
     """Load only the exact cached Cursor preview approved by digest."""
     if not re.fullmatch(r"[0-9a-f]{64}", preview_digest or ""):
         raise CursorSeedPreviewError("Cursor seed preview digest is missing or invalid")
@@ -1637,13 +2611,54 @@ def load_cursor_seed_preview(
     if body.get("project") != str(Path(project_path).resolve()) \
             or body.get("session_id") != session_id:
         raise CursorSeedPreviewError("Cursor seed preview belongs to another project or session")
+    if body.get("extractor_version") != SEED_EXTRACTOR_VERSION:
+        raise CursorSeedPreviewError(
+            "seed extractor changed; rerun preview before apply"
+        )
     try:
         sources = [SeedSource(**item) for item in body.get("sources", [])]
         candidates = [SeedCandidate(**item) for item in body.get("candidates", [])]
         estimate = int(body.get("llm_estimate", 0))
     except (TypeError, ValueError) as exc:
         raise CursorSeedPreviewError("Cursor seed preview candidates are malformed") from exc
-    return sources, candidates, estimate
+    if not include_apply_state:
+        return sources, candidates, estimate
+    if body.get("version") != 2:
+        raise CursorSeedPreviewError(
+            "Cursor seed preview lacks exact apply-state metadata; rerun preview"
+        )
+    try:
+        apply_sources = [
+            SeedSource(**item) for item in body.get("apply_sources", [])
+        ]
+        source_failure_codes = {
+            str(key): str(value)
+            for key, value in dict(body.get("source_failure_codes") or {}).items()
+        }
+        workstream_scope = str(body["workstream_scope"])
+        llm_stats = dict(body.get("llm_stats") or {})
+        discovery_stats = dict(body.get("discovery_stats") or {})
+        refinement_empty = bool(body.get("llm_refinement_empty", False))
+    except (KeyError, TypeError, ValueError) as exc:
+        raise CursorSeedPreviewError(
+            "Cursor seed preview apply state is malformed"
+        ) from exc
+    if not workstream_scope or any(
+        code not in {"extractor_failed", "source_unavailable", "source_invalid"}
+        for code in source_failure_codes.values()
+    ):
+        raise CursorSeedPreviewError("Cursor seed preview apply state is invalid")
+    return (
+        sources,
+        candidates,
+        estimate,
+        apply_sources,
+        source_failure_codes,
+        workstream_scope,
+        llm_stats,
+        discovery_stats,
+        refinement_empty,
+    )
 
 
 def remove_cursor_seed_preview(project_path: str, session_id: str) -> None:
@@ -1653,28 +2668,781 @@ def remove_cursor_seed_preview(project_path: str, session_id: str) -> None:
         pass
 
 
-def apply_candidates(candidates: list[SeedCandidate], *, project_path: str) -> list[int]:
+def project_scope_fingerprint(project_path: str) -> str:
+    resolved = str(Path(project_path).resolve())
+    return hashlib.sha256(resolved.encode("utf-8")).hexdigest()
+
+
+def existing_workstream_preflight(
+    project_path: str, workstream_id: int,
+) -> str | None:
+    """Validate a target without creating or migrating a preview-time vault."""
+    try:
+        db_file = paths.db_path(project_path)
+    except Exception:
+        return "the project KB location could not be resolved"
+    if not db_file.is_file():
+        return "the project KB does not exist"
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = sqlite3.connect(db_file.resolve().as_uri() + "?mode=ro", uri=True)
+        row = conn.execute(
+            "SELECT kind, status FROM nodes WHERE id = ?", (int(workstream_id),)
+        ).fetchone()
+    except sqlite3.Error:
+        return "the project KB could not be read"
+    finally:
+        if conn is not None:
+            conn.close()
+    if row is None:
+        return "the requested node does not exist"
+    if row[0] != "workstream":
+        return "the requested node is not a workstream"
+    if row[1] == "stale":
+        return "the requested workstream is stale"
+    return None
+
+
+def seed_source_import_key(
+    source: SeedSource, *, project_path: str, workstream_scope: str,
+) -> str:
+    payload = {
+        "version": SEED_EXTRACTOR_VERSION,
+        "project": project_scope_fingerprint(project_path),
+        "workstream_scope": workstream_scope,
+        "source_id": source.id,
+        "content_digest": source.content_digest,
+    }
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def split_applied_sources(
+    sources: list[SeedSource], *, project_path: str, workstream_scope: str,
+) -> tuple[list[SeedSource], list[SeedSource]]:
+    """Read an existing ledger without creating/migrating a preview-time DB."""
+    if not sources:
+        return [], []
+    try:
+        db_file = paths.db_path(project_path)
+    except Exception:
+        return sources, []
+    if not db_file.is_file():
+        return sources, []
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = sqlite3.connect(db_file.resolve().as_uri() + "?mode=ro", uri=True)
+        table = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='seed_source_import'"
+        ).fetchone()
+        if table is None:
+            return sources, []
+        keyed = {
+            seed_source_import_key(
+                source, project_path=project_path, workstream_scope=workstream_scope,
+            ): source
+            for source in sources
+        }
+        placeholders = ",".join("?" for _ in keyed)
+        applied_keys = {
+            str(row[0]) for row in conn.execute(
+                f"SELECT import_key FROM seed_source_import "
+                f"WHERE state = 'applied' AND import_key IN ({placeholders})",
+                tuple(keyed),
+            ).fetchall()
+        }
+        pending = [source for key, source in keyed.items() if key not in applied_keys]
+        applied = [source for key, source in keyed.items() if key in applied_keys]
+        return pending, applied
+    except sqlite3.Error:
+        return sources, []
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def candidate_import_key(
+    candidate: SeedCandidate,
+    *,
+    project_path: str,
+    target_workstream_id: int | None = None,
+) -> str:
+    refs = sorted(
+        f"{ref['id']}:{ref['digest']}" for ref in candidate_source_refs(candidate)
+    )
+    payload = {
+        "version": SEED_EXTRACTOR_VERSION,
+        "project": project_scope_fingerprint(project_path),
+        "kind": candidate.kind,
+        "title": normalize_for_quality_filter(candidate.title),
+        "claim": normalize_for_quality_filter(candidate_core_text(candidate)),
+        "sources": refs,
+        "workstream_key": candidate.workstream_key,
+        "target_workstream_id": target_workstream_id,
+    }
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def candidate_claim_key(
+    candidate: SeedCandidate,
+    *,
+    project_path: str,
+    target_workstream_id: int | None = None,
+    persisted_body: bool = False,
+) -> str:
+    """Stable exact-meaning key used to union corroboration across batches."""
+    payload = {
+        "claim_key_version": SEED_CLAIM_KEY_VERSION,
+        "project": project_scope_fingerprint(project_path),
+        "kind": candidate.kind,
+        "title": normalize_for_quality_filter(candidate.title),
+        "claim": normalize_for_quality_filter(
+            candidate_core_text(candidate, persisted_body=persisted_body)
+        ),
+        "workstream_key": candidate.workstream_key,
+        "target_workstream_id": target_workstream_id,
+    }
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def candidate_source_fingerprint(candidate: SeedCandidate) -> str:
+    refs = sorted(
+        f"{ref['id']}:{ref['digest']}" for ref in candidate_source_refs(candidate)
+    )
+    return hashlib.sha256("\n".join(refs).encode("utf-8")).hexdigest()
+
+
+def body_with_import_receipt(
+    candidate: SeedCandidate,
+    *,
+    import_key: str,
+    project_path: str,
+    workstream_id: int | None,
+) -> str:
+    refs = candidate_source_refs(candidate)
+    source_lines = "\n".join(
+        f"- {ref['id']}; observed_at={ref['mtime'] or 'unknown'}; "
+        f"digest={(ref['digest'] or 'unknown')}"
+        for ref in refs
+    ) or "- user-approved explicit initialization"
+    scope = Path(project_path).resolve().name
+    # Redact every untrusted field as one block so an envelope split across a
+    # candidate, source identifier, or project label cannot evade detection.
+    # Trusted receipt fields are appended only after that redaction pass.
+    untrusted = (
+        f"{candidate.body.rstrip()}\n\n"
+        "Seed source receipts:\n"
+        f"{source_lines}\n\n"
+        f"Seed project label: {scope}"
+    )
+    safe_untrusted, _ = redact_seed_text(untrusted)
+    workstream = str(workstream_id) if workstream_id is not None else "unattached"
+    rendered = (
+        f"{safe_untrusted.rstrip()}\n\n"
+        "Seed import receipt:\n"
+        f"- Latch-Seed-Import-Key: {import_key}\n"
+        f"- extractor: {SEED_EXTRACTOR_VERSION}\n"
+        f"- project_fingerprint: {project_scope_fingerprint(project_path)}\n"
+        f"- workstream_id: {workstream}\n"
+        "- authority: staging; requires review before canonical promotion"
+    )
+    return rendered
+
+
+def node_matches_seed_claim(
+    node: dict[str, Any],
+    candidate: SeedCandidate,
+    *,
+    project_path: str,
+    target_workstream_id: int | None,
+    claim_key: str,
+) -> bool:
+    """Require current claim text and scope to match before provenance union."""
+    if node.get("kind") != candidate.kind or node.get("status") == "stale":
+        return False
+    expected_parent = None if candidate.kind == "workstream" else target_workstream_id
+    if node.get("workstream_id") != expected_parent:
+        return False
+    snapshot = SeedCandidate(
+        kind=str(node.get("kind") or ""),
+        title=str(node.get("title") or ""),
+        body=str(node.get("body") or ""),
+        confidence=0.0,
+        signals=[],
+        source_ids=[],
+        source_paths=[],
+        source_mtimes=[],
+        source_digests=[],
+        llm_used=False,
+        workstream_key=candidate.workstream_key,
+    )
+    return candidate_claim_key(
+        snapshot,
+        project_path=project_path,
+        target_workstream_id=expected_parent,
+        persisted_body=True,
+    ) == claim_key
+
+
+def backfill_legacy_seed_claims(conn: Any, *, project_path: str) -> int:
+    """Recover additive claim/recency metadata from intact local seed nodes."""
+    import db as db_store  # noqa: WPS433
+
+    resolved_project = str(Path(project_path).resolve())
+    rows = conn.execute(
+        """
+        SELECT si.import_key, si.source_import_keys_json, si.workstream_key,
+               si.workstream_id, n.kind, n.title, n.body, n.status,
+               n.workstream_id AS current_workstream_id
+        FROM seed_import si
+        JOIN nodes n ON n.id = si.node_id
+        WHERE si.project_path = ? AND si.claim_key IS NULL
+        ORDER BY si.import_key
+        """,
+        (resolved_project,),
+    ).fetchall()
+    updated = 0
+    for raw in rows:
+        row = dict(raw)
+        expected_parent = (
+            None if row["kind"] == "workstream" else row["workstream_id"]
+        )
+        if row["current_workstream_id"] != expected_parent:
+            continue
+        snapshot = SeedCandidate(
+            kind=str(row["kind"]),
+            title=str(row["title"] or ""),
+            body=str(row["body"] or ""),
+            confidence=0.0,
+            signals=[],
+            source_ids=[],
+            source_paths=[],
+            source_mtimes=[],
+            source_digests=[],
+            llm_used=False,
+            workstream_key=row["workstream_key"],
+        )
+        claim_key = candidate_claim_key(
+            snapshot,
+            project_path=project_path,
+            target_workstream_id=expected_parent,
+            persisted_body=True,
+        )
+        observed_values: list[str] = []
+        try:
+            source_keys = json.loads(row["source_import_keys_json"] or "[]")
+        except (TypeError, json.JSONDecodeError):
+            source_keys = []
+        for source_key in source_keys if isinstance(source_keys, list) else []:
+            source_row = db_store.get_seed_source_import(conn, str(source_key))
+            if source_row is None:
+                continue
+            try:
+                observed_values.append(
+                    normalize_seed_observed_at(source_row["source_mtime"])
+                )
+            except (KeyError, TypeError, ValueError):
+                continue
+        try:
+            db_store.backfill_seed_import_receipt(
+                conn,
+                row["import_key"],
+                claim_key=claim_key,
+                observed_at=max(observed_values, default=None),
+            )
+        except (KeyError, db_store.SeedImportLedgerError):
+            continue
+        updated += 1
+    return updated
+
+
+def _find_import_marker_node(conn: Any, import_key: str) -> int | None:
+    marker = f"Latch-Seed-Import-Key: {import_key}"
+    row = conn.execute(
+        "SELECT id FROM nodes WHERE status != 'stale' AND instr(body, ?) > 0 "
+        "ORDER BY id LIMIT 1",
+        (marker,),
+    ).fetchone()
+    return int(row["id"]) if row is not None else None
+
+
+def append_seed_corroboration(
+    conn: Any, node_id: int, candidate: SeedCandidate, import_key: str,
+) -> None:
+    """Add provenance to an existing staging seed node without changing claim."""
+    import db as db_store  # noqa: WPS433
+
+    row = conn.execute(
+        "SELECT body, status FROM nodes WHERE id = ?", (node_id,)
+    ).fetchone()
+    if row is None or row["status"] != "staging":
+        raise ValueError("seed corroboration target is not an active staging node")
+    marker = f"Latch-Seed-Import-Key: {import_key}"
+    body = str(row["body"] or "")
+    if marker in body:
+        return
+    inline_count = body.count("\n\nAdditional seed corroboration:\n")
+    if inline_count >= MAX_INLINE_CORROBORATIONS:
+        # Full, unbounded provenance lives in seed_import/seed_source_import.
+        # Keep retrieval text compact even after many explicit import passes.
+        return
+    refs = "\n".join(
+        f"- {public_source_id(ref['id'])}; "
+        f"observed_at={WHITESPACE_RE.sub(' ', ref['mtime']).strip() or 'unknown'}; "
+        f"digest={ref['digest'] or 'unknown'}"
+        for ref in candidate_source_refs(candidate)
+    )
+    safe_refs, _ = redact_seed_text(refs)
+    db_store.update_node(
+        conn,
+        node_id,
+        body=(
+            body.rstrip()
+            + "\n\nAdditional seed corroboration:\n"
+            + f"- {marker}\n"
+            + safe_refs
+            + (
+                "\n- inline provenance cap reached; later receipts remain in "
+                "the structured seed ledger"
+                if inline_count + 1 == MAX_INLINE_CORROBORATIONS else ""
+            )
+        ),
+    )
+
+
+def apply_candidates(
+    candidates: list[SeedCandidate],
+    *,
+    project_path: str,
+    existing_workstream_id: int | None = None,
+    sources: list[SeedSource] | None = None,
+    workstream_scope: str = "project",
+    source_failure_codes: dict[str, str] | None = None,
+) -> SeedApplyResult:
     import heal  # noqa: WPS433
     import db  # noqa: WPS433
+    import artifacts as artifact_store  # noqa: WPS433
+    import lockfile  # noqa: WPS433
 
-    conn = db.connect(project_path)
-    inserted: list[int] = []
-    try:
-        for cand in candidates:
-            result = heal.insert_with_heal(
-                conn,
-                kind=cand.kind,
-                title=cand.title,
-                body=cand.body,
-                status="staging",
-                use_llm=False,
-                project_path=project_path,
-                artifacts=[{"repo": project_path}],
+    if paths.is_unlatched_mode():
+        raise SeedWriteBlocked(
+            "unlatched",
+            "Latch is Unlatched; initial-KB apply was blocked before any write.",
+        )
+
+    candidates = sanitize_reserved_workstream_keys(
+        candidates, existing_workstream_id=existing_workstream_id,
+    )
+    if existing_workstream_id is not None:
+        candidates = [
+            candidate for candidate in candidates if candidate.kind != "workstream"
+        ]
+    candidates = resolve_unambiguous_workstream_links(candidates)
+    parent_counts: dict[str, int] = {}
+    for candidate in candidates:
+        if candidate.kind == "workstream" and candidate.workstream_key:
+            parent_counts[candidate.workstream_key] = (
+                parent_counts.get(candidate.workstream_key, 0) + 1
             )
-            inserted.append(int(result["id"]))
-    finally:
-        conn.close()
-    return inserted
+    ambiguous_parent_keys = {
+        key for key, count in parent_counts.items() if count != 1
+    }
+
+    result = SeedApplyResult()
+    source_rows: dict[str, dict[str, Any]] = {}
+    source_key_by_ref: dict[tuple[str, str], str] = {}
+    source_error_by_key: dict[str, str] = {}
+
+    def mark_candidate_sources(candidate: SeedCandidate, error_code: str) -> None:
+        for ref in candidate_source_refs(candidate):
+            source_key = source_key_by_ref.get((ref["id"], ref["digest"]))
+            if source_key is not None:
+                source_error_by_key.setdefault(source_key, error_code)
+
+    try:
+        lock_context = lockfile.writer_lock(project_path)
+        with lock_context:
+            conn = db.connect(project_path)
+            try:
+                if existing_workstream_id is not None:
+                    row = db.get_node(conn, int(existing_workstream_id))
+                    if row is None or row.get("kind") != "workstream" \
+                            or row.get("status") == "stale":
+                        raise SeedWriteBlocked(
+                            "invalid_workstream",
+                            "The requested existing workstream is missing, stale, or not a workstream.",
+                        )
+
+                for source in sources or []:
+                    source_key = seed_source_import_key(
+                        source,
+                        project_path=project_path,
+                        workstream_scope=workstream_scope,
+                    )
+                    row = db.begin_seed_source_import(
+                        conn,
+                        import_key=source_key,
+                        source_id=source.id,
+                        source_agent=source.agent,
+                        source_path=source.path,
+                        source_mtime=source.mtime,
+                        source_digest=source.content_digest,
+                        project_path=str(Path(project_path).resolve()),
+                        workstream_key=(
+                            None if workstream_scope == "project" else workstream_scope
+                        ),
+                        extractor_name="latch_seed",
+                        extractor_version=SEED_EXTRACTOR_VERSION,
+                        retry_failed=True,
+                        retry_pending=True,
+                    )
+                    source_rows[source_key] = row
+                    source_key_by_ref[(source.id, source.content_digest)] = source_key
+                    revision_token = source_revision_token(source)
+                    if revision_token in (source_failure_codes or {}):
+                        source_error_by_key[source_key] = (
+                            source_failure_codes or {}
+                        )[revision_token]
+
+                backfill_legacy_seed_claims(conn, project_path=project_path)
+
+                workstream_nodes: dict[str, int] = {}
+                if existing_workstream_id is not None:
+                    workstream_nodes[f"existing:{int(existing_workstream_id)}"] = int(
+                        existing_workstream_id
+                    )
+                failed_workstreams: set[str] = set(ambiguous_parent_keys)
+                candidate_workstream_keys = {
+                    candidate.workstream_key
+                    for candidate in candidates
+                    if candidate.workstream_key
+                    and not candidate.workstream_key.startswith("existing:")
+                }
+                resolved_project = str(Path(project_path).resolve())
+                for candidate_key in sorted(candidate_workstream_keys):
+                    prior_nodes = db.find_seed_workstream_nodes(
+                        conn,
+                        project_path=resolved_project,
+                        workstream_key=candidate_key,
+                    )
+                    active = [
+                        row for row in prior_nodes if row.get("status") != "stale"
+                    ]
+                    if len(active) == 1 and len(prior_nodes) == 1:
+                        workstream_nodes[candidate_key] = int(active[0]["id"])
+                    elif prior_nodes:
+                        # Multiple or stale prior parents require explicit human
+                        # reconciliation/reopen semantics, never nearest-parent reuse.
+                        failed_workstreams.add(candidate_key)
+                ordered = sorted(
+                    candidates,
+                    key=lambda candidate: (
+                        0 if candidate.kind == "workstream" else 1,
+                        -candidate_rank_score(candidate)[0],
+                        candidate.title,
+                    ),
+                )
+
+                for candidate in ordered:
+                    target_workstream_id: int | None = None
+                    key = candidate.workstream_key
+                    if candidate.kind == "workstream" \
+                            and key in failed_workstreams:
+                        import_key = candidate_import_key(
+                            candidate, project_path=project_path,
+                        )
+                        mark_candidate_sources(candidate, "candidate_invalid")
+                        result.failures.append({
+                            "import_key": import_key,
+                            "error_code": "candidate_invalid",
+                        })
+                        continue
+                    if candidate.kind == "workstream" and key:
+                        target_workstream_id = workstream_nodes.get(key)
+                    if candidate.kind != "workstream" and not key \
+                            and existing_workstream_id is not None:
+                        key = f"existing:{int(existing_workstream_id)}"
+                        candidate.workstream_key = key
+                    if candidate.kind != "workstream" and key:
+                        if key.startswith("existing:"):
+                            try:
+                                target_workstream_id = int(key.split(":", 1)[1])
+                            except ValueError:
+                                target_workstream_id = None
+                            row = db.get_node(conn, target_workstream_id) \
+                                if target_workstream_id is not None else None
+                            if row is None or row.get("kind") != "workstream" \
+                                    or row.get("status") == "stale":
+                                failed_workstreams.add(key)
+                        else:
+                            target_workstream_id = workstream_nodes.get(key)
+                            if target_workstream_id is None:
+                                failed_workstreams.add(key)
+
+                    import_key = candidate_import_key(
+                        candidate,
+                        project_path=project_path,
+                        target_workstream_id=(
+                            None if candidate.kind == "workstream"
+                            else target_workstream_id
+                        ),
+                    )
+                    claim_key = candidate_claim_key(
+                        candidate,
+                        project_path=project_path,
+                        target_workstream_id=(
+                            None if candidate.kind == "workstream"
+                            else target_workstream_id
+                        ),
+                    )
+                    if candidate.kind == "workstream" \
+                            and target_workstream_id is not None:
+                        current_parent = db.get_node(conn, target_workstream_id)
+                        if current_parent is None or not node_matches_seed_claim(
+                            current_parent,
+                            candidate,
+                            project_path=project_path,
+                            target_workstream_id=None,
+                            claim_key=claim_key,
+                        ):
+                            if key:
+                                failed_workstreams.add(key)
+                            mark_candidate_sources(candidate, "candidate_invalid")
+                            result.failures.append({
+                                "import_key": import_key,
+                                "error_code": "candidate_invalid",
+                            })
+                            continue
+                    if key in failed_workstreams and candidate.kind != "workstream":
+                        mark_candidate_sources(candidate, "workstream_attach_failed")
+                        result.failures.append({
+                            "import_key": import_key,
+                            "error_code": "workstream_attach_failed",
+                        })
+                        continue
+
+                    source_import_keys = [
+                        source_key_by_ref[(ref["id"], ref["digest"])]
+                        for ref in candidate_source_refs(candidate)
+                        if (ref["id"], ref["digest"]) in source_key_by_ref
+                    ]
+                    ledger_row: dict[str, Any] | None = None
+                    node_id: int | None = None
+                    try:
+                        existing = db.get_seed_import(conn, import_key)
+                        if existing is not None and existing["state"] == "applied":
+                            existing = db.backfill_seed_import_receipt(
+                                conn,
+                                import_key,
+                                claim_key=claim_key,
+                                observed_at=latest_candidate_observed_at(candidate),
+                            )
+                            node_id = int(existing["node_id"])
+                            active_node = db.get_node(conn, node_id)
+                            if active_node is None \
+                                    or active_node.get("status") == "stale" \
+                                    or active_node.get("kind") != candidate.kind:
+                                if candidate.kind == "workstream" and key:
+                                    failed_workstreams.add(key)
+                                mark_candidate_sources(candidate, "candidate_invalid")
+                                result.failures.append({
+                                    "import_key": import_key,
+                                    "error_code": "candidate_invalid",
+                                })
+                                continue
+                            result.skipped_import_keys.append(import_key)
+                            result.skipped_node_ids.append(node_id)
+                            if candidate.kind == "workstream" and key:
+                                workstream_nodes[key] = node_id
+                                result.workstream_attachments[key] = node_id
+                            continue
+
+                        claim_nodes = db.find_seed_claim_nodes(
+                            conn, claim_key=claim_key,
+                        )
+                        valid_claim_nodes = [
+                            row for row in claim_nodes
+                            if node_matches_seed_claim(
+                                row,
+                                candidate,
+                                project_path=project_path,
+                                target_workstream_id=(
+                                    None if candidate.kind == "workstream"
+                                    else target_workstream_id
+                                ),
+                                claim_key=claim_key,
+                            )
+                        ]
+                        if claim_nodes and (
+                            len(claim_nodes) != 1 or len(valid_claim_nodes) != 1
+                        ):
+                            if candidate.kind == "workstream" and key:
+                                failed_workstreams.add(key)
+                            mark_candidate_sources(candidate, "candidate_invalid")
+                            result.failures.append({
+                                "import_key": import_key,
+                                "error_code": "candidate_invalid",
+                            })
+                            continue
+                        claim_reuse_id = (
+                            int(valid_claim_nodes[0]["id"])
+                            if len(valid_claim_nodes) == 1 else None
+                        )
+
+                        ledger_row = db.begin_seed_import(
+                            conn,
+                            import_key=import_key,
+                            claim_key=claim_key,
+                            project_path=str(Path(project_path).resolve()),
+                            extractor_name="latch_seed",
+                            extractor_version=SEED_EXTRACTOR_VERSION,
+                            observed_at=latest_candidate_observed_at(candidate),
+                            source_import_keys=source_import_keys,
+                            source_ids=candidate.source_ids,
+                            workstream_key=key,
+                            workstream_id=(
+                                None if candidate.kind == "workstream"
+                                else target_workstream_id
+                            ),
+                            retry_failed=True,
+                            retry_pending=True,
+                        )
+                        node_id = (
+                            int(ledger_row["node_id"])
+                            if ledger_row.get("node_id") is not None
+                            else target_workstream_id
+                            if candidate.kind == "workstream"
+                            and target_workstream_id is not None
+                            else claim_reuse_id
+                            if claim_reuse_id is not None
+                            else _find_import_marker_node(conn, import_key)
+                        )
+                        if node_id is None:
+                            safe_title, _ = redact_seed_text(candidate.title)
+                            inserted = heal.insert_with_heal(
+                                conn,
+                                kind=candidate.kind,
+                                title=safe_title,
+                                body=body_with_import_receipt(
+                                    candidate,
+                                    import_key=import_key,
+                                    project_path=project_path,
+                                    workstream_id=target_workstream_id,
+                                ),
+                                status="staging",
+                                use_llm=False,
+                                workstream_id=target_workstream_id,
+                                project_path=project_path,
+                                artifacts=[{"repo": project_path}],
+                            )
+                            node_id = int(inserted["id"])
+                            db.set_seed_import_node(conn, import_key, node_id)
+                            result.inserted_ids.append(node_id)
+                        else:
+                            db.set_seed_import_node(conn, import_key, node_id)
+                            if ledger_row.get("created") and (
+                                claim_reuse_id is not None
+                                or (
+                                    candidate.kind == "workstream"
+                                    and target_workstream_id is not None
+                                )
+                            ):
+                                result.corroborated_import_keys.append(import_key)
+                                result.corroborated_node_ids.append(node_id)
+                            else:
+                                result.resumed_import_keys.append(import_key)
+                                result.resumed_node_ids.append(node_id)
+                            reused_node = db.get_node(conn, node_id)
+                            if reused_node is not None \
+                                    and reused_node.get("status") == "staging":
+                                append_seed_corroboration(
+                                    conn, node_id, candidate, import_key,
+                                )
+
+                        artifact_store.capture_for_node(
+                            conn,
+                            node_id,
+                            artifacts=[{"repo": project_path}],
+                            project_cwd=project_path,
+                        )
+                        db.finish_seed_import(
+                            conn, import_key, state="applied", node_id=node_id,
+                        )
+                        if candidate.kind == "workstream" and key:
+                            workstream_nodes[key] = node_id
+                            result.workstream_attachments[key] = node_id
+                    except Exception:
+                        if candidate.kind == "workstream" and key:
+                            failed_workstreams.add(key)
+                        # Workstream resolution and validation happen before
+                        # this write/checkpoint block.  Failures here describe
+                        # the node write, not attachment selection; unresolved
+                        # parents are rejected above with the distinct
+                        # workstream_attach_failed code.
+                        error_code = "node_write_failed"
+                        mark_candidate_sources(candidate, error_code)
+                        if ledger_row is not None:
+                            try:
+                                db.finish_seed_import(
+                                    conn,
+                                    import_key,
+                                    state="failed",
+                                    node_id=node_id,
+                                    error_code=error_code,
+                                )
+                            except Exception:
+                                pass
+                        result.failures.append({
+                            "import_key": import_key,
+                            "error_code": error_code,
+                        })
+
+                source_outcomes: dict[str, tuple[str, str | None]] = {}
+                for source_key, row in source_rows.items():
+                    if row.get("state") == "applied":
+                        source_error = source_error_by_key.get(source_key)
+                        if source_error:
+                            result.failures.append({
+                                "import_key": source_key,
+                                "error_code": source_error,
+                            })
+                        continue
+                    source_error = source_error_by_key.get(source_key)
+                    source_state = "failed" if source_error else "applied"
+                    source_outcomes[source_key] = (source_state, source_error)
+                    if source_error:
+                        result.failures.append({
+                            "import_key": source_key,
+                            "error_code": source_error,
+                        })
+                if source_outcomes:
+                    try:
+                        db.finish_seed_source_imports(conn, source_outcomes)
+                    except Exception:
+                        for source_key in source_outcomes:
+                            result.failures.append({
+                                "import_key": source_key,
+                                "error_code": "internal",
+                            })
+            finally:
+                conn.close()
+    except SeedWriteBlocked:
+        raise
+    except Exception as exc:
+        # The lock timeout occurs before ledger or node writes. Do not expose
+        # local paths or raw exception text in the structured receipt.
+        reason = "compaction_in_progress" \
+            if exc.__class__.__name__ == "CompactionInProgressError" else "write_failed"
+        raise SeedWriteBlocked(
+            reason,
+            "Initial-KB apply is retryable; no batch lock was acquired."
+            if reason == "compaction_in_progress" else
+            "Initial-KB apply could not start safely.",
+        ) from exc
+    return result
 
 
 def clip(text: str, limit: int) -> str:
@@ -1692,6 +3460,45 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     prompt_choices(args)
     args.project = str(Path(args.project).resolve())
+    if args.max_sessions is None or args.max_sessions <= 0:
+        print("--last-sessions must be positive.", file=sys.stderr)
+        return 2
+    if args.max_candidates <= 0 or args.max_llm_calls < 0:
+        print("--max-candidates must be positive and --max-llm-calls non-negative.", file=sys.stderr)
+        return 2
+    if args.max_llm_calls > HARD_MAX_LLM_CALLS:
+        print(
+            f"--max-llm-calls cannot exceed the hard {HARD_MAX_LLM_CALLS}-call "
+            "initial-KB boundary.",
+            file=sys.stderr,
+        )
+        return 2
+    if args.workstream_id is not None and args.workstream_id <= 0:
+        print("--workstream-id must be a positive node id.", file=sys.stderr)
+        return 2
+    if args.workstream_id is not None:
+        workstream_error = existing_workstream_preflight(
+            args.project, args.workstream_id,
+        )
+        if workstream_error:
+            print(
+                f"--workstream-id {args.workstream_id} is unavailable: "
+                f"{workstream_error}.",
+                file=sys.stderr,
+            )
+            return 2
+    if args.new_workstream is not None:
+        safe_workstream, _ = redact_seed_text(args.new_workstream.strip())
+        if not safe_workstream:
+            print("--new-workstream needs a non-empty title.", file=sys.stderr)
+            return 2
+        args.new_workstream = safe_workstream
+    scope_key = workstream_scope_key(args)
+    args.sources_skipped_unchanged = 0
+    args.sources_selected = 0
+    args.sources_deferred = 0
+    args.llm_stats = {}
+    args.discovery_stats = {}
     cached_cursor_apply = args.source == "cursor" and args.apply
     if cached_cursor_apply:
         if not args.cursor_session_id or not args.preview_digest:
@@ -1702,15 +3509,43 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 2
         try:
-            sources, candidates, llm_estimate = load_cursor_seed_preview(
+            (
+                sources,
+                candidates,
+                llm_estimate,
+                apply_sources,
+                apply_failure_codes,
+                cached_scope,
+                cached_llm_stats,
+                cached_discovery_stats,
+                cached_refinement_empty,
+            ) = load_cursor_seed_preview(
                 project_path=args.project,
                 session_id=args.cursor_session_id,
                 preview_digest=args.preview_digest,
+                include_apply_state=True,
             )
         except CursorSeedPreviewError as exc:
             print(f"Cursor seed apply unavailable: {exc}", file=sys.stderr)
             return 2
-        args.llm_refinement_empty = False
+        if cached_scope != scope_key:
+            print(
+                "Cursor seed apply scope does not match the reviewed preview; "
+                "rerun preview with the same workstream options.",
+                file=sys.stderr,
+            )
+            return 2
+        args.llm_refinement_empty = cached_refinement_empty
+        args.llm_stats = {**cached_llm_stats, "cached_preview": True}
+        args.discovery_stats = cached_discovery_stats
+        args.sources_selected = len(sources)
+        attempted_tokens = {
+            source_revision_token(source) for source in apply_sources
+        }
+        args.sources_deferred = sum(
+            source_revision_token(source) not in attempted_tokens
+            for source in sources
+        )
     else:
         try:
             sources = discover_sources(
@@ -1723,32 +3558,112 @@ def main(argv: list[str] | None = None) -> int:
                 cursor_transcripts=args.cursor_transcript,
                 cursor_session_id=args.cursor_session_id,
                 all_projects=args.all_projects,
+                focus_query=args.new_workstream,
+                stats=args.discovery_stats,
             )
         except cursor_transcript.CursorTranscriptError as e:
             print(f"Cursor seed source unavailable: {e}", file=sys.stderr)
             return 2
+        if not args.force_reimport:
+            sources, already_applied = split_applied_sources(
+                sources,
+                project_path=args.project,
+                workstream_scope=scope_key,
+            )
+            args.sources_skipped_unchanged = len(already_applied)
+
+        args.sources_selected = len(sources)
+        call_sources = (
+            planned_llm_sources(sources, max_calls=args.max_llm_calls)
+            if args.llm == "yes" else sources
+        )
         llm_estimate = estimate_llm_calls(
-            len(sources),
-            calls_per_session=args.calls_per_session,
+            len(call_sources),
+            calls_per_session=1,
             max_llm_calls=args.max_llm_calls,
         ) if args.llm == "yes" else 0
 
-        if not confirm_llm_budget(args, len(sources)):
+        if not confirm_source_use(args, call_sources):
+            print("Initial-KB extraction cancelled before any LLM calls.")
+            return 1
+        if not confirm_llm_budget(args, len(call_sources)):
             print("Seed pass cancelled before any LLM calls.")
             return 1
 
-        deterministic = deterministic_candidates(sources, max_candidates=args.max_candidates)
         llm = []
-        if args.llm == "yes":
+        if args.llm == "yes" and call_sources:
             llm = llm_candidates(
-                sources,
+                call_sources,
                 project_path=args.project,
                 max_calls=args.max_llm_calls,
                 max_candidates=args.max_candidates,
                 backend=args.backend,
+                focus_workstream=args.new_workstream,
+                stats=args.llm_stats,
             )
+        if args.llm == "yes":
+            attempted_revisions = set(
+                args.llm_stats.get("source_revision_tokens", [])
+            )
+            accepted_by_revision = args.llm_stats.get(
+                "accepted_candidates_by_revision", {}
+            )
+            # Deterministic extraction may corroborate a source only after that
+            # source returned at least one accepted model candidate. A valid
+            # empty model result stays empty rather than being bypassed.
+            deterministic_sources = [
+                source for source in call_sources
+                if int(accepted_by_revision.get(source_revision_token(source), 0)) > 0
+            ]
+            apply_sources = [
+                source for source in call_sources
+                if source_revision_token(source) in attempted_revisions
+            ]
+            deferred_ids = [
+                source.id for source in sources
+                if source_revision_token(source) not in attempted_revisions
+            ]
+            args.llm_stats["planned_source_ids"] = [
+                source.id for source in call_sources
+            ]
+            args.llm_stats["deferred_source_ids"] = deferred_ids
+            args.sources_deferred = len(deferred_ids)
+        else:
+            deterministic_sources = sources
+            apply_sources = sources
+        deterministic = deterministic_candidates(
+            deterministic_sources, max_candidates=args.max_candidates,
+        )
+        if args.llm == "yes":
+            deterministic = [
+                candidate for candidate in deterministic
+                if candidate.kind != "workstream"
+            ]
         candidates, llm_refinement_empty = choose_seed_candidates(args, llm, deterministic)
-        args.llm_refinement_empty = llm_refinement_empty
+        candidates = sanitize_reserved_workstream_keys(
+            candidates, existing_workstream_id=args.workstream_id,
+        )
+        candidates = resolve_unambiguous_workstream_links(candidates)
+        candidates = apply_requested_workstream_scope(
+            candidates,
+            new_workstream=args.new_workstream,
+            workstream_id=args.workstream_id,
+            max_candidates=args.max_candidates,
+        )
+        args.llm_refinement_empty = bool(
+            llm_refinement_empty
+            or (
+                args.llm == "yes"
+                and bool(sources)
+                and args.llm_stats.get("succeeded", 0) == 0
+            )
+        )
+        apply_failure_codes = {
+            revision: "extractor_failed"
+            for revision in args.llm_stats.get(
+                "failed_source_revision_tokens", []
+            )
+        }
         if args.source == "cursor":
             if not args.cursor_session_id:
                 print("Cursor seed preview requires --cursor-session-id.", file=sys.stderr)
@@ -1759,6 +3674,12 @@ def main(argv: list[str] | None = None) -> int:
                 sources=sources,
                 candidates=candidates,
                 llm_estimate=llm_estimate,
+                apply_sources=apply_sources,
+                source_failure_codes=apply_failure_codes,
+                workstream_scope=scope_key,
+                llm_stats=args.llm_stats,
+                discovery_stats=args.discovery_stats,
+                llm_refinement_empty=args.llm_refinement_empty,
             )
 
     output = render_json(args=args, sources=sources, candidates=candidates, llm_estimate=llm_estimate) \
@@ -1769,20 +3690,33 @@ def main(argv: list[str] | None = None) -> int:
 
     if not args.apply:
         return 0
-    if not candidates:
-        print("Nothing to write.")
-        return 0
-    if not args.yes and not _prompt_yes_no(
+    if args.llm_refinement_empty and not candidates:
+        print("Nothing was applied because LLM extraction did not complete successfully.")
+        return 1
+    if candidates and not args.yes and not _prompt_yes_no(
         f"Write {len(candidates)} candidate(s) to the KB as staging evidence",
         default=False,
     ):
         print("Seed candidates were not written.")
         return 1
-    inserted = apply_candidates(candidates, project_path=args.project)
-    if cached_cursor_apply and args.cursor_session_id:
+    try:
+        applied = apply_candidates(
+            candidates,
+            project_path=args.project,
+            existing_workstream_id=args.workstream_id,
+            sources=apply_sources,
+            workstream_scope=scope_key,
+            source_failure_codes=apply_failure_codes,
+        )
+    except SeedWriteBlocked as exc:
+        print(f"Initial-KB apply blocked ({exc.reason}): {exc}", file=sys.stderr)
+        return 1
+    if isinstance(applied, list):  # compatibility for embedders/tests of the old helper
+        applied = SeedApplyResult(inserted_ids=list(applied))
+    if cached_cursor_apply and args.cursor_session_id and applied.complete:
         remove_cursor_seed_preview(args.project, args.cursor_session_id)
-    print(apply_success_message(inserted, candidates))
-    return 0
+    print(apply_success_message(applied, candidates))
+    return 0 if applied.complete else 1
 
 
 if __name__ == "__main__":
