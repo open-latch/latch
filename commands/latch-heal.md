@@ -23,6 +23,10 @@ Run the nightly heal against the per-project knowledge base under
    - Verdict: **supersede** marks loser stale + adds a `supersedes` edge.
      **keep_both** adds a `related_to` edge so this pair is skipped on
      future sweeps.
+   - If the heal budget is exhausted before arbitration, leave the pair
+     untouched and edge-free. Record a structural `heal_deferred` row with the
+     pair ids, similarity, and tier so the same pair can be audited and retried
+     automatically on a later run.
 
 Run with the Bash tool:
 
@@ -31,7 +35,9 @@ python "<KB_HOME>/src/maintenance.py" nightly "$(pwd)"
 ```
 
 Report the JSON summary: `examined`, `collisions`, `superseded`, `kept_both`,
-per-path counts (`recency` / `ref_count` / `llm`), and `budget_blocked` if any
-collisions fell back to keep_both because the daily cap was hit.
+`deferred`, per-path counts (`recency` / `ref_count` / `llm` / `deferred`), and
+`budget_blocked` if any collisions were left pending because the daily cap was
+hit. Budget-blocked pairs do not receive an edge and remain eligible for the
+next heal run.
 
 If anything fails, check `<KB_HOME>/maintenance.log`.

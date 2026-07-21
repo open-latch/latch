@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 import db  # noqa: E402
 import embeddings  # noqa: E402
 import heal  # noqa: E402
+import log_utils  # noqa: E402
 
 
 def _assert(cond, msg):
@@ -370,7 +371,7 @@ def test_three_pass_high_tier_default_preserves_behavior():
 # ---------- nightly_heal two-tier summary + dispatch ----------
 
 def test_nightly_heal_summary_has_reconciled_and_by_tier_keys():
-    """Summary schema includes new keys: reconciled count + by_tier breakdown."""
+    """Summary schema exposes reconciliation, tier, and deferral counts."""
     tmp, conn = _fresh_db()
     try:
         result = heal.nightly_heal(conn, project_path=tmp, use_llm=False,
@@ -378,6 +379,9 @@ def test_nightly_heal_summary_has_reconciled_and_by_tier_keys():
         _assert("reconciled" in result, f"missing 'reconciled' key: {result}")
         _assert("by_tier" in result, f"missing 'by_tier' key: {result}")
         _assert("high" in result["by_tier"] and "low" in result["by_tier"], result["by_tier"])
+        _assert(result["deferred"] == 0, f"unexpected deferral: {result}")
+        _assert(result["deferred_by_tier"] == {"high": 0, "low": 0}, result)
+        _assert(result["by_path"]["deferred"] == 0, result)
         print("PASS nightly_heal_summary_has_reconciled_and_by_tier_keys")
     finally:
         _cleanup(tmp, conn)
@@ -458,9 +462,8 @@ def test_nightly_heal_applies_reconciled_by_when_llm_returns_it():
         _cleanup(tmp, conn)
 
 
-def test_nightly_heal_budget_blocked_falls_back_to_keep_both():
-    """When budget.check_and_record denies (cap hit), pair must fall back to
-    keep_both (no supersede, no reconciled_by) and budget_blocked counter bumps."""
+def test_nightly_heal_budget_blocked_defers_without_edge_and_retries():
+    """A budget-blocked pair remains edge-free and is retried once approved."""
     tmp, conn = _fresh_db()
     try:
         a = _mk(conn, kind="fact", title="similar a",
@@ -485,13 +488,65 @@ def test_nightly_heal_budget_blocked_falls_back_to_keep_both():
 
         _assert(result["budget_blocked"] >= 1,
                 f"expected budget_blocked >= 1: {result}")
+        _assert(result["deferred"] == result["budget_blocked"],
+                f"every budget block must be an explicit deferral: {result}")
+        _assert(result["deferred_by_tier"]["low"] >= 1,
+                f"expected a low-tier deferred pair: {result}")
+        _assert(result["by_path"]["deferred"] >= 1,
+                f"deferred path counter missing: {result}")
         _assert(result["superseded"] == 0, f"no supersede on budget block: {result}")
         _assert(result["reconciled"] == 0, f"no reconcile on budget block: {result}")
+        _assert(result["kept_both"] == 0,
+                f"budget exhaustion must not adjudicate keep_both: {result}")
         # Both nodes still alive.
         _assert(db.get_node(conn, a)["status"] != "stale", "a stale")
         _assert(db.get_node(conn, b)["status"] != "stale", "b stale")
-        print(f"PASS nightly_heal_budget_blocked_falls_back_to_keep_both "
-              f"(budget_blocked={result['budget_blocked']})")
+        _assert(not heal.edge_exists_between(conn, a, b),
+                "budget exhaustion must leave the pair edge-free")
+
+        today = datetime.now(timezone.utc).date()
+        deferred_rows = list(log_utils.read_log_range(
+            "heal_deferred", today, today, tmp,
+        ))
+        expected_pair = tuple(sorted((a, b)))
+        matching = [
+            row for row in deferred_rows
+            if (row.get("node_a_id"), row.get("node_b_id")) == expected_pair
+        ]
+        _assert(matching, f"missing structural heal_deferred row: {deferred_rows}")
+        _assert(matching[-1]["tier"] == "low"
+                and matching[-1]["reason"] == "budget_cap"
+                and matching[-1]["retry_eligible"] is True,
+                f"incomplete deferred-pair provenance: {matching[-1]}")
+
+        # Approval makes budget available. With no edge from the first run, the
+        # exact pair must be rediscovered and receive a real arbitration verdict.
+        budget.approve_today(tmp)
+        calls: list[tuple[int, int]] = []
+        original_arb = heal._arbitrate_nightly
+
+        def stub_arb(a_node, b_node, _sim, **kw):
+            calls.append(tuple(sorted((a_node["id"], b_node["id"]))))
+            return {"decision": "keep_both", "reason": "retry adjudicated"}
+
+        heal._arbitrate_nightly = stub_arb
+        try:
+            retried = heal.nightly_heal(
+                conn, project_path=tmp, use_llm=True,
+                low_threshold=0.30, high_threshold=0.95,
+            )
+        finally:
+            heal._arbitrate_nightly = original_arb
+
+        _assert(expected_pair in calls,
+                f"deferred pair was not retried after budget approval: {calls}")
+        _assert(retried["llm_invocations"] >= 1 and retried["kept_both"] >= 1,
+                f"retry did not receive a real verdict: {retried}")
+        _assert(heal.edge_exists_between(conn, a, b),
+                "real retry verdict should persist its relationship")
+        print(f"PASS nightly_heal_budget_blocked_defers_without_edge_and_retries "
+              f"(budget_blocked={result['budget_blocked']}, "
+              f"retried_calls={retried['llm_invocations']})")
     finally:
         _cleanup(tmp, conn)
 
@@ -574,6 +629,14 @@ def test_nightly_heal_high_tier_arbitrated_before_low_tier_under_budget_pressure
                 and result["budget_blocked_by_tier"]["high"] == 0,
                 f"budget block should be on low tier only: "
                 f"{result['budget_blocked_by_tier']}")
+        _assert(result["deferred_by_tier"]["low"] == 1
+                and result["deferred_by_tier"]["high"] == 0,
+                f"deferral should be on low tier only: "
+                f"{result['deferred_by_tier']}")
+        _assert(not heal.edge_exists_between(conn, low_a, low_b),
+                "budget-blocked low-tier pair must remain retryable")
+        _assert(heal.edge_exists_between(conn, high_a, high_b),
+                "the one adjudicated high-tier pair should persist its verdict")
         print(f"PASS nightly_heal_high_tier_arbitrated_before_low_tier_under_budget_pressure "
               f"(by_tier={result['by_tier']}, "
               f"budget_blocked_by_tier={result['budget_blocked_by_tier']})")
@@ -857,7 +920,7 @@ if __name__ == "__main__":
     test_nightly_heal_summary_has_reconciled_and_by_tier_keys()
     test_nightly_heal_low_tier_keeps_both_when_use_llm_false()
     test_nightly_heal_applies_reconciled_by_when_llm_returns_it()
-    test_nightly_heal_budget_blocked_falls_back_to_keep_both()
+    test_nightly_heal_budget_blocked_defers_without_edge_and_retries()
     test_nightly_heal_high_tier_arbitrated_before_low_tier_under_budget_pressure()
     test_nightly_heal_runs_log_retention()
     test_nightly_heal_log_retention_failure_isolated()
