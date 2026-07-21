@@ -159,7 +159,10 @@ sections.
   match, so an old owner cannot erase a newer owner's record.
 - POSIX startup double-forks before heavyweight imports and the proxy waits for
   the bootstrap child. This prevents reclaimed daemons becoming zombies under
-  long-lived proxies. Windows uses detached-process creation flags.
+  long-lived proxies. On Windows, the broker bypasses the venv executable
+  redirector and starts the base console interpreter with `CREATE_NO_WINDOW`,
+  `CREATE_NEW_PROCESS_GROUP`, and hidden startup info. The venv's
+  `Lib/site-packages` remains available through `PYTHONPATH`.
 
 ### Connection isolation
 
@@ -345,6 +348,11 @@ still runs the current daemon against keyed pre-capability, rejected epoch-1,
 and `fa162bd` root-discovery wire contracts, so the compatibility behavior
 under review is cross-platform. Reviewers should use the live PR checks—not a
 copied run id—as the authority for the final pushed head.
+
+On 2026-07-21, physical Windows Server 2019 acceptance covered cold startup and
+a live `latch_recent(limit=1)` call from Cursor, Codex CLI, and Claude Code.
+Each host connected to the shared runtime without opening a Python console
+window.
 
 The production-representative tests cover:
 
