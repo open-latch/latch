@@ -24,6 +24,7 @@ import codex_transcript  # noqa: E402
 import cursor_backend  # noqa: E402
 import db  # noqa: E402
 import embeddings  # noqa: E402
+import feeders  # noqa: E402
 import heal  # noqa: E402
 import lockfile  # noqa: E402
 import paths  # noqa: E402
@@ -52,7 +53,9 @@ You are given:
   1. Any prior summary for this same session (which you should COMBINE with new content,
      not duplicate). If this is the first compact, prior summary will be empty.
   2. Recent transcript content.
-  3. A small sample of related KB nodes already known.
+  3. A small sample of related KB nodes already known. Rows carrying role
+     "open_feeder" are unresolved building blocks of the currently active
+     workstreams — see Temporal stance and Closure duty below.
 
 Produce ONE JSON object with this exact shape, and nothing else:
 
@@ -84,6 +87,27 @@ Kind semantics (pick the best fit; when in doubt, `fact`):
   committed to. Parked future items, experimental directions, "maybe someday"
   thoughts. Ideas are surfaced to future sessions so they are not lost.
 
+Temporal stance (decide it for every extracted node):
+- SETTLED — records something that is true or finished. Write it matter-of-fact.
+- FORWARD-LOOKING — an idea, open question, research finding, or partial
+  progress that exists to serve work that has not happened yet. Write it as a
+  building block toward its end state, and include in the body:
+    (a) the end state or decision it serves,
+    (b) "Done when: <condition that makes it resolved or moot>",
+    (c) the next concrete step.
+  When that end state is a workstream or decision visible in related_kb_nodes,
+  also emit a links entry to it using advances / motivates / depends_on.
+  A forward-looking node with no target link is a capture smell; a settled
+  fact with no links is fine.
+
+Closure duty:
+- If the transcript shows that a related_kb_nodes row (especially one with
+  role "open_feeder") was completed, made moot, or abandoned this session,
+  emit a links entry from the extracted node recording that outcome to the
+  old node's id, using `resolves` (completed or moot) or `supersedes`
+  (replaced by a new direction). Declaring the transition now is cheaper and
+  more accurate than a nightly sweep reconstructing it later.
+
 Workstream guidance:
 - If any related_kb_nodes have kind='workstream' and a new node clearly
   belongs to one of them, set `workstream_id` to that workstream's id.
@@ -112,7 +136,9 @@ Guidelines:
   from the prior summary plus the new content. Do not lose state.
 - Only extract a node if it is reusable knowledge (would help a future session).
   Skip per-turn chatter.
-- Skip links if you are unsure — empty list is fine.
+- Skip links if you are unsure — empty list is fine for settled nodes.
+  Forward-looking nodes should carry their target link whenever the target
+  is visible in related_kb_nodes.
 - Output JSON only. No markdown fences, no commentary.
 """
 
@@ -269,6 +295,9 @@ def _run_compaction_locked(
                 prior_summary = prior["body"]
 
         related = _related_nodes_brief(conn, transcript_text[-4000:] or "project work")
+        # Focus-workstream feeders ride along so the summarizer can target
+        # forward-looking links and honor the closure duty (KB 2299).
+        related = feeders.merge_feeder_rows(conn, related)
 
         prompt_payload = {
             "project_path": project_path,

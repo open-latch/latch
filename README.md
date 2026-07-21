@@ -66,7 +66,7 @@ model-backed receipt from small deterministic fixture suites:
 
 | Evidence | Result | Meaning |
 | --- | ---: | --- |
-| Live pre-edit gate | `DO_NOT_PROCEED` | Cited a canonical rejected path; worktree unchanged |
+| Live pre-edit gate | `MODIFY` | Cited a canonical rejected path; worktree unchanged |
 | Decision-evidence fixture | `latch_full` 8/8; `memory_like` 4/8 | Small internal ablation, not a third-party benchmark |
 | Seed-report fixture | 16/16 | Deterministic capture/filtering checks; zero model calls |
 

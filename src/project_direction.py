@@ -19,9 +19,9 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 import artifacts as artifact_store  # noqa: E402
 import db  # noqa: E402
+import feeders  # noqa: E402
 
 
-BACKLOG_KINDS = {"open_question", "idea"}
 DECISION_KINDS = {"decision"}
 CONSTRAINT_KINDS = {"preference"}
 PROGRESS_KINDS = {"progress"}
@@ -165,7 +165,7 @@ def _assemble_workstream(conn, ws: dict, *, member_limit: int) -> WorkstreamDire
     members = _workstream_members(conn, wid, limit=member_limit)
     connected = _connected_nodes(conn, wid, members)
     decisions = _governing_decisions(wid, members, connected)
-    backlog = _nodes_for_kinds(members, BACKLOG_KINDS)
+    backlog = _feeder_backlog(conn, wid, member_limit=member_limit)
     constraints = _nodes_for_kinds(members, CONSTRAINT_KINDS)
     progress = _nodes_for_kinds(members, PROGRESS_KINDS)
     artifacts = _artifacts_for_nodes(conn, [wid, *[int(n["id"]) for n in members]])
@@ -290,6 +290,42 @@ def _nodes_for_kinds(nodes: list[dict], kinds: set[str]) -> list[DirectionNode]:
             status=str(node["status"]),
         ))
     return out
+
+
+EDGE_FEEDER_LIMIT = 5
+
+
+def _feeder_backlog(
+    conn,
+    workstream_id: int,
+    *,
+    member_limit: int,
+    edge_limit: int = EDGE_FEEDER_LIMIT,
+) -> list[DirectionNode]:
+    """Backlog = the workstream's open feeders (KB 2299): unresolved
+    forward-looking members plus declared-intent edge feeders, from the same
+    `feeders.open_feeders` query the brief uses — one source of truth, so a
+    resolution edge hides a row everywhere at once. Member and edge rows are
+    capped independently so neither can crowd the other out; a node that is
+    both member and edge feeder appears once, carrying its declared
+    relation."""
+    member_rows: list[DirectionNode] = []
+    edge_rows: list[DirectionNode] = []
+    for row in feeders.open_feeders(conn, workstream_id, limit=0):
+        via = str(row["via"])
+        node = DirectionNode(
+            id=int(row["id"]),
+            kind=str(row["kind"]),
+            title=str(row["title"]),
+            status=str(row["status"]),
+            relation=None if via == "member" else via,
+        )
+        if via == "member":
+            if len(member_rows) < member_limit:
+                member_rows.append(node)
+        elif len(edge_rows) < edge_limit:
+            edge_rows.append(node)
+    return [*member_rows, *edge_rows]
 
 
 def _artifacts_for_nodes(conn, node_ids: list[int]) -> list[DirectionArtifact]:
