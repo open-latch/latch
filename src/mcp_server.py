@@ -1711,21 +1711,33 @@ def initialize_runtime(project_cwd: str, *, start_embed_listener: bool) -> None:
         _RUNTIME_INITIALIZED = True
 
 
-def prune_kb_tool_aliases(server: FastMCP) -> None:
-    """Hard-remove kb_* aliases for a trimmed-surface install (id=2224).
+def prune_hidden_surface_tools(server: FastMCP) -> list[str]:
+    """Apply the trimmed-surface hide policy to the legacy fallback registry.
 
     Runs ONLY on the legacy one-process-per-session fallback, where this
-    process serves exactly one install and its env is authoritative.  The
-    shared daemon must never call this: its registry serves every install on
+    process serves exactly one install and its env is authoritative.  It shares
+    the exact hide policy the stdio proxy uses (``mcp_proxy.is_hidden_from_listing``)
+    so the legacy advertised surface matches the proxy-filtered surface: kb_*
+    aliases AND off-surface latch_* diagnostics such as ``latch_runtime_status``.
+    The shared daemon must never call this: its registry serves every install on
     the machine, so per-install trimming happens in ``mcp_proxy`` instead.
+
+    Returns the tool names removed.
     """
+    from mcp_proxy import is_hidden_from_listing
+
+    removed: list[str] = []
     for tool in list(server._tool_manager.list_tools()):
-        if tool.name.startswith("kb_"):
+        if is_hidden_from_listing(tool.name):
             server.remove_tool(tool.name)
+            removed.append(tool.name)
+    return removed
 
 
 if __name__ == "__main__":
     initialize_runtime(PROJECT_CWD, start_embed_listener=True)
-    if (os.environ.get("LATCH_TOOL_SURFACE") or "").strip().lower() == "latch":
-        prune_kb_tool_aliases(mcp)
+    from mcp_proxy import trimmed_tool_surface
+
+    if trimmed_tool_surface():
+        prune_hidden_surface_tools(mcp)
     mcp.run()

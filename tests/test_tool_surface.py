@@ -10,7 +10,8 @@ predates it — pass through byte-identical.
 
 The legacy one-process-per-session fallback (``LATCH_MCP_LEGACY=1``) serves
 exactly one install, so there the registry itself is pruned at startup via
-``mcp_server.prune_kb_tool_aliases`` (public ``FastMCP.remove_tool``).
+``mcp_server.prune_hidden_surface_tools`` (public ``FastMCP.remove_tool``),
+which shares ``mcp_proxy.is_hidden_from_listing`` so the two paths cannot drift.
 """
 from __future__ import annotations
 
@@ -183,11 +184,11 @@ def test_forward_rejects_kb_call_when_trimmed():
 # --------------------------------------------------------------------------- #
 # Legacy stdio fallback: registry prune
 # --------------------------------------------------------------------------- #
-def test_legacy_prune_removes_kb_aliases_from_registry():
+def test_legacy_prune_matches_proxy_hidden_policy():
     try:
         from mcp.server.fastmcp import FastMCP
     except Exception:
-        print("SKIP legacy_prune_removes_kb_aliases_from_registry (no mcp package)")
+        print("SKIP legacy_prune_matches_proxy_hidden_policy (no mcp package)")
         return
     import mcp_server
 
@@ -199,10 +200,26 @@ def test_legacy_prune_removes_kb_aliases_from_registry():
         return "ok"
 
     server.add_tool(_probe, name="kb_probe")
-    mcp_server.prune_kb_tool_aliases(server)
+
+    @server.tool(name="latch_runtime_status")
+    def _rt() -> dict:
+        """rt"""
+        return {}
+
+    server.add_tool(_rt, name="kb_runtime_status")
+
+    removed = mcp_server.prune_hidden_surface_tools(server)
     names = sorted(t.name for t in server._tool_manager.list_tools())
+    # Regression (PR #37 P2): the legacy prune must drop latch_runtime_status
+    # too, not only kb_* aliases — so the legacy advertised surface matches the
+    # proxy-filtered surface. Before the fix this left latch_runtime_status
+    # advertised (21 tools vs the proxy's 20).
     _assert(names == ["latch_probe"], names)
-    print("PASS legacy_prune_removes_kb_aliases_from_registry")
+    _assert("latch_runtime_status" in removed, f"runtime_status not pruned: {removed}")
+    _assert({"kb_probe", "kb_runtime_status"} <= set(removed), removed)
+    # Every removed name must satisfy the one shared hide policy.
+    _assert(all(mcp_proxy.is_hidden_from_listing(n) for n in removed), removed)
+    print("PASS legacy_prune_matches_proxy_hidden_policy")
 
 
 def main():
@@ -215,7 +232,7 @@ def main():
     test_daemon_tools_list_response_passthrough_without_flag()
     test_non_tools_list_responses_never_filtered()
     test_forward_rejects_kb_call_when_trimmed()
-    test_legacy_prune_removes_kb_aliases_from_registry()
+    test_legacy_prune_matches_proxy_hidden_policy()
     print("OK test_tool_surface")
 
 

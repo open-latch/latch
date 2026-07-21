@@ -127,7 +127,13 @@ _HIDDEN_TOOL_PREFIX = "kb_"
 _SURFACE_HIDDEN_TOOLS = frozenset({"latch_runtime_status"})
 
 
-def _is_hidden_from_listing(name: str) -> bool:
+def is_hidden_from_listing(name: str) -> bool:
+    """Single source of the trimmed-surface hide policy.
+
+    Both trim paths use this so they can never drift: the stdio proxy filters
+    these names out of tools/list, and the legacy one-process fallback prunes
+    the same names from its own registry (mcp_server.prune_hidden_surface_tools).
+    """
     return name.startswith(_HIDDEN_TOOL_PREFIX) or name in _SURFACE_HIDDEN_TOOLS
 
 
@@ -152,7 +158,7 @@ def filter_tools_list_result(message: dict[str, Any]) -> dict[str, Any]:
         for tool in tools
         if not (
             isinstance(tool, dict)
-            and _is_hidden_from_listing(str(tool.get("name") or ""))
+            and is_hidden_from_listing(str(tool.get("name") or ""))
         )
     ]
     if len(kept) == len(tools):
