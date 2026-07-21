@@ -47,6 +47,8 @@ START_REASONS = frozenset({
     "connection_retry",
     "prompt_hook",
 })
+WINDOWS_CREATE_NO_WINDOW = 0x08000000
+WINDOWS_CREATE_NEW_PROCESS_GROUP = 0x00000200
 
 
 class BrokerError(RuntimeError):
@@ -791,6 +793,43 @@ def _start_reason(value: str) -> str:
     return value if value in START_REASONS else "unknown"
 
 
+def _windows_creation_flags() -> int:
+    return (
+        getattr(subprocess, "CREATE_NO_WINDOW", WINDOWS_CREATE_NO_WINDOW)
+        | getattr(
+            subprocess,
+            "CREATE_NEW_PROCESS_GROUP",
+            WINDOWS_CREATE_NEW_PROCESS_GROUP,
+        )
+    )
+
+
+def _windows_hidden_startupinfo() -> Any:
+    startup = subprocess.STARTUPINFO()
+    startup.dwFlags |= getattr(subprocess, "STARTF_USESHOWWINDOW", 0x00000001)
+    startup.wShowWindow = getattr(subprocess, "SW_HIDE", 0)
+    return startup
+
+
+def _windows_base_command(env: dict[str, str]) -> str:
+    """Bypass a venv redirector that can drop no-window creation flags."""
+    candidates = (
+        getattr(sys, "_base_executable", None),
+        str(Path(sys.base_prefix) / "python.exe"),
+    )
+    executable = next(
+        (str(Path(value)) for value in candidates if value and Path(value).is_file()),
+        sys.executable,
+    )
+    site_packages = Path(sys.prefix) / "Lib" / "site-packages"
+    if executable != sys.executable and site_packages.is_dir():
+        existing = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = str(site_packages) + (
+            os.pathsep + existing if existing else ""
+        )
+    return executable
+
+
 def _spawn_daemon(project_cwd: str, *, start_reason: str) -> int:
     daemon_py = Path(__file__).resolve().parent / "mcp_daemon.py"
     env = os.environ.copy()
@@ -810,18 +849,18 @@ def _spawn_daemon(project_cwd: str, *, start_reason: str) -> int:
         "env": env,
         "close_fds": True,
     }
+    executable = sys.executable
     if os.name == "nt":
-        kwargs["creationflags"] = (
-            getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
-            | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
-        )
+        executable = _windows_base_command(env)
+        kwargs["creationflags"] = _windows_creation_flags()
+        kwargs["startupinfo"] = _windows_hidden_startupinfo()
     else:
         env["LATCH_MCP_DAEMONIZE"] = "1"
 
     log_path = runtime_dir() / LOG_FILE
     with log_path.open("ab", buffering=0) as log:
         kwargs["stderr"] = log
-        process = subprocess.Popen([sys.executable, str(daemon_py)], **kwargs)
+        process = subprocess.Popen([executable, str(daemon_py)], **kwargs)
     if os.name != "nt":
         try:
             process.wait(timeout=5.0)
@@ -832,6 +871,10 @@ def _spawn_daemon(project_cwd: str, *, start_reason: str) -> int:
     emit_lifecycle(
         "daemon_spawned",
         bootstrap_pid=process.pid,
+        parent_pid=os.getpid(),
+        executable=executable,
+        argv=[executable, str(daemon_py)],
+        creationflags=int(kwargs.get("creationflags", 0)),
         reason=_start_reason(start_reason),
     )
     return process.pid
@@ -885,17 +928,17 @@ def request_daemon_start(project_cwd: str) -> bool:
         "env": env,
         "close_fds": True,
     }
+    executable = sys.executable
     if os.name == "nt":
-        kwargs["creationflags"] = (
-            getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
-            | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
-        )
+        executable = _windows_base_command(env)
+        kwargs["creationflags"] = _windows_creation_flags()
+        kwargs["startupinfo"] = _windows_hidden_startupinfo()
     else:
         kwargs["start_new_session"] = True
     try:
-        subprocess.Popen(
+        process = subprocess.Popen(
             [
-                sys.executable,
+                executable,
                 str(Path(__file__).resolve()),
                 "--ensure-daemon",
                 project_cwd,
@@ -903,7 +946,20 @@ def request_daemon_start(project_cwd: str) -> bool:
             ],
             **kwargs,
         )
-        emit_lifecycle("daemon_wake_requested")
+        emit_lifecycle(
+            "daemon_wake_requested",
+            bootstrap_pid=process.pid,
+            parent_pid=os.getpid(),
+            executable=executable,
+            argv=[
+                executable,
+                str(Path(__file__).resolve()),
+                "--ensure-daemon",
+                project_cwd,
+                "prompt_hook",
+            ],
+            creationflags=int(kwargs.get("creationflags", 0)),
+        )
         return True
     except OSError as exc:
         emit_lifecycle("daemon_start_failed", reason=str(exc))

@@ -17,6 +17,36 @@ import mcp_daemon  # noqa: E402
 import mcp_proxy  # noqa: E402
 
 
+def test_windows_daemon_creation_flags_suppress_console_without_detaching():
+    flags = mcp_broker._windows_creation_flags()
+    assert flags & mcp_broker.WINDOWS_CREATE_NO_WINDOW
+    assert flags & mcp_broker.WINDOWS_CREATE_NEW_PROCESS_GROUP
+    assert not (flags & 0x00000008)  # Do not restore the old detached launch mode.
+
+
+def test_windows_base_command_bypasses_venv_redirector(monkeypatch, tmp_path):
+    base_dir = tmp_path / "base"
+    base_dir.mkdir()
+    base_python = base_dir / "python.exe"
+    base_python.write_bytes(b"")
+
+    venv_dir = tmp_path / "venv"
+    site_packages = venv_dir / "Lib" / "site-packages"
+    site_packages.mkdir(parents=True)
+    venv_python = venv_dir / "Scripts" / "python.exe"
+
+    monkeypatch.setattr(
+        mcp_broker.sys, "_base_executable", str(base_python), raising=False
+    )
+    monkeypatch.setattr(mcp_broker.sys, "base_prefix", str(base_dir))
+    monkeypatch.setattr(mcp_broker.sys, "prefix", str(venv_dir))
+    monkeypatch.setattr(mcp_broker.sys, "executable", str(venv_python))
+
+    env = {}
+    assert mcp_broker._windows_base_command(env) == str(base_python)
+    assert env["PYTHONPATH"] == str(site_packages)
+
+
 def test_blue_green_registry_is_keyed_for_v1_v2_v1(monkeypatch, tmp_path):
     vault = tmp_path / "registry"
     monkeypatch.setattr(mcp_broker, "runtime_dir", lambda: vault)

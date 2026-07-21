@@ -164,9 +164,9 @@ def _venv_site_packages() -> str | None:
     Injected into the base child's ``PYTHONPATH`` (rather than using
     ``__PYVENV_LAUNCHER__``) so the child's ``sys.executable`` stays the BASE
     ``python.exe``. That matters because the shared daemon is spawned via
-    ``sys.executable``: if that were the venv redirector, the daemon's
-    ``DETACHED_PROCESS`` re-exec would allocate a visible console window on a
-    cold start. Keeping ``sys.executable`` = base python keeps the daemon
+    ``sys.executable``: if that were the venv redirector, its re-exec could drop
+    the daemon's no-window creation flags and allocate a visible console window
+    on a cold start. Keeping ``sys.executable`` = base python keeps the daemon
     windowless too."""
     cand = Path(sys.prefix) / "Lib" / "site-packages"
     return str(cand) if cand.is_dir() else None
