@@ -11,6 +11,7 @@ import pytest
 import artifacts
 import budget
 import db
+import feeders
 import gate
 import model_backends
 import paths
@@ -479,6 +480,59 @@ def test_new_and_existing_workstreams_attach_reuse_and_do_not_gain_focus(
         assert parent is not None and parent["status"] == "staging"
         assert len(children) == 1 and children[0]["status"] == "staging"
         assert conn.execute("SELECT COUNT(*) FROM focus").fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
+def test_seeded_forward_looking_children_feed_attached_workstream(
+    tmp_path, monkeypatch,
+):
+    monkeypatch.setattr(paths, "is_unlatched_mode", lambda: False)
+    project = tmp_path / "seeded-feeders"
+    project.mkdir()
+    conn = db.connect(str(project))
+    try:
+        workstream_id = db.insert_node(
+            conn,
+            kind="workstream",
+            title="Seed activation lane",
+            body="Reviewed workstream for imported continuity evidence.",
+            status="canonical",
+        )
+    finally:
+        conn.close()
+
+    source = _source("codex:seeded-feeders", agent="codex")
+    candidates = [
+        _candidate(
+            source,
+            kind="idea",
+            title="Keep a bounded activation report",
+            claim="Explore a bounded activation report before expanding scope.",
+            signals=["idea", "llm_seed"],
+        ),
+        _candidate(
+            source,
+            kind="open_question",
+            title="Which activation evidence is sufficient?",
+            claim="Decide which activation evidence is sufficient for review.",
+            signals=["open_question", "llm_seed"],
+        ),
+    ]
+    result = seed.apply_candidates(
+        candidates,
+        project_path=str(project),
+        existing_workstream_id=workstream_id,
+        sources=[source],
+        workstream_scope=f"existing:{workstream_id}",
+    )
+    assert len(result.inserted_ids) == 2
+
+    conn = db.connect(str(project))
+    try:
+        rows = feeders.open_feeders(conn, workstream_id, limit=10)
+        assert {row["id"] for row in rows} == set(result.inserted_ids)
+        assert {row["via"] for row in rows} == {"member"}
     finally:
         conn.close()
 
