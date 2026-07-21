@@ -318,7 +318,7 @@ success criteria, and receipt checks.
 | Agent | What latch installs | Important boundary |
 | --- | --- | --- |
 | Claude Code | MCP tools, hooks, slash commands, `/latch-compact`, managed `CLAUDE.md` contract | Restart after install so tools and hooks load |
-| Codex | Shared MCP tools and KB, `AGENTS.md`, SessionStart hook, Codex model backend defaults | Start a new task after install; compaction is manual |
+| Codex | Shared MCP tools and KB, user skills, `AGENTS.md`, SessionStart hook, Codex model backend defaults | Start a new task after install; compaction is manual |
 | Cursor | Project MCP, Rule, commands, skills, `AGENTS.md`; optional session/gate/activity hooks | Current-session seed/compact only; no historical transcript discovery |
 | Multiple agents | One shared local latch KB | A decision captured through one agent can gate the others |
 
@@ -344,10 +344,12 @@ bash /path/to/latch/bin/latch_doctor.sh
 
 ### Codex
 
-The installer adds the `latch` MCP server to Codex `config.toml`, installs the
-contract into `AGENTS.md`, and adds the SessionStart hook. Existing installs
-using the legacy `claude-kb` server key are migrated when the managed block is
-refreshed.
+The installer adds the `latch` MCP server to Codex `config.toml`, syncs Latch's
+bundled workflows into `$HOME/.agents/skills` (on Windows,
+`%USERPROFILE%\.agents\skills`), installs the contract into `AGENTS.md`, and
+adds the SessionStart hook. Existing installs using the legacy `claude-kb`
+server key are migrated when the managed block is refreshed. Same-named
+user-owned skills are never overwritten.
 
 ```bash
 # From the project repo where Codex should follow latch.
@@ -357,6 +359,12 @@ refreshed.
 /path/to/latch/bin/install_codex.sh --check
 /path/to/latch/bin/latch_codex_doctor.sh
 ```
+
+Codex exposes installed workflows through `/skills` or an explicit skill
+mention such as `$source-command-latch-compact`; it does not create top-level
+`/latch-*` slash commands. Codex can also select a workflow implicitly from its
+description. It detects new skills automatically; restart Codex if a newly
+installed workflow does not appear.
 
 ### Cursor
 
