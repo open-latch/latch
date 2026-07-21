@@ -58,6 +58,7 @@ def render_mcp_block(python_path: str, server_py: str) -> str:
         f"[mcp_servers.{SERVER_NAME}.env]",
         'LATCH_MODEL_BACKEND = "codex"',
         'LATCH_GATE_BACKEND = "codex"',
+        'LATCH_TOOL_SURFACE = "latch"',
         END_MARK,
     ])
 

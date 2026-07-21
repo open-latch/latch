@@ -69,7 +69,6 @@ import mcp_runtime  # noqa: E402
 import paths  # noqa: E402
 import project_direction  # noqa: E402
 import priorities  # noqa: E402
-import profiles  # noqa: E402
 import rolling  # noqa: E402
 import gate  # noqa: E402
 import search  # noqa: E402
@@ -1588,64 +1587,16 @@ def kb_priority_retire(node_id: int) -> dict:
         return priorities.retire_priority(conn, node_id)
 
 
-# EXPERIMENTAL — mission-control / verification profiles (kb_profile_* verbs).
-# NOT recommended for use; planned to be unshipped to a separate branch later
-# (observed unhelpful on pmeyer's workspace, 2026-06-10). See KB decision id=1550.
-@mcp.tool(name="latch_profile_list")
-@mcp.tool(name="kb_profile_list")
-def kb_profile_list(include_retired: bool = False) -> dict | list[dict]:
-    """List verification profiles — the per-user gate-intensity presets (the
-    knob from trust-and-go up to mission-control). Each row:
-    {id, name, description, status, config}. The built-in presets are
-    materialised on first call. `config` holds the closed-set parameters
-    gate_surface / verdict_posture / claim_backing_policy / adversary /
-    user_authority. Profiles never participate in retrieval or traversal."""
-    if paths.is_unlatched_mode():
-        return _unlatched_response("latch_profile_list")
-    with _conn() as conn:
-        profiles.ensure_presets(conn)
-        return profiles.list_profiles(conn, include_retired=include_retired)
-
-
-@mcp.tool(name="latch_profile_active")
-@mcp.tool(name="kb_profile_active")
-def kb_profile_active(actor: str | None = None) -> dict:
-    """Show the verification profile currently active for `actor` (defaults to
-    the resolved OS user — the SAME identity the gate and the UserPromptSubmit
-    hook observe). Returns {actor, bound, profile_id, name, config}; falls back
-    to the default (trust-and-go) preset when the user has no explicit binding."""
-    if paths.is_unlatched_mode():
-        return _unlatched_response("latch_profile_active")
-    with _conn() as conn:
-        return profiles.resolve_active_profile(conn, actor)
-
-
-@mcp.tool(name="latch_profile_bind")
-@mcp.tool(name="kb_profile_bind")
-def kb_profile_bind(
-    actor: str | None = None, name: str | None = None, node_id: int | None = None,
-) -> dict:
-    """Bind a user to a verification profile, by preset name (e.g.
-    'mission-control', 'trust-and-go') or explicit profile `node_id`. `actor` is
-    the user-identity string (matches CLAUDE_KB_USER / USERNAME); omit it to bind
-    the CURRENT OS user (so `/mission-control` escalates whoever runs it). One binding per
-    user; re-binding replaces it. This is a per-user config mutation — confirm
-    the user wants it before calling (do not bind anyone to mission-control
-    silently)."""
-    if paths.is_unlatched_mode():
-        return _unlatched_response("latch_profile_bind")
-    with _conn() as conn:
-        return profiles.bind_actor(conn, actor, name=name, node_id=node_id)
-
-
-@mcp.tool(name="latch_embed")
-@mcp.tool(name="kb_embed")
-def kb_embed(text: str) -> dict | list[float]:
-    """Embed `text` through the shared runtime's model owner. Mainly here for
-    parity with the TCP embed listener — agents should rarely call it directly."""
-    if paths.is_unlatched_mode():
-        return _unlatched_response("latch_embed")
-    return embeddings.embed(text).tolist()
+# The verification-profile engine (src/profiles.py — per-user gate presets
+# from trust-and-go up to mission-control) remains wired into the gate and the
+# hooks.  Its experimental kb_/latch_profile_* MCP verbs were removed from the
+# tool surface: profile bindings are a deliberate per-user configuration
+# mutation, not something an agent should reach for mid-session.
+#
+# The standalone latch_/kb_embed MCP verb was also removed from the surface:
+# embedding is automatic on every write and through the TCP embed listener, so
+# no agent ever needs to call it directly.  The listener and write-path embed
+# calls are unaffected.
 
 
 def _peak_rss_bytes() -> int | None:
@@ -1760,6 +1711,33 @@ def initialize_runtime(project_cwd: str, *, start_embed_listener: bool) -> None:
         _RUNTIME_INITIALIZED = True
 
 
+def prune_hidden_surface_tools(server: FastMCP) -> list[str]:
+    """Apply the trimmed-surface hide policy to the legacy fallback registry.
+
+    Runs ONLY on the legacy one-process-per-session fallback, where this
+    process serves exactly one install and its env is authoritative.  It shares
+    the exact hide policy the stdio proxy uses (``mcp_proxy.is_hidden_from_listing``)
+    so the legacy advertised surface matches the proxy-filtered surface: kb_*
+    aliases AND off-surface latch_* diagnostics such as ``latch_runtime_status``.
+    The shared daemon must never call this: its registry serves every install on
+    the machine, so per-install trimming happens in ``mcp_proxy`` instead.
+
+    Returns the tool names removed.
+    """
+    from mcp_proxy import is_hidden_from_listing
+
+    removed: list[str] = []
+    for tool in list(server._tool_manager.list_tools()):
+        if is_hidden_from_listing(tool.name):
+            server.remove_tool(tool.name)
+            removed.append(tool.name)
+    return removed
+
+
 if __name__ == "__main__":
     initialize_runtime(PROJECT_CWD, start_embed_listener=True)
+    from mcp_proxy import trimmed_tool_surface
+
+    if trimmed_tool_surface():
+        prune_hidden_surface_tools(mcp)
     mcp.run()

@@ -79,6 +79,11 @@ LEGACY_SERVER_NAMES = ("claude-kb",)
 ALL_SERVER_NAMES = (SERVER_NAME, *LEGACY_SERVER_NAMES)
 PERMISSION_RULE = f"mcp__{SERVER_NAME}"
 LEGACY_PERMISSION_RULES = tuple(f"mcp__{name}" for name in LEGACY_SERVER_NAMES)
+# Fresh installs advertise latch_* tool names only (id=2224).  Existing
+# registrations early-return in register_mcp and never gain this flag, so
+# legacy installs keep their kb_* aliases untouched.
+TOOL_SURFACE_ENV = "LATCH_TOOL_SURFACE"
+TOOL_SURFACE_LATCH = "latch"
 ALL_PERMISSION_RULES = (PERMISSION_RULE, *LEGACY_PERMISSION_RULES)
 MANAGED_EVENTS = ("SessionStart", "UserPromptSubmit", "Stop", "SessionEnd", "PostToolUse")
 # Substring that identifies a hook command as latch-owned (so re-runs replace
@@ -362,6 +367,7 @@ def register_mcp(claude: str, python_path: str, server_py: str,
     statuses = mcp_statuses(claude, python_path, server_py)
     match = matching_mcp_server(statuses)
     add_cmd = [claude, "mcp", "add", SERVER_NAME, "--scope", "user",
+               "-e", f"{TOOL_SURFACE_ENV}={TOOL_SURFACE_LATCH}",
                "--", python_path, server_py]
     if match == SERVER_NAME:
         legacy_matches = [n for n in LEGACY_SERVER_NAMES if statuses.get(n) == "matches"]

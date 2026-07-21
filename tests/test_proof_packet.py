@@ -528,6 +528,32 @@ def test_readme_derives_fixture_count():
     print("PASS readme_derives_fixture_count")
 
 
+def test_root_readme_gate_verdict_matches_proof_packet():
+    """Cross-surface guard (PR #37 review, node 2553).
+
+    ``proof/`` is regenerated on every recapture, but the root ``README.md``
+    proof table is hand-maintained.  Without this check a recapture that changes
+    the live gate recommendation silently leaves ``README.md`` advertising a
+    stale verdict.  This asserts the root README's live-gate row matches the
+    generated packet.
+    """
+    import json
+    import re
+
+    results = json.loads((ROOT / "proof" / "results.json").read_text(encoding="utf-8"))
+    packet_verdict = results["live_demo"]["recommendation"]
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    match = re.search(r"\|\s*Live pre-edit gate\s*\|\s*`([A-Z_]+)`", readme)
+    _assert(match is not None, "root README has no 'Live pre-edit gate' proof row")
+    readme_verdict = match.group(1)
+    _assert(
+        readme_verdict == packet_verdict,
+        f"root README live-gate verdict {readme_verdict!r} != proof packet "
+        f"{packet_verdict!r}; update README.md or recapture the packet",
+    )
+    print("PASS root_readme_gate_verdict_matches_proof_packet")
+
+
 def test_failed_publication_preserves_last_good_packet():
     receipt = proof_packet.load_live_receipt()
     with tempfile.TemporaryDirectory(prefix="latch-proof-publish-test-") as raw_dir:
@@ -681,6 +707,7 @@ if __name__ == "__main__":
     test_depth_one_merge_ref_requires_two_history_levels()
     test_readme_selects_seeded_canonical_evidence()
     test_readme_derives_fixture_count()
+    test_root_readme_gate_verdict_matches_proof_packet()
     test_failed_publication_preserves_last_good_packet()
     test_failed_directory_swap_restores_last_good_packet()
     test_generated_packet_matches_derived_eval_results()

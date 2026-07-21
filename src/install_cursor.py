@@ -167,6 +167,7 @@ def _adapter_env(model_backend: str | None = None) -> dict[str, str]:
         "LATCH_MAINTENANCE_BACKEND": backend,
         "LATCH_COMPACTOR_BACKEND": backend,
         "LATCH_WIRING_VERSION": str(WIRING_VERSION),
+        "LATCH_TOOL_SURFACE": "latch",
     }
     return env
 
