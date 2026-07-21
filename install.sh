@@ -43,6 +43,7 @@ Bootstrap options:
 
 Other arguments are forwarded to latch_quickstart, for example:
   --agents claude|codex|cursor|both|all
+  --latch-intensity quiet|standard|full
   --seed-source claude|codex|cursor|both|all
   --no-seed
 
@@ -145,6 +146,11 @@ if [ "$DRY_RUN" -eq 1 ]; then
   fi
   printf '  runtime    : private uv + Python 3.11 virtual environment\n'
   printf '  activation : guided quickstart, checks, then consented initial-KB review\n'
+  if [ "${#QUICKSTART_ARGS[@]}" -gt 0 ]; then
+    printf '  quickstart : %s\n' "${QUICKSTART_ARGS[*]}"
+  else
+    printf '  quickstart : interactive choices / safe defaults\n'
+  fi
   exit 0
 fi
 

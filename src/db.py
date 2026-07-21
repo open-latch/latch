@@ -15,7 +15,7 @@ from typing import Any, Iterable, Sequence
 
 import log_utils
 import schema_version
-from paths import SCHEMA_PATH, db_path, ensure_project_dir
+from paths import SCHEMA_PATH, db_path, ensure_project_dir, latch_intensity
 
 
 VEC_DIM = 384  # all-MiniLM-L6-v2
@@ -1405,6 +1405,12 @@ def add_edge(
 
     if pre_capture is not None:
         pre_capture["elapsed_ms"] = int((time.perf_counter() - t0) * 1000)
+        try:
+            pre_capture["intensity"] = latch_intensity()
+        except Exception:
+            # Telemetry must never turn a committed edge write into a caller-
+            # visible failure.
+            pre_capture["intensity"] = None
         log_utils.emit_event(
             "reconciliation", pre_capture,
             project_path=project_path,

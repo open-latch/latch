@@ -1,1 +1,2 @@
 *.sh text eol=lf
+benchmarks/results/intensity_v1_receipt.json text eol=lf

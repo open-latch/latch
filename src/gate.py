@@ -1810,7 +1810,16 @@ def _log_invocation(
     """
     try:
         seeds = chain_assembly.get("seeds") or []
+        try:
+            intensity = paths.latch_intensity()
+        except Exception:
+            # Resolver trouble must not erase an otherwise useful gate row.
+            intensity = None
         entry = {
+            # Observation only: intensity never enters chain assembly or verdict
+            # classification. Recording it lets tier evals compare downstream
+            # outcomes without weakening the gate itself.
+            "intensity": intensity,
             "query_hash": _query_hash(request),
             "query_chars": len(request),
             "recommendation": verdict.get("recommendation"),

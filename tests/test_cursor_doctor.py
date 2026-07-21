@@ -75,7 +75,10 @@ def test_json_mode_reports_malformed_cursor_config():
                 "--agents-md", str(agents),
             ])
         payload = json.loads(out.getvalue())
-        config_check = payload["checks"][0]
+        config_check = next(
+            check for check in payload["checks"]
+            if check["name"] == "Cursor .cursor/mcp.json MCP server"
+        )
         _assert(rc == 1, rc)
         _assert(payload["ok"] is False, payload)
         _assert(config_check["level"] == cd.FAIL, config_check)
@@ -271,7 +274,7 @@ def test_run_all_static_and_cli_checks():
         )
         _assert(
             [c.level for c in checks]
-            == [cd.OK, cd.OK, cd.OK, cd.OK, cd.OK, cd.OK, cd.OK, cd.OK, cd.OK, cd.WARN, cd.WARN],
+            == [cd.OK, cd.OK, cd.OK, cd.OK, cd.OK, cd.OK, cd.OK, cd.OK, cd.OK, cd.OK, cd.WARN, cd.WARN],
             checks,
         )
     finally:

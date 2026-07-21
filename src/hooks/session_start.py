@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 from _common import log, project_cwd, read_hook_input, session_id, transcript_path
@@ -19,13 +20,98 @@ import budget
 import db
 import feeders
 import priorities
-from paths import KB_ROOT, is_disabled, is_in_compact, is_unlatched_mode
+from paths import (
+    KB_ROOT,
+    is_disabled,
+    is_in_compact,
+    is_unlatched_mode,
+    latch_intensity,
+    normalize_latch_intensity,
+)
 
 
 MAX_WORKSTREAMS = 5
 MAX_OPEN_QUESTIONS = 3
 MAX_BRIEFING_IDEAS = 5
 MAX_FEEDERS_PER_WORKSTREAM = 3
+
+
+@dataclass(frozen=True)
+class BriefPolicy:
+    max_workstreams: int
+    max_open_questions: int
+    max_ideas: int
+    workstream_chars: int
+    idea_chars: int
+    include_priorities: bool
+    include_latest_progress: bool
+    max_feeders_per_workstream: int = MAX_FEEDERS_PER_WORKSTREAM
+    compact: bool = False
+
+
+BRIEF_POLICIES = {
+    "quiet": BriefPolicy(
+        1, 1, 0, 0, 0, False, False,
+        max_feeders_per_workstream=1,
+        compact=True,
+    ),
+    "standard": BriefPolicy(
+        3, 2, 2, 240, 160, True, True,
+        max_feeders_per_workstream=2,
+    ),
+    # Full preserves the shipped body bounds: 320-char workstream pointers and
+    # 160-char idea excerpts. Legacy installs therefore retain their context
+    # footprint instead of silently growing when they map to Full.
+    "full": BriefPolicy(5, 3, 5, 320, 160, True, True),
+}
+
+
+def _bound_feeder_surface(
+    workstream_feeders: dict[int, list[dict]],
+    open_question_candidates: list[dict],
+    idea_candidates: list[dict],
+    policy: BriefPolicy,
+) -> tuple[dict[int, list[dict]], list[dict], list[dict]]:
+    """Make nested feeders obey the same tier caps as top-level pointers.
+
+    Contextual feeders get first claim on the open-question/idea budgets. The
+    remaining budget is filled by the ordinary recent-node sections, with ids
+    deduped across workstreams and top-level sections.
+    """
+    bounded: dict[int, list[dict]] = {}
+    seen: set[int] = set()
+    question_budget = policy.max_open_questions
+    idea_budget = policy.max_ideas
+
+    for workstream_id, rows in workstream_feeders.items():
+        selected: list[dict] = []
+        for row in rows:
+            if len(selected) >= policy.max_feeders_per_workstream:
+                break
+            node_id = int(row["id"])
+            if node_id in seen:
+                continue
+            kind = str(row.get("kind") or "")
+            if kind == "open_question":
+                if question_budget <= 0:
+                    continue
+                question_budget -= 1
+            elif kind == "idea":
+                if idea_budget <= 0:
+                    continue
+                idea_budget -= 1
+            seen.add(node_id)
+            selected.append(row)
+        if selected:
+            bounded[workstream_id] = selected
+
+    open_questions = [
+        row for row in open_question_candidates if int(row["id"]) not in seen
+    ][:question_budget]
+    ideas = [
+        row for row in idea_candidates if int(row["id"]) not in seen
+    ][:idea_budget]
+    return bounded, open_questions, ideas
 
 # Below this many (non-stale) nodes the KB is treated as new, and the brief
 # leads with a short getting-started block so a first-time user gets value
@@ -48,6 +134,12 @@ _GETTING_STARTED_BLOCK = (
     "ruled out and why, then try asking for it again and watch latch catch the "
     "contradiction. Optional; re-runnable any time.\n"
     "- This note disappears once your KB has a little history.\n"
+)
+
+_GETTING_STARTED_QUIET_BLOCK = (
+    "## Getting started\n\n"
+    "Latch is ready to preserve decisions and rejected paths. Try `/latch-pm` "
+    "for a first catch; use `/latch-compact` when you want this session saved.\n"
 )
 
 
@@ -238,6 +330,7 @@ def _build_briefing(
     claude_md_synced: bool = False,
     synced_doc_name: str = "CLAUDE.md",
     wiring_notice: str | None = None,
+    intensity: str | None = None,
 ) -> str:
     """Build the SessionStart additionalContext brief.
 
@@ -250,10 +343,14 @@ def _build_briefing(
     otherwise-silent re-sync is visible to the user. `synced_doc_name` keeps
     Codex's AGENTS.md notice honest while preserving Claude's default wording.
     """
+    resolved_intensity = normalize_latch_intensity(intensity) if intensity else None
+    resolved_intensity = resolved_intensity or latch_intensity()
+    policy = BRIEF_POLICIES[resolved_intensity]
+
     try:
         conn = db.connect(cwd)
         try:
-            focus_rows = db.get_focus(conn, limit=MAX_WORKSTREAMS)
+            focus_rows = db.get_focus(conn, limit=policy.max_workstreams)
             # Fallback: focus table empty (fresh DB, freshly evicted, or before
             # any auto-bump activity). Recent-canonical workstreams keep the
             # brief useful instead of going silent.
@@ -263,31 +360,37 @@ def _build_briefing(
             else:
                 workstreams = db.recent_nodes(
                     conn, kind="workstream", status="canonical",
-                    limit=MAX_WORKSTREAMS,
+                    limit=policy.max_workstreams,
                 )
                 workstreams_from_focus = False
             # status=canonical on an open_question means "resolved" — drop those
             # from the brief so they stop bugging the user. Over-fetch since the
             # API only filters TO a single status; we want everything EXCEPT
             # canonical (and stale, which recent_nodes already excludes by default).
-            open_qs = [
+            open_question_candidates = [
                 n for n in db.recent_nodes(
                     conn, kind="open_question", limit=MAX_OPEN_QUESTIONS * 3,
+                    # Over-fetch so resolved canonical questions can be removed.
                 )
                 if n.get("status") != "canonical"
-            ][:MAX_OPEN_QUESTIONS]
-            ideas = db.recent_nodes(conn, kind="idea", limit=MAX_BRIEFING_IDEAS)
-            latest_progress = db.recent_nodes(
-                conn, kind="progress", status="canonical", limit=1,
+            ]
+            idea_candidates = (
+                db.recent_nodes(conn, kind="idea", limit=MAX_BRIEFING_IDEAS * 3)
+                if policy.max_ideas else []
             )
-            prio = priorities.list_priorities(conn)
+            latest_progress = (
+                db.recent_nodes(conn, kind="progress", status="canonical", limit=1)
+                if policy.include_latest_progress else []
+            )
+            prio = priorities.list_priorities(conn) if policy.include_priorities else []
             workstream_prio: dict[int, list[dict]] = {}
             for ws in workstreams:
                 wid = ws.get("workstream_id") or ws.get("id")
                 if wid is None:
                     continue
-                workstream_prio[int(wid)] = priorities.list_priorities(
-                    conn, workstream_id=int(wid),
+                workstream_prio[int(wid)] = (
+                    priorities.list_priorities(conn, workstream_id=int(wid))
+                    if policy.include_priorities else []
                 )
             # Open feeders per workstream (KB 2299): the declared building
             # blocks of each active goal, surfaced via intent edges and
@@ -298,10 +401,16 @@ def _build_briefing(
                 if wid is None:
                     continue
                 rows = feeders.open_feeders(
-                    conn, int(wid), limit=MAX_FEEDERS_PER_WORKSTREAM,
+                    conn, int(wid), limit=0,
                 )
                 if rows:
                     workstream_feeders[int(wid)] = rows
+            workstream_feeders, open_qs, ideas = _bound_feeder_surface(
+                workstream_feeders,
+                open_question_candidates,
+                idea_candidates,
+                policy,
+            )
             # New-user detection: cheap COUNT(*), same connection. Drives the
             # getting-started block below.
             show_getting_started = db.node_count(conn) < NEW_USER_NODE_THRESHOLD
@@ -338,13 +447,34 @@ def _build_briefing(
             and not prio and not orphan_count and not budget_line and not n_drift
             and not show_getting_started and not claude_md_synced
             and not wiring_notice):
+        # Intensity bounds real startup pointers; it does not manufacture a
+        # tier-advertisement banner when an established KB has nothing in the
+        # brief's workstream/question/idea/progress surfaces.
         return ""
 
     parts = ["# latch — session brief\n"]
+    if resolved_intensity == "quiet":
+        parts.append(
+            "_Quiet: compact startup context; correction notices stay on for "
+            "supported prompt-hook hosts, and ambient prompt retrieval is off. "
+            "The same gate check runs when invoked._\n"
+        )
+    elif resolved_intensity == "standard":
+        parts.append(
+            "_Standard: lean startup context; supported prompt-hook hosts surface "
+            "judgment when the topic changes._\n"
+        )
+    else:
+        parts.append(
+            "_Full: Latch uses its broadest available startup and prompt-time "
+            "surfacing; prompt retrieval depends on host support._\n"
+        )
     # New-user onboarding leads the brief (and is the one thing a brand-new,
     # otherwise-empty KB has to show). Self-removes once the KB fills.
     if show_getting_started:
-        parts.append(_GETTING_STARTED_BLOCK)
+        parts.append(
+            _GETTING_STARTED_QUIET_BLOCK if policy.compact else _GETTING_STARTED_BLOCK
+        )
     if orphan_count:
         parts.append(
             f"_{orphan_count} prior session(s) have unreviewed transcripts. "
@@ -382,7 +512,10 @@ def _build_briefing(
         for ws in workstreams:
             marker = " (pinned)" if ws.get("pinned") else ""
             parts.append(f"- (id={ws['id']}){marker} **{ws['title']}**")
-            parts.append(f"  {_one_line(ws['body'], n=320)}")
+            if policy.workstream_chars:
+                parts.append(
+                    f"  {_one_line(ws['body'], n=policy.workstream_chars)}"
+                )
             wid = int(ws.get("workstream_id") or ws["id"])
             feeds = workstream_feeders.get(wid, [])
             if feeds:
@@ -408,7 +541,8 @@ def _build_briefing(
         parts.append("\n## Parked ideas (future / hypothetical)\n")
         for n in ideas:
             parts.append(
-                f"- (id={n['id']}{_by(n)}) **{n['title']}** — {_one_line(n['body'])}"
+                f"- (id={n['id']}{_by(n)}) **{n['title']}** — "
+                f"{_one_line(n['body'], n=policy.idea_chars)}"
             )
 
     # Latest progress kept as a single one-liner pointer (not a full body dump).

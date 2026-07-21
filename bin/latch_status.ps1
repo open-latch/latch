@@ -35,6 +35,28 @@ if ($env:LATCH_UNLATCHED) {
   Write-Host "  [ENABLED ] no UNLATCHED/DISABLE sentinel or env var - hooks active."
 }
 
+$Python = if ($env:LATCH_PYTHON) { $env:LATCH_PYTHON } else { $env:CLAUDE_KB_PYTHON }
+if (-not $Python) {
+  foreach ($candidate in @(
+    (Join-Path $KbHome ".venv\Scripts\python.exe"),
+    (Join-Path $KbHome ".venv\bin\python")
+  )) {
+    if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+      $Python = $candidate
+      break
+    }
+  }
+}
+if (-not $Python) { $Python = "python" }
+try {
+  & $Python (Join-Path $KbHome "src\intensity_cli.py")
+  if ($LASTEXITCODE -gt 1) {
+    Write-Host "  warning: intensity status command exited $LASTEXITCODE"
+  }
+} catch {
+  Write-Host "Latch intensity: unavailable (could not run src\intensity_cli.py)"
+}
+
 if ($env:LATCH_DISABLE_WRITE) {
   Write-Host "  [write-off] `$env:LATCH_DISABLE_WRITE is set - Stop/SessionEnd/compactor no-op; reads live."
 } elseif ($env:CLAUDE_KB_DISABLE_WRITE) {

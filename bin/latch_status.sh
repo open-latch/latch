@@ -28,6 +28,19 @@ else
   echo "  [ENABLED ] no UNLATCHED/DISABLE sentinel or env var - hooks active."
 fi
 
+intensity_rc=0
+intensity_output="$(bash "${KB_HOME}/bin/latch_intensity.sh" 2>&1)" || intensity_rc=$?
+if [ -n "$intensity_output" ]; then
+  while IFS= read -r line; do
+    echo "  $line"
+  done <<< "$intensity_output"
+else
+  echo "  Latch intensity: unavailable (could not run bin/latch_intensity.sh)"
+fi
+if [ "$intensity_rc" -gt 1 ]; then
+  echo "  warning: intensity status command exited ${intensity_rc}"
+fi
+
 if [ -n "${LATCH_DISABLE_WRITE:-}" ]; then
   echo "  [write-off] \$LATCH_DISABLE_WRITE is set — Stop/SessionEnd/compactor no-op; reads live."
 elif [ -n "${CLAUDE_KB_DISABLE_WRITE:-}" ]; then

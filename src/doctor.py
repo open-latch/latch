@@ -74,6 +74,7 @@ import sys
 from pathlib import Path
 
 import install_engine
+import paths
 import versioning
 
 MIN_PY = (3, 11)
@@ -91,6 +92,14 @@ def check_latch_version() -> tuple[str, str, str]:
         f"{versioning.LATCH_VERSION} ({commit}{dirty}); supports KB schema "
         f"{versioning.KB_SCHEMA_VERSION}; project wiring {versioning.WIRING_VERSION}",
     )
+
+
+def check_latch_intensity() -> tuple[str, str, str]:
+    value, source, warning = paths.latch_intensity_state()
+    detail = f"{value} ({source}); {paths.latch_intensity_change_hint()}"
+    if warning:
+        return "Latch intensity", WARN, f"{detail}; {warning}"
+    return "Latch intensity", OK, detail
 
 
 EMBED_DIM = 384
@@ -769,6 +778,7 @@ def run_all(skip_embed: bool, no_arch: bool, allow_old_py: bool,
             no_pin: bool = False) -> list[tuple[str, str, str]]:
     results: list[tuple[str, str, str]] = [
         check_latch_version(),
+        check_latch_intensity(),
         check_python_version(allow_old_py),
     ]
     if no_arch:

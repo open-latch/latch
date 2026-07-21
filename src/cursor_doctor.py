@@ -18,6 +18,7 @@ import cursor_rules_sync
 import cursor_transcript
 import install_cursor
 import install_engine
+import paths
 
 OK = "OK"
 WARN = "WARN"
@@ -57,6 +58,16 @@ def check_cursor_config(
         detail = str(e.code) if e.code is not None else "invalid Cursor MCP config"
         return Check("Cursor .cursor/mcp.json MCP server", FAIL, detail)
     return Check("Cursor .cursor/mcp.json MCP server", OK if ok else FAIL, detail)
+
+
+def check_latch_intensity() -> Check:
+    value, source, warning = paths.latch_intensity_state()
+    detail = f"{value} ({source}); {paths.latch_intensity_change_hint()}"
+    return Check(
+        "Latch intensity",
+        WARN if warning else OK,
+        f"{detail}; {warning}" if warning else detail,
+    )
 
 
 def check_agents_md(agents_path: Path) -> Check:
@@ -304,6 +315,7 @@ def run_all(
     require_compact: bool = False,
 ) -> list[Check]:
     checks = [
+        check_latch_intensity(),
         check_cursor_config(config_path, python_path, server_py, model_backend=model_backend),
         check_mcp_launch_target(python_path, server_py),
     ]

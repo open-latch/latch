@@ -20,9 +20,10 @@
 ---
 
 **TL;DR:** install latch once, run the guided quickstart from a project repo,
-choose Claude Code, Codex, Cursor, or all three, and seed recent local sessions.
-Then ask an agent to violate a saved decision. latch should show a cited gate
-receipt before edits instead of silently reviving the rejected path.
+choose Claude Code, Codex, Cursor, or all three, choose how proactively Latch
+should surface project judgment, and seed recent local sessions. Then ask an
+agent to violate a saved decision. latch should show a cited gate receipt before
+edits instead of silently reviving the rejected path.
 
 Coding agents do not just forget facts. They forget why a project chose one
 path and rejected another. That is where drift starts: an agent re-litigates a
@@ -69,6 +70,10 @@ model-backed receipt from small deterministic fixture suites:
 | Live pre-edit gate | `DO_NOT_PROCEED` | Cited a canonical rejected path; worktree unchanged |
 | Decision-evidence fixture | `latch_full` 8/8; `memory_like` 4/8 | Small internal ablation, not a third-party benchmark |
 | Seed-report fixture | 16/16 | Deterministic capture/filtering checks; zero model calls |
+
+The `latch_full` row is a gate-retrieval mode, not the Full intensity tier. It
+must not be used as a Quiet/Standard/Full comparison or as a rebuild-savings
+claim.
 
 No useful history yet? Run the public-safe fixture in a throwaway repo:
 
@@ -117,6 +122,87 @@ surfaces to wire, runs their doctor checks, and offers the bounded initial-KB
 review. Selected local transcripts are listed and redacted before any model
 call; no seed candidate is written until you approve it.
 
+### Choose Latch intensity
+
+Quickstart also asks, **“How proactively should Latch surface project
+judgment?”** The choice is install-wide: it applies to every project and host
+using that Latch installation.
+
+| Level | Automatic surfacing | Honest tradeoff |
+| --- | --- | --- |
+| Quiet | Up to 1 workstream and 1 open question at startup; no hook-added similarity hits | Lowest ambient context; contract-driven Latch reads and the gate still surface prior judgment |
+| Standard | Lightweight local topic-similarity check on each eligible prompt; injects up to 3 KB hits only on the first prompt or a topic change; startup brief up to 3 workstreams, 2 questions, and 2 ideas | Fresh-install default; gives up same-topic injection, 2 hit slots, Full no-hit receipts, Full guideline nudges, and the broader brief |
+| **Full — best protection** | Up to 5 KB hits on every eligible prompt, including same-topic follow-ups; startup brief up to 5 workstreams, 3 questions, and 5 ideas; explicit no-hit receipts and standing-guideline capture nudges | Uses the most prompt context; recommended for long-lived, multi-agent, handoff-heavy, or costly-to-rebuild projects |
+
+Every tier keeps the static managed project contract, including its live Latch
+read before each response, plus correction reminders where a prompt hook
+supports them. Intensity controls hook-added briefs and prompt context—not
+whether the agent can or should query Latch. The same gate check and
+configuration run when invoked. That does **not** promise identical evidence,
+catches, or outcomes: automatic context and project state can differ between
+runs.
+
+Host capabilities bound what intensity can change:
+
+| Host | Intensity-controlled runtime surface |
+| --- | --- |
+| Claude Code | Startup brief and similarity-based prompt surfacing |
+| Codex | Startup brief; Codex has no similarity-based prompt hook |
+| Cursor with hooks | Startup brief; the mechanical pre-edit gate remains enabled |
+| Cursor without hooks | No current intensity-controlled runtime surface; managed guidance remains unchanged |
+
+Quickstart and the installers default a genuinely fresh install to Standard and
+save that choice in `latch_settings.json`. During quickstart, a settings-less
+install with existing KB evidence is treated as an older install and its
+previously shipped Full behavior is saved. A manually wired, settings-less
+runtime does not inspect KB evidence; it resolves to legacy Full.
+
+At ordinary runtime, `LATCH_INTENSITY` is a process-scoped override and does not
+edit the saved choice. If a valid `LATCH_INTENSITY` is present while quickstart
+runs, however, quickstart treats it as an explicit installation choice and
+persists it install-wide on apply. Unset it before quickstart if the override
+was only a temporary experiment. You can choose Full non-interactively:
+
+```bash
+bash install.sh --agents both --latch-intensity full
+```
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/open-latch/latch/main/install.ps1))) -LatchIntensity full
+```
+
+Retier the whole installation later without reinstalling:
+
+```bash
+/path/to/latch/bin/latch_intensity.sh full
+# Windows: & C:\path\to\latch\bin\latch_intensity.ps1 full
+```
+
+Latch does not yet claim a universal percentage, time, or dollar reduction in
+rebuild work. In the frozen `intensity_v1` policy fixture, the expected
+guardrail reference is present in ambient hook context for `0/5` Quiet, `2/5`
+Standard, and `5/5` Full constructed opportunities. Hook-emitted context across
+the seven synthetic prompt events is `0`, `1,712`, and `3,056` characters. That
+count excludes startup briefs, the static contract, explicit tool-call context,
+correction/profile nudges, latency, and actual reconstruction work. Authored
+scores and relative risk weights make the result true by construction: it is a
+policy regression contract, not a retrieval-quality benchmark, observed
+developer savings, or proof that the agent noticed or used the reference.
+Read the checked-in
+[`intensity_v1` receipt](./benchmarks/results/intensity_v1_receipt.json) or
+regenerate that exact portable artifact atomically with:
+
+```bash
+bash bin/latch_intensity_eval.sh --write-receipt
+# Windows: .\bin\latch_intensity_eval.ps1 --write-receipt
+```
+
+The existing decision-evidence benchmark separately tests whether gate
+retrieval finds the right rejected paths and rationale. Intensity is recorded
+in local structural prompt, gate, correction, reconciliation, and gate-outcome
+events so future multi-turn evals can replace proxy weights with observed,
+scenario-bounded rebuild outcomes.
+
 The current pre-release command follows `main` and prints the exact installed
 commit. For a stable release, pin both the downloaded script and the checkout
 ref in the same command so the install cannot drift back to `main`:
@@ -148,7 +234,7 @@ the bootstrap options:
 ```bash
 bash install.sh --agents both
 bash install.sh --agents cursor --cursor-with-hooks
-bash install.sh --agents all --cursor-with-hooks
+bash install.sh --agents all --cursor-with-hooks --latch-intensity full
 ```
 
 Default app locations are `~/.local/share/latch/app` on Linux,

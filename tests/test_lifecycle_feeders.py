@@ -153,6 +153,60 @@ def test_session_brief_renders_open_feeders(tmp_path):
     assert "unresolved feeder" in brief
 
 
+def test_session_brief_feeders_obey_intensity_bounds(tmp_path):
+    project, conn = _mk_kb(tmp_path)
+    ws = _ws(conn)
+    db.set_focus(conn, ws)
+    question_ids = {
+        db.insert_node(
+            conn,
+            kind="open_question",
+            title=f"question feeder {i}",
+            body="x",
+            workstream_id=ws,
+        )
+        for i in range(3)
+    }
+    idea_ids = {
+        db.insert_node(
+            conn,
+            kind="idea",
+            title=f"idea feeder {i}",
+            body="x",
+            workstream_id=ws,
+        )
+        for i in range(3)
+    }
+    for i in range(3):
+        fact_id = db.insert_node(
+            conn, kind="fact", title=f"fact feeder {i}", body="x",
+        )
+        db.add_edge(conn, fact_id, ws, "advances")
+    conn.close()
+
+    def feeder_count(brief: str) -> int:
+        line = next(
+            row for row in brief.splitlines() if "open feeders:" in row
+        )
+        return line.count("(id=")
+
+    for intensity, feeder_cap, question_cap, idea_cap in (
+        ("quiet", 1, 1, 0),
+        ("standard", 2, 2, 2),
+        ("full", 3, 3, 5),
+    ):
+        surfaced: list[int] = []
+        brief = session_start._build_briefing(
+            project, surfaced_ids=surfaced, intensity=intensity,
+        )
+        assert feeder_count(brief) <= feeder_cap
+        assert sum(node_id in surfaced for node_id in question_ids) <= question_cap
+        assert sum(node_id in surfaced for node_id in idea_ids) <= idea_cap
+        assert len(surfaced) == len(set(surfaced))
+        if intensity == "quiet":
+            assert "idea feeder" not in brief
+
+
 def test_open_feeders_excludes_resolved_and_reopens_on_tombstone(tmp_path):
     _, conn = _mk_kb(tmp_path)
     ws = _ws(conn)

@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import contextlib
 import io
+import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -13,6 +15,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import quickstart as qs  # noqa: E402
+
+
+ROOT = Path(__file__).resolve().parent.parent
 
 
 def _assert(cond, msg):
@@ -227,6 +232,242 @@ def test_resolve_agents_accepts_cursor_and_all():
     print("PASS resolve_agents_accepts_cursor_and_all")
 
 
+def test_intensity_fresh_noninteractive_defaults_standard(monkeypatch):
+    monkeypatch.setattr(qs.paths, "configured_latch_intensity", lambda: None)
+    monkeypatch.setattr(qs.paths, "kb_has_evidence", lambda _project, **_kwargs: False)
+    output: list[str] = []
+    selected, reason = qs.resolve_latch_intensity(
+        None,
+        project=Path("/tmp/project"),
+        agents=("claude",),
+        env={},
+        is_tty=False,
+        output_fn=output.append,
+    )
+    _assert((selected, reason) == ("standard", "fresh-install default"),
+            f"unexpected fresh default: {(selected, reason)}")
+    _assert(any("similarity-based prompt surfacing" in line for line in output), output)
+
+
+def test_intensity_existing_evidence_preserves_full(monkeypatch):
+    monkeypatch.setattr(qs.paths, "configured_latch_intensity", lambda: None)
+    monkeypatch.setattr(qs.paths, "kb_has_evidence", lambda _project, **_kwargs: True)
+    selected, reason = qs.resolve_latch_intensity(
+        None,
+        project=Path("/tmp/project"),
+        agents=("codex",),
+        env={},
+        is_tty=False,
+        output_fn=lambda _line: None,
+    )
+    _assert((selected, reason) == ("full", "preserving existing Full behavior"),
+            f"legacy install should preserve Full: {(selected, reason)}")
+
+
+def test_intensity_explicit_kb_dir_evidence_preserves_full(monkeypatch, tmp_path):
+    kb_dir = tmp_path / "existing-kb"
+    kb_dir.mkdir()
+    conn = sqlite3.connect(kb_dir / "kb.db")
+    conn.execute("CREATE TABLE nodes (id INTEGER PRIMARY KEY)")
+    conn.execute("INSERT INTO nodes DEFAULT VALUES")
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(qs.paths, "configured_latch_intensity", lambda: None)
+    selected, reason = qs.resolve_latch_intensity(
+        None,
+        project=tmp_path / "project",
+        agents=("codex",),
+        kb_dir=kb_dir,
+        env={},
+        is_tty=False,
+        output_fn=lambda _line: None,
+    )
+    _assert((selected, reason) == ("full", "preserving existing Full behavior"),
+            f"an explicit existing KB must preserve Full: {(selected, reason)}")
+
+
+def test_intensity_git_bash_kb_dir_uses_pin_normalization_on_windows(
+    monkeypatch, tmp_path
+):
+    if os.name != "nt":
+        return
+    kb_dir = (tmp_path / "existing-kb").absolute()
+    kb_dir.mkdir()
+    conn = sqlite3.connect(kb_dir / "kb.db")
+    conn.execute("CREATE TABLE nodes (id INTEGER PRIMARY KEY)")
+    conn.execute("INSERT INTO nodes DEFAULT VALUES")
+    conn.commit()
+    conn.close()
+
+    native = kb_dir.as_posix()
+    git_bash_path = f"/{native[0].lower()}{native[2:]}"
+    monkeypatch.setattr(qs.paths, "configured_latch_intensity", lambda: None)
+    selected, reason = qs.resolve_latch_intensity(
+        None,
+        project=tmp_path / "project",
+        agents=("codex",),
+        kb_dir=git_bash_path,
+        env={},
+        is_tty=False,
+        output_fn=lambda _line: None,
+    )
+    _assert((selected, reason) == ("full", "preserving existing Full behavior"),
+            f"Git Bash target must inspect the KB that will be pinned: "
+            f"{(selected, reason)}")
+
+
+def test_intensity_interactive_copy_and_full_choice_are_honest(monkeypatch):
+    monkeypatch.setattr(qs.paths, "configured_latch_intensity", lambda: None)
+    monkeypatch.setattr(qs.paths, "kb_has_evidence", lambda _project, **_kwargs: False)
+    output: list[str] = []
+    selected, reason = qs.resolve_latch_intensity(
+        None,
+        project=Path("/tmp/project"),
+        agents=("codex",),
+        env={},
+        is_tty=True,
+        input_fn=lambda _prompt: "3",
+        output_fn=output.append,
+    )
+    text = "\n".join(output)
+    _assert((selected, reason) == ("full", "interactive choice"),
+            f"full choice not resolved: {(selected, reason)}")
+    _assert("How proactively" in text, text)
+    _assert("Full — best protection" in text, text)
+    _assert("same-topic follow-ups" in text, text)
+    _assert("Gives up same-topic resurfacing" in text, text)
+    _assert("every project and host using this Latch install" in text, text)
+    _assert("tier-level rebuild savings are not measured yet" in text, text)
+    _assert("Codex does not currently support similarity-based prompt retrieval" in text,
+            text)
+    receipt = json.loads(
+        (ROOT / "benchmarks" / "results" / "intensity_v1_receipt.json")
+        .read_text(encoding="utf-8")
+    )
+    tiers = receipt["tiers"]
+    for tier in ("quiet", "standard", "full"):
+        row = tiers[tier]
+        ratio = (
+            f"{row['opportunities_with_expected_reference']}/"
+            f"{row['labeled_reference_opportunities']}"
+        )
+        _assert(ratio in text, f"chooser is stale versus receipt: {ratio}\n{text}")
+    chars = [f"{tiers[tier]['prompt_context_chars']:,}" for tier in (
+        "quiet", "standard", "full",
+    )]
+    _assert(
+        f"{chars[0]}, {chars[1]}, and {chars[2]} characters" in text,
+        f"chooser character counts are stale versus receipt: {chars}\n{text}",
+    )
+
+
+def test_intensity_environment_override_is_effective_and_persistable(monkeypatch):
+    monkeypatch.setattr(qs.paths, "configured_latch_intensity", lambda: "standard")
+    monkeypatch.setattr(qs.paths, "kb_has_evidence", lambda _project, **_kwargs: True)
+    output: list[str] = []
+    selected, reason = qs.resolve_latch_intensity(
+        None,
+        project=Path("/tmp/project"),
+        agents=("claude",),
+        env={"LATCH_INTENSITY": "FULL"},
+        is_tty=True,
+        input_fn=lambda _prompt: (_ for _ in ()).throw(
+            AssertionError("an explicit environment choice must not prompt")
+        ),
+        output_fn=output.append,
+    )
+    _assert((selected, reason) == ("full", "environment override"),
+            f"environment override not honored: {(selected, reason)}")
+    text = "\n".join(output)
+    _assert("normally a process-only override" in text, text)
+    _assert("requested install-wide choice" in text, text)
+    _assert("persists it" in text and "on apply" in text, text)
+    _assert("dry-run makes no change" in text, text)
+
+
+def test_intensity_conflicting_environment_and_cli_choice_is_rejected(monkeypatch):
+    monkeypatch.setattr(qs.paths, "configured_latch_intensity", lambda: None)
+    monkeypatch.setattr(qs.paths, "kb_has_evidence", lambda _project, **_kwargs: False)
+    try:
+        qs.resolve_latch_intensity(
+            "standard",
+            project=Path("/tmp/project"),
+            agents=("claude",),
+            env={"LATCH_INTENSITY": "quiet"},
+            is_tty=False,
+            output_fn=lambda _line: None,
+        )
+    except ValueError as exc:
+        _assert("conflicts" in str(exc), f"unexpected error: {exc}")
+    else:
+        raise AssertionError("conflicting env and CLI choices must be rejected")
+
+
+def test_intensity_invalid_saved_settings_block_silent_escalation(
+    monkeypatch, tmp_path
+):
+    settings = tmp_path / "latch_settings.json"
+    settings.write_text('{"intensity":"maximum"}\n', encoding="utf-8")
+    monkeypatch.setattr(qs.paths, "LATCH_SETTINGS_FILE", settings)
+    monkeypatch.setattr(qs.paths, "configured_latch_intensity", lambda: None)
+    monkeypatch.setattr(qs.paths, "kb_has_evidence", lambda _project, **_kwargs: True)
+    try:
+        qs.resolve_latch_intensity(
+            None,
+            project=tmp_path,
+            agents=("claude",),
+            env={},
+            is_tty=False,
+            output_fn=lambda _line: None,
+        )
+    except ValueError as exc:
+        _assert("cannot safely choose a tier" in str(exc), f"unexpected: {exc}")
+    else:
+        raise AssertionError("invalid saved settings must not become Full")
+
+
+def test_explicit_choice_can_repair_invalid_saved_settings(monkeypatch, tmp_path):
+    settings = tmp_path / "latch_settings.json"
+    settings.write_text('{"intensity":"maximum"}\n', encoding="utf-8")
+    monkeypatch.setattr(qs.paths, "LATCH_SETTINGS_FILE", settings)
+    monkeypatch.setattr(qs.paths, "configured_latch_intensity", lambda: None)
+    monkeypatch.setattr(qs.paths, "kb_has_evidence", lambda _project, **_kwargs: True)
+    selected, reason = qs.resolve_latch_intensity(
+        "standard",
+        project=tmp_path,
+        agents=("claude",),
+        env={},
+        is_tty=False,
+        output_fn=lambda _line: None,
+    )
+    _assert((selected, reason) == ("standard", "command-line choice"),
+            f"explicit repair choice should win: {(selected, reason)}")
+
+
+def test_non_file_settings_path_blocks_quickstart_before_selection(
+    monkeypatch, tmp_path
+):
+    settings = tmp_path / "latch_settings.json"
+    settings.mkdir()
+    monkeypatch.setattr(qs.paths, "LATCH_SETTINGS_FILE", settings)
+    monkeypatch.setattr(qs.paths, "configured_latch_intensity", lambda: None)
+    monkeypatch.setattr(qs.paths, "kb_has_evidence", lambda _project, **_kwargs: False)
+    try:
+        qs.resolve_latch_intensity(
+            "standard",
+            project=tmp_path,
+            agents=("claude",),
+            env={},
+            is_tty=False,
+            output_fn=lambda _line: None,
+        )
+    except ValueError as exc:
+        _assert("not a regular file" in str(exc), f"unexpected: {exc}")
+    else:
+        raise AssertionError("a non-file settings path must block quickstart")
+
+
 def test_agent_preflight_reports_every_missing_selected_cli():
     available = {"codex": "/usr/local/bin/codex"}
     errors = qs.agent_preflight_errors(
@@ -406,6 +647,7 @@ def test_quickstart_pins_after_preflight_before_wiring():
     project.mkdir()
     original = {
         "resolve_python": qs.install_engine.resolve_python,
+        "resolve_latch_intensity": qs.resolve_latch_intensity,
         "agent_preflight_errors": qs.agent_preflight_errors,
         "pin_kb_for_quickstart": qs.pin_kb_for_quickstart,
         "build_install_steps": qs.build_install_steps,
@@ -416,6 +658,10 @@ def test_quickstart_pins_after_preflight_before_wiring():
     try:
         qs.install_engine.resolve_python = lambda _value: "/py"
         qs.agent_preflight_errors = lambda *_args, **_kwargs: []
+        qs.resolve_latch_intensity = lambda _value, **kwargs: (
+            events.append(("intensity", kwargs["kb_dir"]))
+            or ("standard", "test choice")
+        )
         qs.pin_kb_for_quickstart = lambda value, *, dry_run: (
             events.append(("pin", (value, dry_run))) or ("OK", "pinned")
         )
@@ -434,12 +680,14 @@ def test_quickstart_pins_after_preflight_before_wiring():
             "--no-seed",
         ])
         _assert(rc == 0, f"quickstart should complete, got {rc}")
-        _assert(events[:2] == [
+        _assert(events[:3] == [
+            ("intensity", str(root / "isolated kb")),
             ("pin", (str(root / "isolated kb"), False)),
             ("run", ["wire"]),
-        ], f"pin must follow preflight and precede wiring: {events}")
+        ], f"intensity must inspect the target before pinning and wiring: {events}")
     finally:
         qs.install_engine.resolve_python = original["resolve_python"]
+        qs.resolve_latch_intensity = original["resolve_latch_intensity"]
         qs.agent_preflight_errors = original["agent_preflight_errors"]
         qs.pin_kb_for_quickstart = original["pin_kb_for_quickstart"]
         qs.build_install_steps = original["build_install_steps"]
