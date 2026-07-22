@@ -195,8 +195,10 @@ At natural stopping points, capture the session so tomorrow's agent inherits tod
 Compaction is user-initiated because it spends a model call and writes a durable summary into the KB:
 
 - Claude Code: `/latch-compact`
-- Codex: `/path/to/latch/bin/run_codex_compact_now.sh`
+- Codex: `/latch-compact`
 - Cursor: `/latch-compact` from the current hooked conversation
+
+Or, you can simply instruct latch with natural language, and the agent will handle the rest. 
 
 ## Safety and control
 
