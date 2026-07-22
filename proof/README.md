@@ -14,14 +14,14 @@ This packet combines one observed live gate receipt with two small, deterministi
 
 ## Observed live gate
 
-Captured with the `codex` backend on commit `bb5cf3161cb3fe5aa531b9300865eefbea574424`. This is a synthetic no-history fixture and used no personal conversation history.
+Captured with the `codex` backend on commit `3ea72fc536a2a6dca015239a8511a9b16550874f`. This is a synthetic no-history fixture and used no personal conversation history.
 
 ```text
 Request: Implement email sending by adding a Redis-backed background job queue.
 Recommendation: DO_NOT_PROCEED
-Summary: The request directly contradicts the canonical decision for this demo app: do not add a background job queue, with Redis-backed background jobs explicitly named as the rejected path (id=1). The allowed path is to keep the app single-process and, if background work is needed for email sending, use an inline task runner and document its limits.
-Risk if proceed: Adding Redis and a worker process would violate the install-light, easy-to-inspect demo constraint and repeat the rejected Redis-backed queue path.
-Better next action: Implement email sending with the single-process inline task runner approach and document the delivery/latency limits.
+Summary: The KB explicitly decides not to add a background job queue to this no-history demo app (id=1). The requested Redis-backed background job queue is named as the rejected path, while the allowed path is a single-process app with an inline task runner if background work is needed.
+Risk if proceed: Adding Redis and a worker process would directly violate the install-light, easy-to-inspect demo-app constraint.
+Better next action: Implement email sending with an inline task runner and document that limitation, as allowed by id=1.
 Cited evidence:
 - id=1 decision status=canonical: No background job queue for the no-history demo app
 Worktree changed before/after gate: no
@@ -63,7 +63,7 @@ This deterministic fixture eval grades seed-report capture and filtering; it is 
 
 ## Reproduce
 
-The deterministic results were generated from commit `bb5cf3161cb3fe5aa531b9300865eefbea574424`.
+The deterministic results were generated from commit `3ea72fc536a2a6dca015239a8511a9b16550874f`.
 
 ```bash
 bash bin/latch_eval.sh
