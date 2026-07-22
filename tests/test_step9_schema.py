@@ -348,6 +348,7 @@ def test_apply_compaction_forwards_workstream_id():
         }
         compactor._apply_compaction(
             conn, session_id="S1", result=result, final=False, prior_summary_id=None,
+            offered_workstream_ids={ws},
         )
         f1 = conn.execute("SELECT workstream_id FROM nodes WHERE title = 'F1'").fetchone()
         f2 = conn.execute("SELECT workstream_id FROM nodes WHERE title = 'F2'").fetchone()
@@ -379,6 +380,83 @@ def test_apply_compaction_handles_bad_workstream_id_type():
             _assert(r["workstream_id"] is None,
                     f"{t} should coerce to NULL, got {r['workstream_id']}")
         print("PASS apply_compaction_handles_bad_workstream_id_type")
+    finally:
+        _cleanup(tmp, conn)
+
+
+def test_apply_compaction_rejects_unoffered_nonworkstream_and_stale_workstream_ids():
+    tmp, conn = _fresh_db()
+    try:
+        offered = db.insert_node(conn, kind="workstream", title="Offered", body="...")
+        unoffered = db.insert_node(conn, kind="workstream", title="Unoffered", body="...")
+        stale = db.insert_node(
+            conn, kind="workstream", title="Closed", body="...", status="stale",
+        )
+        fact = db.insert_node(conn, kind="fact", title="Not a lane", body="...")
+        result = {
+            "session_summary": {"title": "T", "body": "B"},
+            "extracted_nodes": [
+                {"kind": "fact", "title": "Good", "body": "x", "workstream_id": offered},
+                {"kind": "fact", "title": "NotOffered", "body": "x", "workstream_id": unoffered},
+                {"kind": "fact", "title": "Closed", "body": "x", "workstream_id": stale},
+                {"kind": "fact", "title": "WrongKind", "body": "x", "workstream_id": fact},
+            ],
+            "links": [],
+        }
+        compactor._apply_compaction(
+            conn,
+            session_id="S1",
+            result=result,
+            final=False,
+            prior_summary_id=None,
+            offered_workstream_ids={offered, stale, fact},
+        )
+        rows = {
+            row["title"]: row["workstream_id"]
+            for row in conn.execute(
+                "SELECT title, workstream_id FROM nodes "
+                "WHERE title IN ('Good', 'NotOffered', 'Closed', 'WrongKind')"
+            ).fetchall()
+        }
+        _assert(rows["Good"] == offered, rows)
+        _assert(rows["NotOffered"] is None, rows)
+        _assert(rows["Closed"] is None, rows)
+        _assert(rows["WrongKind"] is None, rows)
+    finally:
+        _cleanup(tmp, conn)
+
+
+def test_apply_compaction_redirects_offered_merged_workstream_to_absorber():
+    tmp, conn = _fresh_db()
+    try:
+        source = db.insert_node(
+            conn, kind="workstream", title="Merged source", body="...", status="stale",
+        )
+        absorber = db.insert_node(
+            conn, kind="workstream", title="Active absorber", body="...", status="canonical",
+        )
+        db.add_edge(conn, source, absorber, "merged_into")
+        compactor._apply_compaction(
+            conn,
+            session_id="S1",
+            result={
+                "session_summary": {"title": "T", "body": "B"},
+                "extracted_nodes": [{
+                    "kind": "fact",
+                    "title": "Post-merge fact",
+                    "body": "x",
+                    "workstream_id": source,
+                }],
+                "links": [],
+            },
+            final=False,
+            prior_summary_id=None,
+            offered_workstream_ids={source},
+        )
+        row = conn.execute(
+            "SELECT workstream_id FROM nodes WHERE title='Post-merge fact'"
+        ).fetchone()
+        _assert(row["workstream_id"] == absorber, row)
     finally:
         _cleanup(tmp, conn)
 

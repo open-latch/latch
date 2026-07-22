@@ -167,6 +167,113 @@ def test_focus_seeding_disabled_when_flag_off():
         _cleanup(tmp, conn)
 
 
+def test_workstream_seed_adds_bounded_focus_derived_membership_hop():
+    tmp, conn = _fresh_db()
+    old_limit = gate.GATE_WORKSTREAM_MEMBER_HOP_LIMIT
+    gate.GATE_WORKSTREAM_MEMBER_HOP_LIMIT = 2
+    try:
+        ws = db.insert_node(
+            conn, kind="workstream", title="Membership lane",
+            body="Objective: exercise member context.",
+        )
+        members = [
+            db.insert_node(
+                conn, kind="fact", title=f"member {i}", body="member body",
+                workstream_id=ws,
+            )
+            for i in range(4)
+        ]
+        db.set_focus(conn, ws)
+        out = gate.assemble_gate(conn, "")
+        chain = _seed_only(out, ws)
+        membership = [
+            node for node in chain["evidence"]
+            if node.get("context_source") == "workstream_membership"
+        ]
+        _assert({node["id"] for node in membership} == set(members[-2:]), membership)
+        _assert(all(node.get("focus_derived") is True for node in membership), membership)
+        _assert(gate._workstream_ids_from_seeds(out["seeds"], conn=conn) == [],
+                "focus/member context must not activate scoped priorities")
+        rendered = gate._render_chain_for_prompt(
+            out, max_evidence_per_chain=1, max_total_evidence=1, stale_budget=0,
+        )
+        _assert(_count_rendered_evidence(rendered) == 1, rendered)
+        print("PASS workstream_seed_adds_bounded_focus_derived_membership_hop")
+    finally:
+        gate.GATE_WORKSTREAM_MEMBER_HOP_LIMIT = old_limit
+        _cleanup(tmp, conn)
+
+
+def test_gate_renders_lane_header_and_shared_authority_labels():
+    tmp, conn = _fresh_db()
+    original_search = gate.search.hybrid_search
+    try:
+        ws = db.insert_node(
+            conn, kind="workstream", title="Auth rework",
+            body="Objective: rework auth.\nDone when: login is deterministic.",
+        )
+        local = db.insert_node(
+            conn, kind="decision", title="Unique local auth decision",
+            body="unique-local-auth-token", workstream_id=ws,
+        )
+        foundational = db.insert_node(
+            conn, kind="decision", title="Project security boundary", body="secure all lanes",
+        )
+        db.add_edge(conn, foundational, local, "constrains")
+        local_row = dict(conn.execute("SELECT * FROM nodes WHERE id = ?", (local,)).fetchone())
+        local_row["score"] = 1.0
+        gate.search.hybrid_search = lambda *args, **kwargs: [local_row]
+        out = gate.assemble_gate(
+            conn, "unique-local-auth-token", seed_top_k=1, focus_seed=False,
+        )
+        rendered = gate._render_chain_for_prompt(out)
+        _assert(f"Lane {ws}: Auth rework — Done when: login is deterministic." in rendered,
+                rendered)
+        _assert("[authority=lane-local]" in rendered, rendered)
+        _assert("[authority=foundational]" in rendered, rendered)
+        _assert(str(foundational) in rendered, "lane grouping must not filter evidence")
+        print("PASS gate_renders_lane_header_and_shared_authority_labels")
+    finally:
+        gate.search.hybrid_search = original_search
+        _cleanup(tmp, conn)
+
+
+def test_gate_merged_lane_redirects_to_absorber_and_traverses_edge():
+    tmp, conn = _fresh_db()
+    original_search = gate.search.hybrid_search
+    try:
+        source = db.insert_node(
+            conn, kind="workstream", title="Retired auth lane",
+            body="retired-auth-identity-token", status="stale",
+        )
+        absorber = db.insert_node(
+            conn, kind="workstream", title="Unified auth lane",
+            body="Done when: auth work has one live identity.",
+        )
+        db.add_edge(conn, source, absorber, "merged_into")
+        source_row = dict(conn.execute("SELECT * FROM nodes WHERE id = ?", (source,)).fetchone())
+        source_row["score"] = 1.0
+        gate.search.hybrid_search = lambda *args, **kwargs: [source_row]
+        out = gate.assemble_gate(
+            conn, "retired-auth-identity-token", seed_top_k=1, focus_seed=False,
+        )
+        chain = _seed_only(out, source)
+        _assert(chain["lane_group_id"] == absorber, chain)
+        redirect = next(node for node in chain["evidence"] if node["id"] == absorber)
+        _assert(redirect["via_relation"] == "merged_into", redirect)
+        ranked = gate._evidence_sort_for_relevance([
+            redirect,
+            _ev(999999, via="related_to"),
+        ])
+        _assert(ranked[0]["id"] == absorber, ranked)
+        rendered = gate._render_chain_for_prompt(out)
+        _assert(f"Lane {absorber}: Unified auth lane" in rendered, rendered)
+        print("PASS gate_merged_lane_redirects_to_absorber_and_traverses_edge")
+    finally:
+        gate.search.hybrid_search = original_search
+        _cleanup(tmp, conn)
+
+
 # ---------- traversal ----------
 
 def _seed_only(out, seed_id):
@@ -686,6 +793,53 @@ def test_empty_db_returns_empty_chains():
         _cleanup(tmp, conn)
 
 
+def test_gate_contact_recording_uses_current_turn_and_hybrid_graph_only():
+    tmp, conn = _fresh_db()
+    try:
+        lane = db.insert_node(conn, kind="workstream", title="Lane", body="x")
+        hybrid = db.insert_node(
+            conn, kind="decision", title="hybrid", body="x", workstream_id=lane,
+        )
+        reached = db.insert_node(
+            conn, kind="fact", title="reached", body="x", workstream_id=lane,
+        )
+        membership = db.insert_node(
+            conn, kind="fact", title="membership", body="x", workstream_id=lane,
+        )
+        db.upsert_session(conn, "gate-session", tmp)
+        db.increment_turn(conn, "gate-session")
+        db.increment_turn(conn, "gate-session")
+        gate._record_gate_contacts(
+            conn,
+            session_id="gate-session",
+            chain_assembly={
+                "seeds": [
+                    {"id": hybrid, "source": "hybrid", "score": 0.9,
+                     "kind": "decision", "workstream_id": lane},
+                    {"id": lane, "source": "focus", "score": 1.0,
+                     "kind": "workstream", "workstream_id": lane},
+                ],
+                "chains": [
+                    {"seed_id": hybrid, "evidence": [
+                        {"id": reached},
+                        {"id": membership, "focus_derived": True},
+                    ]},
+                    {"seed_id": lane, "evidence": [{"id": reached}]},
+                ],
+            },
+        )
+        rows = conn.execute(
+            "SELECT node_id, turn, seed_node_id FROM retrieval_events "
+            "WHERE source = 'gate' ORDER BY id",
+        ).fetchall()
+        _assert({row["node_id"] for row in rows} == {hybrid, reached}, rows)
+        _assert(all(row["turn"] == 2 for row in rows), rows)
+        _assert(all(row["seed_node_id"] == hybrid for row in rows), rows)
+        print("PASS gate_contact_recording_uses_current_turn_and_hybrid_graph_only")
+    finally:
+        _cleanup(tmp, conn)
+
+
 # ---------- render-layer prompt caps (KB id=1415) ----------
 # These exercise the rendering layer directly with synthetic chain assemblies —
 # no DB needed. assemble_gate/traversal semantics are unchanged; the prompt is
@@ -847,6 +1001,9 @@ if __name__ == "__main__":
     test_focus_seeding_adds_workstreams()
     test_focus_seeding_dedupes_against_hybrid()
     test_focus_seeding_disabled_when_flag_off()
+    test_workstream_seed_adds_bounded_focus_derived_membership_hop()
+    test_gate_renders_lane_header_and_shared_authority_labels()
+    test_gate_merged_lane_redirects_to_absorber_and_traverses_edge()
     test_traversal_walks_canonical_relations_one_hop()
     test_traversal_walks_incoming_edges()
     test_traversal_includes_related_to()
@@ -870,6 +1027,7 @@ if __name__ == "__main__":
     test_body_excerpt_truncates_long_bodies()
     test_body_excerpt_handles_none_body()
     test_empty_db_returns_empty_chains()
+    test_gate_contact_recording_uses_current_turn_and_hybrid_graph_only()
     test_render_caps_evidence_per_chain()
     test_render_ranking_prefers_canonical_over_related_to()
     test_render_ranking_prefers_reconciled_by()

@@ -44,6 +44,91 @@ _NOT_RESOLVED_SQL = """NOT EXISTS (
           )"""
 
 
+def _active_workstream(conn: sqlite3.Connection, workstream_id: int) -> bool:
+    """True only for a live workstream identity.
+
+    Lifecycle reads deliberately fail closed.  A stale (closed or merged-away)
+    identity must not keep contributing feeders after its lane has ended.
+    Callers that want merge redirection resolve the identity before calling.
+    """
+    row = conn.execute(
+        "SELECT kind, status FROM nodes WHERE id = ?", (workstream_id,),
+    ).fetchone()
+    return bool(
+        row is not None
+        and row["kind"] == "workstream"
+        and row["status"] != "stale"
+    )
+
+
+def open_feeder_snapshot(
+    conn: sqlite3.Connection,
+    workstream_id: int,
+    *,
+    require_active: bool = True,
+) -> list[dict]:
+    """Return every unresolved feeder with durable intent-edge identities.
+
+    Unlike :func:`open_feeders`, this is an unbounded mutation preflight.  It
+    keeps *all* active feeder relations for each node so CLOSE can deterministically
+    repoint/tombstone exactly the edges it inspected and can persist those IDs in
+    its reversal receipt.
+    """
+    wid = int(workstream_id)
+    if require_active and not _active_workstream(conn, wid):
+        return []
+    rows = conn.execute(
+        f"""
+        SELECT n.id, n.kind, n.title, n.status, n.workstream_id, n.updated_at,
+               CASE WHEN n.workstream_id = ? THEN 1 ELSE 0 END AS is_member,
+               e.id AS edge_id, e.src AS edge_src, e.dst AS edge_dst,
+               e.relation AS edge_relation, e.status AS edge_status,
+               e.created_by AS edge_created_by
+        FROM nodes n
+        LEFT JOIN edges e
+          ON e.src = n.id
+         AND e.dst = ?
+         AND e.status = 'active'
+         AND e.relation IN (?, ?, ?)
+        WHERE n.status != 'stale'
+          AND n.kind != 'workstream'
+          AND NOT (n.kind = 'open_question' AND n.status = 'canonical')
+          AND (
+                (n.workstream_id = ? AND n.kind IN ('idea', 'open_question'))
+                OR e.id IS NOT NULL
+              )
+          AND {_NOT_RESOLVED_SQL}
+        ORDER BY n.updated_at DESC, n.id DESC, e.id ASC
+        """,
+        (
+            wid, wid, *FEEDER_RELATIONS, wid, *RESOLUTION_RELATIONS,
+        ),
+    ).fetchall()
+    by_id: dict[int, dict] = {}
+    for row in rows:
+        node_id = int(row["id"])
+        item = by_id.setdefault(node_id, {
+            "id": node_id,
+            "kind": row["kind"],
+            "title": row["title"],
+            "status": row["status"],
+            "workstream_id": row["workstream_id"],
+            "updated_at": row["updated_at"],
+            "is_member": bool(row["is_member"]),
+            "intent_edges": [],
+        })
+        if row["edge_id"] is not None:
+            item["intent_edges"].append({
+                "id": int(row["edge_id"]),
+                "src": int(row["edge_src"]),
+                "dst": int(row["edge_dst"]),
+                "relation": row["edge_relation"],
+                "status": row["edge_status"],
+                "created_by": row["edge_created_by"],
+            })
+    return list(by_id.values())
+
+
 def open_feeders(
     conn: sqlite3.Connection, workstream_id: int, *, limit: int = DEFAULT_LIMIT,
 ) -> list[dict]:
@@ -62,47 +147,17 @@ def open_feeders(
     closed and excluded regardless of its own status — closure-duty edges
     land while the node is still `staging`.
     """
-    members = conn.execute(
-        f"""
-        SELECT n.id, n.kind, n.title, n.status, n.workstream_id, n.updated_at
-        FROM nodes n
-        WHERE n.workstream_id = ?
-          AND n.status != 'stale'
-          AND (n.kind = 'idea'
-               OR (n.kind = 'open_question' AND n.status != 'canonical'))
-          AND {_NOT_RESOLVED_SQL}
-        """,
-        (workstream_id, *RESOLUTION_RELATIONS),
-    ).fetchall()
-    edge_rows = conn.execute(
-        f"""
-        SELECT n.id, n.kind, n.title, n.status, n.workstream_id, n.updated_at,
-               e.relation
-        FROM edges e
-        JOIN nodes n ON n.id = e.src
-        WHERE e.dst = ?
-          AND e.status = 'active'
-          AND e.relation IN (?, ?, ?)
-          AND n.status != 'stale'
-          AND n.kind != 'workstream'
-          AND NOT (n.kind = 'open_question' AND n.status = 'canonical')
-          AND {_NOT_RESOLVED_SQL}
-        """,
-        (workstream_id, *FEEDER_RELATIONS, *RESOLUTION_RELATIONS),
-    ).fetchall()
-
-    by_id: dict[int, dict] = {}
-    for row in members:
-        d = dict(row)
-        d["via"] = "member"
-        by_id[int(d["id"])] = d
-    for row in edge_rows:
-        d = dict(row)
-        d["via"] = d.pop("relation")
-        by_id[int(d["id"])] = d
-    ranked = sorted(
-        by_id.values(), key=lambda d: str(d["updated_at"]), reverse=True,
-    )
+    ranked = []
+    for item in open_feeder_snapshot(conn, workstream_id):
+        projected = {
+            name: item[name]
+            for name in ("id", "kind", "title", "status", "workstream_id", "updated_at")
+        }
+        projected["via"] = (
+            item["intent_edges"][0]["relation"]
+            if item["intent_edges"] else "member"
+        )
+        ranked.append(projected)
     return ranked[:limit] if limit and limit > 0 else ranked
 
 
@@ -113,6 +168,8 @@ def focus_feeders(
     out: dict[int, list[dict]] = {}
     for ws in db.get_focus(conn, limit=focus_limit):
         wid = int(ws.get("workstream_id") or ws["id"])
+        if not _active_workstream(conn, wid):
+            continue
         rows = open_feeders(conn, wid, limit=per_workstream)
         if rows:
             out[wid] = rows

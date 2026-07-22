@@ -19,6 +19,8 @@ START = "<!--latch:rolling-->"
 END = "<!--/latch:rolling-->"
 HEADER = "## Latest (rolling)"
 DEFAULT_CAP = 3
+EPILOGUE_MARKER_PREFIX = "<!--latch:epilogue:"
+OP_MARKER_PREFIX = "<!--latch:op:"
 
 
 def _split(body: str) -> tuple[list[str], str]:
@@ -50,3 +52,62 @@ def strip_markers(body: str) -> str:
     and entries. The region renders invisibly in markdown either way; this is for
     raw-text consumers that would otherwise show the comment lines."""
     return "\n".join(ln for ln in body.splitlines() if ln.strip() not in (START, END))
+
+
+def append_epilogue(body: str, text: str, *, date: str, op_key: str) -> str:
+    """Append one permanent, operation-keyed history line outside Latest.
+
+    CLOSE history must survive rolling eviction.  The invisible marker makes
+    retries idempotent without weakening the human-readable epilogue.
+    """
+    key = " ".join(str(op_key or "").split())
+    if not key:
+        raise ValueError("op_key is required")
+    marker = f"{EPILOGUE_MARKER_PREFIX}{key}-->"
+    if marker in (body or ""):
+        return body
+    entry_text = " ".join((text or "").split())
+    block = f"{marker}\n- {date}: {entry_text}"
+    current = (body or "").rstrip()
+    return f"{current}\n\n{block}\n" if current else f"{block}\n"
+
+
+def keyed_marker(op_key: str) -> str:
+    key = " ".join(str(op_key or "").split())
+    if not key:
+        raise ValueError("op_key is required")
+    return f"{OP_MARKER_PREFIX}{key}-->"
+
+
+def apply_keyed(
+    body: str,
+    text: str,
+    *,
+    date: str,
+    op_key: str,
+    cap: int = DEFAULT_CAP,
+) -> tuple[str, str]:
+    """Add one idempotent, keyed rolling entry and return ``(body, line)``."""
+    marker = keyed_marker(op_key)
+    entries, rest = _split(body or "")
+    for line in entries:
+        if marker in line:
+            return body, line
+    entry_text = " ".join((text or "").split())
+    line = f"- {date}: {entry_text} {marker}"
+    entries = [line, *entries][:max(1, cap)]
+    region = "\n".join([START, HEADER, *entries, END])
+    return (f"{region}\n\n{rest}" if rest else f"{region}\n"), line
+
+
+def remove_keyed(body: str, op_key: str) -> tuple[str, bool]:
+    """Remove a keyed rolling entry if it has not been evicted."""
+    marker = keyed_marker(op_key)
+    entries, rest = _split(body or "")
+    kept = [line for line in entries if marker not in line]
+    if len(kept) == len(entries):
+        return body, False
+    if kept:
+        region = "\n".join([START, HEADER, *kept, END])
+        return (f"{region}\n\n{rest}" if rest else f"{region}\n"), True
+    return (f"{rest}\n" if rest else ""), True

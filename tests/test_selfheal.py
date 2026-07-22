@@ -79,6 +79,7 @@ def test_any_due():
         "last_backup_at": _iso(now - timedelta(hours=1)),
         "last_heal_at": _iso(now - timedelta(hours=1)),
         "last_weekly_at": _iso(now - timedelta(hours=1)),
+        "last_workstream_shadow_at": _iso(now - timedelta(hours=1)),
     }
     _assert(selfheal._any_due(fresh, now) is False, "all-fresh => nothing due")
     stale_backup = dict(fresh, last_backup_at=_iso(now - timedelta(hours=13)))
@@ -161,6 +162,7 @@ def test_maybe_trigger_not_due_no_spawn():
             "last_backup_at": _iso(now),
             "last_heal_at": _iso(now),
             "last_weekly_at": _iso(now),
+            "last_workstream_shadow_at": _iso(now),
         })
         selfheal.spawn_detached = lambda p: calls.append(p)
         selfheal.maybe_trigger(proj)
@@ -264,6 +266,49 @@ def test_raising_op_does_not_advance_its_stamp():
         shutil.rmtree(proj, ignore_errors=True)
 
 
+def test_workstream_governance_runs_after_shared_lock_release():
+    proj = _fresh_project()
+    orig_shadow = selfheal.maintenance.run_workstream_shadow
+    orig_governed = selfheal.maintenance.run_workstream_governed
+    calls = []
+    try:
+        _seed_db(proj)
+        now = datetime.now(timezone.utc)
+        selfheal._save_state(proj, {
+            "last_backup_at": _iso(now),
+            "last_heal_at": _iso(now),
+            "last_weekly_at": _iso(now),
+            "last_workstream_shadow_at": _iso(now - timedelta(hours=25)),
+        })
+
+        def _shadow(_project, *, already_locked=False):
+            _assert(already_locked is True, "selfheal must declare lock ownership")
+            calls.append(("shadow", lockfile._lock_path(proj).exists()))
+            return {"ok": True}
+
+        def _governed(_project):
+            calls.append(("governed", lockfile._lock_path(proj).exists()))
+            return {
+                "ok": True,
+                "applied": [],
+                "failed": [],
+                "suggestion_count": 0,
+            }
+
+        selfheal.maintenance.run_workstream_shadow = _shadow
+        selfheal.maintenance.run_workstream_governed = _governed
+        result = selfheal.run_selfheal(proj)
+
+        _assert(calls == [("shadow", True), ("governed", False)], calls)
+        _assert("workstream_shadow" in result["ran"], result)
+        _assert("workstream_automation" in result["ran"], result)
+        print("PASS workstream_governance_runs_after_shared_lock_release")
+    finally:
+        selfheal.maintenance.run_workstream_shadow = orig_shadow
+        selfheal.maintenance.run_workstream_governed = orig_governed
+        shutil.rmtree(proj, ignore_errors=True)
+
+
 # ---------------- backup + prune ----------------
 
 def test_backup_creates_and_prunes():
@@ -340,6 +385,7 @@ if __name__ == "__main__":
     test_run_selfheal_skips_when_locked()
     test_only_run_ops_advance_stamps()
     test_raising_op_does_not_advance_its_stamp()
+    test_workstream_governance_runs_after_shared_lock_release()
     test_backup_creates_and_prunes()
     test_backup_noop_without_db()
     test_spawn_builds_correct_command()

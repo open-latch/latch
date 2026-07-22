@@ -86,6 +86,23 @@ def test_find_near_duplicates_excludes_stale():
         _cleanup(tmp, conn)
 
 
+def test_find_near_duplicates_excludes_workstreams():
+    """Lifecycle lanes are structural state, never generic heal candidates."""
+    tmp, conn = _fresh_db()
+    try:
+        v = embeddings.embed("release automation migration workstream")
+        wid = db.insert_node(
+            conn, kind="workstream", title="release automation",
+            body="migrate the release pipeline", embedding=embeddings.to_blob(v),
+        )
+        cands = heal.find_near_duplicates(conn, v, threshold=0.5)
+        _assert(wid not in {c["id"] for c in cands},
+                f"workstream leaked into heal arbitration: {cands}")
+        print("PASS find_near_duplicates_excludes_workstreams")
+    finally:
+        _cleanup(tmp, conn)
+
+
 def test_find_near_duplicates_excludes_self():
     tmp, conn = _fresh_db()
     try:
@@ -111,6 +128,31 @@ def test_find_near_duplicates_brute_force_path():
         cands = heal.find_near_duplicates(conn, q, threshold=0.5)
         _assert(len(cands) >= 1 and "similarity" in cands[0], cands)
         print(f"PASS find_near_duplicates_brute_force_path (sim={cands[0]['similarity']:.3f})")
+    finally:
+        _cleanup(tmp, conn)
+
+
+def test_public_vector_search_preserves_workstream_id():
+    """The brute-force/vector handoff must retain event-time lane attribution."""
+    tmp, conn = _fresh_db()
+    try:
+        q = embeddings.embed("release automation migration")
+        wid = db.insert_node(
+            conn, kind="workstream", title="release automation",
+            body="migrate the release pipeline",
+        )
+        nid = db.insert_node(
+            conn, kind="decision", title="release migration decision",
+            body="use the automated release pipeline",
+            embedding=embeddings.to_blob(q), workstream_id=wid,
+        )
+        conn._kb_vec_loaded = False
+        rows = searchmod.vector_search(conn, qvec=q, limit=5)
+        hit = next((r for r in rows if r["id"] == nid), None)
+        _assert(hit is not None, f"expected vector hit for node {nid}: {rows}")
+        _assert(hit["workstream_id"] == wid,
+                f"vector result lost workstream_id={wid}: {hit}")
+        print("PASS public_vector_search_preserves_workstream_id")
     finally:
         _cleanup(tmp, conn)
 
@@ -906,8 +948,10 @@ if __name__ == "__main__":
     test_find_near_duplicates_hits_similar()
     test_find_near_duplicates_misses_unrelated()
     test_find_near_duplicates_excludes_stale()
+    test_find_near_duplicates_excludes_workstreams()
     test_find_near_duplicates_excludes_self()
     test_find_near_duplicates_brute_force_path()
+    test_public_vector_search_preserves_workstream_id()
     test_apply_supersede_marks_stale_and_edges()
     test_apply_keep_both_adds_related_edge()
     test_insert_with_heal_no_match()

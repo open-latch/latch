@@ -136,6 +136,30 @@ def _validate_workstream_scope(
     return None
 
 
+def _resolve_workstream_scope(
+    conn: sqlite3.Connection, workstream_id: int | None,
+) -> tuple[int | None, dict | None, dict | None]:
+    """Return ``(active_id, redirect_receipt, error)`` for priority writes."""
+    if workstream_id is None:
+        return None, None, None
+    try:
+        requested = int(workstream_id)
+    except (TypeError, ValueError):
+        return None, None, {
+            "error": f"workstream_id must be an integer, got {workstream_id!r}",
+        }
+    try:
+        import workstreams
+        resolution = workstreams.resolve_membership_target(conn, requested)
+    except (ImportError, AttributeError):
+        error = _validate_workstream_scope(conn, requested)
+        return (requested, None, None) if error is None else (None, None, error)
+    if not resolution["ok"]:
+        return None, None, {"error": resolution["error"], "workstream_resolution": resolution}
+    active_id = int(resolution["resolved_workstream_id"])
+    return active_id, (resolution if resolution.get("redirected") else None), None
+
+
 def _locked_at(
     conn: sqlite3.Connection,
     rank: int,
@@ -258,11 +282,11 @@ def add_priority(
     text = (text or "").strip()
     if not text:
         return {"error": "empty priority text"}
-    scope_error = _validate_workstream_scope(conn, workstream_id)
+    workstream_id, scope_resolution, scope_error = _resolve_workstream_scope(
+        conn, workstream_id,
+    )
     if scope_error:
         return scope_error
-    if workstream_id is not None:
-        workstream_id = int(workstream_id)
     active = list_priorities(conn, workstream_id=workstream_id)
     if len(active) >= MAX_ACTIVE:
         return {
@@ -313,7 +337,7 @@ def add_priority(
         (nid, locked_rank),
     )
     conn.commit()
-    return {
+    result = {
         "id": nid,
         "ok": True,
         "active_count": len(active) + 1,
@@ -322,6 +346,9 @@ def add_priority(
         "scope": "overall" if workstream_id is None else "workstream",
         "workstream_id": workstream_id,
     }
+    if scope_resolution is not None:
+        result["workstream_resolution"] = scope_resolution
+    return result
 
 
 def list_priorities(
@@ -478,11 +505,11 @@ def reorder_priority(
     }
 
 
-def retire_priority(conn: sqlite3.Connection, node_id: int) -> dict:
+def retire_priority_nc(conn: sqlite3.Connection, node_id: int) -> dict:
     """Retire a priority — soft-delete to 'stale' and move it to the graveyard,
     stamping the date it was retired. Reversible (the row and its audit trail
-    persist); never hard-deletes. Clears the rank so the remaining active
-    priorities renumber to close the gap."""
+    persist); never hard-deletes.  Does not commit, so lifecycle CLOSE can keep
+    the priority transition in its single atomic transaction."""
     node = db.get_node(conn, node_id)
     if node is None:
         return {"error": f"node {node_id} not found"}
@@ -494,7 +521,7 @@ def retire_priority(conn: sqlite3.Connection, node_id: int) -> dict:
             "id": node_id, "retired": True, "already": True,
             "retired_at": existing["retired_at"] if existing else None,
         }
-    db.update_node(conn, node_id, status=RETIRED_STATUS)
+    db.update_node_nc(conn, node_id, status=RETIRED_STATUS)
     now = db._now()
     if _order_row(conn, node_id) is None:
         conn.execute(
@@ -508,8 +535,19 @@ def retire_priority(conn: sqlite3.Connection, node_id: int) -> dict:
             "WHERE node_id = ?",
             (now, node_id),
         )
-    conn.commit()
     return {"id": node_id, "retired": True, "retired_at": now}
+
+
+def retire_priority(conn: sqlite3.Connection, node_id: int) -> dict:
+    """Committed wrapper around :func:`retire_priority_nc`."""
+    try:
+        result = retire_priority_nc(conn, node_id)
+        if "error" not in result:
+            conn.commit()
+        return result
+    except Exception:
+        conn.rollback()
+        raise
 
 
 def render_for_gate(priorities: list[dict]) -> str:

@@ -5,13 +5,14 @@ makes concurrent reads/writes safe for our usage pattern (MCP server + hooks).
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sqlite3
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 import log_utils
 import schema_version
@@ -34,6 +35,67 @@ SEED_IMPORT_ERROR_CODES = frozenset({
     "internal",
 })
 
+WORKSTREAM_OPS = frozenset({"OPEN", "MERGE", "CLOSE", "REOPEN", "ADOPT", "UNMERGE"})
+WORKSTREAM_OP_STATES = frozenset({
+    "pending", "applied", "rejected", "failed", "orphaned_by_restore",
+})
+WORKSTREAM_OP_ERROR_CODES = frozenset({
+    "preflight_stale",
+    "invalid_op",
+    "invalid_target",
+    "invalid_payload",
+    "payload_insufficient",
+    "conflict",
+    "blocked",
+    "awaiting_charter",
+    "rank_conflict",
+    "open_feeders",
+    "quiescence",
+    "mutation_failed",
+    "orphaned_by_restore",
+    "internal",
+})
+WORKSTREAM_EVENT_VERDICTS = frozenset({"agree", "disagree", "unsure"})
+RETRIEVAL_DROPPED_META_KEY = "dropped_retrieval_events"
+
+# Reversal sufficiency is checked when an operation becomes applied. Failed or
+# rejected rows did not mutate state and therefore need no reversal payload.
+WORKSTREAM_REVERSAL_PAYLOAD_KEYS: dict[str, frozenset[str]] = {
+    "OPEN": frozenset({"assigned_member_ids", "watch_pair", "probation"}),
+    "MERGE": frozenset({
+        "repointed_member_ids",
+        "prior_memberships",
+        "rehomed_edge_ids",
+        "tombstoned_edge_ids",
+        "edge_rehomes",
+        "retired_priority_ids",
+        "readded_priority_ids",
+        "overflow_retired_priority_ids",
+        "priority_map",
+        "priority_snapshots",
+        "created_priority_snapshots",
+        "src_focus",
+        "dst_focus",
+        "post_focus",
+        "rolling_line",
+        "rolling_op_key",
+        "absorber_body_before",
+        "absorber_body_before_hash",
+        "absorber_body_after_hash",
+        "source_body_hash",
+        "source_title",
+        "source_prior_status",
+        "merge_edge_id",
+    }),
+    "CLOSE": frozenset({
+        "feeder_disposition_edge_ids", "focus", "retired_priority_ids",
+        "priority_snapshots",
+    }),
+    "REOPEN": frozenset({"prior_status"}),
+    "ADOPT": frozenset({"assigned_member_ids"}),
+    "UNMERGE": frozenset({"merge_op_key"}),
+}
+
 
 class SeedImportLedgerError(ValueError):
     """Base class for invalid seed-ledger operations."""
@@ -45,6 +107,22 @@ class SeedImportConflictError(SeedImportLedgerError):
 
 class SeedImportStateError(SeedImportLedgerError):
     """A requested seed-ledger state transition is invalid."""
+
+
+class WorkstreamLedgerError(ValueError):
+    """Base class for invalid workstream-ledger operations."""
+
+
+class WorkstreamLedgerConflictError(WorkstreamLedgerError):
+    """An idempotency key was reused with different immutable metadata."""
+
+
+class WorkstreamLedgerStateError(WorkstreamLedgerError):
+    """A requested workstream-ledger state transition is invalid."""
+
+
+class WorkstreamPayloadError(WorkstreamLedgerError):
+    """A lifecycle payload cannot satisfy the operation's reversal contract."""
 
 
 def _resolve_actor() -> str:
@@ -506,6 +584,682 @@ def _migrate_seed_import_ledgers(conn: sqlite3.Connection) -> None:
         "ON seed_import(claim_key, state)"
     )
     conn.commit()
+    _migrate_lifecycle_substrate(conn)
+
+
+def _migrate_lifecycle_substrate(conn: sqlite3.Connection) -> None:
+    """Add append-only lifecycle telemetry, operation, and derivation ledgers.
+
+    The migration is deliberately additive and idempotent. Schema version 2 is
+    the minimum-writer gate: old binaries refuse the stamped database before
+    reaching this migration chain, while current binaries can safely reconnect.
+    """
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS retrieval_events (
+            id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id             TEXT,
+            ts                     TEXT    NOT NULL DEFAULT (datetime('now')),
+            turn                   INTEGER,
+            node_id                INTEGER NOT NULL,
+            source                 TEXT    NOT NULL,
+            seed_node_id           INTEGER,
+            reached_node_id        INTEGER,
+            sim                    REAL,
+            workstream_id_at_event INTEGER
+        );
+        CREATE INDEX IF NOT EXISTS idx_retrieval_events_ts
+            ON retrieval_events(ts);
+        CREATE INDEX IF NOT EXISTS idx_retrieval_events_node
+            ON retrieval_events(node_id);
+        CREATE INDEX IF NOT EXISTS idx_retrieval_events_session_turn
+            ON retrieval_events(session_id, turn);
+        CREATE INDEX IF NOT EXISTS idx_retrieval_events_workstream
+            ON retrieval_events(workstream_id_at_event, ts);
+
+        CREATE TABLE IF NOT EXISTS workstream_ops (
+            id                INTEGER PRIMARY KEY AUTOINCREMENT,
+            op_key            TEXT    NOT NULL UNIQUE,
+            candidate_key     TEXT,
+            op                TEXT    NOT NULL CHECK (op IN (
+                                      'OPEN', 'MERGE', 'CLOSE', 'REOPEN', 'ADOPT', 'UNMERGE'
+                                  )),
+            state             TEXT    NOT NULL DEFAULT 'pending' CHECK (state IN (
+                                      'pending', 'applied', 'rejected', 'failed',
+                                      'orphaned_by_restore'
+                                  )),
+            origin            TEXT    NOT NULL,
+            actor             TEXT,
+            session_id        TEXT,
+            src_workstream_id INTEGER,
+            dst_workstream_id INTEGER,
+            forced            INTEGER NOT NULL DEFAULT 0 CHECK (forced IN (0, 1)),
+            preflight_token   TEXT,
+            payload_json      TEXT    NOT NULL,
+            payload_hash      TEXT    NOT NULL,
+            error_code        TEXT CHECK (error_code IN (
+                                      'preflight_stale', 'invalid_op', 'invalid_target',
+                                      'invalid_payload', 'payload_insufficient', 'conflict',
+                                      'blocked', 'awaiting_charter', 'rank_conflict',
+                                      'open_feeders', 'quiescence', 'mutation_failed',
+                                      'orphaned_by_restore', 'internal'
+                                  )),
+            created_at        TEXT    NOT NULL DEFAULT (datetime('now')),
+            updated_at        TEXT    NOT NULL DEFAULT (datetime('now')),
+            applied_at        TEXT,
+            CHECK (
+                (state = 'pending' AND error_code IS NULL AND applied_at IS NULL)
+                OR (state = 'applied' AND error_code IS NULL AND applied_at IS NOT NULL)
+                OR (state IN ('rejected', 'failed', 'orphaned_by_restore')
+                    AND error_code IS NOT NULL AND applied_at IS NULL)
+            )
+        );
+        CREATE INDEX IF NOT EXISTS idx_workstream_ops_candidate
+            ON workstream_ops(candidate_key, created_at);
+        CREATE INDEX IF NOT EXISTS idx_workstream_ops_state
+            ON workstream_ops(state, created_at);
+        CREATE INDEX IF NOT EXISTS idx_workstream_ops_src
+            ON workstream_ops(src_workstream_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_workstream_ops_dst
+            ON workstream_ops(dst_workstream_id, created_at);
+
+        CREATE TABLE IF NOT EXISTS workstream_derivations (
+            id                INTEGER PRIMARY KEY AUTOINCREMENT,
+            derivation_key    TEXT    NOT NULL UNIQUE,
+            substrate_version TEXT    NOT NULL,
+            window_start      TEXT,
+            window_end        TEXT,
+            snapshot_hash     TEXT    NOT NULL,
+            created_at        TEXT    NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_workstream_derivations_created
+            ON workstream_derivations(created_at, id);
+
+        CREATE TABLE IF NOT EXISTS workstream_derivation_candidates (
+            derivation_id INTEGER NOT NULL REFERENCES workstream_derivations(id) ON DELETE CASCADE,
+            candidate_key TEXT    NOT NULL,
+            op            TEXT    NOT NULL CHECK (op IN ('OPEN', 'MERGE', 'CLOSE', 'ADOPT')),
+            rank          INTEGER NOT NULL,
+            signal_json   TEXT    NOT NULL,
+            PRIMARY KEY (derivation_id, candidate_key)
+        );
+        CREATE INDEX IF NOT EXISTS idx_workstream_derivation_candidate_key
+            ON workstream_derivation_candidates(candidate_key, derivation_id);
+
+        CREATE TABLE IF NOT EXISTS workstream_op_events (
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_key      TEXT    NOT NULL UNIQUE,
+            candidate_key  TEXT    NOT NULL,
+            op_key         TEXT,
+            derivation_id  INTEGER REFERENCES workstream_derivations(id),
+            event_type     TEXT    NOT NULL,
+            verdict        TEXT CHECK (verdict IS NULL OR verdict IN (
+                                   'agree', 'disagree', 'unsure'
+                               )),
+            session_id     TEXT,
+            actor          TEXT,
+            payload_json   TEXT    NOT NULL DEFAULT '{}',
+            payload_hash   TEXT    NOT NULL,
+            created_at     TEXT    NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_workstream_op_events_candidate
+            ON workstream_op_events(candidate_key, created_at);
+        CREATE INDEX IF NOT EXISTS idx_workstream_op_events_derivation
+            ON workstream_op_events(derivation_id, candidate_key);
+        """
+    )
+    conn.commit()
+
+
+# ---------- workstream lifecycle ledgers ----------
+
+def _canonical_json(value: Any) -> str:
+    try:
+        return json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+    except (TypeError, ValueError) as exc:
+        raise WorkstreamPayloadError("payload must be canonical JSON data") from exc
+
+
+def _json_hash(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _required_ledger_text(name: str, value: str) -> str:
+    normalized = value.strip() if isinstance(value, str) else ""
+    if not normalized:
+        raise WorkstreamLedgerError(f"{name} must be a non-empty string")
+    return normalized
+
+
+def validate_workstream_reversal_payload(
+    op: str, payload: Mapping[str, Any],
+) -> None:
+    """Reject applied receipts that cannot support an exact reversal."""
+    normalized_op = str(op).upper()
+    required = WORKSTREAM_REVERSAL_PAYLOAD_KEYS.get(normalized_op)
+    if required is None:
+        raise WorkstreamPayloadError("unknown workstream operation")
+    if not isinstance(payload, Mapping):
+        raise WorkstreamPayloadError("operation payload must be an object")
+    missing = sorted(required.difference(payload.keys()))
+    if missing:
+        raise WorkstreamPayloadError(
+            "reversal payload missing: " + ", ".join(missing)
+        )
+    list_fields = {
+        "assigned_member_ids",
+        "repointed_member_ids",
+        "rehomed_edge_ids",
+        "tombstoned_edge_ids",
+        "retired_priority_ids",
+        "readded_priority_ids",
+        "overflow_retired_priority_ids",
+        "feeder_disposition_edge_ids",
+        "priority_snapshots",
+        "edge_rehomes",
+        "priority_map",
+        "created_priority_snapshots",
+    }
+    for name in required.intersection(list_fields):
+        if not isinstance(payload[name], list):
+            raise WorkstreamPayloadError(f"{name} must be a list")
+    if normalized_op == "OPEN" and not isinstance(payload["probation"], Mapping):
+        raise WorkstreamPayloadError("probation must be an object")
+    if normalized_op in {"CLOSE", "MERGE"}:
+        retired_ids = payload.get("retired_priority_ids")
+        snapshots = payload.get("priority_snapshots")
+        if not isinstance(retired_ids, list) or not isinstance(snapshots, list):
+            raise WorkstreamPayloadError("priority reversal fields must be lists")
+        try:
+            retired = {int(value) for value in retired_ids}
+        except (TypeError, ValueError) as exc:
+            raise WorkstreamPayloadError(
+                "retired_priority_ids must contain integer ids"
+            ) from exc
+        required_snapshot = {
+            "id", "title", "body", "status", "workstream_id", "updated_at",
+            "updated_by", "rank", "retired_at",
+        }
+        snapshot_ids: set[int] = set()
+        for item in snapshots:
+            if not isinstance(item, Mapping) or not required_snapshot.issubset(item):
+                raise WorkstreamPayloadError(
+                    "priority_snapshots must contain complete reversal rows"
+                )
+            try:
+                snapshot_ids.add(int(item["id"]))
+            except (TypeError, ValueError) as exc:
+                raise WorkstreamPayloadError(
+                    "priority snapshot id must be an integer"
+                ) from exc
+        if (
+            len(snapshot_ids) != len(snapshots)
+            or len(retired) != len(retired_ids)
+            or snapshot_ids != retired
+        ):
+            raise WorkstreamPayloadError(
+                "priority_snapshots must exactly cover retired_priority_ids"
+            )
+    if normalized_op == "MERGE":
+        if not isinstance(payload["prior_memberships"], Mapping):
+            raise WorkstreamPayloadError("prior_memberships must be an object")
+        try:
+            member_ids = {int(value) for value in payload["repointed_member_ids"]}
+            membership_ids = {int(value) for value in payload["prior_memberships"]}
+        except (TypeError, ValueError) as exc:
+            raise WorkstreamPayloadError("MERGE membership ids must be integers") from exc
+        if member_ids != membership_ids:
+            raise WorkstreamPayloadError(
+                "prior_memberships must exactly cover repointed_member_ids"
+            )
+        copy_ids = {int(value) for value in payload["readded_priority_ids"]}
+        created = payload["created_priority_snapshots"]
+        required_copy_snapshot = {
+            "id", "kind", "title", "body", "status", "session_id",
+            "created_at", "updated_at", "ref_count", "last_referenced_at",
+            "retention_tier", "parent_id", "depth", "created_by", "updated_by",
+            "workstream_id", "content_hash", "embedding_is_null",
+            "priority_rank", "priority_retired_at", "priority_order_present",
+        }
+        if any(
+            not isinstance(item, Mapping)
+            or not required_copy_snapshot.issubset(item)
+            for item in created
+        ):
+            raise WorkstreamPayloadError(
+                "created_priority_snapshots must contain complete rows"
+            )
+        priority_map = payload["priority_map"]
+        if any(
+            not isinstance(item, Mapping)
+            or not {"copy_priority_id", "source_priority_id"}.issubset(item)
+            for item in priority_map
+        ):
+            raise WorkstreamPayloadError("priority_map must contain complete rows")
+        try:
+            created_ids = {int(item["id"]) for item in created}
+            mapped_copy_ids = {
+                int(item["copy_priority_id"])
+                for item in priority_map
+            }
+        except (TypeError, ValueError) as exc:
+            raise WorkstreamPayloadError("MERGE priority map ids must be integers") from exc
+        if (
+            len(copy_ids) != len(payload["readded_priority_ids"])
+            or len(created_ids) != len(created)
+            or len(mapped_copy_ids) != len(priority_map)
+            or created_ids != copy_ids
+            or mapped_copy_ids != copy_ids
+        ):
+            raise WorkstreamPayloadError(
+                "MERGE priority copy metadata must exactly cover readded ids"
+            )
+        if any(
+            not isinstance(item, Mapping)
+            or not {"old_edge", "action", "new_edge_id", "target_before"}.issubset(item)
+            or not isinstance(item.get("old_edge"), Mapping)
+            or not {"id", "src", "dst", "relation"}.issubset(item["old_edge"])
+            for item in payload["edge_rehomes"]
+        ):
+            raise WorkstreamPayloadError("edge_rehomes must contain complete reversal rows")
+
+
+def get_workstream_op(
+    conn: sqlite3.Connection, op_key: str,
+) -> dict | None:
+    row = conn.execute(
+        "SELECT * FROM workstream_ops WHERE op_key = ?", (op_key,),
+    ).fetchone()
+    if row is None:
+        return None
+    result = dict(row)
+    try:
+        result["payload"] = json.loads(result["payload_json"])
+    except (TypeError, json.JSONDecodeError):
+        result["payload"] = None
+    return result
+
+
+def begin_workstream_op_nc(
+    conn: sqlite3.Connection,
+    *,
+    op_key: str,
+    op: str,
+    origin: str,
+    payload: Mapping[str, Any],
+    candidate_key: str | None = None,
+    session_id: str | None = None,
+    src_workstream_id: int | None = None,
+    dst_workstream_id: int | None = None,
+    forced: bool = False,
+    preflight_token: str | None = None,
+    actor: str | None = None,
+) -> dict:
+    """Create/fetch a pending operation receipt without committing.
+
+    The operation key is immutable across every state, including failure. An
+    exact retry is idempotent; any metadata drift is a hard collision.
+    """
+    key = _required_ledger_text("op_key", op_key)
+    normalized_op = str(op).upper()
+    if normalized_op not in WORKSTREAM_OPS:
+        raise WorkstreamLedgerError("unknown workstream operation")
+    normalized_origin = _required_ledger_text("origin", origin)
+    if not isinstance(payload, Mapping):
+        raise WorkstreamPayloadError("operation payload must be an object")
+    payload_json = _canonical_json(dict(payload))
+    payload_hash = _json_hash(payload_json)
+    immutable = {
+        "candidate_key": candidate_key,
+        "op": normalized_op,
+        "origin": normalized_origin,
+        "actor": actor or _ACTOR,
+        "session_id": session_id,
+        "src_workstream_id": src_workstream_id,
+        "dst_workstream_id": dst_workstream_id,
+        "forced": int(bool(forced)),
+        "preflight_token": preflight_token,
+        "payload_hash": payload_hash,
+    }
+    now = _now()
+    cur = conn.execute(
+        "INSERT INTO workstream_ops "
+        "(op_key, candidate_key, op, state, origin, actor, session_id, "
+        " src_workstream_id, dst_workstream_id, forced, preflight_token, "
+        " payload_json, payload_hash, created_at, updated_at) "
+        "VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(op_key) DO NOTHING",
+        (
+            key,
+            candidate_key,
+            normalized_op,
+            normalized_origin,
+            immutable["actor"],
+            session_id,
+            src_workstream_id,
+            dst_workstream_id,
+            immutable["forced"],
+            preflight_token,
+            payload_json,
+            payload_hash,
+            now,
+            now,
+        ),
+    )
+    row = get_workstream_op(conn, key)
+    if row is None:  # pragma: no cover - SQLite acknowledged insert/read
+        raise WorkstreamLedgerError("workstream operation was not readable")
+    for name, expected in immutable.items():
+        if row[name] != expected:
+            raise WorkstreamLedgerConflictError(
+                f"workstream operation {name} metadata mismatch"
+            )
+    row["created"] = bool(cur.rowcount)
+    return row
+
+
+def begin_workstream_op(conn: sqlite3.Connection, **kwargs: Any) -> dict:
+    try:
+        row = begin_workstream_op_nc(conn, **kwargs)
+        conn.commit()
+        return row
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def finish_workstream_op_nc(
+    conn: sqlite3.Connection,
+    op_key: str,
+    *,
+    state: str,
+    error_code: str | None = None,
+) -> dict:
+    """CAS a pending operation to one immutable terminal state."""
+    if state not in WORKSTREAM_OP_STATES or state == "pending":
+        raise WorkstreamLedgerStateError("operation must finish in a terminal state")
+    if state == "applied":
+        if error_code is not None:
+            raise WorkstreamLedgerStateError("applied operation cannot carry error_code")
+    else:
+        if error_code not in WORKSTREAM_OP_ERROR_CODES:
+            raise WorkstreamLedgerStateError(
+                "non-applied operation needs a closed error_code"
+            )
+        if state == "orphaned_by_restore" and error_code != "orphaned_by_restore":
+            raise WorkstreamLedgerStateError(
+                "orphaned_by_restore state requires matching error_code"
+            )
+    row = get_workstream_op(conn, op_key)
+    if row is None:
+        raise KeyError("unknown workstream operation key")
+    if row["state"] == state and row["error_code"] == error_code:
+        return row
+    if row["state"] != "pending":
+        raise WorkstreamLedgerStateError(
+            f"cannot transition workstream operation {row['state']} to {state}"
+        )
+    if state == "applied":
+        validate_workstream_reversal_payload(row["op"], row["payload"])
+    now = _now()
+    applied_at = now if state == "applied" else None
+    cur = conn.execute(
+        "UPDATE workstream_ops SET state = ?, error_code = ?, updated_at = ?, "
+        "applied_at = ? WHERE op_key = ? AND state = 'pending'",
+        (state, error_code, now, applied_at, op_key),
+    )
+    if cur.rowcount != 1:
+        current = get_workstream_op(conn, op_key)
+        if current is not None and current["state"] == state \
+                and current["error_code"] == error_code:
+            return current
+        raise WorkstreamLedgerStateError("operation CAS lost to another terminal state")
+    result = get_workstream_op(conn, op_key)
+    assert result is not None
+    return result
+
+
+def finish_workstream_op(
+    conn: sqlite3.Connection,
+    op_key: str,
+    *,
+    state: str,
+    error_code: str | None = None,
+) -> dict:
+    try:
+        row = finish_workstream_op_nc(
+            conn, op_key, state=state, error_code=error_code,
+        )
+        conn.commit()
+        return row
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def latest_workstream_derivation(conn: sqlite3.Connection) -> dict | None:
+    row = conn.execute(
+        "SELECT * FROM workstream_derivations ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def latest_workstream_derivation_candidates(
+    conn: sqlite3.Connection,
+) -> list[dict]:
+    latest = latest_workstream_derivation(conn)
+    if latest is None:
+        return []
+    rows = conn.execute(
+        "SELECT * FROM workstream_derivation_candidates "
+        "WHERE derivation_id = ? ORDER BY rank, candidate_key",
+        (latest["id"],),
+    ).fetchall()
+    out: list[dict] = []
+    for row in rows:
+        item = dict(row)
+        item["signal"] = json.loads(item["signal_json"])
+        item["derivation_key"] = latest["derivation_key"]
+        item["substrate_version"] = latest["substrate_version"]
+        out.append(item)
+    return out
+
+
+def record_workstream_derivation_nc(
+    conn: sqlite3.Connection,
+    *,
+    derivation_key: str,
+    substrate_version: str,
+    candidates: Sequence[Mapping[str, Any]],
+    window_start: str | None = None,
+    window_end: str | None = None,
+) -> dict:
+    key = _required_ledger_text("derivation_key", derivation_key)
+    substrate = _required_ledger_text("substrate_version", substrate_version)
+    normalized: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for index, candidate in enumerate(candidates, start=1):
+        candidate_key = _required_ledger_text(
+            "candidate_key", str(candidate.get("candidate_key", "")),
+        )
+        if candidate_key in seen:
+            raise WorkstreamLedgerConflictError("duplicate derivation candidate key")
+        seen.add(candidate_key)
+        op = str(candidate.get("op", "")).upper()
+        if op not in {"OPEN", "MERGE", "CLOSE", "ADOPT"}:
+            raise WorkstreamLedgerError("invalid derivation candidate operation")
+        rank = int(candidate.get("rank", index))
+        signal = candidate.get("signal")
+        if signal is None:
+            signal = {
+                name: value for name, value in candidate.items()
+                if name not in {"candidate_key", "op", "rank"}
+            }
+        signal_json = _canonical_json(signal)
+        normalized.append({
+            "candidate_key": candidate_key,
+            "op": op,
+            "rank": rank,
+            "signal_json": signal_json,
+        })
+    normalized.sort(key=lambda row: (row["rank"], row["candidate_key"]))
+    snapshot_json = _canonical_json(normalized)
+    snapshot_hash = _json_hash(snapshot_json)
+    cur = conn.execute(
+        "INSERT INTO workstream_derivations "
+        "(derivation_key, substrate_version, window_start, window_end, snapshot_hash) "
+        "VALUES (?, ?, ?, ?, ?) ON CONFLICT(derivation_key) DO NOTHING",
+        (key, substrate, window_start, window_end, snapshot_hash),
+    )
+    row = conn.execute(
+        "SELECT * FROM workstream_derivations WHERE derivation_key = ?", (key,),
+    ).fetchone()
+    if row is None:  # pragma: no cover
+        raise WorkstreamLedgerError("workstream derivation was not readable")
+    result = dict(row)
+    for name, expected in {
+        "substrate_version": substrate,
+        "window_start": window_start,
+        "window_end": window_end,
+        "snapshot_hash": snapshot_hash,
+    }.items():
+        if result[name] != expected:
+            raise WorkstreamLedgerConflictError(
+                f"workstream derivation {name} metadata mismatch"
+            )
+    if cur.rowcount:
+        conn.executemany(
+            "INSERT INTO workstream_derivation_candidates "
+            "(derivation_id, candidate_key, op, rank, signal_json) "
+            "VALUES (?, ?, ?, ?, ?)",
+            [
+                (
+                    result["id"],
+                    item["candidate_key"],
+                    item["op"],
+                    item["rank"],
+                    item["signal_json"],
+                )
+                for item in normalized
+            ],
+        )
+    result["created"] = bool(cur.rowcount)
+    return result
+
+
+def record_workstream_derivation(conn: sqlite3.Connection, **kwargs: Any) -> dict:
+    try:
+        row = record_workstream_derivation_nc(conn, **kwargs)
+        conn.commit()
+        return row
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def append_workstream_op_event_nc(
+    conn: sqlite3.Connection,
+    *,
+    event_key: str,
+    candidate_key: str,
+    event_type: str,
+    payload: Mapping[str, Any] | None = None,
+    op_key: str | None = None,
+    derivation_key: str | None = None,
+    verdict: str | None = None,
+    session_id: str | None = None,
+    actor: str | None = None,
+    require_latest_candidate: bool = False,
+) -> dict:
+    key = _required_ledger_text("event_key", event_key)
+    candidate = _required_ledger_text("candidate_key", candidate_key)
+    kind = _required_ledger_text("event_type", event_type)
+    if verdict is not None and verdict not in WORKSTREAM_EVENT_VERDICTS:
+        raise WorkstreamLedgerError("invalid candidate verdict")
+    derivation: dict | None = None
+    if derivation_key is not None:
+        row = conn.execute(
+            "SELECT * FROM workstream_derivations WHERE derivation_key = ?",
+            (derivation_key,),
+        ).fetchone()
+        derivation = dict(row) if row is not None else None
+        if derivation is None:
+            raise KeyError("unknown workstream derivation key")
+    if require_latest_candidate:
+        latest = latest_workstream_derivation(conn)
+        if latest is None:
+            raise WorkstreamLedgerStateError("no current derivation exists")
+        if derivation is not None and derivation["id"] != latest["id"]:
+            raise WorkstreamLedgerStateError("candidate is not from latest derivation")
+        derivation = latest
+        exists = conn.execute(
+            "SELECT 1 FROM workstream_derivation_candidates "
+            "WHERE derivation_id = ? AND candidate_key = ?",
+            (derivation["id"], candidate),
+        ).fetchone()
+        if exists is None:
+            raise WorkstreamLedgerStateError("candidate is not in latest derivation")
+    payload_json = _canonical_json(dict(payload or {}))
+    payload_hash = _json_hash(payload_json)
+    immutable = {
+        "candidate_key": candidate,
+        "op_key": op_key,
+        "derivation_id": derivation["id"] if derivation is not None else None,
+        "event_type": kind,
+        "verdict": verdict,
+        "session_id": session_id,
+        "actor": actor or _ACTOR,
+        "payload_hash": payload_hash,
+    }
+    cur = conn.execute(
+        "INSERT INTO workstream_op_events "
+        "(event_key, candidate_key, op_key, derivation_id, event_type, verdict, "
+        " session_id, actor, payload_json, payload_hash) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(event_key) DO NOTHING",
+        (
+            key,
+            candidate,
+            op_key,
+            immutable["derivation_id"],
+            kind,
+            verdict,
+            session_id,
+            immutable["actor"],
+            payload_json,
+            payload_hash,
+        ),
+    )
+    row = conn.execute(
+        "SELECT * FROM workstream_op_events WHERE event_key = ?", (key,),
+    ).fetchone()
+    if row is None:  # pragma: no cover
+        raise WorkstreamLedgerError("workstream event was not readable")
+    result = dict(row)
+    for name, expected in immutable.items():
+        if result[name] != expected:
+            raise WorkstreamLedgerConflictError(
+                f"workstream event {name} metadata mismatch"
+            )
+    result["payload"] = json.loads(result["payload_json"])
+    result["created"] = bool(cur.rowcount)
+    return result
+
+
+def append_workstream_op_event(conn: sqlite3.Connection, **kwargs: Any) -> dict:
+    try:
+        row = append_workstream_op_event_nc(conn, **kwargs)
+        conn.commit()
+        return row
+    except Exception:
+        conn.rollback()
+        raise
 
 
 # ---------- history seed import ledgers ----------
@@ -1044,7 +1798,7 @@ def finish_seed_import(
 
 # ---------- nodes ----------
 
-def insert_node(
+def insert_node_nc(
     conn: sqlite3.Connection,
     *,
     kind: str,
@@ -1055,6 +1809,7 @@ def insert_node(
     embedding: bytes | None = None,
     workstream_id: int | None = None,
 ) -> int:
+    """Insert a node without committing the surrounding transaction."""
     now = _now()
     cur = conn.execute(
         """
@@ -1072,11 +1827,35 @@ def insert_node(
             "INSERT INTO vec_nodes(rowid, embedding) VALUES (?, ?)",
             (nid, embedding),
         )
+    return int(nid)
+
+
+def insert_node(
+    conn: sqlite3.Connection,
+    *,
+    kind: str,
+    title: str,
+    body: str,
+    status: str = "staging",
+    session_id: str | None = None,
+    embedding: bytes | None = None,
+    workstream_id: int | None = None,
+) -> int:
+    nid = insert_node_nc(
+        conn,
+        kind=kind,
+        title=title,
+        body=body,
+        status=status,
+        session_id=session_id,
+        embedding=embedding,
+        workstream_id=workstream_id,
+    )
     conn.commit()
     return nid
 
 
-def update_node(
+def update_node_nc(
     conn: sqlite3.Connection,
     node_id: int,
     *,
@@ -1085,6 +1864,7 @@ def update_node(
     status: str | None = None,
     embedding: bytes | None = None,
 ) -> None:
+    """Update a node without committing the surrounding transaction."""
     fields, values = [], []
     if title is not None:
         fields.append("title = ?"); values.append(title)
@@ -1106,7 +1886,54 @@ def update_node(
             "INSERT INTO vec_nodes(rowid, embedding) VALUES (?, ?)",
             (node_id, embedding),
         )
+
+
+def update_node(
+    conn: sqlite3.Connection,
+    node_id: int,
+    *,
+    title: str | None = None,
+    body: str | None = None,
+    status: str | None = None,
+    embedding: bytes | None = None,
+) -> None:
+    update_node_nc(
+        conn,
+        node_id,
+        title=title,
+        body=body,
+        status=status,
+        embedding=embedding,
+    )
     conn.commit()
+
+
+def set_node_workstream_nc(
+    conn: sqlite3.Connection,
+    node_ids: Iterable[int],
+    workstream_id: int | None,
+) -> int:
+    """Assign node membership without committing; empty input is a no-op."""
+    ids = sorted({int(node_id) for node_id in node_ids})
+    if not ids:
+        return 0
+    placeholders = ",".join("?" for _ in ids)
+    cur = conn.execute(
+        f"UPDATE nodes SET workstream_id = ?, updated_at = ?, updated_by = ? "
+        f"WHERE id IN ({placeholders})",
+        [workstream_id, _now(), _ACTOR, *ids],
+    )
+    return int(cur.rowcount or 0)
+
+
+def set_node_workstream(
+    conn: sqlite3.Connection,
+    node_ids: Iterable[int],
+    workstream_id: int | None,
+) -> int:
+    count = set_node_workstream_nc(conn, node_ids, workstream_id)
+    conn.commit()
+    return count
 
 
 # ---------- payload size guardrails (compact-by-default for MCP tool returns) ----------
@@ -1273,6 +2100,7 @@ def promote_by_ref_count(
     rows = conn.execute(
         "SELECT n.id FROM nodes n "
         "WHERE n.status = 'staging' AND n.ref_count >= ? "
+        "AND n.kind != 'workstream' "
         "AND instr(COALESCE(n.body, ''), 'Latch-Seed-Import-Key:') = 0 "
         "AND NOT EXISTS (SELECT 1 FROM seed_import si "
         "WHERE si.node_id = n.id)",
@@ -1363,6 +2191,32 @@ def is_traversal_relation(rel: str) -> bool:
 RECONCILIATION_RELATIONS = frozenset({"supersedes", "replaces", "reconciled_by"})
 
 
+def add_edge_nc(
+    conn: sqlite3.Connection,
+    src: int,
+    dst: int,
+    relation: str,
+    *,
+    created_by: str | None = None,
+) -> int:
+    """Insert/reactivate an edge without committing or emitting telemetry."""
+    canonical = canonicalize_relation(relation)
+    conn.execute(
+        "INSERT INTO edges (src, dst, relation, status, created_at, created_by) "
+        "VALUES (?, ?, ?, 'active', ?, ?) "
+        "ON CONFLICT(src, dst,relation) DO UPDATE SET status = 'active' "
+        "WHERE edges.status = 'tombstoned'",
+        (src, dst, canonical, _now(), created_by or _ACTOR),
+    )
+    row = conn.execute(
+        "SELECT id FROM edges WHERE src = ? AND dst = ? AND relation = ?",
+        (src, dst, canonical),
+    ).fetchone()
+    if row is None:  # pragma: no cover - insert/read invariant
+        raise RuntimeError("edge was not readable after insert")
+    return int(row["id"])
+
+
 def add_edge(
     conn: sqlite3.Connection,
     src: int,
@@ -1394,13 +2248,7 @@ def add_edge(
     if canonical in RECONCILIATION_RELATIONS:
         pre_capture = _capture_reconciliation_state(conn, src, dst, canonical)
 
-    conn.execute(
-        "INSERT INTO edges (src, dst, relation, status, created_at, created_by) "
-        "VALUES (?, ?, ?, 'active', ?, ?) "
-        "ON CONFLICT(src, dst, relation) DO UPDATE SET status = 'active' "
-        "WHERE edges.status = 'tombstoned'",
-        (src, dst, canonical, _now(), _ACTOR),
-    )
+    add_edge_nc(conn, src, dst, canonical)
     conn.commit()
 
     if pre_capture is not None:
@@ -1486,6 +2334,27 @@ def _days_since(created_at_str: str | None) -> float | None:
     return (datetime.now(timezone.utc) - t).total_seconds() / 86400.0
 
 
+def tombstone_edge_nc(
+    conn: sqlite3.Connection, src: int, dst: int, relation: str,
+) -> int:
+    """Tombstone an active edge without committing."""
+    cur = conn.execute(
+        "UPDATE edges SET status = 'tombstoned' "
+        "WHERE src = ? AND dst = ? AND relation = ? AND status = 'active'",
+        (src, dst, canonicalize_relation(relation)),
+    )
+    return int(cur.rowcount or 0)
+
+
+def tombstone_edge_id_nc(conn: sqlite3.Connection, edge_id: int) -> int:
+    """Tombstone one active edge by durable ledger id, without committing."""
+    cur = conn.execute(
+        "UPDATE edges SET status = 'tombstoned' WHERE id = ? AND status = 'active'",
+        (edge_id,),
+    )
+    return int(cur.rowcount or 0)
+
+
 def tombstone_edge(
     conn: sqlite3.Connection, src: int, dst: int, relation: str,
 ) -> int:
@@ -1502,13 +2371,9 @@ def tombstone_edge(
     Relation is canonicalized before lookup (mirrors `add_edge`), so
     `tombstone_edge(a, b, "relates_to")` hits the canonical `related_to` row.
     """
-    cur = conn.execute(
-        "UPDATE edges SET status = 'tombstoned' "
-        "WHERE src = ? AND dst = ? AND relation = ? AND status = 'active'",
-        (src, dst, canonicalize_relation(relation)),
-    )
+    count = tombstone_edge_nc(conn, src, dst, relation)
     conn.commit()
-    return cur.rowcount or 0
+    return count
 
 
 # ---------- sessions ----------
@@ -1633,13 +2498,59 @@ def record_retrievals(
     turn: int,
     items: Iterable[tuple[int, float | None]],
     source: str,
+    event_details: Mapping[int, Mapping[str, Any]] | None = None,
 ) -> int:
     """Upsert (session_id, node_id) rows. New rows record sim_at_first; repeat
-    hits bump hit_count + last_injected_at/turn. Returns rows touched."""
+    hits bump hit_count + last_injected_at/turn. Every hit is also appended to
+    ``retrieval_events`` with event-time lane attribution.
+
+    Retrieval telemetry is deliberately best effort: if only the append fails,
+    the active-set writes still commit and a persistent dropped-event counter is
+    incremented. Primary write failures continue to propagate.
+    """
     items = list(items)
     if not items:
         return 0
     now = _now()
+    n = _record_session_retrievals_nc(
+        conn,
+        session_id=session_id,
+        turn=turn,
+        items=items,
+        source=source,
+        now=now,
+    )
+    conn.execute("SAVEPOINT retrieval_event_append")
+    try:
+        _insert_retrieval_events_nc(
+            conn,
+            session_id=session_id,
+            turn=turn,
+            items=items,
+            source=source,
+            event_details=event_details,
+            ts=now,
+        )
+    except sqlite3.Error:
+        conn.execute("ROLLBACK TO SAVEPOINT retrieval_event_append")
+        conn.execute("RELEASE SAVEPOINT retrieval_event_append")
+        _increment_retrieval_dropped_nc(conn, len(items))
+    else:
+        conn.execute("RELEASE SAVEPOINT retrieval_event_append")
+    conn.commit()
+    return n
+
+
+def _record_session_retrievals_nc(
+    conn: sqlite3.Connection,
+    *,
+    session_id: str,
+    turn: int,
+    items: Sequence[tuple[int, float | None]],
+    source: str,
+    now: str,
+) -> int:
+    """Update the active-set table without committing."""
     n = 0
     for node_id, sim in items:
         existing = conn.execute(
@@ -1666,8 +2577,154 @@ def record_retrievals(
                 (now, turn, session_id, node_id),
             )
         n += 1
-    conn.commit()
     return n
+
+
+def _event_workstream_id(conn: sqlite3.Connection, node_id: int) -> int | None:
+    row = conn.execute(
+        "SELECT id, kind, workstream_id FROM nodes WHERE id = ?", (node_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    if row["kind"] == "workstream":
+        return int(row["id"])
+    return int(row["workstream_id"]) if row["workstream_id"] is not None else None
+
+
+def _insert_retrieval_events_nc(
+    conn: sqlite3.Connection,
+    *,
+    session_id: str | None,
+    turn: int | None,
+    items: Sequence[tuple[int, float | None]],
+    source: str,
+    event_details: Mapping[int, Mapping[str, Any]] | None = None,
+    ts: str | None = None,
+) -> int:
+    """Append retrieval event rows without committing."""
+    event_ts = ts or _now()
+    count = 0
+    for node_id, sim in items:
+        detail = (event_details or {}).get(int(node_id), {})
+        workstream_id = detail.get("workstream_id_at_event")
+        if workstream_id is None:
+            workstream_id = _event_workstream_id(conn, int(node_id))
+        conn.execute(
+            "INSERT INTO retrieval_events "
+            "(session_id, ts, turn, node_id, source, seed_node_id, "
+            " reached_node_id, sim, workstream_id_at_event) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                session_id,
+                event_ts,
+                turn,
+                int(node_id),
+                source,
+                detail.get("seed_node_id"),
+                detail.get("reached_node_id"),
+                sim,
+                workstream_id,
+            ),
+        )
+        count += 1
+    return count
+
+
+def _increment_retrieval_dropped_nc(
+    conn: sqlite3.Connection, amount: int = 1,
+) -> None:
+    conn.execute(
+        "INSERT INTO latch_meta(key, value) VALUES (?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = "
+        "CAST(latch_meta.value AS INTEGER) + excluded.value",
+        (RETRIEVAL_DROPPED_META_KEY, str(int(amount))),
+    )
+
+
+def retrieval_events_dropped(conn: sqlite3.Connection) -> int:
+    row = conn.execute(
+        "SELECT value FROM latch_meta WHERE key = ?",
+        (RETRIEVAL_DROPPED_META_KEY,),
+    ).fetchone()
+    if row is None:
+        return 0
+    try:
+        return int(row["value"])
+    except (TypeError, ValueError):
+        return 0
+
+
+def record_retrieval_events(
+    conn: sqlite3.Connection,
+    *,
+    source: str,
+    items: Iterable[tuple[int, float | None]],
+    session_id: str | None = None,
+    turn: int | None = None,
+    event_details: Mapping[int, Mapping[str, Any]] | None = None,
+    ts: str | None = None,
+) -> int:
+    """Append non-active-set contacts such as tool, write, and gate events.
+
+    This path is best effort by definition and returns zero after recording a
+    persistent drop when SQLite rejects the event append.
+    """
+    normalized = [(int(node_id), sim) for node_id, sim in items]
+    if not normalized:
+        return 0
+    resolved_turn = turn
+    if session_id is not None and resolved_turn is None:
+        row = conn.execute(
+            "SELECT turn_count FROM sessions WHERE id = ?", (session_id,),
+        ).fetchone()
+        resolved_turn = int(row["turn_count"]) if row is not None else None
+    conn.execute("SAVEPOINT retrieval_event_only_append")
+    try:
+        count = _insert_retrieval_events_nc(
+            conn,
+            session_id=session_id,
+            turn=resolved_turn,
+            items=normalized,
+            source=source,
+            event_details=event_details,
+            ts=ts,
+        )
+    except sqlite3.Error:
+        conn.execute("ROLLBACK TO SAVEPOINT retrieval_event_only_append")
+        conn.execute("RELEASE SAVEPOINT retrieval_event_only_append")
+        _increment_retrieval_dropped_nc(conn, len(normalized))
+        conn.commit()
+        return 0
+    conn.execute("RELEASE SAVEPOINT retrieval_event_only_append")
+    conn.commit()
+    return count
+
+
+def prune_retrieval_events(
+    conn: sqlite3.Connection,
+    *,
+    retention_days: int = 90,
+    now: datetime | str | None = None,
+) -> int:
+    """Delete append-only retrieval events older than the retention window."""
+    if retention_days < 0:
+        raise ValueError("retention_days must be non-negative")
+    if isinstance(now, str):
+        anchor = _parse_ts(now)
+        if anchor is None:
+            raise ValueError("now must be an ISO-like UTC timestamp")
+    elif isinstance(now, datetime):
+        anchor = now
+        if anchor.tzinfo is None:
+            anchor = anchor.replace(tzinfo=timezone.utc)
+        else:
+            anchor = anchor.astimezone(timezone.utc)
+    else:
+        anchor = datetime.now(timezone.utc)
+    cutoff = (anchor - timedelta(days=retention_days)).strftime("%Y-%m-%d %H:%M:%S")
+    cur = conn.execute("DELETE FROM retrieval_events WHERE ts < ?", (cutoff,))
+    conn.commit()
+    return int(cur.rowcount or 0)
 
 
 def get_active_set(
@@ -1808,13 +2865,98 @@ def _resolve_workstream_id(conn: sqlite3.Connection, node_id: int) -> int | None
     return int(wid) if wid is not None else None
 
 
-def bump_focus(
+def get_focus_row(
+    conn: sqlite3.Connection, workstream_id: int,
+) -> dict | None:
+    row = conn.execute(
+        "SELECT workstream_id, rank, score, set_at, set_by, pinned "
+        "FROM focus WHERE workstream_id = ?",
+        (workstream_id,),
+    ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def set_focus_row_nc(
+    conn: sqlite3.Connection,
+    workstream_id: int,
+    *,
+    score: float,
+    set_at: str,
+    set_by: str,
+    pinned: bool | int,
+    rank: int = 0,
+) -> None:
+    """Write a complete focus row without committing (used by rollback)."""
+    conn.execute(
+        "INSERT INTO focus(workstream_id, rank, score, set_at, set_by, pinned) "
+        "VALUES (?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(workstream_id) DO UPDATE SET "
+        "rank=excluded.rank, score=excluded.score, set_at=excluded.set_at, "
+        "set_by=excluded.set_by, pinned=excluded.pinned",
+        (workstream_id, int(rank), float(score), set_at, set_by, int(bool(pinned))),
+    )
+
+
+def restore_focus_row_nc(
+    conn: sqlite3.Connection, row: Mapping[str, Any],
+) -> None:
+    """Restore a row captured by :func:`get_focus_row`, without committing."""
+    set_focus_row_nc(
+        conn,
+        int(row["workstream_id"]),
+        rank=int(row.get("rank", 0)),
+        score=float(row["score"]),
+        set_at=str(row["set_at"]),
+        set_by=str(row["set_by"]),
+        pinned=int(row["pinned"]),
+    )
+
+
+def delete_focus_row_nc(conn: sqlite3.Connection, workstream_id: int) -> int:
+    cur = conn.execute("DELETE FROM focus WHERE workstream_id = ?", (workstream_id,))
+    return int(cur.rowcount or 0)
+
+
+def set_focus_score_nc(
+    conn: sqlite3.Connection,
+    workstream_id: int,
+    score: float,
+    *,
+    set_at: str | None = None,
+    set_by: str | None = None,
+) -> int:
+    fields = ["score = ?"]
+    values: list[Any] = [float(score)]
+    if set_at is not None:
+        fields.append("set_at = ?")
+        values.append(set_at)
+    if set_by is not None:
+        fields.append("set_by = ?")
+        values.append(set_by)
+    values.append(workstream_id)
+    cur = conn.execute(
+        f"UPDATE focus SET {', '.join(fields)} WHERE workstream_id = ?", values,
+    )
+    return int(cur.rowcount or 0)
+
+
+def set_focus_pinned_nc(
+    conn: sqlite3.Connection, workstream_id: int, pinned: bool | int,
+) -> int:
+    cur = conn.execute(
+        "UPDATE focus SET pinned = ? WHERE workstream_id = ?",
+        (int(bool(pinned)), workstream_id),
+    )
+    return int(cur.rowcount or 0)
+
+
+def bump_focus_nc(
     conn: sqlite3.Connection,
     workstream_id: int | None,
     *,
     delta: float = FOCUS_DEFAULT_DELTA,
     set_by: str = "auto",
-) -> None:
+) -> bool:
     """Add `delta` to the focus row for `workstream_id` (creating it if absent).
     Decay is applied to the existing stored score before adding delta, so
     `score` on disk reflects the freshly-decayed-then-bumped value at
@@ -1827,16 +2969,29 @@ def bump_focus(
     `workstream_id` may be NULL — silently no-op (orphan nodes don't drive focus).
     """
     if workstream_id is None:
-        return
+        return False
     # Defensive: the focus row's PK is FK'd to nodes(id) ON DELETE CASCADE.
     # If the node id doesn't exist or isn't kind='workstream', skip — we'd
     # otherwise create a row that fails FK at commit (or worse, attaches focus
     # to a leaf node).
     row = conn.execute(
-        "SELECT kind FROM nodes WHERE id = ?", (workstream_id,)
+        "SELECT kind, status FROM nodes WHERE id = ?", (workstream_id,)
     ).fetchone()
     if row is None or row["kind"] != "workstream":
-        return
+        return False
+    if row["status"] == "stale":
+        # Redirect merged identities, but never revive focus for a permanently
+        # closed lane.  Local import keeps db.py independent at module load.
+        try:
+            import workstreams
+            active_id = workstreams.resolve_active(
+                conn, int(workstream_id),
+            ).get("active_id")
+        except (ImportError, AttributeError, TypeError, ValueError):
+            active_id = None
+        if active_id is None:
+            return False
+        workstream_id = int(active_id)
 
     now = _now()
     existing = conn.execute(
@@ -1855,8 +3010,19 @@ def bump_focus(
             "UPDATE focus SET score = ?, set_at = ?, set_by = ? WHERE workstream_id = ?",
             (new_score, now, set_by, workstream_id),
         )
+    recompute_focus_ranks_nc(conn)
+    return True
+
+
+def bump_focus(
+    conn: sqlite3.Connection,
+    workstream_id: int | None,
+    *,
+    delta: float = FOCUS_DEFAULT_DELTA,
+    set_by: str = "auto",
+) -> None:
+    bump_focus_nc(conn, workstream_id, delta=delta, set_by=set_by)
     conn.commit()
-    _recompute_focus_ranks(conn)
 
 
 def bump_focus_for_nodes(
@@ -1888,34 +3054,26 @@ def set_focus(
 def pin_focus(conn: sqlite3.Connection, workstream_id: int) -> bool:
     """Insert focus row if missing, set pinned=1. Pinned rows are exempt from
     eviction. Returns True if the workstream id is a valid workstream node."""
-    row = conn.execute(
-        "SELECT kind FROM nodes WHERE id = ?", (workstream_id,)
-    ).fetchone()
-    if row is None or row["kind"] != "workstream":
+    if not bump_focus_nc(conn, workstream_id, delta=0.0, set_by="user"):
         return False
-    bump_focus(conn, workstream_id, delta=0.0, set_by="user")
-    conn.execute(
-        "UPDATE focus SET pinned = 1 WHERE workstream_id = ?", (workstream_id,)
-    )
+    set_focus_pinned_nc(conn, workstream_id, True)
+    recompute_focus_ranks_nc(conn)
     conn.commit()
-    _recompute_focus_ranks(conn)
     return True
 
 
 def unpin_focus(conn: sqlite3.Connection, workstream_id: int) -> None:
-    conn.execute(
-        "UPDATE focus SET pinned = 0 WHERE workstream_id = ?", (workstream_id,)
-    )
+    set_focus_pinned_nc(conn, workstream_id, False)
+    recompute_focus_ranks_nc(conn)
     conn.commit()
-    _recompute_focus_ranks(conn)
 
 
 def drop_focus(conn: sqlite3.Connection, workstream_id: int) -> None:
     """Hard remove from focus table (loses score history). Use sparingly —
     decay alone usually suffices for stale workstreams."""
-    conn.execute("DELETE FROM focus WHERE workstream_id = ?", (workstream_id,))
+    delete_focus_row_nc(conn, workstream_id)
+    recompute_focus_ranks_nc(conn)
     conn.commit()
-    _recompute_focus_ranks(conn)
 
 
 def prune_focus(
@@ -1953,12 +3111,12 @@ def prune_focus(
     conn.execute(
         f"DELETE FROM focus WHERE workstream_id IN ({placeholders})", to_evict
     )
+    recompute_focus_ranks_nc(conn)
     conn.commit()
-    _recompute_focus_ranks(conn)
     return len(to_evict)
 
 
-def _recompute_focus_ranks(conn: sqlite3.Connection) -> None:
+def recompute_focus_ranks_nc(conn: sqlite3.Connection) -> None:
     """Set `rank` to 1..N from the current decayed-score order, pinned first.
     rank is informational — get_focus re-sorts on read."""
     rows = conn.execute(
@@ -1973,6 +3131,11 @@ def _recompute_focus_ranks(conn: sqlite3.Connection) -> None:
             "UPDATE focus SET rank = ? WHERE workstream_id = ?",
             (i, r["workstream_id"]),
         )
+
+
+def _recompute_focus_ranks(conn: sqlite3.Connection) -> None:
+    """Backward-compatible committing wrapper for older internal callers."""
+    recompute_focus_ranks_nc(conn)
     conn.commit()
 
 
@@ -1989,7 +3152,7 @@ def get_focus(
                n.created_by, n.updated_by
         FROM focus f
         JOIN nodes n ON n.id = f.workstream_id
-        WHERE n.status != 'stale'
+        WHERE n.kind = 'workstream' AND n.status != 'stale'
         """
     ).fetchall()
     out: list[dict] = []

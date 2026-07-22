@@ -36,6 +36,7 @@ import numpy as np
 import budget  # noqa: E402
 import db  # noqa: E402
 import embeddings  # noqa: E402
+import log_utils  # noqa: E402
 import model_backends  # noqa: E402
 import paths  # noqa: E402
 
@@ -443,7 +444,7 @@ def build_tree(
 
     # 4. Collect leaf candidates: non-stale, depth=0, has embedding.
     leaf_rows = conn.execute(
-        "SELECT id, kind, title, body, ref_count, embedding "
+        "SELECT id, kind, title, body, ref_count, embedding, workstream_id "
         "FROM nodes "
         "WHERE status != 'stale' AND depth = 0 AND embedding IS NOT NULL"
     ).fetchall()
@@ -505,6 +506,60 @@ def build_tree(
             break
         members = [clusterable[i] for i in cluster]
         member_ids = [m["id"] for m in members]
+        cluster_hash = _cluster_content_hash(members)
+
+        # Structural lifecycle corroboration only: lane ids and node ids, never
+        # bodies.  Text clustering may group candidates, but cannot itself
+        # authorize membership or a lifecycle mutation.
+        lane_counts: dict[int, int] = defaultdict(int)
+        orphan_ids: list[int] = []
+        for member in members:
+            wid = member.get("workstream_id")
+            if wid is None and member.get("kind") == "workstream":
+                wid = member["id"]
+            if wid is None:
+                orphan_ids.append(int(member["id"]))
+            else:
+                lane_counts[int(wid)] += 1
+        if len(lane_counts) >= 2:
+            log_utils.emit_event(
+                "lifecycle",
+                {
+                    "event": "cluster_span",
+                    "cluster_id": cluster_hash[:16],
+                    "workstream_ids": sorted(lane_counts),
+                    "fractions": {
+                        str(wid): round(count / len(members), 6)
+                        for wid, count in sorted(lane_counts.items())
+                    },
+                },
+                project_path=project_path,
+                session_id=None,
+            )
+        if orphan_ids and len(orphan_ids) > len(members) / 2:
+            log_utils.emit_event(
+                "lifecycle",
+                {
+                    "event": "orphan_cluster",
+                    "cluster_id": cluster_hash[:16],
+                    "member_ids": sorted(orphan_ids),
+                    "tree_derived_at": datetime.now().isoformat(timespec="seconds"),
+                },
+                project_path=project_path,
+                session_id=None,
+            )
+        if orphan_ids and lane_counts:
+            log_utils.emit_event(
+                "lifecycle",
+                {
+                    "event": "mixed_lane_orphan_cluster",
+                    "cluster_id": cluster_hash[:16],
+                    "orphan_ids": sorted(orphan_ids),
+                    "workstream_ids": sorted(lane_counts),
+                },
+                project_path=project_path,
+                session_id=None,
+            )
 
         if len(members) < min_cluster_size:
             result["singletons"] += 1
@@ -532,7 +587,6 @@ def build_tree(
             _debug(f"    member id={m['id']} kind={m['kind']!r} "
                    f"title={m['title']!r}")
 
-        cluster_hash = _cluster_content_hash(members)
         cached_id = existing_summaries.get(cluster_hash)
 
         if cached_id is not None:

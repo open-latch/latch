@@ -183,7 +183,8 @@ def _vec_nodes_search(
     ids = [r["rowid"] for r in rows]
     placeholders = ",".join("?" for _ in ids)
     node_rows = conn.execute(
-        f"SELECT id, kind, title, body, status, session_id, created_at, updated_at "
+        f"SELECT id, kind, title, body, status, session_id, created_at, updated_at, "
+        f"workstream_id "
         f"FROM nodes WHERE id IN ({placeholders})",
         ids,
     ).fetchall()
@@ -210,7 +211,8 @@ def _brute_force_vector_search(
     if not include_stale:
         where += " AND status != 'stale'"
     rows = conn.execute(
-        f"SELECT id, kind, title, body, status, session_id, created_at, updated_at, embedding "
+        f"SELECT id, kind, title, body, status, session_id, created_at, updated_at, "
+        f"workstream_id, embedding "
         f"FROM nodes {where}"
     ).fetchall()
     if not rows:

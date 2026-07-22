@@ -390,6 +390,14 @@ def correct_apply(
     bad = db.get_node(conn, bad_node_id)
     if bad is None:
         return {"error": f"node {bad_node_id} not found", "bad_node_id": bad_node_id}
+    if bad["kind"] == "workstream" or kind == "workstream":
+        return {
+            "error": (
+                "workstream lifecycle is machine-owned; generic correction "
+                "cannot create, supersede, or stale a workstream"
+            ),
+            "bad_node_id": bad_node_id,
+        }
 
     t0 = time.perf_counter()
 

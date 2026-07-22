@@ -14,6 +14,7 @@ import _isolation  # noqa: F401,E402
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import artifacts  # noqa: E402
+import authority  # noqa: E402
 import db  # noqa: E402
 import project_direction as pd  # noqa: E402
 
@@ -99,9 +100,9 @@ def test_project_direction_assembles_workstream_spine():
         _assert(item["next_action"] == "run the applied seed catch demo.", item)
         decision_titles = {d["title"]: d for d in item["governing_decisions"]}
         _assert(decision_titles["Keep seed proof local-first"]["authority_tier"]
-                == "foundational_project_decision", decision_titles)
+                == "foundational", decision_titles)
         _assert(decision_titles["Use catch-demo after apply"]["authority_tier"]
-                == "local_implementation_decision", decision_titles)
+                == "lane-local", decision_titles)
         _assert(item["backlog_items"][0]["id"] == backlog, item["backlog_items"])
         _assert(item["recent_progress"][0]["id"] == progress, item["recent_progress"])
         _assert(item["artifacts"][0]["repo"] == "/repo/latch", item["artifacts"])
@@ -111,12 +112,25 @@ def test_project_direction_assembles_workstream_spine():
         text = pd.format_text(report)
         _assert("Latch Project Direction" in text, text)
         _assert("Governing decisions:" in text, text)
-        _assert("foundational_project_decision" in text, text)
+        _assert("foundational" in text, text)
         encoded = json.dumps(report)
         _assert("Confirm catch-demo" in encoded, encoded)
         print("PASS project_direction_assembles_workstream_spine")
     finally:
         _cleanup(tmp, conn)
+
+
+def test_project_direction_uses_shared_graded_authority():
+    _assert(pd.AUTHORITY_RELATIONS is authority.AUTHORITY_RELATIONS, "shared relation set")
+    _assert(pd._authority_tier(
+        relation="constrains", decision_workstream_id=None, workstream_id=41,
+    ) == authority.FOUNDATIONAL, "unscoped project constraint is foundational")
+    _assert(pd._authority_tier(
+        relation="replaces", decision_workstream_id=72, workstream_id=41,
+    ) == authority.GOVERNING, "authority edge governs the rendered lane")
+    _assert(pd._authority_tier(
+        relation="related_to", decision_workstream_id=41, workstream_id=41,
+    ) == authority.LANE_LOCAL, "membership is lane-local in its owning lane")
 
 
 def test_project_direction_falls_back_to_recent_workstreams():
@@ -188,6 +202,52 @@ def test_project_direction_surfaces_unanchored_recent_evidence():
         _cleanup(tmp, conn)
 
 
+def test_project_direction_claims_pending_lifecycle_receipt_once():
+    tmp, conn = _fresh_db()
+    try:
+        ws = db.insert_node(
+            conn,
+            kind="workstream",
+            title="Receipt lane",
+            body="Objective: surface a receipt.\nDone when: visible.",
+            status="canonical",
+        )
+        receipt = (
+            'latch opened workstream "Receipt lane" — recurred across 2 '
+            "sessions since 2026-07-01; Done when: visible."
+        )
+        db.begin_workstream_op(
+            conn,
+            op_key="direction-open-receipt",
+            op="OPEN",
+            origin="auto",
+            candidate_key="candidate:direction-open",
+            dst_workstream_id=ws,
+            payload={
+                "request": {
+                    "title": "Receipt lane",
+                    "done_when": "visible",
+                    "recurrence": {"session_count": 2, "since": "2026-07-01"},
+                },
+                "title": "Receipt lane",
+                "receipt": receipt,
+                "assigned_member_ids": [],
+                "watch_pair": None,
+                "probation": {},
+            },
+        )
+        db.finish_workstream_op(conn, "direction-open-receipt", state="applied")
+
+        first = pd.assemble_project_direction(conn)
+        _assert(first["used"]["lifecycle_receipts"] == 1, first)
+        _assert(receipt in pd.format_text(first), first)
+        second = pd.assemble_project_direction(conn)
+        _assert(second["used"]["lifecycle_receipts"] == 0, second)
+        _assert(receipt not in pd.format_text(second), second)
+    finally:
+        _cleanup(tmp, conn)
+
+
 def test_project_direction_cli_json_output():
     tmp, conn = _fresh_db()
     try:
@@ -217,6 +277,7 @@ def test_project_direction_cli_json_output():
 
 if __name__ == "__main__":
     test_project_direction_assembles_workstream_spine()
+    test_project_direction_uses_shared_graded_authority()
     test_project_direction_falls_back_to_recent_workstreams()
     test_project_direction_handles_empty_kb()
     test_project_direction_surfaces_unanchored_recent_evidence()

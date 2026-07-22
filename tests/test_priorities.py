@@ -15,6 +15,8 @@ from __future__ import annotations
 import shutil
 import sys
 import tempfile
+import threading
+from contextlib import contextmanager
 from pathlib import Path
 
 _SRC = Path(__file__).resolve().parent.parent / "src"
@@ -53,6 +55,185 @@ def _ins(conn, kind, title, body, *, status="staging", workstream_id=None):
     return db.insert_node(
         conn, kind=kind, title=title, body=body, status=status,
         embedding=embeddings.to_blob(vec), workstream_id=workstream_id,
+    )
+
+
+# ---------- public mutation locking ----------
+
+def test_public_priority_mutations_lock_before_opening_db(monkeypatch):
+    """All public priority writers take the lifecycle lock in one order.
+
+    The lock must be entered before the connection is opened and held until
+    after the priority helper returns/commits.  Keeping this ownership at the
+    MCP boundary also prevents lifecycle's already-locked priority calls from
+    recursively acquiring the non-reentrant file lock.
+    """
+    import mcp_server
+
+    events: list[str] = []
+    project = "/deterministic/priority-lock-project"
+    connection = object()
+
+    @contextmanager
+    def observed_lock(project_path, *args, **kwargs):
+        _assert(project_path == project, f"unexpected lock project: {project_path}")
+        events.append("lock:enter")
+        try:
+            yield
+        finally:
+            events.append("lock:exit")
+
+    @contextmanager
+    def observed_conn():
+        events.append("db:enter")
+        try:
+            yield connection
+        finally:
+            events.append("db:exit")
+
+    def observed_add(conn, text, **kwargs):
+        _assert(conn is connection and text == "add", "add arguments changed")
+        events.append("mutate:add")
+        return {"ok": True, "id": 11}
+
+    def observed_reorder(conn, node_id, new_rank):
+        _assert(
+            conn is connection and (node_id, new_rank) == (11, 2),
+            "reorder arguments changed",
+        )
+        events.append("mutate:reorder")
+        return {"ok": True, "id": 11}
+
+    def observed_retire(conn, node_id):
+        _assert(conn is connection and node_id == 11, "retire arguments changed")
+        events.append("mutate:retire")
+        return {"retired": True, "id": 11}
+
+    monkeypatch.setattr(mcp_server, "_project_cwd", lambda: project)
+    monkeypatch.setattr(mcp_server.paths, "is_unlatched_mode", lambda: False)
+    monkeypatch.setattr(mcp_server.lockfile, "writer_lock", observed_lock)
+    monkeypatch.setattr(mcp_server, "_conn", observed_conn)
+    monkeypatch.setattr(mcp_server.priorities, "add_priority", observed_add)
+    monkeypatch.setattr(mcp_server.priorities, "reorder_priority", observed_reorder)
+    monkeypatch.setattr(mcp_server.priorities, "retire_priority", observed_retire)
+
+    _assert(mcp_server.kb_priority_add("add").get("ok"), "public add failed")
+    _assert(
+        mcp_server.kb_priority_reorder(11, 2).get("ok"),
+        "public reorder failed",
+    )
+    _assert(
+        mcp_server.kb_priority_retire(11).get("retired"),
+        "public retire failed",
+    )
+    _assert(
+        events == [
+            "lock:enter", "db:enter", "mutate:add", "db:exit", "lock:exit",
+            "lock:enter", "db:enter", "mutate:reorder", "db:exit", "lock:exit",
+            "lock:enter", "db:enter", "mutate:retire", "db:exit", "lock:exit",
+        ],
+        f"priority mutation lock order changed: {events}",
+    )
+
+
+def test_public_priority_mutations_fail_closed_when_lifecycle_lock_is_busy(
+    monkeypatch,
+):
+    """A live lifecycle writer times out without opening SQLite or mutating."""
+    import mcp_server
+
+    @contextmanager
+    def busy_lock(*args, **kwargs):
+        raise mcp_server.lockfile.CompactionInProgressError("held")
+        yield  # pragma: no cover - makes this a context manager
+
+    def forbidden_conn():
+        raise AssertionError("SQLite must not open before the writer lock")
+
+    monkeypatch.setattr(mcp_server.paths, "is_unlatched_mode", lambda: False)
+    monkeypatch.setattr(mcp_server.lockfile, "writer_lock", busy_lock)
+    monkeypatch.setattr(mcp_server, "_conn", forbidden_conn)
+
+    results = [
+        mcp_server.kb_priority_add("blocked"),
+        mcp_server.kb_priority_reorder(1, 1),
+        mcp_server.kb_priority_retire(1),
+    ]
+    _assert(
+        all(
+            result.get("ok") is False
+            and result.get("reason") == "compaction_in_progress"
+            for result in results
+        ),
+        f"busy priority writes must fail closed: {results}",
+    )
+
+
+def test_public_priority_write_waits_for_shared_lifecycle_lock(
+    tmp_path, monkeypatch,
+):
+    """A public write cannot reach SQLite while the lifecycle lock is held."""
+    import mcp_server
+
+    project = str(tmp_path)
+    worker_attempted_lock = threading.Event()
+    worker_opened_db = threading.Event()
+    original_compactor_lock = mcp_server.lockfile.compactor_lock
+    original_conn = mcp_server._conn
+    result: dict = {}
+
+    @contextmanager
+    def observed_compactor_lock(project_path):
+        if threading.current_thread().name == "public-priority-writer":
+            worker_attempted_lock.set()
+        with original_compactor_lock(project_path) as acquired:
+            yield acquired
+
+    def observed_conn():
+        if threading.current_thread().name == "public-priority-writer":
+            worker_opened_db.set()
+        return original_conn()
+
+    def public_add():
+        result.update(mcp_server.kb_priority_add("serialized priority"))
+
+    monkeypatch.setattr(mcp_server, "_project_cwd", lambda: project)
+    monkeypatch.setattr(mcp_server.paths, "is_unlatched_mode", lambda: False)
+    monkeypatch.setattr(
+        mcp_server.lockfile, "compactor_lock", observed_compactor_lock,
+    )
+    monkeypatch.setattr(mcp_server, "_conn", observed_conn)
+
+    worker = threading.Thread(
+        target=public_add, name="public-priority-writer", daemon=True,
+    )
+    # This is the exact lock lifecycle OPEN/CLOSE/MERGE use.  The public
+    # priority writer must wait outside SQLite until it is released.
+    with mcp_server.lockfile.writer_lock(
+        project, timeout_s=1.0, poll_interval_s=0.01,
+    ):
+        worker.start()
+        _assert(
+            worker_attempted_lock.wait(2.0),
+            "public writer never attempted the shared lifecycle lock",
+        )
+        _assert(
+            not worker_opened_db.wait(0.2),
+            "public writer opened SQLite before acquiring the lifecycle lock",
+        )
+        _assert(worker.is_alive(), "public writer did not wait for the held lock")
+
+    worker.join(timeout=5.0)
+    _assert(not worker.is_alive(), "public writer did not resume after lock release")
+    _assert(result.get("ok"), f"serialized public add failed: {result}")
+
+    # Retire remains idempotent across separately locked public calls.
+    first = mcp_server.kb_priority_retire(result["id"])
+    second = mcp_server.kb_priority_retire(result["id"])
+    _assert(first.get("retired"), f"first retire failed: {first}")
+    _assert(
+        second.get("retired") and second.get("already"),
+        f"second retire lost idempotency under locking: {second}",
     )
 
 
