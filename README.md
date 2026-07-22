@@ -27,8 +27,6 @@
 
 ## The receipt
 
-No preamble. Here is the whole thing.
-
 **A fresh agent proposes a path this project already rejected:**
 
 ```text
@@ -278,8 +276,9 @@ isolated [`uv`](https://docs.astral.sh/uv/) + Python 3.11 runtime — it does no
 profile or require a system Python. It asks which agent surfaces to wire, asks how proactively latch
 should surface judgment, runs their doctor checks, and offers a bounded initial-KB review: selected
 transcripts are listed and redacted before any model call, and nothing is written until you approve
-it. Rerunning the command repairs and reconciles the existing install; it never silently upgrades.
-One installation serves many repos; `--install-dir PATH` (PowerShell `-InstallDir PATH`) picks an
+it. Rerunning the command repairs and reconciles the existing install while keeping its current
+Latch source revision; it never silently switches to a newer release or commit. One installation
+serves many repos; `--install-dir PATH` (PowerShell `-InstallDir PATH`) picks an
 alternate location. Install internals and per-surface manual setup live in
 [ARCHITECTURE.md](./ARCHITECTURE.md).
 

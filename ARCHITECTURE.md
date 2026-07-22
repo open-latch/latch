@@ -255,40 +255,52 @@ automatic Stop/SessionEnd turn/end compaction remains deliberately deferred.
 ### Cursor adapter install (project MCP + rules + commands + AGENTS.md)
 
 Cursor support is a project-local adapter around the shared latch MCP server.
-It does **not** write Claude Code or Codex config, and it does **not** install
-Cursor hooks, native Cursor compaction, Cursor transcript discovery, or a native
-Cursor model backend.
+It does **not** write Claude Code or Codex config. The base install is
+hook-free; pass `--with-hooks` to add current-session context and pre-edit gate
+enforcement. Historical Cursor transcript discovery remains deliberately
+unsupported.
 
 `bin/install_cursor.{sh,ps1}` runs `src/install_cursor.py`, which:
 
 - **Manages project `.cursor/mcp.json`** with a `mcpServers.latch` stdio server
   pointing at `src/mcp_server.py`. It preserves unrelated MCP servers and
-  settings, removes older latch-owned legacy names, and can set
-  `LATCH_MODEL_BACKEND` / `LATCH_GATE_BACKEND` to `claude` or `codex` when
-  `--model-backend` is provided.
+  settings, removes older latch-owned legacy names, and uses the Cursor Agent
+  CLI as the native model backend. Explicit `claude` and `codex` compatibility
+  overrides remain available through `--model-backend`.
 - **Manages `.cursor/rules/latch.mdc`** as a latch-owned always-apply Cursor
   project rule. The rule activates KB-first behavior and foreground
   `latch_gate` receipts.
-- **Installs project-local `.cursor/commands/*.md` prompts** for supported
-  latch workflows such as manual gate, gate report, PM seed, maintenance, and
-  unlatch. The installer deliberately removes latch-owned `latch-compact.md`
-  from Cursor commands because Cursor-native compaction is deferred.
+- **Installs project-local commands and workflow skills** for supported latch
+  operations, including current-session seed and compaction. Those workflows
+  use only the exact conversation/transcript pair recorded by the opt-in
+  SessionStart hook; latch does not scan Cursor's private history folders.
 - **Syncs `AGENTS.md`** using the same shared managed-region mechanics as
   Codex, branded for Cursor on first wiring.
+- **Optionally manages `.cursor/hooks.json`** when `--with-hooks` is passed.
+  The hook layer adds SessionStart context, exact current-session handoff,
+  per-prompt fail-closed pre-edit gate enforcement, and post-tool latch
+  activity context while preserving unrelated hooks.
 
 Usage from the project root whose Cursor workspace should use latch:
 
 ```bash
-/path/to/latch/bin/install_cursor.sh --yes --model-backend codex
-/path/to/latch/bin/install_cursor.sh --check --model-backend codex
-/path/to/latch/bin/latch_cursor_doctor.sh --model-backend codex
+/path/to/latch/bin/install_cursor.sh --yes --with-hooks
+# Windows: C:\path\to\latch\bin\install_cursor.ps1 --yes --with-hooks
+
+/path/to/latch/bin/install_cursor.sh --check --with-hooks
+/path/to/latch/bin/latch_cursor_doctor.sh --with-hooks
 ```
 
 `src/cursor_doctor.py` performs strict static checks for `.cursor/mcp.json`,
-the MCP launch target, `AGENTS.md`, `.cursor/rules/latch.mdc`, and
-`.cursor/commands`. It treats the live Cursor CLI probe as optional: missing
-`agent` is a warning, but if `agent mcp list-tools latch` is available and lacks
-critical tools such as `latch_gate`, the doctor fails.
+the MCP launch target, `AGENTS.md`, Cursor rules, commands, skills, and optional
+hooks. With the native backend it also requires a reachable, authenticated
+Cursor Agent CLI. CLI-side MCP visibility does not replace the user-controlled
+IDE approval and workspace enablement steps.
+
+See the [Cursor reference](./runbooks/cursor.md) for the full hook, privacy,
+current-session, model-backend, doctor, and plugin boundaries. Use the
+[Cursor gate smoke runbook](./runbooks/cursor_gate_smoke.md) for live
+acceptance.
 
 ### Verify the wiring
 
