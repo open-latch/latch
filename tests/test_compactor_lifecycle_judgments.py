@@ -201,6 +201,12 @@ def test_open_proposal_accepts_verified_recurrence_without_mutating_lanes(tmp_pa
         conn, source="gate", session_id="S2", turn=2,
         items=[(member_a, None), (member_b, None)],
     )
+    event_ids = [
+        int(row["id"])
+        for row in conn.execute(
+            "SELECT id FROM retrieval_events ORDER BY id",
+        ).fetchall()
+    ]
     candidate = lifecycle_signals.make_candidate_key("OPEN", [], ["a", "b"])
     db.record_workstream_derivation(
         conn,
@@ -223,7 +229,10 @@ def test_open_proposal_accepts_verified_recurrence_without_mutating_lanes(tmp_pa
             "charter_body": _charter(),
             "seed_member_ids": [member_a, member_b],
             "member_titles": ["member A", "member B"],
-            "recurrence_evidence": {"session_ids": ["S1", "S2"]},
+            "recurrence_evidence": {
+                "session_ids": ["S1", "S2"],
+                "retrieval_event_ids": event_ids,
+            },
         }]},
         title_to_id={},
     )
@@ -242,7 +251,90 @@ def test_open_proposal_accepts_verified_recurrence_without_mutating_lanes(tmp_pa
     assert payload["proposal_validated"] is True
     assert payload["proposal_source"] == "compactor"
     assert payload["recurrence"]["session_count"] == 2
+    assert payload["recurrence"]["retrieval_event_ids"] == event_ids
     assert payload["objective"] == "keep lifecycle judgment deterministic."
+    conn.close()
+
+
+@pytest.mark.parametrize(
+    ("evidence_kind", "expected_reason"),
+    [
+        ("sessions", "unverified_recurrence_session"),
+        ("events", "invalid_retrieval_event_evidence"),
+    ],
+)
+def test_open_proposal_rejects_contacts_recorded_in_another_lane(
+    tmp_path, evidence_kind, expected_reason,
+):
+    conn = _connect(tmp_path)
+    other_lane = _node(conn, kind="workstream", title="Other lane")
+    member = _node(
+        conn, kind="idea", title="formerly assigned member",
+        workstream_id=other_lane,
+    )
+    for session_id in ("S1", "S2"):
+        db.record_retrieval_events(
+            conn,
+            source="tool",
+            session_id=session_id,
+            turn=1,
+            items=[(member, None)],
+        )
+    event_ids = [
+        int(row["id"])
+        for row in conn.execute(
+            "SELECT id FROM retrieval_events WHERE node_id=? ORDER BY id",
+            (member,),
+        ).fetchall()
+    ]
+    assert {
+        int(row["workstream_id_at_event"])
+        for row in conn.execute(
+            "SELECT workstream_id_at_event FROM retrieval_events WHERE node_id=?",
+            (member,),
+        ).fetchall()
+    } == {other_lane}
+    db.set_node_workstream(conn, [member], None)
+    candidate = lifecycle_signals.make_candidate_key(
+        "OPEN", [], ["prior-lane-contact"],
+    )
+    db.record_workstream_derivation(
+        conn,
+        derivation_key=f"prior-lane-{evidence_kind}",
+        substrate_version=lifecycle_signals.SUBSTRATE_VERSION,
+        candidates=[{
+            "candidate_key": candidate,
+            "op": "OPEN",
+            "signal": {"member_ids": [member]},
+        }],
+    )
+    recurrence = (
+        {"session_ids": ["S1", "S2"]}
+        if evidence_kind == "sessions"
+        else {"retrieval_event_ids": event_ids}
+    )
+
+    outcome = compactor._apply_lifecycle_judgments(
+        conn,
+        "prior-lane-proposal",
+        {"workstream_proposals": [{
+            "proposal_key": "must-reject-prior-lane",
+            "candidate_key": candidate,
+            "title": "Invalid recurrence",
+            "charter_body": _charter(),
+            "seed_member_ids": [member],
+            "recurrence_evidence": recurrence,
+        }]},
+        title_to_id={},
+    )
+
+    assert outcome["proposals_accepted"] == 0
+    assert outcome["proposals_rejected"] == 1
+    event = conn.execute(
+        "SELECT payload_json FROM workstream_op_events "
+        "WHERE event_type='proposal_rejected'",
+    ).fetchone()
+    assert expected_reason in json.loads(event["payload_json"])["reasons"]
     conn.close()
 
 

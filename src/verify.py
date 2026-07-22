@@ -398,6 +398,39 @@ def correct_apply(
             ),
             "bad_node_id": bad_node_id,
         }
+    if bad["kind"] == "priority" or kind == "priority":
+        return {
+            "error": (
+                "priority ordering and lifecycle are machine-owned; generic "
+                "correction cannot create, supersede, reconcile, or stale a "
+                "priority; use the priority service"
+            ),
+            "bad_node_id": bad_node_id,
+        }
+
+    reconcile_list = [int(x) for x in (reconcile_ids or []) if int(x) != bad_node_id]
+    referenced_priority_ids: set[int] = set()
+    for node_id in reconcile_list:
+        node = db.get_node(conn, node_id)
+        if node is not None and node["kind"] == "priority":
+            referenced_priority_ids.add(node_id)
+    for link in links or []:
+        dst = link.get("dst")
+        if dst is None:
+            continue
+        linked = db.get_node(conn, int(dst))
+        if linked is not None and linked["kind"] == "priority":
+            referenced_priority_ids.add(int(dst))
+    if referenced_priority_ids:
+        return {
+            "error": (
+                "priority graph state is machine-owned; generic correction "
+                "cannot add reconciliation or caller-supplied edges touching "
+                "a priority; use the priority service"
+            ),
+            "bad_node_id": bad_node_id,
+            "priority_node_ids": sorted(referenced_priority_ids),
+        }
 
     t0 = time.perf_counter()
 
@@ -411,50 +444,73 @@ def correct_apply(
         (bad_node_id,),
     ).fetchone()[0])
 
-    reconcile_list = [int(x) for x in (reconcile_ids or []) if int(x) != bad_node_id]
-
     # (2) insert the corrected node — controlled embed, no on-insert heal.
     blob = embeddings.to_blob(embeddings.embed(f"{title}\n\n{body}"))
-    corrected_id = db.insert_node(
-        conn, kind=kind, title=title, body=body, status=corrected_status,
-        session_id=session_id, embedding=blob, workstream_id=workstream_id,
-    )
+    if conn.in_transaction:
+        raise sqlite3.OperationalError("correct_apply requires a clean connection")
 
-    # (3) primary edge — capture-before-mutation ordering for supersede.
-    staled = False
-    if mode == "supersede":
-        db.add_edge(
-            conn, src=corrected_id, dst=bad_node_id, relation="supersedes",
-            project_path=project_path, session_id=session_id,
-        )
-        db.update_node(conn, bad_node_id, status="stale")  # AFTER add_edge
-        staled = True
-    else:  # reconcile — both stay canonical, bad surfaces corrected via banner
-        db.add_edge(
-            conn, src=bad_node_id, dst=corrected_id, relation="reconciled_by",
-            project_path=project_path, session_id=session_id,
+    reconciliation_events: list[tuple[dict, float]] = []
+
+    def add_edge_atomic(src: int, dst: int, relation: str) -> None:
+        canonical = db.canonicalize_relation(relation)
+        edge_started = time.perf_counter()
+        captured = None
+        if canonical in db.RECONCILIATION_RELATIONS:
+            captured = db._capture_reconciliation_state(conn, src, dst, canonical)
+        db.add_edge_nc(conn, src, dst, canonical)
+        if captured is not None:
+            reconciliation_events.append((captured, edge_started))
+
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        corrected_id = db.insert_node_nc(
+            conn, kind=kind, title=title, body=body, status=corrected_status,
+            session_id=session_id, embedding=blob, workstream_id=workstream_id,
         )
 
-    # (4) reconciled_by edges from judged framing-carriers to the correction.
-    reconciled_applied: list[int] = []
-    for rid in reconcile_list:
-        if db.get_node(conn, rid) is None:
-            continue
-        db.add_edge(
-            conn, src=rid, dst=corrected_id, relation="reconciled_by",
-            project_path=project_path, session_id=session_id,
-        )
-        reconciled_applied.append(rid)
+        # (3) primary edge — capture-before-mutation ordering for supersede.
+        staled = False
+        if mode == "supersede":
+            add_edge_atomic(corrected_id, bad_node_id, "supersedes")
+            db.update_node_nc(conn, bad_node_id, status="stale")  # AFTER edge capture
+            staled = True
+        else:  # reconcile — both stay canonical, bad surfaces corrected via banner
+            add_edge_atomic(bad_node_id, corrected_id, "reconciled_by")
 
-    # (5) caller-supplied links from the corrected node (e.g. advances workstream).
-    for link in links or []:
-        dst = link.get("dst")
-        rel = link.get("relation")
-        if dst is None or not rel:
-            continue
-        db.add_edge(
-            conn, src=corrected_id, dst=int(dst), relation=str(rel),
-            project_path=project_path, session_id=session_id,
+        # (4) reconciled_by edges from judged framing-carriers to the correction.
+        reconciled_applied: list[int] = []
+        for rid in reconcile_list:
+            if db.get_node(conn, rid) is None:
+                continue
+            add_edge_atomic(rid, corrected_id, "reconciled_by")
+            reconciled_applied.append(rid)
+
+        # (5) caller-supplied links from the corrected node.
+        for link in links or []:
+            dst = link.get("dst")
+            rel = link.get("relation")
+            if dst is None or not rel:
+                continue
+            add_edge_atomic(corrected_id, int(dst), str(rel))
+
+        orphan_hint = heal.compute_orphan_hint(conn, corrected_id, body)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+    # Reconciliation telemetry remains capture-before-mutation, but is emitted
+    # only after the complete correction transaction commits.
+    for captured, edge_started in reconciliation_events:
+        captured["elapsed_ms"] = int((time.perf_counter() - edge_started) * 1000)
+        try:
+            captured["intensity"] = latch_intensity()
+        except Exception:
+            captured["intensity"] = None
+        log_utils.emit_event(
+            "reconciliation", captured,
+            project_path=project_path,
+            session_id=session_id,
         )
 
     # (6) structural-only correction.log row (id=1091 / id=1108 — NO titles,
@@ -490,7 +546,6 @@ def correct_apply(
         session_id=session_id,
     )
 
-    orphan_hint = heal.compute_orphan_hint(conn, corrected_id, body)
     return {
         "ok": True,
         "mode": mode,

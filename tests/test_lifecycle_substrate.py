@@ -129,6 +129,42 @@ def test_candidate_and_auto_op_keys_are_canonical():
         lifecycle_signals.make_candidate_key("OPEN", [], [])
 
 
+def test_merge_payload_binding_is_semantic_and_directional():
+    signal = {"left": 3, "right": 8}
+    one = lifecycle_signals.make_candidate_payload_binding(
+        "MERGE",
+        signal,
+        request={
+            "source_workstream_id": 3,
+            "absorber_workstream_id": 8,
+            "dispositions": {"11": {"action": "keep"}},
+        },
+    )
+    equivalent = lifecycle_signals.make_candidate_payload_binding(
+        "merge",
+        {"left": 8, "right": 3},
+        request={
+            "src_workstream_id": 3,
+            "dst_workstream_id": 8,
+            "dispositions": {11: "preserve"},
+        },
+    )
+    reversed_direction = lifecycle_signals.make_candidate_payload_binding(
+        "MERGE",
+        signal,
+        request={
+            "source_workstream_id": 8,
+            "absorber_workstream_id": 3,
+            "dispositions": {11: "preserve"},
+        },
+    )
+    assert one == equivalent
+    assert one != reversed_direction
+    base = lifecycle_signals.make_candidate_key("MERGE", [3, 8])
+    assert lifecycle_signals.candidate_evidence_key(base, one) \
+        == lifecycle_signals.candidate_evidence_key(base, equivalent)
+
+
 def test_workstream_op_ledger_is_idempotent_cas_and_payload_checked(
     tmp_path, monkeypatch,
 ):
@@ -323,4 +359,20 @@ def test_contacts_exclude_turn_zero_null_session_and_focus_gate(tmp_path, monkey
     assert "session_start" not in {
         source for row in contacts for source in row["sources"]
     }
+    rows = [dict(row) for row in conn.execute(
+        "SELECT id,session_id,turn,source FROM retrieval_events ORDER BY id"
+    ).fetchall()]
+    python_ids = {
+        int(row["id"])
+        for row in rows
+        if lifecycle_signals.is_eligible_contact_event(row)
+    }
+    sql_ids = {
+        int(row["id"])
+        for row in conn.execute(
+            "SELECT id FROM retrieval_events WHERE "
+            + lifecycle_signals.eligible_contact_sql()
+        ).fetchall()
+    }
+    assert python_ids == sql_ids
     conn.close()

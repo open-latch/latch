@@ -27,6 +27,7 @@ import db  # noqa: E402
 import embeddings  # noqa: E402
 import feeders  # noqa: E402
 import heal  # noqa: E402
+import lifecycle_signals  # noqa: E402
 import lockfile  # noqa: E402
 import log_utils  # noqa: E402
 import paths  # noqa: E402
@@ -1176,9 +1177,8 @@ def _eligible_contact_sessions(conn, member_ids: list[int]) -> set[str]:
         f"""
         SELECT DISTINCT session_id FROM retrieval_events
         WHERE node_id IN ({placeholders})
-          AND session_id IS NOT NULL
-          AND (source = 'write'
-               OR (turn > 0 AND source IN ('prompt', 'graph', 'tool', 'gate')))
+          AND workstream_id_at_event IS NULL
+          AND {lifecycle_signals.eligible_contact_sql()}
         """,
         member_ids,
     ).fetchall()
@@ -1192,7 +1192,8 @@ def _eligible_retrieval_event_sessions(
         return set(), True
     placeholders = ",".join("?" for _ in event_ids)
     rows = conn.execute(
-        f"SELECT id, session_id, turn, node_id, source FROM retrieval_events "
+        f"SELECT id, session_id, turn, node_id, source, "
+        f"workstream_id_at_event FROM retrieval_events "
         f"WHERE id IN ({placeholders})",
         event_ids,
     ).fetchall()
@@ -1202,16 +1203,9 @@ def _eligible_retrieval_event_sessions(
     sessions: set[str] = set()
     for row in rows:
         eligible = (
-            row["session_id"] is not None
-            and int(row["node_id"]) in members
-            and (
-                row["source"] == "write"
-                or (
-                    row["turn"] is not None
-                    and int(row["turn"]) > 0
-                    and row["source"] in {"prompt", "graph", "tool", "gate"}
-                )
-            )
+            int(row["node_id"]) in members
+            and row["workstream_id_at_event"] is None
+            and lifecycle_signals.is_eligible_contact_event(dict(row))
         )
         if not eligible:
             return set(), False

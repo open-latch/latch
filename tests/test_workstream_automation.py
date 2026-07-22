@@ -84,6 +84,11 @@ def _seed_candidate(
     op: str,
     signal: dict,
 ) -> None:
+    signal = copy.deepcopy(signal)
+    if op in {"MERGE", "ADOPT"} and "candidate_payload_binding" not in signal:
+        binding = lifecycle_signals.make_candidate_payload_binding(op, signal)
+        if binding is not None:
+            signal["candidate_payload_binding"] = binding
     for index in (1, 2):
         db.record_workstream_derivation(
             conn,
@@ -107,6 +112,11 @@ def _record_candidate_once(
     op: str,
     signal: dict,
 ) -> None:
+    signal = copy.deepcopy(signal)
+    if op in {"MERGE", "ADOPT"} and "candidate_payload_binding" not in signal:
+        binding = lifecycle_signals.make_candidate_payload_binding(op, signal)
+        if binding is not None:
+            signal["candidate_payload_binding"] = binding
     db.record_workstream_derivation(
         conn,
         derivation_key=derivation_key,
@@ -200,7 +210,7 @@ def _record_open_origin(
         payload={
             "assigned_member_ids": [],
             "probation": {},
-            "watch_pair": [],
+            "watch_pair": None,
         },
     )
     db.finish_workstream_op(conn, op_key, state="applied")
@@ -274,6 +284,21 @@ def _merge_signal(left: int, right: int, *, with_direction: bool = True) -> dict
             "evidence": {"trigger": "co_contact"},
             "priority_policy_complete": True,
         }
+    else:
+        # Probation merge-back resolves the new lane into its ordered watch
+        # target at planning time. Bind that eventual payload even when the
+        # generic detector direction is intentionally absent in these tests.
+        signal["candidate_payload_binding"] = (
+            lifecycle_signals.make_candidate_payload_binding(
+                "MERGE",
+                signal,
+                request={
+                    "source_workstream_id": right,
+                    "absorber_workstream_id": left,
+                    "dispositions": {},
+                },
+            )
+        )
     return signal
 
 
@@ -738,6 +763,65 @@ def test_accepted_open_proposal_rechecks_contamination_free_sessions(
     conn.close()
 
 
+def test_open_recurrence_rejects_contacts_from_prior_lane_membership(
+    tmp_path, monkeypatch,
+):
+    conn = _connect(tmp_path, monkeypatch)
+    other_lane = _lane(conn)
+    member = db.insert_node(
+        conn,
+        kind="idea",
+        title="formerly assigned member",
+        body="forward",
+        status="staging",
+        workstream_id=other_lane,
+    )
+    for session_id in ("S1", "S2"):
+        db.record_retrieval_events(
+            conn,
+            source="tool",
+            session_id=session_id,
+            turn=1,
+            items=[(member, None)],
+            ts="2026-07-20 12:00:00",
+        )
+    db.set_node_workstream(conn, [member], None)
+    key = lifecycle_signals.make_candidate_key("OPEN", [], ["prior-lane-proof"])
+    _seed_candidate(
+        conn,
+        candidate_key=key,
+        op="OPEN",
+        signal={
+            "qualified": True,
+            "member_ids": [member],
+            "tier1_present": True,
+            "tier1": "multi_session_orphan_contact",
+        },
+    )
+    _accepted_proposal(
+        conn,
+        candidate_key=key,
+        member_ids=[member],
+        record_sessions=False,
+    )
+
+    plan = automation.plan_actions(
+        conn, now=NOW, receipts_live=True, workstreams_module=_fake_module([]),
+    )[0]
+
+    assert {
+        int(row["workstream_id_at_event"])
+        for row in conn.execute(
+            "SELECT workstream_id_at_event FROM retrieval_events WHERE node_id=?",
+            (member,),
+        )
+    } == {other_lane}
+    assert not plan["eligible"]
+    assert plan["policy_evidence"]["proposal_event_status"] \
+        == "recurrence_incomplete"
+    conn.close()
+
+
 def test_rejected_malformed_and_stale_open_proposals_never_qualify(
     tmp_path, monkeypatch,
 ):
@@ -1011,9 +1095,17 @@ def test_attestation_quorum_persists_while_candidate_key_persists(
 def test_detector_shaped_merge_is_preflighted_and_reachable(tmp_path, monkeypatch):
     conn = _connect(tmp_path, monkeypatch)
     left, right = _lane(conn), _lane(conn)
-    key = lifecycle_signals.make_candidate_key("MERGE", [left, right])
+    base_key = lifecycle_signals.make_candidate_key("MERGE", [left, right])
+    signal = _merge_signal(left, right)
+    signal["base_candidate_key"] = base_key
+    signal["candidate_payload_binding"] = (
+        lifecycle_signals.make_candidate_payload_binding("MERGE", signal)
+    )
+    key = lifecycle_signals.candidate_evidence_key(
+        base_key, signal["candidate_payload_binding"],
+    )
     _seed_candidate(
-        conn, candidate_key=key, op="MERGE", signal=_merge_signal(left, right),
+        conn, candidate_key=key, op="MERGE", signal=signal,
     )
     _attest(conn, key, "S1", "S2")
     _exercise_unmerge(conn)
@@ -1029,6 +1121,85 @@ def test_detector_shaped_merge_is_preflighted_and_reachable(tmp_path, monkeypatc
     assert calls[0]["op"] == "MERGE"
     assert calls[0]["force"] is False
     assert calls[0]["candidate_key"] == key
+    conn.close()
+
+
+@pytest.mark.parametrize("changed_field", ["direction", "dispositions"])
+def test_merge_payload_change_resets_attestation_and_calibration(
+    tmp_path, monkeypatch, changed_field,
+):
+    conn = _connect(tmp_path, monkeypatch)
+    left, right = _lane(conn), _lane(conn)
+    key = lifecycle_signals.make_candidate_key("MERGE", [left, right])
+    original = _merge_signal(left, right)
+    _record_candidate_once(
+        conn,
+        derivation_key="merge-binding-d1",
+        candidate_key=key,
+        op="MERGE",
+        signal=original,
+    )
+    _record_candidate_once(
+        conn,
+        derivation_key="merge-binding-d2",
+        candidate_key=key,
+        op="MERGE",
+        signal=original,
+    )
+    _attest(conn, key, "S1", "S2")
+    changed = _merge_signal(right, left) if changed_field == "direction" else copy.deepcopy(original)
+    if changed_field == "dispositions":
+        changed["apply_request"]["dispositions"] = {"999": "preserve"}
+    _record_candidate_once(
+        conn,
+        derivation_key="merge-binding-d3",
+        candidate_key=key,
+        op="MERGE",
+        signal=changed,
+    )
+
+    plan = automation.plan_actions(
+        conn, now=NOW, receipts_live=True, workstreams_module=_fake_module([]),
+    )[0]
+
+    binding = plan["policy_evidence"]["candidate_payload_binding"]
+    assert binding["validated"] is True
+    assert plan["candidate_evidence_key"]
+    assert plan["attestation"]["agree_sessions"] == []
+    assert not plan["attestation"]["quorum"]
+    assert plan["calibration"]["consecutive_present"] == 1
+    assert not plan["calibration"]["graduated"]
+    conn.close()
+
+
+def test_legacy_unbound_merge_evidence_fails_closed(tmp_path, monkeypatch):
+    conn = _connect(tmp_path, monkeypatch)
+    left, right = _lane(conn), _lane(conn)
+    key = lifecycle_signals.make_candidate_key("MERGE", [left, right])
+    signal = _merge_signal(left, right)
+    signal.pop("candidate_payload_binding", None)
+    for index in (1, 2):
+        db.record_workstream_derivation(
+            conn,
+            derivation_key=f"legacy-unbound-{index}",
+            substrate_version=workstream_detector.SUBSTRATE_VERSION,
+            candidates=[{
+                "candidate_key": key,
+                "op": "MERGE",
+                "signal": signal,
+            }],
+        )
+    _attest(conn, key, "S1", "S2")
+    _exercise_unmerge(conn)
+
+    plan = automation.plan_actions(
+        conn, now=NOW, receipts_live=True, workstreams_module=_fake_module([]),
+    )[0]
+
+    assert "candidate_payload_binding_incomplete" in plan["reason_codes"]
+    assert not plan["attestation"]["quorum"]
+    assert not plan["calibration"]["graduated"]
+    assert plan["candidate_evidence_key"] is None
     conn.close()
 
 
@@ -1259,6 +1430,7 @@ def test_structurally_completed_close_is_preflighted_and_reachable(
     key = lifecycle_signals.make_candidate_key("CLOSE", [lane])
     signal = {
         "qualified": True,
+        "cap_pressure": True,
         "workstream_id": lane,
         "outcome": "completed",
         "completion_evidence": {
@@ -1283,6 +1455,7 @@ def test_structurally_completed_close_is_preflighted_and_reachable(
     )
     plan = result["plans"][0]
     assert plan["eligible"]
+    assert "cap_pressure" not in plan["reason_codes"]
     assert plan["policy_evidence"]["completion"]["structural_completion"]
     assert plan["apply_request"]["preflight_token"]
     assert calls[0]["op"] == "CLOSE"
@@ -1410,7 +1583,7 @@ def test_detector_shaped_adopt_is_reachable_without_force(tmp_path, monkeypatch)
         )
         for kind in ("idea", "progress")
     ]
-    key = lifecycle_signals.make_candidate_key("ADOPT", [lane])
+    base_key = lifecycle_signals.make_candidate_key("ADOPT", [lane])
     signal = {
         "qualified": True,
         "workstream_id": lane,
@@ -1432,6 +1605,13 @@ def test_detector_shaped_adopt_is_reachable_without_force(tmp_path, monkeypatch)
             "allow_auto_apply": True,
         },
     }
+    signal["base_candidate_key"] = base_key
+    signal["candidate_payload_binding"] = (
+        lifecycle_signals.make_candidate_payload_binding("ADOPT", signal)
+    )
+    key = lifecycle_signals.candidate_evidence_key(
+        base_key, signal["candidate_payload_binding"],
+    )
     _seed_candidate(conn, candidate_key=key, op="ADOPT", signal=signal)
     calls: list[dict] = []
     result = automation.run_governed(
@@ -1443,6 +1623,110 @@ def test_detector_shaped_adopt_is_reachable_without_force(tmp_path, monkeypatch)
     assert calls[0]["candidate_key"] == key
     assert calls[0]["allow_auto_apply"] is True
     assert "force" not in calls[0]
+    conn.close()
+
+
+@pytest.mark.parametrize(
+    ("changed_field", "resets_evidence"),
+    [
+        ("members", True),
+        ("relations", True),
+        ("sessions", False),
+    ],
+)
+def test_adopt_action_changes_reset_evidence_but_new_contacts_do_not(
+    tmp_path, monkeypatch, changed_field, resets_evidence,
+):
+    conn = _connect(tmp_path, monkeypatch)
+    lane = _lane(conn)
+    members = [
+        db.insert_node(
+            conn, kind="idea", title=f"member {index}", body="forward",
+            status="staging",
+        )
+        for index in range(3)
+    ]
+
+    def adopt_signal(
+        member_ids: list[int],
+        target_id: int,
+        *,
+        relation: str = "advances",
+        sessions: list[str] | None = None,
+    ) -> dict:
+        sessions = sessions or ["S1", "S2"]
+        return {
+            "qualified": True,
+            "workstream_id": lane,
+            "member_ids": member_ids,
+            "tier1": "multi_session_orphan_contact",
+            "tier1_session_ids": sessions,
+            "tier2_inputs": ["shared_target"],
+            "shared_target_ids": [target_id],
+            "tree_ids": [90],
+            "bounded_evidence": [{
+                "tree_id": 90,
+                "member_ids": member_ids,
+                "shared_target_ids": [target_id],
+            }],
+            "apply_request": {
+                "workstream_id": lane,
+                "node_ids": member_ids,
+                "relations": {str(node_id): relation for node_id in member_ids},
+                "evidence": {
+                    "trigger": "shared_target",
+                    "forward_looking": True,
+                    "session_ids": sessions,
+                    "shared_target_ids": [target_id],
+                    "tree_ids": [90],
+                },
+                "allow_auto_apply": True,
+            },
+        }
+
+    key = lifecycle_signals.make_candidate_key("ADOPT", [lane])
+    original = adopt_signal(members[:2], 999)
+    for suffix in ("d1", "d2"):
+        _record_candidate_once(
+            conn,
+            derivation_key=f"adopt-binding-{suffix}",
+            candidate_key=key,
+            op="ADOPT",
+            signal=original,
+        )
+    _attest(conn, key, "S1", "S2")
+    if changed_field == "members":
+        changed = adopt_signal(members, 999)
+    elif changed_field == "relations":
+        changed = adopt_signal(members[:2], 999, relation="motivates")
+    else:
+        changed = adopt_signal(
+            members[:2], 999, sessions=["S1", "S2", "S3"],
+        )
+    _record_candidate_once(
+        conn,
+        derivation_key="adopt-binding-d3",
+        candidate_key=key,
+        op="ADOPT",
+        signal=changed,
+    )
+
+    plan = automation.plan_actions(
+        conn, now=NOW, receipts_live=True, workstreams_module=_fake_module([]),
+    )[0]
+
+    assert plan["policy_evidence"]["candidate_payload_binding"]["validated"]
+    if resets_evidence:
+        assert plan["attestation"]["agree_sessions"] == []
+        assert not plan["attestation"]["quorum"]
+        assert plan["calibration"]["consecutive_present"] == 1
+        assert not plan["calibration"]["graduated"]
+    else:
+        assert plan["attestation"]["agree_sessions"] == ["S1", "S2"]
+        assert plan["attestation"]["quorum"]
+        assert plan["calibration"]["consecutive_present"] \
+            == automation.CALIBRATION_WINDOWS
+        assert plan["calibration"]["graduated"]
     conn.close()
 
 
@@ -1510,6 +1794,56 @@ def test_trailing_regret_rate_demotes_an_otherwise_eligible_plan(
     assert regret["rate"] == 1.0
     assert "trailing_regret_rate_exceeded" in plan["reason_codes"]
     assert calls == []
+    conn.close()
+
+
+def test_completed_auto_open_is_success_not_trailing_regret(tmp_path, monkeypatch):
+    conn = _connect(tmp_path, monkeypatch)
+    lane = _lane(conn)
+    db.begin_workstream_op(
+        conn,
+        op_key="auto-open-completed",
+        op="OPEN",
+        origin="auto",
+        dst_workstream_id=lane,
+        payload={
+            "assigned_member_ids": [],
+            "watch_pair": None,
+            "probation": {
+                "active": True,
+                "opened_at": "2026-07-01 00:00:00",
+            },
+        },
+    )
+    db.finish_workstream_op(conn, "auto-open-completed", state="applied")
+    result = workstreams.close_workstream(
+        conn,
+        lane,
+        outcome="completed",
+        reason="done when satisfied",
+        op_key="manual-close-completed",
+        dispositions={},
+        origin="manual",
+        project_path=str(tmp_path),
+    )
+    assert result["state"] == "applied"
+
+    state = automation._trailing_regret_state(conn)
+
+    assert state["denominator"] == 1
+    assert state["successful_completion_count"] == 1
+    assert state["reversal_count"] == 0
+    assert state["ambiguous_count"] == 0
+    assert state["rate"] == 0.0
+    assert state["complete"] is True
+
+    key = lifecycle_signals.make_candidate_key("OPEN", [], ["post-completion"])
+    _seed_candidate(conn, candidate_key=key, op="OPEN", signal=_open_signal())
+    plan = automation.plan_actions(
+        conn, now=NOW, receipts_live=True, workstreams_module=_fake_module([]),
+    )[0]
+    assert "trailing_regret_rate_exceeded" not in plan["reason_codes"]
+    assert "trailing_regret_linkage_ambiguous" not in plan["reason_codes"]
     conn.close()
 
 

@@ -23,6 +23,15 @@ import log_utils  # noqa: E402
 RECEIPTS_CHANNEL_LIVE = True
 
 
+def _begin_surface_claims(conn: sqlite3.Connection) -> None:
+    """Serialize one read-and-claim pass without disturbing caller writes."""
+    if conn.in_transaction:
+        raise sqlite3.OperationalError(
+            "lifecycle receipt claims require a clean connection"
+        )
+    conn.execute("BEGIN IMMEDIATE")
+
+
 def _candidate_suggestion(conn: sqlite3.Connection, op: str, signal: dict) -> str:
     """Render one bounded, statement-only trust-ladder suggestion."""
     normalized = str(op).upper()
@@ -206,26 +215,28 @@ def surface_pending_suggestions(
     operation row or mutate any workstream; the event only proves that the
     trust ladder has a viable user-facing channel.
     """
-    latest = db.latest_workstream_derivation(conn)
-    if latest is None:
-        return []
-    rows = conn.execute(
-        "SELECT c.candidate_key, c.op, c.signal_json "
-        "FROM workstream_derivation_candidates c "
-        "WHERE c.derivation_id=? "
-        "AND NOT EXISTS ("
-        "  SELECT 1 FROM workstream_op_events e "
-        "  WHERE e.candidate_key=c.candidate_key "
-        "    AND e.event_type='suggestion_surfaced'"
-        ") "
-        "AND NOT EXISTS ("
-        "  SELECT 1 FROM workstream_ops o "
-        "  WHERE o.candidate_key=c.candidate_key AND o.state='applied'"
-        ") ORDER BY c.rank, c.candidate_key LIMIT ?",
-        (int(latest["id"]), max(20, int(limit) * 4)),
-    ).fetchall()
     suggestions: list[tuple[str, str]] = []
+    _begin_surface_claims(conn)
     try:
+        latest = db.latest_workstream_derivation(conn)
+        if latest is None:
+            conn.commit()
+            return []
+        rows = conn.execute(
+            "SELECT c.candidate_key, c.op, c.signal_json "
+            "FROM workstream_derivation_candidates c "
+            "WHERE c.derivation_id=? "
+            "AND NOT EXISTS ("
+            "  SELECT 1 FROM workstream_op_events e "
+            "  WHERE e.candidate_key=c.candidate_key "
+            "    AND e.event_type='suggestion_surfaced'"
+            ") "
+            "AND NOT EXISTS ("
+            "  SELECT 1 FROM workstream_ops o "
+            "  WHERE o.candidate_key=c.candidate_key AND o.state='applied'"
+            ") ORDER BY c.rank, c.candidate_key LIMIT ?",
+            (int(latest["id"]), max(20, int(limit) * 4)),
+        ).fetchall()
         for row in rows:
             try:
                 signal = json.loads(row["signal_json"])
@@ -237,7 +248,7 @@ def surface_pending_suggestions(
                 continue
             candidate_key = str(row["candidate_key"])
             suggestion = _candidate_suggestion(conn, str(row["op"]), signal)
-            db.append_workstream_op_event_nc(
+            claimed = db.append_workstream_op_event_nc(
                 conn,
                 event_key=f"suggestion:{candidate_key}",
                 candidate_key=candidate_key,
@@ -247,6 +258,8 @@ def surface_pending_suggestions(
                 session_id=session_id,
                 require_latest_candidate=True,
             )
+            if not claimed["created"]:
+                continue
             suggestions.append((candidate_key, suggestion))
             if len(suggestions) >= max(1, int(limit)):
                 break
@@ -458,16 +471,7 @@ def surface_pending(
     limit: int = 20,
 ) -> list[str]:
     """Atomically claim pending receipts and return their display strings."""
-    items = pending_receipts(conn, limit=limit)
-    if not items:
-        return []
-    try:
-        for item in items:
-            mark_surfaced_nc(conn, item["op_key"], session_id=session_id)
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
+    items = surface_pending_items(conn, session_id=session_id, limit=limit)
     return [item["receipt"] for item in items]
 
 
@@ -478,17 +482,19 @@ def surface_pending_items(
     limit: int = 20,
 ) -> list[dict]:
     """Claim pending receipts while retaining operation metadata for UI policy."""
-    items = pending_receipts(conn, limit=limit)
-    if not items:
-        return []
+    claimed: list[dict] = []
+    _begin_surface_claims(conn)
     try:
+        items = pending_receipts(conn, limit=limit)
         for item in items:
-            mark_surfaced_nc(conn, item["op_key"], session_id=session_id)
+            event = mark_surfaced_nc(conn, item["op_key"], session_id=session_id)
+            if event["created"]:
+                claimed.append(item)
         conn.commit()
     except Exception:
         conn.rollback()
         raise
-    return items
+    return claimed
 
 
 def emit_applied(

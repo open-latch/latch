@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import sys
+import threading
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -66,6 +68,141 @@ def test_mcp_insert_and_update_redirect_merged_membership(boundary_kb, monkeypat
     updated = mcp_server.kb_update(orphan, workstream_id=merged)
     assert updated["workstream_resolution"]["state"] == "merged"
     assert db.get_node(conn, orphan)["workstream_id"] == active
+
+
+def test_generic_insert_locks_before_membership_resolution_and_connection(
+    monkeypatch,
+):
+    events: list[str] = []
+    project = "/deterministic/generic-membership-lock"
+    connection = object()
+
+    @contextmanager
+    def observed_lock(project_path, *args, **kwargs):
+        assert project_path == project
+        events.append("lock:enter")
+        try:
+            yield
+        finally:
+            events.append("lock:exit")
+
+    @contextmanager
+    def observed_conn():
+        events.append("db:enter")
+        try:
+            yield connection
+        finally:
+            events.append("db:exit")
+
+    def observed_resolution(conn, requested_id):
+        assert conn is connection and requested_id == 41
+        events.append("membership:resolve")
+        return 42, {"resolved_workstream_id": 42}, None
+
+    def observed_insert(conn, **kwargs):
+        assert conn is connection and kwargs["workstream_id"] == 42
+        events.append("mutate:commit")
+        return {"ok": True}
+
+    monkeypatch.setattr(mcp_server, "_project_cwd", lambda: project)
+    monkeypatch.setattr(mcp_server.paths, "is_unlatched_mode", lambda: False)
+    monkeypatch.setattr(mcp_server.lockfile, "writer_lock", observed_lock)
+    monkeypatch.setattr(mcp_server, "_conn", observed_conn)
+    monkeypatch.setattr(
+        mcp_server, "_resolve_membership_for_mcp", observed_resolution,
+    )
+    monkeypatch.setattr(heal, "insert_with_heal", observed_insert)
+
+    result = mcp_server.kb_insert(
+        "fact", "serialized", "body", workstream_id=41,
+    )
+
+    assert result["ok"] is True
+    assert events == [
+        "lock:enter",
+        "db:enter",
+        "membership:resolve",
+        "mutate:commit",
+        "db:exit",
+        "lock:exit",
+    ]
+
+
+def test_generic_insert_waits_outside_sqlite_for_lifecycle_writer(
+    tmp_path, monkeypatch,
+):
+    project = tmp_path / "serialized-project"
+    project.mkdir()
+    setup_conn = db.connect(str(project))
+    lane = _lane(setup_conn, "Active lane", status="canonical")
+    setup_conn.close()
+
+    worker_attempted_lock = threading.Event()
+    worker_opened_db = threading.Event()
+    original_compactor_lock = mcp_server.lockfile.compactor_lock
+    original_conn = mcp_server._conn
+    result: dict = {}
+
+    @contextmanager
+    def observed_compactor_lock(project_path):
+        if threading.current_thread().name == "generic-membership-writer":
+            worker_attempted_lock.set()
+        with original_compactor_lock(project_path) as acquired:
+            yield acquired
+
+    def observed_conn():
+        if threading.current_thread().name == "generic-membership-writer":
+            worker_opened_db.set()
+        return original_conn()
+
+    def insert_without_heal(
+        conn, *, kind, title, body, status, workstream_id, **_kwargs,
+    ):
+        return {
+            "id": db.insert_node(
+                conn,
+                kind=kind,
+                title=title,
+                body=body,
+                status=status,
+                workstream_id=workstream_id,
+            ),
+        }
+
+    def public_insert():
+        result.update(mcp_server.kb_insert(
+            "fact", "serialized", "body", workstream_id=lane,
+        ))
+
+    monkeypatch.setattr(mcp_server, "_project_cwd", lambda: str(project))
+    monkeypatch.setattr(mcp_server.paths, "is_unlatched_mode", lambda: False)
+    monkeypatch.setattr(
+        mcp_server.lockfile, "compactor_lock", observed_compactor_lock,
+    )
+    monkeypatch.setattr(mcp_server, "_conn", observed_conn)
+    monkeypatch.setattr(heal, "insert_with_heal", insert_without_heal)
+
+    worker = threading.Thread(
+        target=public_insert,
+        name="generic-membership-writer",
+        daemon=True,
+    )
+    with mcp_server.lockfile.writer_lock(
+        str(project), timeout_s=1.0, poll_interval_s=0.01,
+    ):
+        worker.start()
+        assert worker_attempted_lock.wait(2.0)
+        assert not worker_opened_db.wait(0.2)
+        assert worker.is_alive()
+
+    worker.join(timeout=5.0)
+    assert not worker.is_alive()
+    assert result.get("id") is not None
+    check_conn = db.connect(str(project))
+    try:
+        assert db.get_node(check_conn, int(result["id"]))["workstream_id"] == lane
+    finally:
+        check_conn.close()
 
 
 def test_mcp_membership_rejects_closed_or_missing_lane_without_write(
@@ -169,6 +306,146 @@ def test_mcp_generic_insert_cannot_bypass_priority_ordering(
     assert conn.execute(
         "SELECT COUNT(*) FROM nodes WHERE kind = 'priority'",
     ).fetchone()[0] == before
+
+
+def test_mcp_correction_cannot_create_or_mutate_priorities(boundary_kb):
+    _, conn = boundary_kb
+    bad = db.insert_node(
+        conn, kind="fact", title="Incorrect fact", body="old",
+        status="canonical",
+    )
+    priority_result = priorities.add_priority(conn, "Protected priority")
+    assert priority_result["ok"] is True
+    priority_id = int(priority_result["id"])
+    before_count = conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0]
+
+    create_attempt = mcp_server.kb_correct_apply(
+        bad,
+        mode="supersede",
+        title="Illicit priority",
+        body="must not be written",
+        kind="priority",
+    )
+    supersede_attempt = mcp_server.kb_correct_apply(
+        priority_id,
+        mode="supersede",
+        title="Replacement",
+        body="must not stale the priority",
+        kind="decision",
+    )
+    reconcile_attempt = mcp_server.kb_correct_apply(
+        priority_id,
+        mode="reconcile",
+        title="Replacement",
+        body="must not link the priority",
+        kind="decision",
+    )
+
+    for result in (create_attempt, supersede_attempt, reconcile_attempt):
+        assert result.get("ok") is not True
+        assert "priority" in result["error"]
+        assert "machine-owned" in result["error"]
+    assert conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0] == before_count
+    assert db.get_node(conn, bad)["status"] == "canonical"
+    assert db.get_node(conn, priority_id)["status"] == "canonical"
+    assert conn.execute(
+        "SELECT COUNT(*) FROM edges WHERE src=? OR dst=?",
+        (priority_id, priority_id),
+    ).fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("reference_field", ["reconcile_ids", "links"])
+def test_mcp_correction_rejects_indirect_priority_graph_mutation(
+    boundary_kb, reference_field,
+):
+    _, conn = boundary_kb
+    bad = db.insert_node(conn, kind="fact", title="Wrong", body="old")
+    priority_id = int(priorities.add_priority(conn, "Protected priority")["id"])
+    before_count = conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0]
+    kwargs = (
+        {"reconcile_ids": [priority_id]}
+        if reference_field == "reconcile_ids"
+        else {"links": [{"dst": priority_id, "relation": "supersedes"}]}
+    )
+
+    result = mcp_server.kb_correct_apply(
+        bad,
+        mode="reconcile",
+        title="Corrected",
+        body="new",
+        kind="fact",
+        **kwargs,
+    )
+
+    assert result.get("ok") is not True
+    assert result["priority_node_ids"] == [priority_id]
+    assert conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0] == before_count
+    assert conn.execute(
+        "SELECT COUNT(*) FROM edges WHERE src=? OR dst=?",
+        (priority_id, priority_id),
+    ).fetchone()[0] == 0
+
+
+def test_public_graph_writers_cannot_attach_edges_to_priorities(
+    boundary_kb, monkeypatch,
+):
+    _, conn = boundary_kb
+    priority_id = int(priorities.add_priority(conn, "Protected priority")["id"])
+    source = db.insert_node(conn, kind="fact", title="Source", body="Source")
+    before_nodes = conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0]
+
+    direct_to = mcp_server.kb_link(source, priority_id, "supersedes")
+    direct_from = mcp_server.kb_link(priority_id, source, "replaces")
+    coerced_bool = mcp_server.kb_link(True, source, "related_to")
+    coerced_float_string = mcp_server.kb_link(
+        f"{priority_id}.0", source, "related_to",
+    )
+
+    def unexpected_insert(*_args, **_kwargs):
+        raise AssertionError("priority edge guard must run before node insertion")
+
+    monkeypatch.setattr(heal, "insert_with_heal", unexpected_insert)
+    inserted = mcp_server.kb_insert(
+        "fact",
+        "Must not be inserted",
+        "A priority edge is invalid",
+        links=[{"dst": priority_id, "relation": "related_to"}],
+    )
+    captured = mcp_server.kb_capture_decision(
+        title="Must not be captured",
+        body="A priority edge is invalid",
+        gate_request="Should this be captured?",
+        human_action="approve",
+        links=[{"dst": priority_id, "relation": "related_to"}],
+    )
+    inserted_bool = mcp_server.kb_insert(
+        "fact",
+        "Must not be inserted through bool coercion",
+        "A boolean priority endpoint is invalid",
+        links=[{"dst": True, "relation": "related_to"}],
+    )
+    captured_bool = mcp_server.kb_capture_decision(
+        title="Must not be captured through bool coercion",
+        body="A boolean priority endpoint is invalid",
+        gate_request="Should this be captured?",
+        human_action="approve",
+        links=[{"dst": True, "relation": "related_to"}],
+    )
+
+    for result in (direct_to, direct_from, inserted, captured):
+        assert result["ok"] is False
+        assert result["priority_node_ids"] == [priority_id]
+        assert "surface-only" in result["error"]
+    for result in (
+        coerced_bool, coerced_float_string, inserted_bool, captured_bool,
+    ):
+        assert result["ok"] is False
+        assert "positive integers" in result["error"]
+    assert conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0] == before_nodes
+    assert conn.execute(
+        "SELECT COUNT(*) FROM edges WHERE src=? OR dst=?",
+        (priority_id, priority_id),
+    ).fetchone()[0] == 0
 
 
 @pytest.mark.parametrize(

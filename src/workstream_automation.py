@@ -76,12 +76,14 @@ def _attestation_state(
     *,
     derivation_id: int,
     candidate_key: str,
+    payload_binding: Mapping[str, Any] | None = None,
+    binding_required: bool = False,
 ) -> dict:
     # Candidate identity is stable across daily derivations.  Events are
     # accepted only when their derivation really contained that candidate, but
     # they continue to count while the same key persists in the latest run.
     rows = conn.execute(
-        "SELECT e.verdict, e.session_id, e.derivation_id "
+        "SELECT e.verdict, e.session_id, e.derivation_id, c.signal_json "
         "FROM workstream_op_events e "
         "JOIN workstream_derivation_candidates c "
         "ON c.derivation_id=e.derivation_id AND c.candidate_key=e.candidate_key "
@@ -89,6 +91,29 @@ def _attestation_state(
         "AND e.verdict IS NOT NULL AND e.derivation_id<=? ORDER BY e.id",
         (candidate_key, derivation_id),
     ).fetchall()
+    if binding_required:
+        expected_version = str((payload_binding or {}).get("version") or "")
+        expected_fingerprint = str(
+            (payload_binding or {}).get("fingerprint") or ""
+        )
+        matching_rows: list[sqlite3.Row] = []
+        for row in rows:
+            try:
+                historical_signal = json.loads(row["signal_json"])
+            except (TypeError, json.JSONDecodeError):
+                continue
+            advertised = (
+                historical_signal.get("candidate_payload_binding")
+                if isinstance(historical_signal, Mapping) else None
+            )
+            if (
+                isinstance(advertised, Mapping)
+                and str(advertised.get("version") or "") == expected_version
+                and str(advertised.get("fingerprint") or "")
+                == expected_fingerprint
+            ):
+                matching_rows.append(row)
+        rows = matching_rows
     agrees = {
         str(row["session_id"])
         for row in rows
@@ -103,12 +128,21 @@ def _attestation_state(
         "unsure_count": unsure,
         "derivation_ids": sorted({int(row["derivation_id"]) for row in rows}),
         "quorum": len(agrees) >= AGREE_QUORUM and disagrees == 0,
+        "payload_binding": dict(payload_binding) if payload_binding else None,
     }
 
 
-def _calibration_state(conn: sqlite3.Connection, candidate_key: str) -> dict:
+def _calibration_state(
+    conn: sqlite3.Connection,
+    candidate_key: str,
+    *,
+    payload_binding: Mapping[str, Any] | None = None,
+) -> dict:
     state = workstream_detector.load_prequential_state(
-        conn, candidate_key, lookback=CALIBRATION_WINDOWS,
+        conn,
+        candidate_key,
+        lookback=CALIBRATION_WINDOWS,
+        payload_binding=payload_binding,
     )
     state["graduated"] = workstream_detector.graduation_eligible(
         state,
@@ -143,6 +177,58 @@ def _strict_int_list(value: Any) -> list[int] | None:
             return None
         result.append(parsed)
     return sorted(set(result)) if len(set(result)) == len(result) else None
+
+
+def _candidate_payload_binding_state(
+    op: str,
+    signal: Mapping[str, Any],
+    request: Mapping[str, Any],
+    *,
+    candidate_key: str,
+) -> dict:
+    required = op in {"MERGE", "ADOPT"}
+    if not required:
+        return {
+            "required": False,
+            "validated": True,
+            "advertised": None,
+            "expected": None,
+            "evidence_key": candidate_key,
+        }
+    expected = lifecycle_signals.make_candidate_payload_binding(
+        op, signal, request=request,
+    )
+    raw_advertised = signal.get("candidate_payload_binding")
+    advertised = dict(raw_advertised) if isinstance(raw_advertised, Mapping) else None
+    validated = bool(
+        expected is not None
+        and advertised is not None
+        and advertised.get("version") == expected.get("version")
+        and advertised.get("fingerprint") == expected.get("fingerprint")
+    )
+    evidence_key = None
+    if validated and expected is not None:
+        try:
+            raw_base_key = signal.get("base_candidate_key")
+            base_candidate_key = (
+                str(raw_base_key).strip()
+                if raw_base_key is not None else candidate_key
+            )
+            evidence_key = lifecycle_signals.candidate_evidence_key(
+                base_candidate_key, expected,
+            )
+            if raw_base_key is not None and evidence_key != candidate_key:
+                validated = False
+                evidence_key = None
+        except ValueError:
+            validated = False
+    return {
+        "required": True,
+        "validated": validated,
+        "advertised": advertised,
+        "expected": expected,
+        "evidence_key": evidence_key,
+    }
 
 
 def _verified_shared_targets(
@@ -190,8 +276,8 @@ def _verified_recurrence_sessions(
         f"AND r.session_id IN ({session_marks}) "
         "AND r.workstream_id_at_event IS NULL "
         "AND member.status!='stale' "
-        "AND (r.source='write' OR "
-        "(r.turn>0 AND r.source IN ('prompt','graph','tool','gate')))",
+        "AND member.workstream_id IS NULL "
+        f"AND {lifecycle_signals.eligible_contact_sql('r')}",
         [*members, *sessions],
     ).fetchall()
     return {str(row["session_id"]) for row in rows} == set(sessions)
@@ -441,6 +527,16 @@ def _probation_merge_back(
     return {"eligible": True, "reason": "watch_pair", **matches[0]}
 
 
+def _close_outcome_from_payload(payload: Mapping[str, Any] | None) -> str | None:
+    if not isinstance(payload, Mapping):
+        return None
+    request = payload.get("request")
+    if not isinstance(request, Mapping):
+        return None
+    outcome = str(request.get("outcome") or "").strip().lower()
+    return outcome if outcome in {"completed", "abandoned", "superseded_by"} else None
+
+
 def _trailing_regret_state(conn: sqlite3.Connection) -> dict:
     """Pessimistic bounded regret rate over recent automatic OPEN/MERGE ops."""
     sampled = conn.execute(
@@ -455,6 +551,7 @@ def _trailing_regret_state(conn: sqlite3.Connection) -> dict:
             "numerator": 0,
             "denominator": 0,
             "reversal_count": 0,
+            "successful_completion_count": 0,
             "ambiguous_count": 0,
             "rate": 0.0,
             "complete": True,
@@ -470,6 +567,7 @@ def _trailing_regret_state(conn: sqlite3.Connection) -> dict:
     reversals = reversals[:TRAILING_REGRET_REVERSAL_SCAN_LIMIT]
     parsed_reversals = [(row, _json_object(row["payload_json"])) for row in reversals]
     reversal_count = 0
+    successful_completion_count = 0
     ambiguous_count = int(truncated)
     denominator = 0
     for operation in sampled:
@@ -516,11 +614,19 @@ def _trailing_regret_state(conn: sqlite3.Connection) -> dict:
                 continue
             watched = next(iter(set(watch_pair) - {lane_id}), None)
         linked: list[sqlite3.Row] = []
-        for row, _reversal_payload in parsed_reversals:
+        completed: list[sqlite3.Row] = []
+        malformed_close = False
+        for row, reversal_payload in parsed_reversals:
             if int(row["id"]) <= operation_id:
                 continue
             if row["op"] == "CLOSE" and row["src_workstream_id"] == lane_id:
-                linked.append(row)
+                outcome = _close_outcome_from_payload(reversal_payload)
+                if outcome == "completed":
+                    completed.append(row)
+                elif outcome in {"abandoned", "superseded_by"}:
+                    linked.append(row)
+                else:
+                    malformed_close = True
             elif (
                 watched is not None
                 and row["op"] == "MERGE"
@@ -528,10 +634,14 @@ def _trailing_regret_state(conn: sqlite3.Connection) -> dict:
                 and row["dst_workstream_id"] == watched
             ):
                 linked.append(row)
-        if len(linked) > 1:
+        if malformed_close or len(linked) > 1 or (linked and completed):
             ambiguous_count += 1
         elif len(linked) == 1:
             reversal_count += 1
+        elif completed:
+            # A completed lane is the intended terminal state of a successful
+            # automatic OPEN, not evidence that the OPEN should be regretted.
+            successful_completion_count += 1
     numerator = reversal_count + ambiguous_count
     rate = numerator / denominator if denominator else 0.0
     return {
@@ -540,6 +650,7 @@ def _trailing_regret_state(conn: sqlite3.Connection) -> dict:
         "numerator": numerator,
         "denominator": denominator,
         "reversal_count": reversal_count,
+        "successful_completion_count": successful_completion_count,
         "ambiguous_count": ambiguous_count,
         "rate": round(rate, 6),
         "complete": ambiguous_count == 0,
@@ -1282,7 +1393,7 @@ def plan_actions(
         preparation_evidence: dict[str, Any] = {}
         if not bool(signal.get("qualified")):
             reasons.append("candidate_not_qualified")
-        if signal.get("cap_pressure") is True:
+        if signal.get("cap_pressure") is True and op not in {"MERGE", "CLOSE"}:
             reasons.append("cap_pressure")
         if raw_force:
             reasons.append("force_forbidden")
@@ -1291,9 +1402,6 @@ def plan_actions(
         if derivation.get("substrate_version") != workstream_detector.SUBSTRATE_VERSION:
             reasons.append("substrate_version_mismatch")
 
-        attestation = _attestation_state(
-            conn, derivation_id=int(derivation["id"]), candidate_key=candidate_key,
-        )
         if op == "OPEN":
             proposal = _accepted_open_proposal(
                 conn, candidate_key=candidate_key, signal=signal,
@@ -1319,10 +1427,34 @@ def plan_actions(
             preparation_evidence.update(prepared_evidence)
             reasons.extend(prepared_reasons)
 
+        binding_state = _candidate_payload_binding_state(
+            op, signal, request, candidate_key=candidate_key,
+        )
+        if binding_state["required"] and not binding_state["validated"]:
+            reasons.append("candidate_payload_binding_incomplete")
+        binding_filter = binding_state["expected"]
+        if binding_state["required"] and not binding_state["validated"]:
+            binding_filter = {
+                "version": lifecycle_signals.CANDIDATE_PAYLOAD_BINDING_VERSION,
+                "fingerprint": "invalid",
+            }
+        attestation = _attestation_state(
+            conn,
+            derivation_id=int(derivation["id"]),
+            candidate_key=candidate_key,
+            payload_binding=binding_filter,
+            binding_required=bool(binding_state["required"]),
+        )
         missing = _required_request_fields(op, request)
         if missing:
             reasons.append("missing_apply_request")
-        calibration = _calibration_state(conn, candidate_key)
+        calibration = _calibration_state(
+            conn,
+            candidate_key,
+            payload_binding=(
+                binding_filter if binding_state["required"] else None
+            ),
+        )
         if not calibration["graduated"]:
             reasons.append("calibration_not_graduated")
         if not trailing_regret["complete"]:
@@ -1354,6 +1486,7 @@ def plan_actions(
             reasons.append("session_not_quiescent")
 
         evidence: dict[str, Any] = dict(preparation_evidence)
+        evidence["candidate_payload_binding"] = binding_state
         if op == "OPEN":
             open_ok, open_evidence = _open_evidence(signal, request)
             evidence.update(open_evidence)
@@ -1431,6 +1564,7 @@ def plan_actions(
             stage = "eligible"
         plans.append({
             "candidate_key": candidate_key,
+            "candidate_evidence_key": binding_state["evidence_key"],
             "op": op,
             "rank": int(candidate["rank"]),
             "stage": stage,

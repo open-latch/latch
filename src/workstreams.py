@@ -37,6 +37,12 @@ RECENT_ACTIVE_LANE_CAP = 12
 ACTIVE_STATUSES = frozenset({"staging", "canonical"})
 CLOSE_OUTCOMES = frozenset({"completed", "abandoned", "superseded_by"})
 CLOSE_ACTIONS = frozenset({"moot", "release", "keep-open", "repoint"})
+ADOPT_STRUCTURAL_TARGET_RELATIONS = frozenset({
+    "advances", "motivates", "depends_on", "constrains", "tested_against",
+})
+ADOPT_STRUCTURAL_TARGET_KINDS = frozenset({
+    "decision", "open_question", "idea", "progress", "workstream",
+})
 
 
 class WorkstreamLifecycleError(RuntimeError):
@@ -60,6 +66,23 @@ def _canonical(value: Any) -> str:
 
 def _snapshot_token(value: Any) -> str:
     return hashlib.sha256(_canonical(value).encode("utf-8")).hexdigest()
+
+
+def _node_mutable_state_token(node: Mapping[str, Any]) -> str:
+    """Hash mutable node state without embedding raw binary in a receipt."""
+    raw_embedding = node.get("embedding")
+    embedding_hash = (
+        hashlib.sha256(bytes(raw_embedding)).hexdigest()
+        if raw_embedding is not None else None
+    )
+    return _snapshot_token({
+        "title": node.get("title"),
+        "body": node.get("body"),
+        "status": node.get("status"),
+        "embedding_sha256": embedding_hash,
+        "parent_id": node.get("parent_id"),
+        "workstream_id": node.get("workstream_id"),
+    })
 
 
 def _clean_text(name: str, value: Any) -> str:
@@ -331,7 +354,7 @@ def _existing_result(
         if existing.get("op") == "CLOSE"
         else existing.get("dst_workstream_id") or existing.get("src_workstream_id")
     )
-    return {
+    result = {
         "ok": existing["state"] == "applied",
         "state": existing["state"],
         "error_code": existing.get("error_code"),
@@ -345,6 +368,11 @@ def _existing_result(
         "idempotent": True,
         "forced": bool(existing.get("forced")),
     }
+    if existing.get("op") == "CLOSE":
+        successor_id = existing.get("dst_workstream_id")
+        result["successor_workstream_id"] = successor_id
+        result["superseded_by"] = successor_id
+    return result
 
 
 def _applied_result(row: dict) -> dict:
@@ -354,7 +382,7 @@ def _applied_result(row: dict) -> dict:
         if row.get("op") == "CLOSE"
         else row.get("dst_workstream_id") or row.get("src_workstream_id")
     )
-    return {
+    result = {
         "ok": True,
         "state": "applied",
         "op": row["op"],
@@ -367,6 +395,11 @@ def _applied_result(row: dict) -> dict:
         "idempotent": False,
         "forced": bool(row.get("forced")),
     }
+    if row.get("op") == "CLOSE":
+        successor_id = row.get("dst_workstream_id")
+        result["successor_workstream_id"] = successor_id
+        result["superseded_by"] = successor_id
+    return result
 
 
 def _finish_failed_nc(
@@ -523,6 +556,161 @@ def _verified_shared_targets(
         [*members, *targets],
     ).fetchall()
     return {int(row["dst"]) for row in rows} == set(targets)
+
+
+def _verified_adopt_shared_targets(
+    conn: sqlite3.Connection,
+    *,
+    workstream_id: int,
+    member_ids: Sequence[int],
+    target_ids: Sequence[int],
+    tree_ids: Sequence[int],
+    structural_evidence: Any,
+) -> bool:
+    """Revalidate each detector-shaped ADOPT Tier-2 evidence tuple.
+
+    Governed ADOPT candidates are derived from a mixed summary tree: an
+    unassigned candidate and an existing member of the destination lane share
+    a live structural target.  Multi-tree candidates retain one complete tuple
+    per tree in their apply request.  Reconstructing each tuple prevents
+    aggregate-equivalent graph drift from moving all corroboration into a
+    different tree.
+    """
+    members = sorted({int(value) for value in member_ids})
+    targets = sorted({int(value) for value in target_ids})
+    trees = sorted({int(value) for value in tree_ids})
+    if (
+        not members
+        or not targets
+        or not trees
+        or not isinstance(structural_evidence, (list, tuple))
+        or not structural_evidence
+    ):
+        return False
+
+    groups: list[tuple[int, list[int], list[int]]] = []
+    try:
+        for raw_group in structural_evidence:
+            if not isinstance(raw_group, Mapping):
+                return False
+            raw_members = raw_group.get("member_ids")
+            raw_targets = raw_group.get("shared_target_ids")
+            if not isinstance(raw_members, (list, tuple)) or not isinstance(
+                raw_targets, (list, tuple),
+            ):
+                return False
+            group_tree = int(raw_group["tree_id"])
+            group_members = sorted({int(value) for value in raw_members})
+            group_targets = sorted({int(value) for value in raw_targets})
+            if not group_members or not group_targets:
+                return False
+            groups.append((group_tree, group_members, group_targets))
+    except (KeyError, TypeError, ValueError):
+        return False
+
+    group_tree_ids = [tree_id for tree_id, _members, _targets in groups]
+    if len(set(group_tree_ids)) != len(group_tree_ids) or set(group_tree_ids) != set(trees):
+        return False
+    if {
+        node_id for _tree, group_members, _targets in groups for node_id in group_members
+    } != set(members):
+        return False
+    if {
+        target_id for _tree, _members, group_targets in groups
+        for target_id in group_targets
+    } != set(targets):
+        return False
+
+    for tree_id, group_members, group_targets in groups:
+        tree = conn.execute(
+            "SELECT id FROM nodes WHERE id = ? AND kind = 'summary' "
+            "AND status != 'stale'",
+            (tree_id,),
+        ).fetchone()
+        if tree is None:
+            return False
+
+        member_marks = ",".join("?" for _ in group_members)
+        current_members = conn.execute(
+            f"SELECT id FROM nodes WHERE id IN ({member_marks}) "
+            "AND parent_id = ? AND status != 'stale' AND workstream_id IS NULL "
+            "AND kind NOT IN ('summary','workstream','priority') ORDER BY id",
+            (*group_members, tree_id),
+        ).fetchall()
+        if {int(row["id"]) for row in current_members} != set(group_members):
+            return False
+
+        target_marks = ",".join("?" for _ in group_targets)
+        live_targets = conn.execute(
+            f"SELECT id,kind,parent_id FROM nodes WHERE id IN ({target_marks}) "
+            "AND status != 'stale' ORDER BY id",
+            group_targets,
+        ).fetchall()
+        if {int(row["id"]) for row in live_targets} != set(group_targets):
+            return False
+        # The detector only calls a node a structural target when it is
+        # external to the mixed tree group.  Reparenting it into that tree
+        # invalidates the original evidence even if all edges remain active.
+        if any(
+            row["parent_id"] is not None and int(row["parent_id"]) == tree_id
+            for row in live_targets
+        ):
+            return False
+        target_kinds = {int(row["id"]): str(row["kind"]) for row in live_targets}
+
+        lane_rows = conn.execute(
+            "SELECT id FROM nodes WHERE workstream_id = ? AND parent_id = ? "
+            "AND status != 'stale' "
+            "AND kind NOT IN ('summary','workstream','priority') ORDER BY id",
+            (int(workstream_id), tree_id),
+        ).fetchall()
+        lane_ids = [int(row["id"]) for row in lane_rows]
+        if not lane_ids:
+            return False
+        lane_marks = ",".join("?" for _ in lane_ids)
+
+        candidate_links: dict[int, bool] = dict.fromkeys(group_targets, False)
+        lane_links: dict[int, bool] = dict.fromkeys(group_targets, False)
+        rows = conn.execute(
+            f"SELECT e.src,e.dst,e.relation FROM edges e "
+            f"JOIN nodes s ON s.id=e.src JOIN nodes d ON d.id=e.dst "
+            f"WHERE e.status='active' AND s.status!='stale' AND d.status!='stale' "
+            f"AND ((e.src IN ({member_marks}) AND e.dst IN ({target_marks})) "
+            f"OR (e.dst IN ({member_marks}) AND e.src IN ({target_marks})) "
+            f"OR (e.src IN ({lane_marks}) AND e.dst IN ({target_marks})) "
+            f"OR (e.dst IN ({lane_marks}) AND e.src IN ({target_marks})))",
+            [
+                *group_members, *group_targets, *group_members, *group_targets,
+                *lane_ids, *group_targets, *lane_ids, *group_targets,
+            ],
+        ).fetchall()
+        member_set = set(group_members)
+        lane_set = set(lane_ids)
+        target_set = set(group_targets)
+        for row in rows:
+            src = int(row["src"])
+            dst = int(row["dst"])
+            if src in target_set:
+                target_id, linked_id = src, dst
+            elif dst in target_set:
+                target_id, linked_id = dst, src
+            else:  # pragma: no cover - constrained by SQL
+                continue
+            if (
+                str(row["relation"]) not in ADOPT_STRUCTURAL_TARGET_RELATIONS
+                and target_kinds[target_id] not in ADOPT_STRUCTURAL_TARGET_KINDS
+            ):
+                continue
+            if linked_id in member_set:
+                candidate_links[target_id] = True
+            if linked_id in lane_set:
+                lane_links[target_id] = True
+        if not all(
+            candidate_links[target_id] and lane_links[target_id]
+            for target_id in group_targets
+        ):
+            return False
+    return True
 
 
 def _auto_plan_is_current(
@@ -1239,6 +1427,13 @@ def close_workstream(
         raise WorkstreamValidationError("automatic CLOSE cannot force past safety rails")
     if clean_outcome == "superseded_by" and superseded_by is None:
         raise WorkstreamValidationError("superseded_by outcome requires a target")
+    if clean_outcome != "superseded_by" and superseded_by is not None:
+        raise WorkstreamValidationError(
+            "superseded_by target is only valid for the superseded_by outcome"
+        )
+    requested_successor_id = (
+        int(superseded_by) if clean_outcome == "superseded_by" else None
+    )
     request = {
         "requested_workstream_id": requested_id,
         "outcome": clean_outcome,
@@ -1246,7 +1441,9 @@ def close_workstream(
         "dispositions": {str(k): v for k, v in sorted(normalized_dispositions.items())},
         "origin": clean_origin,
         "force": bool(force),
-        "superseded_by": int(superseded_by) if superseded_by is not None else None,
+        # The raw requested identity is part of the immutable op-key request.
+        # Its active application target is resolved separately under lock.
+        "superseded_by": requested_successor_id,
     }
     _require_clean_connection(conn)
     prior = _existing_result(conn, op_key=key, request=request)
@@ -1270,6 +1467,17 @@ def close_workstream(
             if prior is not None:
                 conn.commit()
                 return prior
+            successor_id = None
+            if requested_successor_id is not None:
+                successor = resolve_active(conn, requested_successor_id)
+                if (
+                    successor["active_id"] is None
+                    or int(successor["active_id"]) == active_id
+                ):
+                    raise WorkstreamValidationError(
+                        "superseded_by target must be another active workstream"
+                    )
+                successor_id = int(successor["active_id"])
             locked_probation_abandonment = (
                 clean_origin == "auto"
                 and clean_outcome == "abandoned"
@@ -1296,7 +1504,7 @@ def close_workstream(
                     "dispositions": dispositions,
                     "origin": origin,
                     "force": force,
-                    "superseded_by": superseded_by,
+                    "superseded_by": requested_successor_id,
                     "preflight_token": preflight_token,
                     "session_id": session_id,
                     "candidate_key": candidate_key,
@@ -1311,9 +1519,7 @@ def close_workstream(
                     error_code="preflight_stale",
                     session_id=session_id,
                     src_workstream_id=active_id,
-                    dst_workstream_id=(
-                        int(superseded_by) if superseded_by is not None else None
-                    ),
+                    dst_workstream_id=successor_id,
                     forced=force,
                     preflight_token=expected_token,
                     candidate_key=candidate_key,
@@ -1326,7 +1532,8 @@ def close_workstream(
                 failed = _finish_failed_nc(
                     conn, op_key=key, op="CLOSE", origin=clean_origin,
                     request=request, error_code="preflight_stale", session_id=session_id,
-                    src_workstream_id=active_id, forced=force,
+                    src_workstream_id=active_id, dst_workstream_id=successor_id,
+                    forced=force,
                     preflight_token=expected_token,
                     candidate_key=candidate_key,
                 )
@@ -1336,7 +1543,8 @@ def close_workstream(
                 failed = _finish_failed_nc(
                     conn, op_key=key, op="CLOSE", origin=clean_origin,
                     request=request, error_code="preflight_stale", session_id=session_id,
-                    src_workstream_id=active_id, forced=force,
+                    src_workstream_id=active_id, dst_workstream_id=successor_id,
+                    forced=force,
                     preflight_token=expected_token,
                     candidate_key=candidate_key,
                 )
@@ -1357,7 +1565,8 @@ def close_workstream(
                 failed = _finish_failed_nc(
                     conn, op_key=key, op="CLOSE", origin=clean_origin,
                     request=request, error_code="open_feeders", session_id=session_id,
-                    src_workstream_id=active_id, forced=force,
+                    src_workstream_id=active_id, dst_workstream_id=successor_id,
+                    forced=force,
                     preflight_token=expected_token,
                     candidate_key=candidate_key,
                 )
@@ -1428,11 +1637,9 @@ def close_workstream(
 
             successor_edge_id = None
             if clean_outcome == "superseded_by":
-                successor = resolve_active(conn, int(superseded_by))
-                if successor["active_id"] is None or int(successor["active_id"]) == active_id:
-                    raise WorkstreamValidationError("superseded_by target must be another active workstream")
+                assert successor_id is not None
                 successor_edge_id = _add_edge_id(
-                    conn, active_id, int(successor["active_id"]), "closed_in_favor_of",
+                    conn, active_id, successor_id, "closed_in_favor_of",
                     created_by="lifecycle:close",
                 )
                 created_edge_ids.append(successor_edge_id)
@@ -1479,6 +1686,8 @@ def close_workstream(
                 "retired_priority_ids": retired_priority_ids,
                 "priority_snapshots": priority_snapshots,
                 "successor_edge_id": successor_edge_id,
+                "successor_workstream_id": successor_id,
+                "superseded_by": successor_id,
                 "backup_path": backup_path,
             }
             row = db.begin_workstream_op_nc(
@@ -1490,7 +1699,7 @@ def close_workstream(
                 candidate_key=candidate_key or f"close:{active_id}",
                 session_id=session_id,
                 src_workstream_id=active_id,
-                dst_workstream_id=(int(superseded_by) if superseded_by is not None else None),
+                dst_workstream_id=successor_id,
                 forced=force,
                 preflight_token=expected_token,
             )
@@ -1647,6 +1856,25 @@ def adopt_nodes(
     evidence_payload = dict(evidence or {})
     trigger = str(evidence_payload.get("trigger") or "").lower()
     forward = bool(evidence_payload.get("forward_looking"))
+    for evidence_id_field in ("shared_target_ids", "tree_ids"):
+        raw_ids = evidence_payload.get(evidence_id_field)
+        if raw_ids is None:
+            continue
+        if not isinstance(raw_ids, (list, tuple, set)):
+            raise WorkstreamValidationError(
+                f"ADOPT evidence {evidence_id_field} must be a list"
+            )
+        try:
+            evidence_payload[evidence_id_field] = sorted({int(value) for value in raw_ids})
+        except (TypeError, ValueError) as exc:
+            raise WorkstreamValidationError(
+                f"ADOPT evidence {evidence_id_field} must contain integer ids"
+            ) from exc
+    shared_target_ids = evidence_payload.get("shared_target_ids") or []
+    tree_ids = evidence_payload.get("tree_ids") or []
+    claims_shared_target = bool(
+        clean_origin == "auto" and (trigger == "shared_target" or shared_target_ids)
+    )
     if clean_origin == "auto" and not allow_auto_apply:
         raise WorkstreamValidationError("standalone automatic ADOPT is candidate-only")
     if clean_origin == "auto" and (not forward or trigger in {"cluster", "cluster_similarity", "cosine"}):
@@ -1743,6 +1971,29 @@ def adopt_nodes(
                     or node["status"] == "stale"
                 ):
                     raise WorkstreamValidationError(f"invalid ADOPT node id={node_id}")
+            if claims_shared_target and not _verified_adopt_shared_targets(
+                conn,
+                workstream_id=active_id,
+                member_ids=members,
+                target_ids=shared_target_ids,
+                tree_ids=tree_ids,
+                structural_evidence=evidence_payload.get("structural_evidence"),
+            ):
+                failed = _finish_failed_nc(
+                    conn,
+                    op_key=key,
+                    op="ADOPT",
+                    origin=clean_origin,
+                    request=request,
+                    error_code="preflight_stale",
+                    session_id=session_id,
+                    dst_workstream_id=active_id,
+                    preflight_token=token,
+                    candidate_key=candidate_key,
+                    failure_payload={"governor": "shared_target_stale"},
+                )
+                conn.commit()
+                return failed
             prior_memberships = {str(node_id): nodes[node_id]["workstream_id"] for node_id in members}
             db.set_node_workstream_nc(conn, members, active_id)
             edge_ids: list[int] = []
@@ -2369,6 +2620,11 @@ def merge_workstreams(
                 "source_post_updated_by": source_after_merge.get("updated_by"),
                 "absorber_prior_updated_at": absorber.get("updated_at"),
                 "absorber_prior_updated_by": absorber.get("updated_by"),
+                "absorber_post_title": absorber_after_merge.get("title"),
+                "absorber_post_status": absorber_after_merge.get("status"),
+                "absorber_post_mutable_state_token": _node_mutable_state_token(
+                    absorber_after_merge,
+                ),
                 "absorber_post_updated_at": absorber_after_merge.get("updated_at"),
                 "absorber_post_updated_by": absorber_after_merge.get("updated_by"),
                 "merge_edge_id": merge_edge_id,
@@ -2707,7 +2963,20 @@ def unmerge_workstreams(
                 )
             db.update_node_nc(conn, absorber_id, body=restored_body)
             absorber_metadata_is_merge_owned = (
-                "absorber_post_updated_at" in payload
+                "absorber_post_title" in payload
+                and "absorber_post_status" in payload
+                and "absorber_post_mutable_state_token" in payload
+                and "absorber_post_updated_at" in payload
+                and absorber.get("title") == payload.get("absorber_post_title")
+                and absorber.get("status") == payload.get("absorber_post_status")
+                and (
+                    _snapshot_token(absorber.get("body"))
+                    == payload.get("absorber_body_after_hash")
+                )
+                and (
+                    _node_mutable_state_token(absorber)
+                    == payload.get("absorber_post_mutable_state_token")
+                )
                 and absorber.get("updated_at") == payload.get("absorber_post_updated_at")
                 and absorber.get("updated_by") == payload.get("absorber_post_updated_by")
             )
@@ -2721,6 +2990,18 @@ def unmerge_workstreams(
                     (
                         payload.get("absorber_prior_updated_at"),
                         payload.get("absorber_prior_updated_by"),
+                        absorber_id,
+                    ),
+                )
+            else:
+                # Removing the MERGE rolling line is lifecycle bookkeeping;
+                # it must not replace attribution for a later title, status,
+                # or body edit that made exact metadata restoration unsafe.
+                conn.execute(
+                    "UPDATE nodes SET updated_at = ?, updated_by = ? WHERE id = ?",
+                    (
+                        absorber.get("updated_at"),
+                        absorber.get("updated_by"),
                         absorber_id,
                     ),
                 )

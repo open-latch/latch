@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import sqlite3
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -384,3 +386,95 @@ def test_shadow_maintenance_reconciles_baselines_and_restore_before_derivation(
     assert not maintenance.lockfile._lock_path(str(tmp_path)).exists()
     assert result["baseline_count"] == 2
     assert result["orphaned_by_restore_count"] == 3
+
+
+def _claim_concurrently(project_path: str, claim):
+    barrier = threading.Barrier(2)
+
+    def run(index: int):
+        conn = db.connect(project_path)
+        try:
+            barrier.wait(timeout=10)
+            return claim(conn, index)
+        finally:
+            conn.close()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(run, index) for index in range(2)]
+        return [future.result(timeout=20) for future in futures]
+
+
+def test_concurrent_receipt_callers_return_only_successful_claim(
+    tmp_path, monkeypatch,
+):
+    conn = _connect(tmp_path, monkeypatch)
+    receipt = "latch opened workstream \"Atomic receipt lane\"."
+    _record_applied_op(
+        conn,
+        op_key="open:atomic-receipt",
+        op="OPEN",
+        payload={
+            "assigned_member_ids": [],
+            "watch_pair": None,
+            "probation": {},
+            "receipt": receipt,
+        },
+    )
+    conn.close()
+
+    results = _claim_concurrently(
+        str(tmp_path),
+        lambda connection, index: lifecycle_receipts.surface_pending_items(
+            connection,
+            session_id=f"receipt-caller-{index}",
+        ),
+    )
+
+    claimed = [item for batch in results for item in batch]
+    assert [item["op_key"] for item in claimed] == ["open:atomic-receipt"]
+    assert claimed[0]["receipt"] == receipt
+    assert sorted(len(batch) for batch in results) == [0, 1]
+
+
+def test_concurrent_suggestion_callers_return_only_successful_claim(
+    tmp_path, monkeypatch,
+):
+    conn = _connect(tmp_path, monkeypatch)
+    db.record_workstream_derivation(
+        conn,
+        derivation_key="atomic-suggestion-derivation",
+        substrate_version="test-v1",
+        candidates=[{
+            "candidate_key": "candidate:atomic-open",
+            "op": "OPEN",
+            "signal": {
+                "qualified": True,
+                "member_ids": [1, 2, 3, 4],
+            },
+        }],
+    )
+    conn.close()
+
+    results = _claim_concurrently(
+        str(tmp_path),
+        lambda connection, index: lifecycle_receipts.surface_pending_suggestions(
+            connection,
+            session_id=f"suggestion-caller-{index}",
+        ),
+    )
+
+    suggestions = [suggestion for batch in results for suggestion in batch]
+    assert len(suggestions) == 1
+    assert "may merit a new workstream" in suggestions[0]
+    assert sorted(len(batch) for batch in results) == [0, 1]
+
+    check = db.connect(str(tmp_path))
+    try:
+        count = check.execute(
+            "SELECT COUNT(*) FROM workstream_op_events "
+            "WHERE event_type='suggestion_surfaced' "
+            "AND candidate_key='candidate:atomic-open'"
+        ).fetchone()[0]
+        assert count == 1
+    finally:
+        check.close()

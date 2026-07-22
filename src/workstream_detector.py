@@ -50,7 +50,6 @@ RECENT_ACTIVE_LANE_CAP = 12
 HEAL_SIGNALS_PER_PAIR_LIMIT = 20
 WEAK_ANNOTATION_ID_LIMIT = 20
 
-_CONTACT_SOURCES = frozenset({"prompt", "graph", "tool", "gate"})
 _STRUCTURAL_TARGET_RELATIONS = frozenset({
     "advances", "motivates", "depends_on", "constrains", "tested_against",
 })
@@ -202,16 +201,7 @@ def _dedupe_open_units(group: Mapping[str, Any]) -> list[dict]:
 
 
 def _is_contact_event(row: Mapping[str, Any]) -> bool:
-    source = row.get("source")
-    if source == "write":
-        return row.get("session_id") is not None
-    turn = row.get("turn")
-    return bool(
-        row.get("session_id") is not None
-        and source in _CONTACT_SOURCES
-        and turn is not None
-        and int(turn) > 0
-    )
+    return lifecycle_signals.is_eligible_contact_event(row)
 
 
 def _node_lane(row: Mapping[str, Any], prefix: str) -> int | None:
@@ -802,9 +792,23 @@ def collect_inputs(
             # lifecycle handling once both the target and a real contact exist.
             continue
         lane = lanes[lane_id]
+        raw_watch_pair = payload.get("watch_pair")
+        watch_pair: list[int] = []
+        if isinstance(raw_watch_pair, (list, tuple)) and len(raw_watch_pair) == 2:
+            try:
+                parsed_watch_pair = [int(value) for value in raw_watch_pair]
+            except (TypeError, ValueError):
+                parsed_watch_pair = []
+            if (
+                parsed_watch_pair
+                and parsed_watch_pair[0] == lane_id
+                and len(set(parsed_watch_pair)) == 2
+            ):
+                watch_pair = parsed_watch_pair
         probation_lanes[lane_id] = {
             "active": True,
             "open_op_key": open_row["op_key"],
+            "watch_pair": watch_pair,
             "opened_at": _stamp(opened_at),
             "eligible_session_target": target,
             "eligible_sessions_after_open": sorted(after_sessions),
@@ -885,6 +889,11 @@ def _merge_candidates(inputs: Mapping[str, Any], matrix: Sequence[dict]) -> list
     tier2 = inputs.get("tier2") or {}
     tier3 = inputs.get("tier3") or {}
     lanes = {int(key): value for key, value in (inputs.get("lanes") or {}).items()}
+    probation_lanes = {
+        int(key): value
+        for key, value in (inputs.get("probation_lanes") or {}).items()
+        if isinstance(value, Mapping)
+    }
     candidates: list[dict] = []
     for contact in matrix:
         if contact["co_contact_sessions"] < MERGE_MIN_CO_CONTACT:
@@ -924,13 +933,39 @@ def _merge_candidates(inputs: Mapping[str, Any], matrix: Sequence[dict]) -> list
                 tier2_inputs.append(event)
         if not tier2_inputs:
             continue
-        candidate_key = lifecycle_signals.make_candidate_key("MERGE", [left, right])
+        base_candidate_key = lifecycle_signals.make_candidate_key(
+            "MERGE", [left, right],
+        )
+        candidate_key = base_candidate_key
         left_lane = lanes.get(left, {})
         right_lane = lanes.get(right, {})
         direction_basis: str | None = None
         source_id: int | None = None
         absorber_id: int | None = None
-        if contact["left_sessions"] != contact["right_sessions"]:
+        probation_directions: list[tuple[int, int]] = []
+        for probation_lane_id in (left, right):
+            probation = probation_lanes.get(probation_lane_id) or {}
+            if (
+                probation.get("active") is not True
+                or probation.get("window_within_retention") is not True
+            ):
+                continue
+            raw_pair = probation.get("watch_pair")
+            if not isinstance(raw_pair, (list, tuple)) or len(raw_pair) != 2:
+                continue
+            try:
+                ordered_pair = [int(value) for value in raw_pair]
+            except (TypeError, ValueError):
+                continue
+            if (
+                ordered_pair[0] == probation_lane_id
+                and set(ordered_pair) == {left, right}
+            ):
+                probation_directions.append((ordered_pair[0], ordered_pair[1]))
+        if len(set(probation_directions)) == 1:
+            direction_basis = "probation_watch_pair"
+            source_id, absorber_id = probation_directions[0]
+        elif contact["left_sessions"] != contact["right_sessions"]:
             direction_basis = "contact_sessions"
             source_id, absorber_id = (
                 (left, right)
@@ -974,7 +1009,7 @@ def _merge_candidates(inputs: Mapping[str, Any], matrix: Sequence[dict]) -> list
                     "absorber_workstream_id": absorber_id,
                     "dispositions": {},
                     "evidence": {
-                        "candidate_key": candidate_key,
+                        "candidate_key": base_candidate_key,
                         "co_contact_sessions": contact["co_contact_sessions"],
                         "eligible_session_count": len(inputs.get("eligible_sessions") or []),
                         "jaccard": contact["jaccard"],
@@ -1007,16 +1042,21 @@ def _merge_candidates(inputs: Mapping[str, Any], matrix: Sequence[dict]) -> list
             },
             "ambiguity_reason": ambiguity_reason,
             "qualified": True,
+            "base_candidate_key": base_candidate_key,
             "mode": "shadow",
             "substrate_version": SUBSTRATE_VERSION,
         }
-        if int(inputs.get("recent_active_lane_count") or 0) >= int(
-            inputs.get("recent_active_lane_cap") or RECENT_ACTIVE_LANE_CAP
-        ):
-            signal["cap_pressure"] = True
-            signal["governor_reason"] = "cap_pressure"
         if apply_request is not None:
             signal["apply_request"] = apply_request
+            binding = lifecycle_signals.make_candidate_payload_binding(
+                "MERGE", signal,
+            )
+            if binding is not None:
+                signal["candidate_payload_binding"] = binding
+                candidate_key = lifecycle_signals.candidate_evidence_key(
+                    base_candidate_key, binding,
+                )
+                apply_request["evidence"]["candidate_key"] = candidate_key
         candidates.append({
             "candidate_key": candidate_key,
             "op": "MERGE",
@@ -1330,6 +1370,7 @@ def _adopt_candidates(
                 "shared_target_ids": set(),
                 "tree_ids": set(),
                 "bounded_evidence": [],
+                "structural_evidence": [],
                 "member_feeder_relations": defaultdict(set),
             })
             row["member_ids"].update(eligible_member_ids)
@@ -1356,6 +1397,14 @@ def _adopt_candidates(
                 "contact_session_ids": sessions[:WEAK_ANNOTATION_ID_LIMIT],
                 "shared_target_ids": shared_targets[:WEAK_ANNOTATION_ID_LIMIT],
             })
+            # Applying ADOPT must revalidate the complete detector-shaped
+            # structure.  Keep the signal annotation bounded for display, but
+            # do not truncate the authority-bearing apply request.
+            row["structural_evidence"].append({
+                "tree_id": int(group["tree_id"]),
+                "member_ids": eligible_member_ids,
+                "shared_target_ids": shared_targets,
+            })
 
     candidates: list[dict] = []
     for lane_id, row in sorted(aggregate.items()):
@@ -1376,6 +1425,9 @@ def _adopt_candidates(
         bounded_evidence = sorted(
             row["bounded_evidence"], key=lambda value: value["tree_id"],
         )[:WEAK_ANNOTATION_ID_LIMIT]
+        structural_evidence = sorted(
+            row["structural_evidence"], key=lambda value: value["tree_id"],
+        )
         lane = lanes[lane_id]
         apply_request = None
         if not bool(lane.get("pinned")):
@@ -1390,6 +1442,7 @@ def _adopt_candidates(
                     "shared_target_ids": shared_targets,
                     "tree_ids": tree_ids,
                     "bounded_evidence": bounded_evidence,
+                    "structural_evidence": structural_evidence,
                 },
                 "allow_auto_apply": True,
             }
@@ -1410,10 +1463,23 @@ def _adopt_candidates(
             "mode": "shadow",
             "substrate_version": SUBSTRATE_VERSION,
         }
+        base_candidate_key = lifecycle_signals.make_candidate_key(
+            "ADOPT", [lane_id],
+        )
+        candidate_key = base_candidate_key
+        signal["base_candidate_key"] = base_candidate_key
         if apply_request is not None:
             signal["apply_request"] = apply_request
+            binding = lifecycle_signals.make_candidate_payload_binding(
+                "ADOPT", signal,
+            )
+            if binding is not None:
+                signal["candidate_payload_binding"] = binding
+                candidate_key = lifecycle_signals.candidate_evidence_key(
+                    base_candidate_key, binding,
+                )
         candidates.append({
-            "candidate_key": lifecycle_signals.make_candidate_key("ADOPT", [lane_id]),
+            "candidate_key": candidate_key,
             "op": "ADOPT",
             "signal": signal,
         })
@@ -1645,11 +1711,6 @@ def _close_candidates(
                 "mode": "shadow",
                 "substrate_version": SUBSTRATE_VERSION,
             }
-        if int(inputs.get("recent_active_lane_count") or 0) >= int(
-            inputs.get("recent_active_lane_cap") or RECENT_ACTIVE_LANE_CAP
-        ):
-            signal["cap_pressure"] = True
-            signal["governor_reason"] = "cap_pressure"
         candidates.append({
             "candidate_key": lifecycle_signals.make_candidate_key("CLOSE", [lane_id]),
             "op": "CLOSE",
@@ -1799,6 +1860,7 @@ def load_prequential_state(
     *,
     lookback: int = 10,
     substrate_version: str = SUBSTRATE_VERSION,
+    payload_binding: Mapping[str, Any] | None = None,
 ) -> dict:
     rows = conn.execute(
         "SELECT id FROM workstream_derivations WHERE substrate_version=? "
@@ -1807,26 +1869,54 @@ def load_prequential_state(
     ).fetchall()
     derivation_ids = [int(row["id"]) for row in reversed(rows)]
     snapshots: list[set[str]] = []
+    matching_derivation_ids: list[int] = []
+    expected_version = str((payload_binding or {}).get("version") or "")
+    expected_fingerprint = str((payload_binding or {}).get("fingerprint") or "")
+    binding_required = payload_binding is not None
     for derivation_id in derivation_ids:
-        snapshots.append({
-            str(row["candidate_key"])
-            for row in conn.execute(
-                "SELECT candidate_key FROM workstream_derivation_candidates "
-                "WHERE derivation_id=?", (derivation_id,),
-            ).fetchall()
-        })
+        snapshot: set[str] = set()
+        candidate_rows = conn.execute(
+            "SELECT candidate_key,signal_json FROM workstream_derivation_candidates "
+            "WHERE derivation_id=?", (derivation_id,),
+        ).fetchall()
+        for candidate in candidate_rows:
+            key = str(candidate["candidate_key"])
+            if not binding_required or key != candidate_key:
+                snapshot.add(key)
+                continue
+            try:
+                signal = json.loads(candidate["signal_json"])
+            except (TypeError, json.JSONDecodeError):
+                continue
+            advertised = (
+                signal.get("candidate_payload_binding")
+                if isinstance(signal, Mapping) else None
+            )
+            if (
+                isinstance(advertised, Mapping)
+                and str(advertised.get("version") or "") == expected_version
+                and str(advertised.get("fingerprint") or "")
+                == expected_fingerprint
+            ):
+                snapshot.add(key)
+                matching_derivation_ids.append(derivation_id)
+        snapshots.append(snapshot)
     verdicts: list[str] = []
-    if derivation_ids:
-        placeholders = ",".join("?" for _ in derivation_ids)
+    verdict_derivation_ids = (
+        matching_derivation_ids if binding_required else derivation_ids
+    )
+    if verdict_derivation_ids:
+        placeholders = ",".join("?" for _ in verdict_derivation_ids)
         verdicts = [
             str(row["verdict"])
             for row in conn.execute(
                 "SELECT verdict FROM workstream_op_events "
                 f"WHERE candidate_key=? AND verdict IS NOT NULL "
                 f"AND derivation_id IN ({placeholders}) ORDER BY id",
-                [candidate_key, *derivation_ids],
+                [candidate_key, *verdict_derivation_ids],
             ).fetchall()
         ]
     state = prequential_state(candidate_key, snapshots, verdicts=verdicts)
     state["substrate_version"] = substrate_version
+    state["payload_binding"] = dict(payload_binding) if payload_binding else None
     return state

@@ -591,6 +591,133 @@ def test_close_captures_implicit_preflight_after_writer_lock(kb, monkeypatch):
     assert db.get_node(conn, workstream_id)["status"] != "stale"
 
 
+@pytest.mark.parametrize("outcome", ["completed", "abandoned"])
+def test_close_rejects_successor_for_non_superseding_outcome(kb, outcome):
+    project, conn = kb
+    workstream_id = _node(conn, "workstream", f"Close {outcome}")
+    successor_id = _node(conn, "workstream", "Unrelated successor")
+
+    with pytest.raises(
+        workstreams.WorkstreamValidationError,
+        match="only valid for the superseded_by outcome",
+    ):
+        workstreams.close_workstream(
+            conn,
+            workstream_id,
+            outcome=outcome,
+            reason="No successor applies",
+            superseded_by=successor_id,
+            op_key=f"close:stray-successor:{outcome}",
+            project_path=project,
+        )
+
+    assert db.get_node(conn, workstream_id)["status"] != "stale"
+    assert db.get_workstream_op(conn, f"close:stray-successor:{outcome}") is None
+
+
+def test_close_resolves_successor_inside_transaction_and_records_one_identity(
+    kb, monkeypatch,
+):
+    project, conn = kb
+    workstream_id = _node(conn, "workstream", "Closing lane")
+    requested_successor = _node(conn, "workstream", "Soon merged successor")
+    active_successor = _node(conn, "workstream", "Resolved successor")
+    original_writer_lock = workstreams.lockfile.writer_lock
+
+    @contextmanager
+    def merge_successor_before_acquire(project_path, *args, **kwargs):
+        db.update_node(conn, requested_successor, status="stale")
+        db.add_edge(conn, requested_successor, active_successor, "merged_into")
+        with original_writer_lock(project_path, *args, **kwargs):
+            yield
+
+    monkeypatch.setattr(
+        workstreams.lockfile, "writer_lock", merge_successor_before_acquire,
+    )
+    result = workstreams.close_workstream(
+        conn,
+        workstream_id,
+        outcome="superseded_by",
+        reason="A successor absorbed the work",
+        superseded_by=requested_successor,
+        op_key="close:resolved-successor",
+        project_path=project,
+    )
+
+    operation = db.get_workstream_op(conn, "close:resolved-successor")
+    assert operation is not None
+    assert result["successor_workstream_id"] == active_successor
+    assert result["superseded_by"] == active_successor
+    assert result["payload"]["request"]["superseded_by"] == requested_successor
+    assert result["payload"]["successor_workstream_id"] == active_successor
+    assert result["payload"]["superseded_by"] == active_successor
+    assert operation["dst_workstream_id"] == active_successor
+    assert conn.execute(
+        "SELECT 1 FROM edges WHERE src = ? AND dst = ? "
+        "AND relation = 'closed_in_favor_of' AND status = 'active'",
+        (workstream_id, active_successor),
+    ).fetchone() is not None
+    assert conn.execute(
+        "SELECT 1 FROM edges WHERE src = ? AND dst = ? "
+        "AND relation = 'closed_in_favor_of' AND status = 'active'",
+        (workstream_id, requested_successor),
+    ).fetchone() is None
+    retry = workstreams.close_workstream(
+        conn,
+        workstream_id,
+        outcome="superseded_by",
+        reason="A successor absorbed the work",
+        superseded_by=requested_successor,
+        op_key="close:resolved-successor",
+        project_path=project,
+    )
+    assert retry["idempotent"] is True
+    assert retry["superseded_by"] == active_successor
+
+    equivalent_alias = _node(
+        conn, "workstream", "Different raw successor", status="stale",
+    )
+    db.add_edge(conn, equivalent_alias, active_successor, "merged_into")
+    with pytest.raises(workstreams.WorkstreamConflictError, match="different request"):
+        workstreams.close_workstream(
+            conn,
+            workstream_id,
+            outcome="superseded_by",
+            reason="A successor absorbed the work",
+            superseded_by=equivalent_alias,
+            op_key="close:resolved-successor",
+            project_path=project,
+        )
+
+    later_successor = _node(conn, "workstream", "Later resolved successor")
+    db.update_node(conn, active_successor, status="stale")
+    db.add_edge(conn, active_successor, later_successor, "merged_into")
+    retry_after_merge = workstreams.close_workstream(
+        conn,
+        workstream_id,
+        outcome="superseded_by",
+        reason="A successor absorbed the work",
+        superseded_by=requested_successor,
+        op_key="close:resolved-successor",
+        project_path=project,
+    )
+    assert retry_after_merge["idempotent"] is True
+    assert retry_after_merge["successor_workstream_id"] == active_successor
+
+    db.update_node(conn, later_successor, status="stale")
+    retry_after_close = workstreams.close_workstream(
+        conn,
+        workstream_id,
+        outcome="superseded_by",
+        reason="A successor absorbed the work",
+        superseded_by=requested_successor,
+        op_key="close:resolved-successor",
+        project_path=project,
+    )
+    assert retry_after_close["idempotent"] is True
+    assert retry_after_close["successor_workstream_id"] == active_successor
+
+
 @pytest.mark.parametrize("priority_status", ["canonical", "staging"])
 def test_close_fails_closed_on_legacy_priority_without_order_metadata(
     kb, priority_status,
@@ -821,6 +948,258 @@ def test_adopt_captures_implicit_preflight_after_writer_lock(kb, monkeypatch):
     )
     assert result["state"] == "applied"
     assert db.get_node(conn, idea)["workstream_id"] == wid
+
+
+@pytest.mark.parametrize(
+    ("evidence_drift", "applied"),
+    [
+        (None, True),
+        ("tombstoned_edge", False),
+        ("stale_target", False),
+        ("moved_member", False),
+        ("target_reparented", False),
+        ("missing_tuple", False),
+    ],
+)
+def test_auto_adopt_revalidates_shared_target_evidence_inside_transaction(
+    kb, monkeypatch, evidence_drift, applied,
+):
+    project, conn = kb
+    tree = _node(conn, "summary", f"Adopt tree {evidence_drift}")
+    lane = _node(conn, "workstream", f"Adopt lane {evidence_drift}")
+    other_lane = _node(conn, "workstream", f"Other lane {evidence_drift}")
+    lane_member = _node(
+        conn, "idea", f"Current lane witness {evidence_drift}", workstream_id=lane,
+    )
+    candidate = _node(conn, "progress", f"Candidate {evidence_drift}")
+    target = _node(conn, "decision", f"Shared target {evidence_drift}")
+    conn.execute(
+        "UPDATE nodes SET parent_id = ? WHERE id IN (?, ?)",
+        (tree, lane_member, candidate),
+    )
+    candidate_edge = db.add_edge_nc(
+        conn, candidate, target, "advances", created_by="test",
+    )
+    db.add_edge_nc(conn, lane_member, target, "advances", created_by="test")
+    conn.commit()
+    original_writer_lock = workstreams.lockfile.writer_lock
+
+    @contextmanager
+    def drift_before_acquire(project_path, *args, **kwargs):
+        if evidence_drift == "tombstoned_edge":
+            conn.execute(
+                "UPDATE edges SET status = 'tombstoned' WHERE id = ?",
+                (candidate_edge,),
+            )
+            conn.commit()
+        elif evidence_drift == "stale_target":
+            db.update_node(conn, target, status="stale")
+        elif evidence_drift == "moved_member":
+            db.set_node_workstream(conn, [candidate], other_lane)
+        elif evidence_drift == "target_reparented":
+            conn.execute(
+                "UPDATE nodes SET parent_id = ? WHERE id = ?", (tree, target),
+            )
+            conn.commit()
+        with original_writer_lock(project_path, *args, **kwargs):
+            yield
+
+    monkeypatch.setattr(workstreams.lockfile, "writer_lock", drift_before_acquire)
+    structural_evidence = [] if evidence_drift == "missing_tuple" else [{
+        "tree_id": tree,
+        "member_ids": [candidate],
+        "shared_target_ids": [target],
+    }]
+    result = workstreams.adopt_nodes(
+        conn,
+        lane,
+        [candidate],
+        op_key=f"adopt:shared-target:{evidence_drift}",
+        relations={candidate: "advances"},
+        evidence={
+            "trigger": "shared_target",
+            "forward_looking": True,
+            "session_ids": ["s1", "s2"],
+            "shared_target_ids": [target],
+            "tree_ids": [tree],
+            "structural_evidence": structural_evidence,
+        },
+        origin="auto",
+        allow_auto_apply=True,
+        candidate_key=f"candidate:adopt:{evidence_drift}",
+        project_path=project,
+    )
+
+    assert result["state"] == ("applied" if applied else "failed")
+    if applied:
+        assert db.get_node(conn, candidate)["workstream_id"] == lane
+    else:
+        assert result["error_code"] == "preflight_stale"
+        assert result["payload"]["governor"] == "shared_target_stale"
+        assert db.get_node(conn, candidate)["workstream_id"] != lane
+
+
+def test_auto_adopt_accepts_complete_structure_larger_than_display_bound(kb):
+    project, conn = kb
+    tree = _node(conn, "summary", "Large adopt tree")
+    lane = _node(conn, "workstream", "Large adopt lane")
+    witness = _node(
+        conn, "progress", "Large adopt lane witness", workstream_id=lane,
+    )
+    target = _node(conn, "decision", "Large adopt shared target")
+    candidates = [
+        _node(conn, "progress", f"Large adopt candidate {index}")
+        for index in range(21)
+    ]
+    marks = ",".join("?" for _ in [witness, *candidates])
+    conn.execute(
+        f"UPDATE nodes SET parent_id = ? WHERE id IN ({marks})",
+        (tree, witness, *candidates),
+    )
+    db.add_edge_nc(conn, witness, target, "advances", created_by="test")
+    for candidate in candidates:
+        db.add_edge_nc(conn, candidate, target, "advances", created_by="test")
+    conn.commit()
+
+    result = workstreams.adopt_nodes(
+        conn,
+        lane,
+        candidates,
+        op_key="adopt:large-structure",
+        relations={candidate: "advances" for candidate in candidates},
+        evidence={
+            "trigger": "shared_target",
+            "forward_looking": True,
+            "session_ids": ["s1", "s2"],
+            "shared_target_ids": [target],
+            "tree_ids": [tree],
+            "structural_evidence": [{
+                "tree_id": tree,
+                "member_ids": candidates,
+                "shared_target_ids": [target],
+            }],
+        },
+        origin="auto",
+        allow_auto_apply=True,
+        candidate_key="candidate:adopt:large-structure",
+        project_path=project,
+    )
+
+    assert result["state"] == "applied"
+    assert {
+        db.get_node(conn, candidate)["workstream_id"] for candidate in candidates
+    } == {lane}
+
+
+@pytest.mark.parametrize(
+    ("evidence_drift", "applied"),
+    [
+        (None, True),
+        ("corroboration_moved_to_other_tree", False),
+        ("members_moved_between_trees", False),
+    ],
+)
+def test_auto_adopt_preserves_each_per_tree_evidence_tuple(
+    kb, monkeypatch, evidence_drift, applied,
+):
+    project, conn = kb
+    tree_a = _node(conn, "summary", f"Adopt tree A {evidence_drift}")
+    tree_b = _node(conn, "summary", f"Adopt tree B {evidence_drift}")
+    lane = _node(conn, "workstream", f"Multi-tree lane {evidence_drift}")
+    candidate_a = _node(conn, "progress", f"Candidate A {evidence_drift}")
+    candidate_b = _node(conn, "idea", f"Candidate B {evidence_drift}")
+    witness_a = _node(
+        conn, "idea", f"Witness A {evidence_drift}", workstream_id=lane,
+    )
+    witness_b = _node(
+        conn, "progress", f"Witness B {evidence_drift}", workstream_id=lane,
+    )
+    target_a = _node(conn, "decision", f"Target A {evidence_drift}")
+    target_b = _node(conn, "decision", f"Target B {evidence_drift}")
+    conn.execute(
+        "UPDATE nodes SET parent_id = ? WHERE id IN (?, ?)",
+        (tree_a, candidate_a, witness_a),
+    )
+    conn.execute(
+        "UPDATE nodes SET parent_id = ? WHERE id IN (?, ?)",
+        (tree_b, candidate_b, witness_b),
+    )
+    edge_b_candidate = db.add_edge_nc(
+        conn, candidate_b, target_b, "advances", created_by="test",
+    )
+    edge_b_witness = db.add_edge_nc(
+        conn, witness_b, target_b, "advances", created_by="test",
+    )
+    db.add_edge_nc(conn, candidate_a, target_a, "advances", created_by="test")
+    db.add_edge_nc(conn, witness_a, target_a, "advances", created_by="test")
+    conn.commit()
+    original_writer_lock = workstreams.lockfile.writer_lock
+
+    @contextmanager
+    def drift_before_acquire(project_path, *args, **kwargs):
+        if evidence_drift == "corroboration_moved_to_other_tree":
+            conn.execute(
+                "UPDATE edges SET status = 'tombstoned' WHERE id IN (?, ?)",
+                (edge_b_candidate, edge_b_witness),
+            )
+            db.add_edge_nc(
+                conn, candidate_a, target_b, "advances", created_by="test",
+            )
+            db.add_edge_nc(
+                conn, witness_a, target_b, "advances", created_by="test",
+            )
+            conn.commit()
+        elif evidence_drift == "members_moved_between_trees":
+            conn.execute(
+                "UPDATE nodes SET parent_id = ? WHERE id IN (?, ?)",
+                (tree_a, candidate_b, witness_b),
+            )
+            conn.commit()
+        with original_writer_lock(project_path, *args, **kwargs):
+            yield
+
+    monkeypatch.setattr(workstreams.lockfile, "writer_lock", drift_before_acquire)
+    result = workstreams.adopt_nodes(
+        conn,
+        lane,
+        [candidate_a, candidate_b],
+        op_key=f"adopt:per-tree:{evidence_drift}",
+        relations={candidate_a: "advances", candidate_b: "advances"},
+        evidence={
+            "trigger": "shared_target",
+            "forward_looking": True,
+            "session_ids": ["s1", "s2"],
+            "shared_target_ids": [target_a, target_b],
+            "tree_ids": [tree_a, tree_b],
+            "structural_evidence": [
+                {
+                    "tree_id": tree_a,
+                    "member_ids": [candidate_a],
+                    "shared_target_ids": [target_a],
+                },
+                {
+                    "tree_id": tree_b,
+                    "member_ids": [candidate_b],
+                    "shared_target_ids": [target_b],
+                },
+            ],
+        },
+        origin="auto",
+        allow_auto_apply=True,
+        candidate_key=f"candidate:adopt:per-tree:{evidence_drift}",
+        project_path=project,
+    )
+
+    assert result["state"] == ("applied" if applied else "failed")
+    if applied:
+        assert {
+            db.get_node(conn, candidate_a)["workstream_id"],
+            db.get_node(conn, candidate_b)["workstream_id"],
+        } == {lane}
+    else:
+        assert result["payload"]["governor"] == "shared_target_stale"
+        assert db.get_node(conn, candidate_a)["workstream_id"] is None
+        assert db.get_node(conn, candidate_b)["workstream_id"] is None
 
 
 def test_applied_receipts_surface_once(kb):
@@ -1183,6 +1562,135 @@ def test_unmerge_fails_closed_when_moved_member_metadata_drifted(kb):
     assert result["state"] == "failed"
     assert f"member_metadata:{moved}" in result["drift"]
     assert db.get_node(conn, moved)["workstream_id"] == lane["absorber"]
+
+
+@pytest.mark.parametrize(
+    ("field", "edited_value"),
+    [
+        ("title", "Post-merge absorber title"),
+        ("status", "canonical"),
+        ("body", "Post-merge absorber body"),
+    ],
+)
+def test_unmerge_preserves_post_merge_absorber_metadata_without_backdating(
+    kb, monkeypatch, field, edited_value,
+):
+    project, conn = kb
+    lane = _merge_fixture(project, conn)
+    absorber = lane["absorber"]
+    conn.execute(
+        "UPDATE nodes SET updated_at = '2001-01-01 00:00:00', "
+        "updated_by = 'pre-merge-editor' WHERE id = ?",
+        (absorber,),
+    )
+    conn.commit()
+    merge_stamp = "2040-01-01 00:00:00"
+    monkeypatch.setattr(db, "_now", lambda: merge_stamp)
+    merged = workstreams.merge_workstreams(
+        conn,
+        lane["source"],
+        absorber,
+        op_key=f"merge:absorber-{field}-edit",
+        dispositions={lane["unknown_edge"]: "preserve"},
+        project_path=project,
+    )
+    assert merged["payload"]["absorber_post_title"] == "Absorber lane"
+    assert merged["payload"]["absorber_post_status"] == "staging"
+    assert db.get_node(conn, absorber)["updated_at"] == merge_stamp
+
+    db.update_node(conn, absorber, **{field: edited_value})
+    edited = db.get_node(conn, absorber)
+    assert edited["updated_at"] == merged["payload"]["absorber_post_updated_at"]
+    assert edited["updated_by"] == merged["payload"]["absorber_post_updated_by"]
+
+    result = workstreams.unmerge_workstreams(
+        conn,
+        f"merge:absorber-{field}-edit",
+        op_key=f"unmerge:absorber-{field}-edit",
+        project_path=project,
+    )
+
+    assert result["state"] == "applied"
+    restored = db.get_node(conn, absorber)
+    assert restored["updated_at"] == merge_stamp
+    if field == "body":
+        assert edited_value in restored["body"]
+    else:
+        assert restored[field] == edited_value
+
+
+def test_unmerge_preserves_later_absorber_edit_attribution(kb):
+    project, conn = kb
+    lane = _merge_fixture(project, conn)
+    workstreams.merge_workstreams(
+        conn,
+        lane["source"],
+        lane["absorber"],
+        op_key="merge:absorber-later-attribution",
+        dispositions={lane["unknown_edge"]: "preserve"},
+        project_path=project,
+    )
+    conn.execute(
+        "UPDATE nodes SET title = 'Later title', "
+        "updated_at = '2041-02-03 04:05:06', updated_by = 'later-editor' "
+        "WHERE id = ?",
+        (lane["absorber"],),
+    )
+    conn.commit()
+
+    result = workstreams.unmerge_workstreams(
+        conn,
+        "merge:absorber-later-attribution",
+        op_key="unmerge:absorber-later-attribution",
+        project_path=project,
+    )
+
+    assert result["state"] == "applied"
+    absorber = db.get_node(conn, lane["absorber"])
+    assert absorber["title"] == "Later title"
+    assert absorber["updated_at"] == "2041-02-03 04:05:06"
+    assert absorber["updated_by"] == "later-editor"
+
+
+def test_unmerge_does_not_backdate_same_stamp_absorber_embedding_edit(
+    kb, monkeypatch,
+):
+    project, conn = kb
+    lane = _merge_fixture(project, conn)
+    absorber = lane["absorber"]
+    conn.execute(
+        "UPDATE nodes SET updated_at = '2001-01-01 00:00:00', "
+        "updated_by = 'pre-merge-editor' WHERE id = ?",
+        (absorber,),
+    )
+    conn.commit()
+    merge_stamp = "2040-01-01 00:00:00"
+    monkeypatch.setattr(db, "_now", lambda: merge_stamp)
+    merged = workstreams.merge_workstreams(
+        conn,
+        lane["source"],
+        absorber,
+        op_key="merge:absorber-embedding-edit",
+        dispositions={lane["unknown_edge"]: "preserve"},
+        project_path=project,
+    )
+    valid_embedding = b"\0" * (384 * 4)
+    db.update_node(conn, absorber, embedding=valid_embedding)
+    edited = db.get_node(conn, absorber)
+    assert edited["updated_at"] == merged["payload"]["absorber_post_updated_at"]
+    assert edited["updated_by"] == merged["payload"]["absorber_post_updated_by"]
+
+    result = workstreams.unmerge_workstreams(
+        conn,
+        "merge:absorber-embedding-edit",
+        op_key="unmerge:absorber-embedding-edit",
+        project_path=project,
+    )
+
+    assert result["state"] == "applied"
+    restored = db.get_node(conn, absorber)
+    assert restored["embedding"] == valid_embedding
+    assert restored["updated_at"] == merge_stamp
 
 
 def test_unmerge_preserves_edited_merge_created_priority(kb):

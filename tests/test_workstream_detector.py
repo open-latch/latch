@@ -120,6 +120,14 @@ def test_merge_requires_tier1_threshold_and_tier2_corroboration():
     assert merge["signal"]["co_contact_sessions"] == 4
     assert merge["signal"]["jaccard"] == 0.8
     assert merge["signal"]["tier2_inputs"] == ["shared_targets"]
+    assert merge["signal"]["candidate_payload_binding"] \
+        == detector.lifecycle_signals.make_candidate_payload_binding(
+            "MERGE", merge["signal"],
+        )
+    assert merge["candidate_key"] == detector.lifecycle_signals.candidate_evidence_key(
+        merge["signal"]["base_candidate_key"],
+        merge["signal"]["candidate_payload_binding"],
+    )
 
 
 def test_merge_direction_and_apply_request_fail_closed_on_ambiguity():
@@ -147,6 +155,18 @@ def test_merge_direction_and_apply_request_fail_closed_on_ambiguity():
     }
     assert candidate["signal"]["apply_request"]["dispositions"] == {}
 
+    inputs["lanes"][1]["active_member_count"] = 3
+    inputs["lanes"][2]["active_member_count"] = 1
+    reversed_direction = next(
+        row for row in detector.derive_shadow_snapshot(inputs)["candidates"]
+        if row["op"] == "MERGE"
+    )
+    assert reversed_direction["signal"]["base_candidate_key"] \
+        == candidate["signal"]["base_candidate_key"]
+    assert reversed_direction["candidate_key"] != candidate["candidate_key"]
+    inputs["lanes"][1]["active_member_count"] = 1
+    inputs["lanes"][2]["active_member_count"] = 3
+
     inputs["lanes"][1]["unknown_inbound_edge_ids"] = [501]
     unsafe = next(
         row for row in detector.derive_shadow_snapshot(inputs)["candidates"]
@@ -163,6 +183,47 @@ def test_merge_direction_and_apply_request_fail_closed_on_ambiguity():
     )
     assert tied["signal"]["ambiguity_reason"] == "merge_direction_tied"
     assert "apply_request" not in tied["signal"]
+
+
+@pytest.mark.parametrize(
+    ("active", "retained", "expected_source", "expected_basis"),
+    [
+        (True, True, 2, "probation_watch_pair"),
+        (False, True, 1, "active_member_count"),
+        (True, False, 1, "active_member_count"),
+    ],
+)
+def test_merge_direction_uses_only_current_probation_watch_pairs(
+    active, retained, expected_source, expected_basis,
+):
+    inputs = _base_inputs()
+    inputs["lanes"] = {
+        1: _lane(1, active_member_count=1),
+        2: _lane(2, active_member_count=3),
+    }
+    inputs["contacts"] = {
+        1: ["S1", "S2", "S3", "S4"],
+        2: ["S1", "S2", "S3", "S4"],
+    }
+    inputs["tier2"] = {
+        "1:2": {"shared_target_ids": [70, 71], "cross_path_sessions": []},
+    }
+    inputs["probation_lanes"] = {
+        2: {
+            "active": active,
+            "window_within_retention": retained,
+            "watch_pair": [2, 1],
+        },
+    }
+
+    candidate = next(
+        row for row in detector.derive_shadow_snapshot(inputs)["candidates"]
+        if row["op"] == "MERGE"
+    )
+
+    assert candidate["signal"]["direction"]["source_workstream_id"] \
+        == expected_source
+    assert candidate["signal"]["direction"]["basis"] == expected_basis
 
 
 def test_heal_signals_are_bounded_tier2_and_expose_qualifying_source(monkeypatch):
@@ -450,6 +511,53 @@ def test_recent_active_lane_cap_emits_blocked_open_with_cap_pressure():
     assert blocked["signal"]["qualified"] is False
 
 
+def test_lane_cap_does_not_block_lane_reducing_merge_or_close():
+    merge_inputs = _base_inputs()
+    merge_inputs["recent_active_lane_count"] = 12
+    merge_inputs["recent_active_lane_cap"] = 12
+    merge_inputs["lanes"] = {
+        1: _lane(1, active_member_count=1),
+        2: _lane(2, active_member_count=3),
+    }
+    merge_inputs["contacts"] = {
+        1: ["S1", "S2", "S3", "S4"],
+        2: ["S1", "S2", "S3", "S4"],
+    }
+    merge_inputs["tier2"] = {
+        "1:2": {"shared_target_ids": [70, 71], "cross_path_sessions": []},
+    }
+    merged = next(
+        row for row in detector.derive_shadow_snapshot(merge_inputs)["candidates"]
+        if row["op"] == "MERGE"
+    )
+    assert "cap_pressure" not in merged["signal"]
+
+    close_inputs = _base_inputs()
+    close_inputs["recent_active_lane_count"] = 12
+    close_inputs["recent_active_lane_cap"] = 12
+    close_inputs["lanes"] = {
+        1: _lane(
+            1,
+            done_when="Release is shipped",
+            forward_member_ids=[10],
+            resolved_forward_member_ids=[10],
+            resolution_edge_ids=[501],
+            resolution_evidence=[{
+                "edge_id": 501,
+                "forward_member_id": 10,
+                "created_by": "alice",
+            }],
+            resolution_density=1.0,
+        ),
+    }
+    closed = next(
+        row for row in detector.derive_shadow_snapshot(close_inputs)["candidates"]
+        if row["op"] == "CLOSE"
+    )
+    assert closed["signal"]["qualified"] is True
+    assert "cap_pressure" not in closed["signal"]
+
+
 def test_mixed_tree_handoff_requires_contacts_and_shared_target_for_adopt():
     group = _open_group(member_ids=(10, 11), kinds=["idea", "progress"])
     group["lane_member_ids"] = {"1": [101]}
@@ -489,6 +597,14 @@ def test_mixed_tree_handoff_requires_contacts_and_shared_target_for_adopt():
     }
     assert adopted["signal"]["apply_request"]["evidence"]["forward_looking"] \
         is True
+    assert adopted["signal"]["candidate_payload_binding"] \
+        == detector.lifecycle_signals.make_candidate_payload_binding(
+            "ADOPT", adopted["signal"],
+        )
+    assert adopted["candidate_key"] == detector.lifecycle_signals.candidate_evidence_key(
+        adopted["signal"]["base_candidate_key"],
+        adopted["signal"]["candidate_payload_binding"],
+    )
 
 
 def test_adopt_aggregates_qualified_groups_per_lane_and_pinned_is_candidate_only():
@@ -526,6 +642,49 @@ def test_adopt_aggregates_qualified_groups_per_lane_and_pinned_is_candidate_only
     assert pinned["signal"]["candidate_only"] is True
     assert pinned["signal"]["ambiguity_reason"] == "pinned_target"
     assert "apply_request" not in pinned["signal"]
+
+
+def test_adopt_keeps_full_apply_structure_when_signal_evidence_is_bounded():
+    groups = []
+    orphan_events = {}
+    for index in range(detector.WEAK_ANNOTATION_ID_LIMIT + 1):
+        member = 1000 + index
+        lane_member = 2000 + index
+        target = 3000 + index
+        group = _open_group(member_ids=(member,), kinds=["progress"])
+        group["tree_id"] = 100 + index
+        group["lane_member_ids"] = {"1": [lane_member]}
+        group["adopt_shared_targets"] = {"1": [target]}
+        group["target_member_ids"] = {str(target): [member, lane_member]}
+        groups.append(group)
+        orphan_events[member] = [
+            {"session_id": "S1"},
+            {"session_id": "S2"},
+        ]
+
+    inputs = _base_inputs()
+    inputs["lanes"] = {1: _lane(1)}
+    inputs["orphan_groups"] = groups
+    inputs["orphan_events"] = orphan_events
+    adopted = next(
+        row for row in detector.derive_shadow_snapshot(inputs)["candidates"]
+        if row["op"] == "ADOPT"
+    )
+
+    bounded = adopted["signal"]["bounded_evidence"]
+    structural = adopted["signal"]["apply_request"]["evidence"][
+        "structural_evidence"
+    ]
+    assert len(bounded) == detector.WEAK_ANNOTATION_ID_LIMIT
+    assert len(structural) == detector.WEAK_ANNOTATION_ID_LIMIT + 1
+    assert {
+        node_id for group in structural for node_id in group["member_ids"]
+    } == set(adopted["signal"]["member_ids"])
+    assert {
+        target_id
+        for group in structural
+        for target_id in group["shared_target_ids"]
+    } == set(adopted["signal"]["shared_target_ids"])
 
 
 def test_close_is_conservative_about_observation_focus_feeders_and_priorities():
