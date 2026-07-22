@@ -3,111 +3,101 @@
 </p>
 
 <p align="center">
-  <strong>A decision seatbelt for coding agents.</strong>
+  <strong>latch stops your coding agent from rebuilding what your project already ruled out.</strong>
 </p>
 
 <p align="center">
-  Local-first &middot; reversible &middot; stops agents before they repeat paths you already ruled out.
+  <em>A decision seatbelt for coding agents.</em>
 </p>
 
 <p align="center">
-  <a href="#the-first-proof">First proof</a> &middot;
+  Local-first &middot; reversible &middot; cited. A fresh agent proposes a settled-and-rejected
+  path; latch fires a gate with the receipt before a single file changes.
+</p>
+
+<p align="center">
+  <a href="#the-receipt">The receipt</a> &middot;
+  <a href="#why-a-gate-not-a-rule">Why a gate</a> &middot;
   <a href="#get-started">Get started</a> &middot;
-  <a href="#supported-agents">Supported agents</a> &middot;
+  <a href="#supported-agents">Agents</a> &middot;
   <a href="#safety-and-control">Safety</a>
 </p>
 
 ---
 
-**TL;DR:** install latch once, run the guided quickstart from a project repo,
-choose Claude Code, Codex, Cursor, or all three, choose how proactively Latch
-should surface project judgment, and seed recent local sessions. Then ask an
-agent to violate a saved decision. latch should show a cited gate receipt before
-edits instead of silently reviving the rejected path.
+## The receipt
 
-Coding agents do not just forget facts. They forget why a project chose one
-path and rejected another. That is where drift starts: an agent re-litigates a
-settled decision, violates a governance rule, or rebuilds the plausible thing
-you already ruled out.
+No preamble. Here is the whole thing.
 
-latch keeps cited decisions, rejected paths, rationale, and source evidence in
-a local project KB, then puts that judgment in the agent's path before files
-change. It is decision continuity, not a larger transcript or a generic memory
-layer.
-
-latch runs locally, uses one SQLite KB store, needs no cloud account, and
-targets macOS, Windows, and Linux with bash and PowerShell wrappers. Claude
-Code, Codex, and Cursor can share the same KB, so judgment captured through one
-agent can gate another.
-
-## The First Proof
-
-**Seed recent sessions -> choose one rejected path -> ask an agent to violate
-it -> see a cited receipt before edits.**
-
-Example: your project previously rejected Redis-backed background jobs for
-local work. Ask an agent to add Redis-backed email jobs. latch should cite the
-saved rejection, explain the rationale, and recommend the compliant path before
-files change.
-
-A live receipt should make latch's role obvious:
+**A fresh agent proposes a path this project already rejected:**
 
 ```text
-Latch gate receipt:
-Latch ran latch_gate on the request.
-Recommendation: MODIFY or DO_NOT_PROCEED
-Summary: the request conflicts with the saved "no background job queue" decision.
-Risk if proceed: adding Redis and a worker repeats the rejected queue path.
+Request: Implement email sending by adding a Redis-backed background job queue.
+```
+
+**latch's gate fires before any edit — and returns the receipt:**
+
+```text
+Recommendation: DO_NOT_PROCEED
+Summary: The request directly contradicts the canonical decision for this demo app: do not add a background job queue, with Redis-backed background jobs explicitly named as the rejected path (id=1). The allowed path is to keep the app single-process and, if background work is needed for email sending, use an inline task runner and document its limits.
+Risk if proceed: Adding Redis and a worker process would violate the install-light, easy-to-inspect demo constraint and repeat the rejected Redis-backed queue path.
+Better next action: Implement email sending with the single-process inline task runner approach and document the delivery/latency limits.
 Cited evidence:
 - id=1 decision status=canonical: No background job queue for the no-history demo app
+Worktree changed before/after gate: no
 ```
 
-The checked-in [V1 public proof packet](./proof/README.md) separates one observed
-model-backed receipt from small deterministic fixture suites:
+Read it field by field:
 
-| Evidence | Result | Meaning |
-| --- | ---: | --- |
-| Live pre-edit gate | `DO_NOT_PROCEED` | Cited a canonical rejected path; worktree unchanged |
-| Decision-evidence fixture | `latch_full` 8/8; `memory_like` 4/8 | Small internal ablation, not a third-party benchmark |
-| Seed-report fixture | 16/16 | Deterministic capture/filtering checks; zero model calls |
+| Field | What it is |
+| --- | --- |
+| `Recommendation` | The go/no-go verdict: `DO_NOT_PROCEED`. |
+| `Summary` | The settled decision and exactly why the request conflicts with it. |
+| `Risk if proceed` | What breaks if the agent ignores the decision. |
+| `Better next action` | The compliant alternative to take instead. |
+| `Cited evidence` | The exact source node: `id=1`, kind `decision`, `status=canonical`. |
+| `Worktree changed` | `no`. The gate ran **before** edits. Nothing on disk moved. |
 
-The `latch_full` row is a gate-retrieval mode, not the Full intensity tier. It
-must not be used as a Quiet/Standard/Full comparison or as a rebuild-savings
-claim.
+That last line is the point. The rejected path was caught and cited, and your tree is untouched.
 
-No useful history yet? Run the public-safe fixture in a throwaway repo:
+This exact receipt is checked in at [`proof/README.md`](./proof/README.md), captured with the
+`codex` backend. It comes from a synthetic no-history demo, so it proves the gate path — not that
+latch read anyone's real history. Seeding your own sessions is what does that.
 
-```bash
-/path/to/latch/bin/latch_demo_no_history.sh
-# Windows: C:\path\to\latch\bin\latch_demo_no_history.ps1
-```
+## Why a gate, not a rule
 
-That fixture is synthetic; it proves the gate path, not that latch understood a
-particular user's history. The real first-value path is to seed your own recent
-sessions and catch one decision your next agent might plausibly violate.
+Give an agent your history and it becomes better-informed, not bound: a bigger transcript is still
+just context it can talk past. Give it a spec, a rule, or a `CLAUDE.md` and you hand it authority it
+can ignore — or quote in one breath and violate in the same diff.
 
-## Get Started
+latch is the runtime gate that closes that gap. It keeps your project's cited decisions, rejected
+paths, rationale, and evidence in a local KB, then puts a go/no-go verdict in the agent's path
+**before files change** — and shows you the receipt. That is decision continuity, not a bigger
+transcript or a generic recall layer.
 
-Prerequisites: **Git** and at least one installed agent CLI: **Claude Code**,
-**Codex**, or **Cursor Agent**. The installer bootstraps a private
-[`uv`](https://docs.astral.sh/uv/) and native Python 3.11 environment; it does
-not modify your shell profile or require a system Python. Release installs use
-the repository's hashed, cross-platform dependency lock.
+latch is an unlock, not just a guardrail — it guides the agent and protects you at the same time.
+Because it keeps the agent inside decisions you've already made instead of rebuilding a path you ruled
+out three sessions ago, you stop re-catching the same mistakes and start handing the agent more. That
+earned confidence is the part token-savers and history-search tools don't give you: not cheaper runs
+or better recall, but faith that the agent is working within your judgment — so you can watch less and
+run more agents in parallel without each one re-litigating what you already settled. The judgment
+stays yours; latch just keeps the agent inside it.
 
-Open a terminal in the project repo you want latch to protect, then run one
-command.
+It runs locally on one SQLite KB, needs no cloud account, and targets macOS, Windows, and Linux.
+Claude Code, Codex, and Cursor share the same KB, so judgment captured through one agent can gate
+another.
+
+## Get started
+
+**Prerequisites:** Git, and at least one installed agent CLI — **Claude Code**, **Codex**, or
+**Cursor Agent**.
+
+**Install in one command.** Open a terminal in the repo you want latch to protect.
 
 macOS, Linux, or Windows Git Bash:
 
 ```bash
 curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/open-latch/latch/main/install.sh | bash
-```
-
-To forward quickstart options through the piped Bash form, pass them after
-`bash -s --`, for example:
-
-```bash
-curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/open-latch/latch/main/install.sh | bash -s -- --agents both
 ```
 
 Windows PowerShell:
@@ -116,11 +106,200 @@ Windows PowerShell:
 irm https://raw.githubusercontent.com/open-latch/latch/main/install.ps1 | iex
 ```
 
-The bootstrap preserves your starting project path, downloads Latch into the
-platform user-data directory, installs its isolated runtime, asks which agent
-surfaces to wire, runs their doctor checks, and offers the bounded initial-KB
-review. Selected local transcripts are listed and redacted before any model
-call; no seed candidate is written until you approve it.
+That's the install. The quickstart wires your agent, asks how proactive latch should be, and then
+prompts you to seed. **Restart the agent** afterward so its tools and hooks load.
+
+**Then seed — this is the real first step, not an optional demo.** An empty KB catches nothing;
+seeding is what lets latch gate the decisions already in *your* history. Point it at your recent
+sessions:
+
+```bash
+/path/to/latch/bin/latch_seed.sh --source both --last-sessions 20 --apply
+# Windows: C:\path\to\latch\bin\latch_seed.ps1 --source both --last-sessions 20 --apply
+```
+
+It is review-first — the pass prints a structured report and writes only the candidates you approve.
+The full walkthrough and source options are in [See it catch](#see-it-catch-seed-then-gate); to read
+the installer first, pin a release, pick an intensity tier, or install to a custom directory, see
+[Install details](#install-details).
+
+## See it catch: seed, then gate
+
+The fixture proves the mechanism. The value is catching a decision from *your* history that your
+next agent would plausibly revive.
+
+**1. Seed your history** (you did this in [Get started](#get-started) — here are the source
+options). Use `--source claude`, `codex`, `cursor`, `both`, or `all`; `--apply` is review-first and
+writes only the candidates you approve, while omitting it previews only. From a hooked Cursor
+conversation, `/latch-seed` is the normal path; Cursor uses only that exact hook-provided transcript
+and never scans its private history folders.
+
+**2. Pick one strong proof target** the seed surfaced:
+
+- a concrete rejected approach or governing rule,
+- the reason or allowed alternative,
+- source and current status evidence,
+- enough specificity that another agent could plausibly violate it.
+
+**3. Ask an agent to implement that rejected approach.** Expect a foreground **Latch gate** receipt
+before edits, cited against your own decision. A `SKIPPED`, `recommendation: null`, empty-evidence,
+or `PROCEED` result on a plainly violating request **is not the proof.**
+
+**Prove no edits with your own eyes.** Capture `git status` before and after a real gate call:
+
+```bash
+git status --short > /tmp/latch-proof.before
+/path/to/latch/bin/run_latch_gate.sh '<generated request>' | tee /tmp/latch-gate-proof.json
+git status --short > /tmp/latch-proof.after
+diff -u /tmp/latch-proof.before /tmp/latch-proof.after
+```
+
+The diff should be empty — the gate ran, and no files moved.
+
+**No history to seed yet?** Run the public-safe fixture in a throwaway repo. It exercises the gate
+path without touching your data:
+
+```bash
+/path/to/latch/bin/latch_demo_no_history.sh
+# Windows: C:\path\to\latch\bin\latch_demo_no_history.ps1
+```
+
+The fixture is synthetic: it proves the gate fires, not that latch understood your history. The
+[first-run mission](./docs/first_run_mission.md) and the
+[proof-ready demo runbook](./runbooks/hook_proof_demo.md) carry the exact paths, success criteria,
+and receipt checks.
+
+## Supported agents
+
+The guided quickstart wires whichever you choose.
+
+| Agent | What latch installs | Boundary |
+| --- | --- | --- |
+| Claude Code | MCP tools, hooks, slash commands, `/latch-compact`, managed `CLAUDE.md` contract | Restart after install so tools and hooks load |
+| Codex | Shared MCP tools + KB, user skills, `AGENTS.md`, SessionStart hook, Codex backend defaults | Start a new task after install; compaction is manual |
+| Cursor | Project MCP, Rule, commands, skills, `AGENTS.md`; optional session/gate/activity hooks | Current-session seed/compact only; no historical transcript discovery |
+| Multiple agents | One shared local latch KB | A decision captured through one agent can gate the others |
+
+Cursor also needs three user-controlled live steps: authenticate with `agent login`, approve the
+project MCP server, and enable **latch** in **Cursor Settings > Tools & MCP**. Static doctor success
+alone does not prove the IDE gate is live. Per-surface manual install and doctor commands live in
+[ARCHITECTURE.md](./ARCHITECTURE.md); see the [Cursor reference](./runbooks/cursor.md) and
+[Cursor gate smoke](./runbooks/cursor_gate_smoke.md).
+
+## Using latch day to day
+
+You mostly do not operate latch. Once wired, the agent reads the KB before answering, captures
+durable decisions as they happen, and runs `latch_gate` before coding-shaped changes — showing a
+short foreground receipt when latch shapes an answer or a gate fires. Audit recent gate activity
+without writing anything via `/latch-gate-report` or `bin/latch_gate_report.sh`.
+
+At natural stopping points, capture the session so tomorrow's agent inherits today's judgment.
+Compaction is user-initiated because it spends a model call and writes a durable summary into the KB:
+
+- Claude Code: `/latch-compact`
+- Codex: `/path/to/latch/bin/run_codex_compact_now.sh`
+- Cursor: `/latch-compact` from the current hooked conversation
+
+## Safety and control
+
+**Local-first.** latch stores project judgment locally in SQLite and requires no cloud account. It
+never uploads your KB. Data leaves your machine only when you run a model-backed path (gate,
+compaction, heal), which may send selected prompts, snippets, and evidence to the Claude, Codex, or
+Cursor backend *you* configured.
+
+**Kill switch.** Stop latch hooks without uninstalling:
+
+```bash
+bash bin/latch_disable.sh
+bash bin/latch_enable.sh
+bash bin/latch_status.sh
+```
+
+**Unlatch.** Turn the automatic judgment layer off for this install, then back on. It masks latch's
+managed `CLAUDE.md` / `AGENTS.md` regions while off; it does not delete the KB, uninstall latch, or
+disable the agent's native tools:
+
+```bash
+bash bin/unlatch.sh
+bash bin/unlatch.sh --confirm unlatch
+bash bin/unlatch.sh --confirm latch
+```
+
+**Uninstall.** Preview or remove latch wiring. KB data is kept unless you pass `--purge`:
+
+```bash
+bash bin/uninstall.sh --dry-run
+bash bin/uninstall.sh
+
+# Remove only latch-owned Cursor wiring from the current project:
+bash bin/uninstall.sh --yes --cursor-only --cursor-project "$PWD"
+```
+
+## Where the gate doesn't help
+
+An honest guardrail names its limits.
+
+- **It warns and cites; it doesn't handcuff.** The gate recommends — you can still choose to proceed.
+  latch stops silent drift, not deliberate decisions.
+- **An empty KB catches nothing.** With no captured judgment there is nothing to gate. Seed first.
+- **A lost reason is reconstructed, not invented.** When the original rationale isn't recoverable,
+  the agent presents a reconstruction for your confirmation rather than asserting it as fact.
+- **The fixtures are instruments, not scorecards.** The bundled evals prove the gate path on small
+  suites; they are not broad claims about every repo or model.
+
+## Proof and limits
+
+The checked-in [V1 public proof packet](./proof/README.md) pairs one observed model-backed receipt
+with two small deterministic fixture suites:
+
+| Evidence | Result | Meaning |
+| --- | ---: | --- |
+| Live pre-edit gate | `DO_NOT_PROCEED` | Cited a canonical rejected path; worktree unchanged |
+| Decision-evidence fixture | `latch_full` 8/8; `memory_like` 4/8 | Small internal ablation, not a third-party benchmark |
+| Seed-report fixture | 16/16 | Deterministic capture/filtering checks; zero model calls |
+
+Regenerate them:
+
+```bash
+bash bin/latch_eval.sh
+bash bin/latch_seed_report_eval.sh
+bash bin/latch_proof_packet.sh --check
+```
+
+Read the `memory_like` row as an internal active-search-only ablation, not a benchmark of any
+third-party product. The `latch_full` row is a gate-retrieval mode, **not** the Full intensity tier —
+don't read it as a Quiet/Standard/Full comparison or a rebuild-savings claim. Details in
+[benchmarks/README.md](./benchmarks/README.md).
+
+## Install details
+
+**What the installer does.** The bootstrap preserves your project path and installs a private,
+isolated [`uv`](https://docs.astral.sh/uv/) + Python 3.11 runtime — it does not touch your shell
+profile or require a system Python. It asks which agent surfaces to wire, asks how proactively latch
+should surface judgment, runs their doctor checks, and offers a bounded initial-KB review: selected
+transcripts are listed and redacted before any model call, and nothing is written until you approve
+it. Rerunning the command repairs and reconciles the existing install; it never silently upgrades.
+One installation serves many repos; `--install-dir PATH` (PowerShell `-InstallDir PATH`) picks an
+alternate location. Install internals and per-surface manual setup live in
+[ARCHITECTURE.md](./ARCHITECTURE.md).
+
+**Pass quickstart options** through the piped Bash form after `bash -s --`:
+
+```bash
+curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/open-latch/latch/main/install.sh | bash -s -- --agents both
+```
+
+**Inspect or pin before you run.** To inspect either installer first, download the script and read it
+locally. The piped command follows `main`; for a stable build, pin both the script and the checkout
+ref so the install cannot drift back to `main`:
+
+```bash
+curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/open-latch/latch/vX.Y.Z/install.sh | LATCH_INSTALL_REF=vX.Y.Z bash
+```
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/open-latch/latch/vX.Y.Z/install.ps1))) -Ref vX.Y.Z
+```
 
 ### Choose Latch intensity
 
@@ -203,365 +382,39 @@ in local structural prompt, gate, correction, reconciliation, and gate-outcome
 events so future multi-turn evals can replace proxy weights with observed,
 scenario-bounded rebuild outcomes.
 
-The current pre-release command follows `main` and prints the exact installed
-commit. For a stable release, pin both the downloaded script and the checkout
-ref in the same command so the install cannot drift back to `main`:
+## Versions and platform
 
-```bash
-curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/open-latch/latch/vX.Y.Z/install.sh | LATCH_INSTALL_REF=vX.Y.Z bash
-```
-
-```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/open-latch/latch/vX.Y.Z/install.ps1))) -Ref vX.Y.Z
-```
-
-To inspect either installer before executing it, download the script first and
-read it locally.
-
-Rerunning the command is a repair/reconcile operation: it keeps the installed
-source revision and idempotently refreshes dependencies and wiring. It never
-silently upgrades. A local script invocation can request an explicit upgrade,
-which refuses dirty source checkouts:
-
-```bash
-bash /path/to/install.sh --upgrade --ref main
-# PowerShell: .\install.ps1 -Upgrade -Ref main
-```
-
-For a non-interactive or local-clone invocation, pass quickstart choices after
-the bootstrap options:
-
-```bash
-bash install.sh --agents both
-bash install.sh --agents cursor --cursor-with-hooks
-bash install.sh --agents all --cursor-with-hooks --latch-intensity full
-```
-
-Default app locations are `~/.local/share/latch/app` on Linux,
-`~/Library/Application Support/Latch/app` on macOS, and
-`%LOCALAPPDATA%\Latch\app` on Windows. Use `--install-dir PATH` or PowerShell
-`-InstallDir PATH` to choose another stable location. One installation serves
-many repos; rerun its `bin/latch_quickstart` wrapper from each project that
-should receive the agent contract.
-
-If you are developing Latch from this source checkout, the same path works
-without a remote download:
-
-```bash
-bash install.sh --install-dir "$PWD" --project /path/to/your/project --agents codex
-# Existing developer environments can continue to run bin/latch_quickstart directly.
-```
-
-The initial quickstart defaults to available Claude/Codex history because no
-Cursor conversation exists yet. After opening a hooked Cursor conversation,
-run `/latch-seed`; Cursor uses only that exact hook-provided transcript.
-
-## First Value: Seed, Then Gate
-
-Do not start with a blank KB if you have prior local sessions. Start with the
-smallest useful review-and-apply scan:
-
-```bash
-/path/to/latch/bin/latch_seed.sh --source both --last-sessions 20 --apply
-# Windows: C:\path\to\latch\bin\latch_seed.ps1 --source both --last-sessions 20 --apply
-```
-
-Use `--source claude`, `codex`, `cursor`, `both`, or `all`. Cursor source
-resolution is intentionally narrow: it uses the exact current SessionStart
-marker named by `--cursor-session-id`, or a transcript path you supply
-explicitly. It never scans Cursor's private history folders.
-
-From a hooked Cursor conversation, `/latch-seed` is the normal path. The
-equivalent preview command is:
-
-```bash
-/path/to/latch/bin/latch_seed.sh --source cursor --cursor-session-id SESSION_ID --format json
-# Review first; apply only the candidates you approve.
-```
-
-`--apply` is still review-first: the seed pass prints a structured report and
-writes only the staging candidates you approve. Omit `--apply` for preview-only
-operation. Keep the default scan focused; increase `--last-sessions N` only if
-the first report does not find useful project judgment.
-
-Look for one strong proof target:
-
-- a concrete rejected approach or governing rule,
-- the reason or allowed alternative,
-- source and current status evidence,
-- enough specificity that another agent could plausibly violate it.
-
-Then run the printed `/latch-gate` or `bin/run_latch_gate.sh` catch-demo command,
-or ask an agent to implement that rejected approach. Expect a foreground
-**Latch gate** receipt before edits: latch ran the gate, cited the saved
-decision/rationale/source/status, explained the conflict, and recommended the
-compliant path. `SKIPPED`, `recommendation: null`, empty evidence, or `PROCEED`
-on a plainly violating request is not the proof.
-
-For a shell proof, capture a no-edit receipt:
-
-```bash
-git status --short > /tmp/latch-proof.before
-/path/to/latch/bin/run_latch_gate.sh '<generated request>' | tee /tmp/latch-gate-proof.json
-git status --short > /tmp/latch-proof.after
-diff -u /tmp/latch-proof.before /tmp/latch-proof.after
-```
-
-The diff should be empty. If the first pass is weak, widen the session window
-once or switch sources before falling back to the no-history fixture. The short
-[first-run mission](./docs/first_run_mission.md) and the
-[proof-ready demo runbook](./runbooks/hook_proof_demo.md) carry the exact paths,
-success criteria, and receipt checks.
-
-## Supported Agents
-
-| Agent | What latch installs | Important boundary |
-| --- | --- | --- |
-| Claude Code | MCP tools, hooks, slash commands, `/latch-compact`, managed `CLAUDE.md` contract | Restart after install so tools and hooks load |
-| Codex | Shared MCP tools and KB, user skills, `AGENTS.md`, SessionStart hook, Codex model backend defaults | Start a new task after install; compaction is manual |
-| Cursor | Project MCP, Rule, commands, skills, `AGENTS.md`; optional session/gate/activity hooks | Current-session seed/compact only; no historical transcript discovery |
-| Multiple agents | One shared local latch KB | A decision captured through one agent can gate the others |
-
-The guided quickstart is the recommended path. These are the underlying manual
-install and verification commands when you need one surface by itself.
-
-### Claude Code
-
-Install and open Claude Code once before applying latch; the installer stops
-before writing config if the `claude` CLI is missing.
-
-```bash
-# From the latch repo root.
-bash bin/install_engine.sh         # Windows: .\bin\install_engine.ps1
-
-# From each project repo where Claude Code should follow latch.
-/path/to/latch/bin/install_claude_md.sh --yes
-# Windows: C:\path\to\latch\bin\install_claude_md.ps1 --yes
-
-bash /path/to/latch/bin/install_engine.sh --check
-bash /path/to/latch/bin/latch_doctor.sh
-```
-
-### Codex
-
-The installer adds the `latch` MCP server to Codex `config.toml`, syncs Latch's
-bundled workflows into `$HOME/.agents/skills` (on Windows,
-`%USERPROFILE%\.agents\skills`), installs the contract into `AGENTS.md`, and
-adds the SessionStart hook. Existing installs using the legacy `claude-kb`
-server key are migrated when the managed block is refreshed. Same-named
-user-owned skills are never overwritten.
-
-```bash
-# From the project repo where Codex should follow latch.
-/path/to/latch/bin/install_codex.sh --yes
-# Windows: C:\path\to\latch\bin\install_codex.ps1 --yes
-
-/path/to/latch/bin/install_codex.sh --check
-/path/to/latch/bin/latch_codex_doctor.sh
-```
-
-Codex exposes installed workflows through `/skills` or an explicit skill
-mention such as `$source-command-latch-compact`; it does not create top-level
-`/latch-*` slash commands. Codex can also select a workflow implicitly from its
-description. It detects new skills automatically; restart Codex if a newly
-installed workflow does not appear.
-
-### Cursor
-
-Cursor is project-scoped. The installer owns `.cursor/mcp.json`, the latch
-Rule, project commands and skills, and the managed `AGENTS.md` region; pass
-`--with-hooks` for SessionStart context and fail-closed pre-edit gate
-enforcement. It preserves unrelated Cursor configuration.
-
-```bash
-# From the project repo where Cursor should follow latch.
-/path/to/latch/bin/install_cursor.sh --yes --with-hooks
-# Windows: C:\path\to\latch\bin\install_cursor.ps1 --yes --with-hooks
-
-/path/to/latch/bin/install_cursor.sh --check --with-hooks
-/path/to/latch/bin/latch_cursor_doctor.sh --with-hooks
-```
-
-Cursor also requires three user-controlled live prerequisites: authenticate the
-Agent CLI with `agent login`, approve the project MCP server, and enable
-**latch** for the workspace in **Cursor Settings > Tools & MCP**. Static doctor
-success or CLI visibility alone does not prove the IDE gate is live.
-
-Read the [Cursor reference](./runbooks/cursor.md) for the complete vetted
-hook, privacy, current-session, backend, doctor, and plugin boundaries. Use the
-[Cursor gate smoke](./runbooks/cursor_gate_smoke.md) for live acceptance.
-
-## Using It Day To Day
-
-You mostly do not operate latch. Once wired, the agent reads the KB before
-answering, captures durable decisions as they happen, and runs `latch_gate`
-before coding-shaped changes. When latch affects an answer, the agent should
-show a short foreground receipt naming what it read or which gate fired. Audit
-recent gate activity without writing anything with `/latch-gate-report` or
-`bin/latch_gate_report.sh`.
-
-At natural stopping points, capture the session:
-
-- Claude Code: `/latch-compact`
-- Codex: `/path/to/latch/bin/run_codex_compact_now.sh`
-- Cursor: `/latch-compact` from the current hooked conversation, or the
-  `run_cursor_compact_now` wrapper with the surfaced session id
-
-Compaction is user-initiated because it spends a model call and writes a durable
-summary into the KB.
-
-latch shares its heavyweight local MCP/model runtime within each pinned vault
-instead of loading a separate embedding model per task. The operational contract
-and benchmark evidence live in
-[`docs/mcp_resource_architecture.md`](./docs/mcp_resource_architecture.md).
-
-## Safety And Control
-
-**Local-first storage.** latch stores project judgment locally in SQLite and
-does not require a cloud account.
-
-**No latch cloud.** latch does not upload your KB to a latch service. Data leaves
-your machine only when you run a model-backed path using the Claude, Codex,
-Cursor, or other backend you configured; those calls may send selected prompts,
-snippets, and evidence context to that backend. Local eval runners use throwaway
-KBs and do not read or write your live project DB.
-
-**Kill switch.** Stop latch hooks without uninstalling:
-
-```bash
-bash bin/latch_disable.sh
-bash bin/latch_enable.sh
-bash bin/latch_status.sh
-```
-
-**Unlatch.** Turn the automatic judgment layer off for this install, then turn
-it back on when ready:
-
-```bash
-bash bin/unlatch.sh
-bash bin/unlatch.sh --confirm unlatch
-bash bin/unlatch.sh --confirm latch
-```
-
-Unlatched mode is install-level and masks latch's managed `CLAUDE.md` /
-`AGENTS.md` regions while off. It does not clone the project, delete the KB,
-uninstall latch, call a latch cloud service, collect telemetry, or disable the
-agent's native memory, model context, repo access, or other tools. It is a rough
-vanilla-agent sanity check, not a controlled benchmark.
-
-**Uninstall.** Preview or remove latch wiring. KB data is kept unless you pass
-`--purge`:
-
-```bash
-bash bin/uninstall.sh --dry-run
-bash bin/uninstall.sh
-
-# Remove only latch-owned Cursor wiring from the current project:
-bash bin/uninstall.sh --dry-run --cursor-only --cursor-project "$PWD"
-bash bin/uninstall.sh --yes --cursor-only --cursor-project "$PWD"
-```
-
-## Proof Discipline And Limits
-
-latch's local evals ask the first-OSS question directly: can the agent surface
-binding project judgment, rejected paths, stale/reconciled status, the documented
-why behind decisions, and visible gate receipts?
-
-```bash
-bash bin/latch_eval.sh
-bash bin/latch_seed_report_eval.sh
-bash bin/latch_proof_packet.sh --check
-```
-
-Read the benchmark as a comparison against the checked-in `memory_like`
-ablation, not a generic scorecard or a benchmark of a third-party memory
-product. The small fixtures are proof instruments, not broad claims about every
-repository or model. When a prior reason is not recoverable, the agent should
-present a reconstruction for confirmation rather than assert it as fact.
-
-See [benchmarks/README.md](./benchmarks/README.md) for fixture and JSON report
-details and the [public proof packet](./proof/README.md) for the observed receipt,
-exact boundaries, and reproduction commands.
-
-Proof verification checks the tooling commit immediately before the generated
-artifacts. In a depth-1 clone, run `git fetch --deepen=2` before retrying
-`bash bin/latch_proof_packet.sh --check`; repeat if necessary or fetch the full
-history.
-
-## Versions And Updates
-
-Stable latch builds use immutable `vX.Y.Z` Git tags and matching GitHub Releases.
-The moving `main` branch is development code, not the update channel.
-
-| Version | Purpose |
-| --- | --- |
-| `LATCH_VERSION` (`VERSION`) | User-facing release |
-| `KB_SCHEMA_VERSION` | Local SQLite compatibility |
-| `WIRING_VERSION` | Copied project integration files |
-
-Show installed versions, check for an update, preview it, then apply explicitly:
+Stable builds use immutable `vX.Y.Z` Git tags and matching Releases; `main` is development code, not
+the update channel. Check and apply updates explicitly:
 
 ```bash
 bash bin/latch_version.sh          # Windows: .\bin\latch_version.ps1
-bash bin/latch_version.sh --json
 bash bin/latch_update.sh --check
 bash bin/latch_update.sh --dry-run
 bash bin/latch_update.sh --yes
 ```
 
-The updater operates only on a clean official `open-latch/latch` clone on
-`main` or an existing release checkout. It refuses modified files, development
-branches, forks, and ambiguous origins; installs an exact release tag; refreshes
-dependencies and existing Claude command copies; and backs up every discovered
-local KB before a schema upgrade. latch refuses to open a KB written by a newer
-schema rather than guessing or downgrading it.
+The updater operates only on a clean official `open-latch/latch` clone, backs up every discovered KB
+before a schema upgrade, and refuses to open a KB written by a newer schema.
 
-Already-wired projects carry a small wiring version in their latch-owned marker.
-On the next SessionStart, the agent performs a local marker-only comparison:
-current wiring is silent and write-free, older managed wiring is repaired once
-with a receipt and backup, and newer wiring is never downgraded. Unmanaged repos
-remain untouched. Cursor without hooks performs the same check when its existing
-project MCP server starts. Restart the relevant agent when a receipt says hooks
-or MCP configuration changed.
-
-Release tags are forward updates. Restoring code across a KB schema change also
-requires restoring the corresponding `kb.db.bak.schema-*` backup.
-
-## Platform Notes
-
-- **Python >= 3.11**, native-architecture. Python 3.12 and 3.13 also work.
-- **uv** is the recommended venv/dependency installer. In Git Bash on Windows,
-  activate the venv with `source .venv/Scripts/activate`.
-- A working `python` must be on `PATH`, or set `LATCH_PYTHON` to its absolute
-  path (`CLAUDE_KB_PYTHON` remains a legacy alias).
-
-### Apple Silicon Arm64
-
-Use a native arm64 Python. A venv built with an Intel Python under Rosetta
-installs x86_64 wheels, and sqlite-vec's prebuilt x86_64 binary can crash at
-extension-load time. Verify with:
+**Python >= 3.11** (3.12 and 3.13 also work), native architecture. On Apple Silicon use a native
+arm64 Python — a Rosetta/Intel venv can crash sqlite-vec at extension-load time. Verify with:
 
 ```bash
 python3 -c "import platform; print(platform.machine())"
 ```
 
-It should print `arm64`. The doctor detects the mismatch and prints the remedy.
+It should print `arm64`; the doctor detects the mismatch and prints the remedy.
 
-## License And Public Boundary
+## License and public boundary
 
-The source code in this repository is licensed under the Apache License,
-Version 2.0. See [LICENSE](./LICENSE), [LICENSING.txt](./LICENSING.txt), and
-[NOTICE](./NOTICE).
+Source in this repository is licensed under the Apache License, Version 2.0. See
+[LICENSE](./LICENSE), [LICENSING.txt](./LICENSING.txt), and [NOTICE](./NOTICE).
 
-This public repo is the local single-player decision-seatbelt core: install,
-doctor, seed/report, local KB, `latch_gate`, receipts, evals, and Claude Code /
-Codex / Cursor adapter wiring. It is intended to be inspectable, forkable, and
-useful without a cloud account.
-
-The latch name and branding are not licensed under Apache 2.0. See
-[TRADEMARK.md](./TRADEMARK.md) for the trademark guidelines and
-[CONTRIBUTING.md](./CONTRIBUTING.md) for contribution terms, including
-AI-assisted contribution guidance.
+This public repo is the local single-player decision-seatbelt core: install, doctor, seed/report,
+local KB, `latch_gate`, receipts, evals, and Claude Code / Codex / Cursor adapter wiring —
+inspectable, forkable, and useful without a cloud account. The latch name and branding are not
+licensed under Apache 2.0; see [TRADEMARK.md](./TRADEMARK.md) and [CONTRIBUTING.md](./CONTRIBUTING.md).
 
 ## Documentation
 
@@ -572,6 +425,6 @@ AI-assisted contribution guidance.
 | [Cursor reference](./runbooks/cursor.md) | [Cursor gate smoke](./runbooks/cursor_gate_smoke.md) |
 | [Architecture](./ARCHITECTURE.md) | [Shared MCP runtime](./docs/mcp_resource_architecture.md) |
 
-Install internals, maintenance machinery, and contributor details live in
-[ARCHITECTURE.md](./ARCHITECTURE.md). The README stays focused on the local
-decision-seatbelt workflow.
+Install internals, per-surface manual install, and maintenance machinery live in
+[ARCHITECTURE.md](./ARCHITECTURE.md). This README stays focused on the local decision-seatbelt
+workflow.
