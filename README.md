@@ -282,6 +282,9 @@ serves many repos; `--install-dir PATH` (PowerShell `-InstallDir PATH`) picks an
 alternate location. Install internals and per-surface manual setup live in
 [ARCHITECTURE.md](./ARCHITECTURE.md).
 
+To stay current, periodically check for a newer tagged release using the explicit update commands in
+[Versions and platform](#versions-and-platform).
+
 **Pass quickstart options** through the piped Bash form after `bash -s --`:
 
 ```bash
