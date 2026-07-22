@@ -243,6 +243,57 @@ def test_insert_with_heal_no_llm_keeps_both_on_match():
         _cleanup(tmp, conn)
 
 
+def test_cross_lane_duplicate_signal_stamps_substrate_version(monkeypatch):
+    tmp, conn = _fresh_db()
+    events = []
+    try:
+        left = db.insert_node(
+            conn,
+            kind="workstream",
+            title="Left lane",
+            body="Objective: left.",
+            status="canonical",
+        )
+        right = db.insert_node(
+            conn,
+            kind="workstream",
+            title="Right lane",
+            body="Objective: right.",
+            status="canonical",
+        )
+        heal.insert_with_heal(
+            conn,
+            kind="fact",
+            title="deploy uses docker compose",
+            body="The deploy pipeline is docker compose up -d.",
+            workstream_id=left,
+            use_llm=False,
+        )
+        monkeypatch.setattr(
+            heal.log_utils,
+            "emit_event",
+            lambda channel, payload, **kwargs: events.append((channel, payload)),
+        )
+        heal.insert_with_heal(
+            conn,
+            kind="fact",
+            title="deployment uses docker compose",
+            body="The deploy pipeline runs docker compose up.",
+            workstream_id=right,
+            threshold=0.0,
+            use_llm=False,
+        )
+        lifecycle = [payload for channel, payload in events if channel == "lifecycle"]
+        _assert(len(lifecycle) == 1, lifecycle)
+        _assert(
+            lifecycle[0]["substrate_version"]
+            == heal.lifecycle_signals.SUBSTRATE_VERSION,
+            lifecycle[0],
+        )
+    finally:
+        _cleanup(tmp, conn)
+
+
 def test_insert_with_heal_respects_kind_filter():
     """A fact and a preference with identical text should not collide — different kinds."""
     tmp, conn = _fresh_db()

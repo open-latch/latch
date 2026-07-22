@@ -416,29 +416,30 @@ def _build_briefing(
             # New-user detection: cheap COUNT(*), same connection. Drives the
             # getting-started block below.
             show_getting_started = db.node_count(conn) < NEW_USER_NODE_THRESHOLD
-            try:
-                receipt_items = lifecycle_receipts.surface_pending_items(
-                    conn,
-                    limit=LIFECYCLE_RECEIPT_LIMITS[resolved_intensity],
-                )
-            except Exception as e:
-                log(f"lifecycle receipt surfacing failed: {e}")
-                receipt_items = []
-            suggestion_budget = max(
-                0,
-                LIFECYCLE_RECEIPT_LIMITS[resolved_intensity] - len(receipt_items),
-            )
-            try:
-                lifecycle_suggestions = (
-                    lifecycle_receipts.surface_pending_suggestions(
+            receipt_items = []
+            lifecycle_suggestions = []
+            if lifecycle_receipts.RECEIPTS_CHANNEL_LIVE:
+                try:
+                    receipt_items = lifecycle_receipts.surface_pending_items(
                         conn,
-                        limit=suggestion_budget,
+                        limit=LIFECYCLE_RECEIPT_LIMITS[resolved_intensity],
                     )
-                    if suggestion_budget else []
+                except Exception as e:
+                    log(f"lifecycle receipt surfacing failed: {e}")
+                suggestion_budget = max(
+                    0,
+                    LIFECYCLE_RECEIPT_LIMITS[resolved_intensity] - len(receipt_items),
                 )
-            except Exception as e:
-                log(f"lifecycle suggestion surfacing failed: {e}")
-                lifecycle_suggestions = []
+                try:
+                    lifecycle_suggestions = (
+                        lifecycle_receipts.surface_pending_suggestions(
+                            conn,
+                            limit=suggestion_budget,
+                        )
+                        if suggestion_budget else []
+                    )
+                except Exception as e:
+                    log(f"lifecycle suggestion surfacing failed: {e}")
         finally:
             conn.close()
     except Exception as e:

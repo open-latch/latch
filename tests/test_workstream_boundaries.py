@@ -86,6 +86,69 @@ def test_mcp_membership_rejects_closed_or_missing_lane_without_write(
     assert db.get_node(conn, orphan)["title"] == "unchanged"
 
 
+def test_mcp_update_allows_ordinary_edits_in_closed_lane(boundary_kb):
+    _, conn = boundary_kb
+    closed = _lane(conn, "Closed history", status="stale")
+    member = db.insert_node(
+        conn,
+        kind="decision",
+        title="Historical decision",
+        body="Original wording",
+        status="canonical",
+        workstream_id=closed,
+    )
+
+    explicit = mcp_server.kb_update(
+        member,
+        title="Must not write",
+        workstream_id=closed,
+    )
+    assert explicit["ok"] is False
+    assert "closed (stale)" in explicit["error"]
+    assert db.get_node(conn, member)["title"] == "Historical decision"
+
+    result = mcp_server.kb_update(
+        member,
+        title="Corrected historical decision",
+        body="Corrected wording",
+        status="staging",
+    )
+
+    assert result["ok"] is True
+    assert "workstream_resolution" not in result
+    updated = db.get_node(conn, member)
+    assert updated["title"] == "Corrected historical decision"
+    assert updated["body"] == "Corrected wording"
+    assert updated["status"] == "staging"
+    assert updated["workstream_id"] == closed
+
+
+def test_mcp_update_does_not_reparent_merged_membership_unless_requested(
+    boundary_kb,
+):
+    _, conn = boundary_kb
+    merged, active = _merged_pair(conn)
+    member = db.insert_node(
+        conn,
+        kind="fact",
+        title="Historical member",
+        body="Before correction",
+        status="canonical",
+        workstream_id=merged,
+    )
+
+    corrected = mcp_server.kb_update(member, body="After correction")
+
+    assert corrected["ok"] is True
+    assert "workstream_resolution" not in corrected
+    assert db.get_node(conn, member)["workstream_id"] == merged
+
+    moved = mcp_server.kb_update(member, workstream_id=merged)
+    assert moved["ok"] is True
+    assert moved["workstream_resolution"]["resolved_workstream_id"] == active
+    assert db.get_node(conn, member)["workstream_id"] == active
+
+
 def test_mcp_generic_insert_cannot_bypass_priority_ordering(
     boundary_kb, monkeypatch,
 ):

@@ -114,6 +114,7 @@ def test_legacy_active_workstream_gets_silent_non_auto_baseline(tmp_path, monkey
     assert row["origin"] == "legacy"
     assert row["payload"]["assigned_member_ids"] == [member]
     assert lifecycle_receipts.pending_receipts(conn) == []
+    assert lifecycle_receipts.recent_receipts(conn) == []
 
     second = lifecycle_receipts.reconcile_legacy_workstream_baselines(conn)
     assert second["baseline_count"] == 0

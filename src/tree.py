@@ -36,6 +36,7 @@ import numpy as np
 import budget  # noqa: E402
 import db  # noqa: E402
 import embeddings  # noqa: E402
+import lifecycle_signals  # noqa: E402
 import log_utils  # noqa: E402
 import model_backends  # noqa: E402
 import paths  # noqa: E402
@@ -508,6 +509,15 @@ def build_tree(
         member_ids = [m["id"] for m in members]
         cluster_hash = _cluster_content_hash(members)
 
+        # Sub-threshold groups are not lifecycle clusters.  In particular,
+        # emitting orphan_cluster for every singleton on every rebuild floods
+        # the detector with repeated non-candidates.
+        if len(members) < min_cluster_size:
+            result["singletons"] += 1
+            _debug(f"  cluster #{cluster_i} size={len(members)} ids={member_ids} "
+                   f"SKIP: below min_cluster_size")
+            continue
+
         # Structural lifecycle corroboration only: lane ids and node ids, never
         # bodies.  Text clustering may group candidates, but cannot itself
         # authorize membership or a lifecycle mutation.
@@ -526,6 +536,7 @@ def build_tree(
                 "lifecycle",
                 {
                     "event": "cluster_span",
+                    "substrate_version": lifecycle_signals.SUBSTRATE_VERSION,
                     "cluster_id": cluster_hash[:16],
                     "workstream_ids": sorted(lane_counts),
                     "fractions": {
@@ -541,6 +552,7 @@ def build_tree(
                 "lifecycle",
                 {
                     "event": "orphan_cluster",
+                    "substrate_version": lifecycle_signals.SUBSTRATE_VERSION,
                     "cluster_id": cluster_hash[:16],
                     "member_ids": sorted(orphan_ids),
                     "tree_derived_at": datetime.now().isoformat(timespec="seconds"),
@@ -553,6 +565,7 @@ def build_tree(
                 "lifecycle",
                 {
                     "event": "mixed_lane_orphan_cluster",
+                    "substrate_version": lifecycle_signals.SUBSTRATE_VERSION,
                     "cluster_id": cluster_hash[:16],
                     "orphan_ids": sorted(orphan_ids),
                     "workstream_ids": sorted(lane_counts),
@@ -560,12 +573,6 @@ def build_tree(
                 project_path=project_path,
                 session_id=None,
             )
-
-        if len(members) < min_cluster_size:
-            result["singletons"] += 1
-            _debug(f"  cluster #{cluster_i} size={len(members)} ids={member_ids} "
-                   f"SKIP: below min_cluster_size")
-            continue
 
         if len(members) > max_cluster_members:
             # Fail-safe collapse guard: refuse to persist a summary for a

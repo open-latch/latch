@@ -427,10 +427,9 @@ def _run_public_priority_mutation(
 
     Acquire the shared project writer lock before opening the SQLite
     connection, then keep it through the priority helper's commit.  The
-    low-level priority helpers deliberately remain lock-free: lifecycle CLOSE
-    and MERGE call their non-committing variants from an already-locked atomic
-    transaction, so locking there would deadlock on the non-reentrant file
-    lock.
+    low-level priority helpers deliberately remain free of filesystem locking:
+    lifecycle CLOSE and MERGE call their non-committing variants from an
+    already-locked atomic transaction.
     """
     project_path = _project_cwd()
     try:
@@ -1066,14 +1065,20 @@ def kb_update(
                     "or latch_priority_retire"
                 ),
             }
-        requested_workstream_id = (
-            workstream_id if workstream_id is not None else node.get("workstream_id")
-        )
-        resolved_workstream_id, workstream_resolution, scope_error = (
-            _resolve_membership_for_mcp(conn, requested_workstream_id)
-        )
-        if scope_error is not None:
-            return scope_error
+        # Membership resolution is a write-boundary for an explicitly requested
+        # move, not a prerequisite for editing the node's other fields.  In
+        # particular, historical knowledge remains editable after its lane is
+        # CLOSED, and a plain correction must not silently reparent a member of
+        # a merged-away lane.  This mirrors latch_append: resolve only the
+        # identity that the caller actually asked the operation to target.
+        resolved_workstream_id = None
+        workstream_resolution = None
+        if workstream_id is not None:
+            resolved_workstream_id, workstream_resolution, scope_error = (
+                _resolve_membership_for_mcp(conn, workstream_id)
+            )
+            if scope_error is not None:
+                return scope_error
         new_vec = None  # raw vector — kept for the claim-change guard
         new_blob = None
         if title is not None or body is not None:
@@ -1087,7 +1092,7 @@ def kb_update(
         old_kind = node["kind"]
         old_status = node["status"]
         old_embedding = node["embedding"]
-        if requested_workstream_id is not None:
+        if workstream_id is not None:
             db.set_node_workstream_nc(conn, [node_id], resolved_workstream_id)
         db.update_node(conn, node_id, title=title, body=body, status=status, embedding=new_blob)
         db.bump_focus_for_nodes(conn, [node_id])

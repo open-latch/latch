@@ -202,9 +202,11 @@ def test_project_direction_surfaces_unanchored_recent_evidence():
         _cleanup(tmp, conn)
 
 
-def test_project_direction_claims_pending_lifecycle_receipt_once():
+def test_project_direction_reads_recent_lifecycle_receipts_without_claiming():
     tmp, conn = _fresh_db()
+    previous_receipts_live = pd.lifecycle_receipts.RECEIPTS_CHANNEL_LIVE
     try:
+        pd.lifecycle_receipts.RECEIPTS_CHANNEL_LIVE = True
         ws = db.insert_node(
             conn,
             kind="workstream",
@@ -238,13 +240,30 @@ def test_project_direction_claims_pending_lifecycle_receipt_once():
         )
         db.finish_workstream_op(conn, "direction-open-receipt", state="applied")
 
+        changes_before = conn.total_changes
         first = pd.assemble_project_direction(conn)
         _assert(first["used"]["lifecycle_receipts"] == 1, first)
         _assert(receipt in pd.format_text(first), first)
+        _assert(conn.total_changes == changes_before, "read-only report committed writes")
+        _assert(
+            conn.execute(
+                "SELECT COUNT(*) FROM workstream_op_events "
+                "WHERE event_type='receipt_surfaced'"
+            ).fetchone()[0] == 0,
+            "project direction claimed SessionStart's receipt",
+        )
         second = pd.assemble_project_direction(conn)
-        _assert(second["used"]["lifecycle_receipts"] == 0, second)
-        _assert(receipt not in pd.format_text(second), second)
+        _assert(second["used"]["lifecycle_receipts"] == 1, second)
+        _assert(receipt in pd.format_text(second), second)
+        _assert(conn.total_changes == changes_before, "repeat report committed writes")
+
+        pd.lifecycle_receipts.RECEIPTS_CHANNEL_LIVE = False
+        silenced = pd.assemble_project_direction(conn)
+        _assert(silenced["used"]["lifecycle_receipts"] == 0, silenced)
+        _assert(receipt not in pd.format_text(silenced), silenced)
+        _assert(conn.total_changes == changes_before, "silenced report committed writes")
     finally:
+        pd.lifecycle_receipts.RECEIPTS_CHANNEL_LIVE = previous_receipts_live
         _cleanup(tmp, conn)
 
 

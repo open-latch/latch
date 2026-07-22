@@ -157,15 +157,60 @@ def _verified_shared_targets(
     target_marks = ",".join("?" for _ in target_ids)
     rows = conn.execute(
         f"SELECT e.dst,COUNT(DISTINCT e.src) AS source_count FROM edges e "
+        f"JOIN nodes member ON member.id=e.src "
         f"JOIN nodes target ON target.id=e.dst "
         f"WHERE e.src IN ({member_marks}) AND e.dst IN ({target_marks}) "
         f"AND e.relation IN ('advances','motivates','depends_on') "
-        f"AND e.status='active' AND target.status!='stale' "
+        f"AND e.status='active' AND member.status!='stale' "
+        f"AND target.status!='stale' "
         f"AND target.kind IN ('decision','workstream') GROUP BY e.dst "
         f"HAVING COUNT(DISTINCT e.src)>=2",
         [*member_ids, *target_ids],
     ).fetchall()
     return {int(row["dst"]) for row in rows} == set(target_ids)
+
+
+def _verified_recurrence_sessions(
+    conn: sqlite3.Connection,
+    *,
+    member_ids: list[int],
+    session_ids: list[str],
+) -> bool:
+    """Recompute OPEN recurrence from contamination-free orphan contacts."""
+    members = sorted({int(value) for value in member_ids})
+    sessions = sorted({str(value) for value in session_ids if str(value).strip()})
+    if not members or len(sessions) < 2:
+        return False
+    member_marks = ",".join("?" for _ in members)
+    session_marks = ",".join("?" for _ in sessions)
+    rows = conn.execute(
+        f"SELECT DISTINCT r.session_id FROM retrieval_events r "
+        f"JOIN nodes member ON member.id=r.node_id "
+        f"WHERE r.node_id IN ({member_marks}) "
+        f"AND r.session_id IN ({session_marks}) "
+        "AND r.workstream_id_at_event IS NULL "
+        "AND member.status!='stale' "
+        "AND (r.source='write' OR "
+        "(r.turn>0 AND r.source IN ('prompt','graph','tool','gate')))",
+        [*members, *sessions],
+    ).fetchall()
+    return {str(row["session_id"]) for row in rows} == set(sessions)
+
+
+def _workstream_open_origin(
+    conn: sqlite3.Connection,
+    workstream_id: int,
+) -> str | None:
+    """Return an unambiguous applied OPEN origin, otherwise fail closed."""
+    rows = conn.execute(
+        "SELECT origin FROM workstream_ops WHERE op='OPEN' AND state='applied' "
+        "AND dst_workstream_id=? ORDER BY id",
+        (int(workstream_id),),
+    ).fetchall()
+    if len(rows) != 1:
+        return None
+    origin = str(rows[0]["origin"] or "").strip().lower()
+    return origin or None
 
 
 def _accepted_open_proposal(
@@ -256,7 +301,14 @@ def _accepted_open_proposal(
     if candidate_members is not None and not set(members).issubset(candidate_members):
         state["evidence"]["proposal_event_status"] = "member_mismatch"
         return state
-    session_recurrence = session_count >= 2 and len(session_ids) >= 2
+    session_recurrence_validated = bool(
+        session_count >= 2
+        and len(session_ids) >= 2
+        and _verified_recurrence_sessions(
+            conn, member_ids=members, session_ids=session_ids,
+        )
+    )
+    session_recurrence = session_recurrence_validated
     if not session_recurrence and not shared_target_validated:
         state["evidence"]["proposal_event_status"] = "recurrence_incomplete"
         return state
@@ -269,6 +321,7 @@ def _accepted_open_proposal(
                 **dict(recurrence),
                 "session_ids": session_ids,
                 "session_count": session_count,
+                "session_recurrence_validated": session_recurrence_validated,
                 "shared_target_ids": shared_target_ids,
                 "shared_target_validated": shared_target_validated,
             },
@@ -282,6 +335,7 @@ def _accepted_open_proposal(
             "proposal_event_derivation_id": int(accepted["derivation_id"]),
             "proposal_event_session_id": accepted["session_id"],
             "proposal_key": payload.get("proposal_key"),
+            "session_recurrence_validated": session_recurrence_validated,
             "shared_target_recurrence_validated": shared_target_validated,
         },
     })
@@ -367,11 +421,14 @@ def _probation_merge_back(
         raw_pair = payload.get("watch_pair")
         if not isinstance(raw_pair, (list, tuple)) or [int(v) for v in raw_pair] != [new_lane, watched]:
             continue
+        absorber_origin = _workstream_open_origin(conn, watched)
         matches.append({
             "open_operation_id": int(row["id"]),
             "open_op_key": row["op_key"],
             "source_workstream_id": new_lane,
             "absorber_workstream_id": watched,
+            "absorber_origin": absorber_origin,
+            "attestation_carveout_eligible": absorber_origin == "auto",
             "eligible_session_count": dynamic.get("eligible_session_count"),
             "eligible_session_target": dynamic.get("eligible_session_target"),
             "contact_session_count": dynamic.get("contact_session_count"),
@@ -1058,12 +1115,7 @@ def _open_evidence(signal: Mapping[str, Any], request: Mapping[str, Any]) -> tup
         )
     except (TypeError, ValueError):
         session_count = 0
-    tier1 = bool(
-        signal.get("tier1_present")
-        or signal.get("tier1") in {
-            "multi_session_orphan_contact", "multi_session_contact", "shared_feeder_target",
-        }
-    )
+    tier1 = signal.get("tier1_present") is True
     shared_targets = _strict_int_list(recurrence.get("shared_target_ids", []))
     shared_target_validated = bool(
         recurrence.get("shared_target_validated") is True and shared_targets
@@ -1313,6 +1365,9 @@ def plan_actions(
             probation_self_revert = bool(
                 isinstance(evidence.get("probation_merge_back"), Mapping)
                 and evidence["probation_merge_back"].get("eligible") is True
+                and evidence["probation_merge_back"].get(
+                    "attestation_carveout_eligible"
+                ) is True
             )
             if attestation["quorum"] or probation_self_revert:
                 stage = "attested"

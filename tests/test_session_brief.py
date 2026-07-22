@@ -471,6 +471,81 @@ def test_brief_surfaces_lifecycle_receipt_once_with_auto_annotation():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_brief_receipt_channel_kill_switch_preserves_pending_receipt():
+    tmp, conn = _fresh_db()
+    previous = lifecycle_receipts.RECEIPTS_CHANNEL_LIVE
+    original_suggestions = lifecycle_receipts.surface_pending_suggestions
+    suggestion_calls = []
+    try:
+        wid = _mk(
+            conn, kind="workstream", title="Silenced lane",
+            body="Objective: prove the receipt kill switch", status="canonical",
+        )
+        receipt = lifecycle_receipts.opened(
+            "Silenced lane", 2, "2026-07-01", "the channel can be disabled",
+        )
+        db.begin_workstream_op(
+            conn,
+            op_key="open-silenced-brief",
+            op="OPEN",
+            origin="auto",
+            candidate_key="open:silenced-brief",
+            dst_workstream_id=wid,
+            payload={
+                "request": {
+                    "title": "Silenced lane",
+                    "done_when": "the channel can be disabled",
+                    "recurrence": {"session_count": 2, "since": "2026-07-01"},
+                },
+                "title": "Silenced lane",
+                "receipt": receipt,
+                "assigned_member_ids": [],
+                "watch_pair": None,
+                "probation": {},
+            },
+        )
+        db.finish_workstream_op(conn, "open-silenced-brief", state="applied")
+        conn.close()
+        conn = None
+
+        lifecycle_receipts.RECEIPTS_CHANNEL_LIVE = False
+        lifecycle_receipts.surface_pending_suggestions = (
+            lambda *_args, **_kwargs: suggestion_calls.append(True) or [
+                "disabled lifecycle suggestion"
+            ]
+        )
+        silenced = session_start._build_briefing(tmp, intensity="quiet")
+        _assert(receipt not in silenced, silenced)
+        _assert("disabled lifecycle suggestion" not in silenced, silenced)
+        _assert(suggestion_calls == [], "kill switch still queried suggestions")
+        check = db.connect(tmp)
+        try:
+            pending = lifecycle_receipts.pending_receipts(check)
+            _assert(
+                [item["op_key"] for item in pending] == ["open-silenced-brief"],
+                pending,
+            )
+        finally:
+            check.close()
+
+        lifecycle_receipts.RECEIPTS_CHANNEL_LIVE = True
+        lifecycle_receipts.surface_pending_suggestions = original_suggestions
+        surfaced = session_start._build_briefing(tmp, intensity="quiet")
+        _assert(receipt in surfaced, surfaced)
+        check = db.connect(tmp)
+        try:
+            _assert(lifecycle_receipts.pending_receipts(check) == [], "receipt not claimed")
+        finally:
+            check.close()
+        print("PASS brief_receipt_channel_kill_switch_preserves_pending_receipt")
+    finally:
+        lifecycle_receipts.RECEIPTS_CHANNEL_LIVE = previous
+        lifecycle_receipts.surface_pending_suggestions = original_suggestions
+        if conn is not None:
+            conn.close()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_quiet_brief_surfaces_candidate_suggestion_once_without_prompting():
     tmp, conn = _fresh_db()
     try:
@@ -548,6 +623,7 @@ if __name__ == "__main__":
     test_brief_surfaces_claude_md_resync_notice()
     test_brief_resync_notice_makes_empty_brief_nonempty()
     test_brief_surfaces_lifecycle_receipt_once_with_auto_annotation()
+    test_brief_receipt_channel_kill_switch_preserves_pending_receipt()
     test_unlatched_brief_is_static_escape_hatch_receipt()
     test_unlatched_emit_includes_user_visible_system_message()
     print("\nAll session-brief tests pass.")

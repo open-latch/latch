@@ -513,10 +513,11 @@ def _verified_shared_targets(
     target_marks = ",".join("?" for _ in targets)
     rows = conn.execute(
         f"SELECT e.dst, COUNT(DISTINCT e.src) AS source_count FROM edges e "
+        f"JOIN nodes member ON member.id=e.src "
         f"JOIN nodes target ON target.id=e.dst "
         f"WHERE e.src IN ({member_marks}) AND e.dst IN ({target_marks}) "
         "AND e.relation IN ('advances','motivates','depends_on') "
-        "AND e.status='active' AND target.status!='stale' "
+        "AND e.status='active' AND member.status!='stale' AND target.status!='stale' "
         "AND target.kind IN ('decision','workstream') GROUP BY e.dst "
         "HAVING COUNT(DISTINCT e.src)>=2",
         [*members, *targets],
@@ -1258,15 +1259,7 @@ def close_workstream(
             "workstream_id": None, "resolution": initial_resolution, "already": True,
         }
     active_id = int(initial_resolution["active_id"])
-    probation_abandonment = (
-        clean_origin == "auto"
-        and clean_outcome == "abandoned"
-        and _within_open_probation(conn, active_id)
-    )
-    _, observed_token = _close_snapshot(
-        conn, active_id, include_probation_releases=probation_abandonment,
-    )
-    expected_token = preflight_token or observed_token
+    expected_token = preflight_token
     lock_path = _project_path(project_path)
     result: dict
     with lockfile.writer_lock(lock_path):
@@ -1277,6 +1270,18 @@ def close_workstream(
             if prior is not None:
                 conn.commit()
                 return prior
+            locked_probation_abandonment = (
+                clean_origin == "auto"
+                and clean_outcome == "abandoned"
+                and _within_open_probation(conn, active_id)
+            )
+            snapshot, locked_token = _close_snapshot(
+                conn,
+                active_id,
+                include_probation_releases=locked_probation_abandonment,
+            )
+            if expected_token is None:
+                expected_token = locked_token
             if not _auto_plan_is_current(
                 conn,
                 origin=clean_origin,
@@ -1327,16 +1332,6 @@ def close_workstream(
                 )
                 conn.commit()
                 return failed
-            locked_probation_abandonment = (
-                clean_origin == "auto"
-                and clean_outcome == "abandoned"
-                and _within_open_probation(conn, active_id)
-            )
-            snapshot, locked_token = _close_snapshot(
-                conn,
-                active_id,
-                include_probation_releases=locked_probation_abandonment,
-            )
             if locked_token != expected_token:
                 failed = _finish_failed_nc(
                     conn, op_key=key, op="CLOSE", origin=clean_origin,
@@ -1672,17 +1667,6 @@ def adopt_nodes(
     if initial_resolution["active_id"] is None:
         raise WorkstreamValidationError("ADOPT target must resolve to an active workstream")
     active_id = int(initial_resolution["active_id"])
-    initial_snapshot = []
-    for node_id in members:
-        node = _row(conn, node_id)
-        initial_snapshot.append({
-            "id": node_id,
-            "kind": node.get("kind") if node else None,
-            "status": node.get("status") if node else None,
-            "workstream_id": node.get("workstream_id") if node else None,
-            "updated_at": node.get("updated_at") if node else None,
-        })
-    token = _snapshot_token(initial_snapshot)
 
     lock_path = _project_path(project_path)
     result: dict
@@ -1694,6 +1678,20 @@ def adopt_nodes(
             if prior is not None:
                 conn.commit()
                 return prior
+            locked_snapshot = []
+            nodes: dict[int, dict] = {}
+            for node_id in members:
+                node = _row(conn, node_id)
+                locked_snapshot.append({
+                    "id": node_id,
+                    "kind": node.get("kind") if node else None,
+                    "status": node.get("status") if node else None,
+                    "workstream_id": node.get("workstream_id") if node else None,
+                    "updated_at": node.get("updated_at") if node else None,
+                })
+                if node is not None:
+                    nodes[node_id] = node
+            token = _snapshot_token(locked_snapshot)
             if not _auto_plan_is_current(
                 conn,
                 origin=clean_origin,
@@ -1729,28 +1727,6 @@ def adopt_nodes(
                 return failed
             resolution = resolve_active(conn, requested_id)
             if resolution["active_id"] is None or int(resolution["active_id"]) != active_id:
-                failed = _finish_failed_nc(
-                    conn, op_key=key, op="ADOPT", origin=clean_origin,
-                    request=request, error_code="preflight_stale", session_id=session_id,
-                    dst_workstream_id=active_id, preflight_token=token,
-                    candidate_key=candidate_key,
-                )
-                conn.commit()
-                return failed
-            locked_snapshot = []
-            nodes: dict[int, dict] = {}
-            for node_id in members:
-                node = _row(conn, node_id)
-                locked_snapshot.append({
-                    "id": node_id,
-                    "kind": node.get("kind") if node else None,
-                    "status": node.get("status") if node else None,
-                    "workstream_id": node.get("workstream_id") if node else None,
-                    "updated_at": node.get("updated_at") if node else None,
-                })
-                if node is not None:
-                    nodes[node_id] = node
-            if _snapshot_token(locked_snapshot) != token:
                 failed = _finish_failed_nc(
                     conn, op_key=key, op="ADOPT", origin=clean_origin,
                     request=request, error_code="preflight_stale", session_id=session_id,
@@ -1867,7 +1843,7 @@ def _merge_snapshot(
     source = _row(conn, source_id)
     absorber = _row(conn, absorber_id)
     members = [dict(row) for row in conn.execute(
-        "SELECT id, kind, status, workstream_id, updated_at FROM nodes "
+        "SELECT id, kind, status, workstream_id, updated_at, updated_by FROM nodes "
         "WHERE workstream_id = ? AND kind NOT IN ('workstream', 'priority') "
         "ORDER BY id",
         (source_id,),
@@ -2160,15 +2136,7 @@ def merge_workstreams(
     prior = _existing_result(conn, op_key=key, request=request)
     if prior is not None:
         return prior
-    first = merge_preflight(conn, source_id, absorber_id)
-    if first["source_resolution"]["state"] != "active":
-        raise WorkstreamValidationError("MERGE source must be an active identity")
-    if first["absorber_resolution"]["state"] != "active":
-        raise WorkstreamValidationError("MERGE absorber must be an active identity")
-    if not first["acyclic"]:
-        raise WorkstreamValidationError("MERGE would enter a cyclic or malformed identity chain")
-    observed_token = first["token"]
-    expected_token = preflight_token or observed_token
+    expected_token = preflight_token
 
     lock_path = _project_path(project_path)
     result: dict
@@ -2180,6 +2148,17 @@ def merge_workstreams(
             if prior is not None:
                 conn.commit()
                 return prior
+            locked = merge_preflight(conn, source_id, absorber_id)
+            if locked["source_resolution"]["state"] != "active":
+                raise WorkstreamValidationError("MERGE source must be an active identity")
+            if locked["absorber_resolution"]["state"] != "active":
+                raise WorkstreamValidationError("MERGE absorber must be an active identity")
+            if not locked["acyclic"]:
+                raise WorkstreamValidationError(
+                    "MERGE would enter a cyclic or malformed identity chain"
+                )
+            if expected_token is None:
+                expected_token = locked["token"]
             if not _auto_plan_is_current(
                 conn,
                 origin=clean_origin,
@@ -2216,7 +2195,6 @@ def merge_workstreams(
                 )
                 conn.commit()
                 return failed
-            locked = merge_preflight(conn, source_id, absorber_id)
             if (
                 locked["token"] != expected_token
                 or locked["source_resolution"]["state"] != "active"
@@ -2257,7 +2235,22 @@ def merge_workstreams(
             source_body_hash = _snapshot_token(source["body"])
             members = [int(item["id"]) for item in snapshot["members"]]
             prior_memberships = {str(item["id"]): item["workstream_id"] for item in snapshot["members"]}
+            prior_member_metadata = {
+                str(item["id"]): {
+                    "updated_at": item.get("updated_at"),
+                    "updated_by": item.get("updated_by"),
+                }
+                for item in snapshot["members"]
+            }
             db.set_node_workstream_nc(conn, members, absorber_id)
+            post_member_metadata = {
+                str(node_id): {
+                    "updated_at": node.get("updated_at") if node else None,
+                    "updated_by": node.get("updated_by") if node else None,
+                }
+                for node_id in members
+                for node in (_row(conn, node_id),)
+            }
             _failure_point("merge_after_members")
 
             rehome_records: list[dict] = []
@@ -2330,6 +2323,9 @@ def merge_workstreams(
             )
             db.update_node_nc(conn, absorber_id, body=absorber_body_after)
             db.update_node_nc(conn, source_id, status="stale")
+            source_after_merge = _row(conn, source_id)
+            absorber_after_merge = _row(conn, absorber_id)
+            assert source_after_merge is not None and absorber_after_merge is not None
             merge_edge_id = _add_edge_id(
                 conn, source_id, absorber_id, "merged_into", created_by="lifecycle:merge",
             )
@@ -2348,6 +2344,8 @@ def merge_workstreams(
                 "receipt": receipt,
                 "repointed_member_ids": members,
                 "prior_memberships": prior_memberships,
+                "prior_member_metadata": prior_member_metadata,
+                "post_member_metadata": post_member_metadata,
                 "rehomed_edge_ids": sorted(set(rehomed_edge_ids)),
                 "tombstoned_edge_ids": sorted(set(tombstoned_edge_ids)),
                 "edge_rehomes": rehome_records,
@@ -2365,6 +2363,14 @@ def merge_workstreams(
                 "absorber_body_after_hash": _snapshot_token(absorber_body_after),
                 "source_body_hash": source_body_hash,
                 "source_prior_status": source["status"],
+                "source_prior_updated_at": source.get("updated_at"),
+                "source_prior_updated_by": source.get("updated_by"),
+                "source_post_updated_at": source_after_merge.get("updated_at"),
+                "source_post_updated_by": source_after_merge.get("updated_by"),
+                "absorber_prior_updated_at": absorber.get("updated_at"),
+                "absorber_prior_updated_by": absorber.get("updated_by"),
+                "absorber_post_updated_at": absorber_after_merge.get("updated_at"),
+                "absorber_post_updated_by": absorber_after_merge.get("updated_by"),
                 "merge_edge_id": merge_edge_id,
                 "backup_path": backup_path,
             }
@@ -2402,6 +2408,22 @@ def _restore_focus_nc(
         db.restore_focus_row_nc(conn, snapshot)
 
 
+def _focus_reversal_state(snapshot: Mapping[str, Any] | None) -> dict | None:
+    """Focus fields whose drift can make MERGE reversal unsafe.
+
+    ``rank`` is a derived display position and ``set_by`` is attribution, not
+    focus state.  Either may change without changing the score/timestamp/pin
+    tuple that MERGE actually combined.
+    """
+    if snapshot is None:
+        return None
+    return {
+        "score": snapshot.get("score"),
+        "set_at": snapshot.get("set_at"),
+        "pinned": snapshot.get("pinned"),
+    }
+
+
 def _merge_unmerge_drift(
     conn: sqlite3.Connection,
     merge_row: Mapping[str, Any],
@@ -2432,6 +2454,15 @@ def _merge_unmerge_drift(
         node = _row(conn, int(node_id))
         if node is None or node.get("workstream_id") != absorber_id:
             drift.append(f"member:{node_id}")
+            continue
+        expected_metadata = (payload.get("post_member_metadata") or {}).get(
+            str(node_id),
+        )
+        if expected_metadata is not None and (
+            node.get("updated_at") != expected_metadata.get("updated_at")
+            or node.get("updated_by") != expected_metadata.get("updated_by")
+        ):
+            drift.append(f"member_metadata:{node_id}")
     for record in payload.get("edge_rehomes") or []:
         old = conn.execute(
             "SELECT status FROM edges WHERE id = ?", (record["old_edge"]["id"],),
@@ -2445,7 +2476,9 @@ def _merge_unmerge_drift(
                 drift.append(f"new_edge:{new_id}")
     if db.get_focus_row(conn, source_id) is not None:
         drift.append("source_focus")
-    if _focus_snapshot(conn, absorber_id) != payload.get("post_focus"):
+    if _focus_reversal_state(_focus_snapshot(conn, absorber_id)) != _focus_reversal_state(
+        payload.get("post_focus")
+    ):
         drift.append("absorber_focus")
     for item in payload.get("priority_snapshots") or []:
         node = _row(conn, int(item["id"]))
@@ -2547,8 +2580,29 @@ def unmerge_workstreams(
                 failed["drift"] = drift
                 return failed
             payload = merge_row["payload"]
+            prior_member_metadata = payload.get("prior_member_metadata") or {}
             for raw_id, prior_owner in (payload.get("prior_memberships") or {}).items():
-                db.set_node_workstream_nc(conn, [int(raw_id)], prior_owner)
+                node_id = int(raw_id)
+                metadata = prior_member_metadata.get(str(raw_id))
+                if isinstance(metadata, Mapping):
+                    cur = conn.execute(
+                        "UPDATE nodes SET workstream_id = ?, updated_at = ?, updated_by = ? "
+                        "WHERE id = ?",
+                        (
+                            prior_owner,
+                            metadata.get("updated_at"),
+                            metadata.get("updated_by"),
+                            node_id,
+                        ),
+                    )
+                    if cur.rowcount != 1:
+                        raise WorkstreamLifecycleError(
+                            f"MERGE member {node_id} could not be restored"
+                        )
+                else:
+                    # Backward compatibility for MERGE receipts written before
+                    # exact member update metadata was captured.
+                    db.set_node_workstream_nc(conn, [node_id], prior_owner)
             _failure_point("unmerge_after_members")
 
             for record in payload.get("edge_rehomes") or []:
@@ -2609,12 +2663,41 @@ def unmerge_workstreams(
             source = _row(conn, source_id)
             absorber = _row(conn, absorber_id)
             assert source is not None and absorber is not None
+            source_metadata_is_merge_owned = (
+                "source_post_updated_at" in payload
+                and source.get("updated_at") == payload.get("source_post_updated_at")
+                and source.get("updated_by") == payload.get("source_post_updated_by")
+            )
             db.update_node_nc(conn, source_id, status=payload.get("source_prior_status") or "staging")
+            if "source_prior_updated_at" in payload:
+                source_updated_at = (
+                    payload.get("source_prior_updated_at")
+                    if source_metadata_is_merge_owned
+                    else source.get("updated_at")
+                )
+                source_updated_by = (
+                    payload.get("source_prior_updated_by")
+                    if source_metadata_is_merge_owned
+                    else source.get("updated_by")
+                )
+                conn.execute(
+                    "UPDATE nodes SET updated_at = ?, updated_by = ? WHERE id = ?",
+                    (
+                        source_updated_at,
+                        source_updated_by,
+                        source_id,
+                    ),
+                )
             restored_body, removed = rolling.remove_keyed(
                 absorber["body"], payload.get("rolling_op_key") or merge_key,
             )
             correction_line = None
-            if removed and _snapshot_token(absorber["body"]) == payload.get("absorber_body_after_hash"):
+            exact_body_restore = (
+                removed
+                and _snapshot_token(absorber["body"])
+                == payload.get("absorber_body_after_hash")
+            )
+            if exact_body_restore:
                 restored_body = payload.get("absorber_body_before", restored_body)
             elif not removed:
                 restored_body, correction_line = rolling.apply_keyed(
@@ -2623,6 +2706,24 @@ def unmerge_workstreams(
                     date=_date(), op_key=key,
                 )
             db.update_node_nc(conn, absorber_id, body=restored_body)
+            absorber_metadata_is_merge_owned = (
+                "absorber_post_updated_at" in payload
+                and absorber.get("updated_at") == payload.get("absorber_post_updated_at")
+                and absorber.get("updated_by") == payload.get("absorber_post_updated_by")
+            )
+            if (
+                exact_body_restore
+                and absorber_metadata_is_merge_owned
+                and "absorber_prior_updated_at" in payload
+            ):
+                conn.execute(
+                    "UPDATE nodes SET updated_at = ?, updated_by = ? WHERE id = ?",
+                    (
+                        payload.get("absorber_prior_updated_at"),
+                        payload.get("absorber_prior_updated_by"),
+                        absorber_id,
+                    ),
+                )
             _failure_point("unmerge_before_ledger")
 
             receipt = (
@@ -2911,8 +3012,9 @@ def reconcile_lifecycle_integrity(
     """Atomically project applied lifecycle receipts onto identity state.
 
     The full predicate projection is recomputed after ``BEGIN IMMEDIATE`` while
-    the shared project writer lock is held.  Self-heal callers that already own
-    that same non-reentrant lock must pass ``already_locked=True``.
+    the shared project writer lock is held. ``already_locked`` remains an
+    explicit fast path for maintenance callers, although same-thread ownership
+    is also safely recognized by :func:`lockfile.writer_lock`.
     """
     _require_clean_connection(conn)
     lock_context = (

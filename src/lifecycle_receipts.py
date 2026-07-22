@@ -98,6 +98,11 @@ def adopted(count: int, title: str) -> str:
 def receipt_for_op(row: dict) -> str | None:
     """Render the immutable approved receipt from an operation ledger row."""
     payload = row.get("payload") or {}
+    # Migration baselines describe state that existed before the lifecycle
+    # ledger.  They are deliberately silent and must never be reconstructed as
+    # synthetic OPEN receipts by a later durable-report read.
+    if payload.get("baseline") or row.get("origin") == "legacy":
+        return None
     if payload.get("receipt"):
         return str(payload["receipt"])
     request = payload.get("request") or {}
@@ -162,6 +167,7 @@ def recent_receipts(conn: sqlite3.Connection, *, limit: int = 10) -> list[dict]:
     """Recent applied lifecycle receipts for durable report surfaces."""
     rows = conn.execute(
         "SELECT * FROM workstream_ops WHERE state = 'applied' "
+        "AND origin != 'legacy' "
         "ORDER BY applied_at DESC, id DESC LIMIT ?",
         (max(1, int(limit)),),
     ).fetchall()

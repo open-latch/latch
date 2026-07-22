@@ -180,9 +180,9 @@ def run_workstream_shadow(
     """Run the independently-cadenced, deterministic lifecycle detector.
 
     Manual calls own the shared project writer lock for baseline/restore
-    reconciliation, derivation, and persistence.  ``run_selfheal`` already
-    holds that non-reentrant lock across its maintenance pass and must pass
-    ``already_locked=True``.
+    reconciliation, derivation, and persistence. ``run_selfheal`` passes
+    ``already_locked=True`` as an explicit fast path; same-thread lock
+    ownership is also recognized safely if a composed caller omits it.
     """
     if paths.is_unlatched_mode():
         return {

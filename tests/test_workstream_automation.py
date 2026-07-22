@@ -129,6 +129,7 @@ def _accepted_proposal(
     event_key: str = "proposal-accepted",
     force_field: bool = False,
     recurrence: dict | None = None,
+    record_sessions: bool = True,
 ) -> dict:
     latest = db.latest_workstream_derivation(conn)
     payload = {
@@ -150,6 +151,16 @@ def _accepted_proposal(
     }
     if force_field:
         payload["force"] = False
+    if record_sessions and member_ids:
+        for session_id in payload["recurrence"].get("session_ids", []):
+            db.record_retrieval_events(
+                conn,
+                source="tool",
+                session_id=str(session_id),
+                turn=1,
+                items=[(member_ids[0], None)],
+                ts="2026-07-20 12:00:00",
+            )
     return db.append_workstream_op_event(
         conn,
         event_key=event_key,
@@ -169,6 +180,28 @@ def _exercise_unmerge(conn: sqlite3.Connection, *, op_key: str = "manual-unmerge
         op="UNMERGE",
         origin="manual",
         payload={"merge_op_key": "prior-merge"},
+    )
+    db.finish_workstream_op(conn, op_key, state="applied")
+
+
+def _record_open_origin(
+    conn: sqlite3.Connection,
+    workstream_id: int,
+    *,
+    op_key: str,
+    origin: str,
+) -> None:
+    db.begin_workstream_op(
+        conn,
+        op_key=op_key,
+        op="OPEN",
+        origin=origin,
+        dst_workstream_id=workstream_id,
+        payload={
+            "assigned_member_ids": [],
+            "probation": {},
+            "watch_pair": [],
+        },
     )
     db.finish_workstream_op(conn, op_key, state="applied")
 
@@ -663,6 +696,48 @@ def test_latest_accepted_open_proposal_supplies_read_only_apply_request(
     conn.close()
 
 
+def test_accepted_open_proposal_rechecks_contamination_free_sessions(
+    tmp_path, monkeypatch,
+):
+    conn = _connect(tmp_path, monkeypatch)
+    member = db.insert_node(
+        conn, kind="idea", title="member", body="forward", status="staging",
+    )
+    key = lifecycle_signals.make_candidate_key("OPEN", [], ["session-proof"])
+    signal = {
+        "qualified": True,
+        "member_ids": [member],
+        "tier1_present": True,
+        "tier1": "multi_session_orphan_contact",
+    }
+    _seed_candidate(conn, candidate_key=key, op="OPEN", signal=signal)
+    for session_id in ("S1", "S2"):
+        db.record_retrieval_events(
+            conn,
+            source="prompt",
+            session_id=session_id,
+            turn=0,
+            items=[(member, None)],
+            ts="2026-07-20 12:00:00",
+        )
+    _accepted_proposal(
+        conn,
+        candidate_key=key,
+        member_ids=[member],
+        record_sessions=False,
+    )
+
+    plan = automation.plan_actions(
+        conn, now=NOW, receipts_live=True, workstreams_module=_fake_module([]),
+    )[0]
+
+    assert not plan["eligible"]
+    assert plan["apply_request"] == {}
+    assert plan["policy_evidence"]["proposal_event_status"] == "recurrence_incomplete"
+    assert "open_proposal_event_not_accepted" in plan["reason_codes"]
+    conn.close()
+
+
 def test_rejected_malformed_and_stale_open_proposals_never_qualify(
     tmp_path, monkeypatch,
 ):
@@ -833,6 +908,56 @@ def test_verified_shared_target_open_applies_without_invented_sessions(
     conn.close()
 
 
+def test_verified_shared_target_ignores_stale_members(tmp_path, monkeypatch):
+    conn = _connect(tmp_path, monkeypatch)
+    members = [
+        db.insert_node(
+            conn, kind="idea", title=f"member {index}", body="forward",
+            status="staging",
+        )
+        for index in range(2)
+    ]
+    target = db.insert_node(
+        conn, kind="decision", title="target", body="decided", status="canonical",
+    )
+    for member in members:
+        db.add_edge(conn, member, target, "advances")
+    db.update_node(conn, members[1], status="stale")
+    assert conn.execute(
+        "SELECT COUNT(*) FROM edges WHERE dst=? AND status='active'", (target,),
+    ).fetchone()[0] == 2
+    key = lifecycle_signals.make_candidate_key("OPEN", [], ["stale-a", "stale-b"])
+    _seed_candidate(
+        conn,
+        candidate_key=key,
+        op="OPEN",
+        signal={
+            "qualified": True,
+            "member_ids": members,
+            "shared_target_ids": [target],
+        },
+    )
+    _accepted_proposal(
+        conn,
+        candidate_key=key,
+        member_ids=members,
+        recurrence={
+            "session_ids": [],
+            "session_count": 0,
+            "shared_target_ids": [target],
+        },
+    )
+
+    plan = automation.plan_actions(
+        conn, now=NOW, receipts_live=True, workstreams_module=_fake_module([]),
+    )[0]
+
+    assert not plan["eligible"]
+    assert plan["apply_request"] == {}
+    assert plan["policy_evidence"]["proposal_event_status"] == "recurrence_incomplete"
+    conn.close()
+
+
 def test_cap_pressure_open_stays_shadow_despite_accepted_proposal(tmp_path, monkeypatch):
     conn = _connect(tmp_path, monkeypatch)
     member = db.insert_node(
@@ -910,6 +1035,9 @@ def test_detector_shaped_merge_is_preflighted_and_reachable(tmp_path, monkeypatc
 def test_active_probation_watch_pair_synthesizes_merge_back(tmp_path, monkeypatch):
     conn = _connect(tmp_path, monkeypatch)
     watched, opened = _lane(conn), _lane(conn)
+    _record_open_origin(
+        conn, watched, op_key="auto-open-absorber", origin="auto",
+    )
     db.begin_workstream_op(
         conn,
         op_key="auto-open-watch",
@@ -942,6 +1070,60 @@ def test_active_probation_watch_pair_synthesizes_merge_back(tmp_path, monkeypatc
     assert plan["policy_evidence"]["probation_merge_back"]["eligible"]
     assert plan["policy_evidence"]["probation_self_revert"]
     assert not plan["attestation"]["quorum"]
+    assert calls[0]["source_workstream_id"] == opened
+    assert calls[0]["absorber_workstream_id"] == watched
+    conn.close()
+
+
+def test_probation_watch_pair_human_absorber_requires_attestation(
+    tmp_path, monkeypatch,
+):
+    conn = _connect(tmp_path, monkeypatch)
+    watched, opened = _lane(conn), _lane(conn)
+    _record_open_origin(
+        conn, watched, op_key="human-open-absorber", origin="manual",
+    )
+    db.begin_workstream_op(
+        conn,
+        op_key="auto-open-human-watch",
+        op="OPEN",
+        origin="auto",
+        dst_workstream_id=opened,
+        payload={
+            "assigned_member_ids": [],
+            "watch_pair": [opened, watched],
+            "probation": {"active": True, "opened_at": "2026-07-01 00:00:00"},
+        },
+    )
+    db.finish_workstream_op(conn, "auto-open-human-watch", state="applied")
+    key = lifecycle_signals.make_candidate_key("MERGE", [watched, opened])
+    _seed_candidate(
+        conn,
+        candidate_key=key,
+        op="MERGE",
+        signal=_merge_signal(watched, opened, with_direction=False),
+    )
+    _exercise_unmerge(conn)
+    calls: list[dict] = []
+
+    plan = automation.run_governed(
+        conn, now=NOW, receipts_live=True, workstreams_module=_fake_module(calls),
+    )["plans"][0]
+
+    assert not plan["eligible"]
+    probation = plan["policy_evidence"]["probation_merge_back"]
+    assert probation["eligible"]
+    assert probation["absorber_origin"] == "manual"
+    assert not probation["attestation_carveout_eligible"]
+    assert not plan["policy_evidence"]["probation_self_revert"]
+    assert "attestation_quorum_missing" in plan["reason_codes"]
+    assert calls == []
+
+    _attest(conn, key, "S1", "S2")
+    plan = automation.run_governed(
+        conn, now=NOW, receipts_live=True, workstreams_module=_fake_module(calls),
+    )["plans"][0]
+    assert plan["eligible"]
     assert calls[0]["source_workstream_id"] == opened
     assert calls[0]["absorber_workstream_id"] == watched
     conn.close()

@@ -13,6 +13,7 @@ Exercises src/priorities.py and its wiring into gate.py against throwaway KBs:
 from __future__ import annotations
 
 import shutil
+import sqlite3
 import sys
 import tempfile
 import threading
@@ -64,9 +65,9 @@ def test_public_priority_mutations_lock_before_opening_db(monkeypatch):
     """All public priority writers take the lifecycle lock in one order.
 
     The lock must be entered before the connection is opened and held until
-    after the priority helper returns/commits.  Keeping this ownership at the
-    MCP boundary also prevents lifecycle's already-locked priority calls from
-    recursively acquiring the non-reentrant file lock.
+    after the priority helper returns/commits. Keeping this ownership at the
+    MCP boundary gives every public priority mutation the same lock ordering as
+    lifecycle operations.
     """
     import mcp_server
 
@@ -238,6 +239,53 @@ def test_public_priority_write_waits_for_shared_lifecycle_lock(
 
 
 # ---------- store: add / list / retire ----------
+
+def test_priority_mutations_begin_immediate_before_predicate_reads():
+    tmp, conn = _fresh_db()
+    try:
+        trace: list[str] = []
+        conn.set_trace_callback(trace.append)
+        added = priorities.add_priority(conn, "serialized predicate")
+        _assert(trace and trace[0] == "BEGIN IMMEDIATE", f"add trace: {trace}")
+
+        trace.clear()
+        reordered = priorities.reorder_priority(conn, added["id"], 1)
+        _assert(reordered.get("ok"), f"reorder failed: {reordered}")
+        _assert(trace and trace[0] == "BEGIN IMMEDIATE", f"reorder trace: {trace}")
+
+        trace.clear()
+        retired = priorities.retire_priority(conn, added["id"])
+        _assert(retired.get("retired"), f"retire failed: {retired}")
+        _assert(trace and trace[0] == "BEGIN IMMEDIATE", f"retire trace: {trace}")
+        _assert(not conn.in_transaction, "public priority mutation leaked a transaction")
+    finally:
+        _cleanup(tmp, conn)
+
+
+def test_priority_add_rolls_back_node_when_order_insert_fails():
+    tmp, conn = _fresh_db()
+    try:
+        before = conn.execute(
+            "SELECT COUNT(*) AS n FROM nodes WHERE kind = 'priority'",
+        ).fetchone()["n"]
+        conn.execute(
+            "CREATE TRIGGER reject_priority_order BEFORE INSERT ON priority_order "
+            "BEGIN SELECT RAISE(ABORT, 'injected order failure'); END"
+        )
+        conn.commit()
+        try:
+            priorities.add_priority(conn, "must roll back")
+        except sqlite3.IntegrityError as exc:
+            _assert("injected order failure" in str(exc), f"unexpected failure: {exc}")
+        else:
+            raise AssertionError("priority_order failure should propagate")
+        after = conn.execute(
+            "SELECT COUNT(*) AS n FROM nodes WHERE kind = 'priority'",
+        ).fetchone()["n"]
+        _assert(after == before, "node insert survived failed priority_order insert")
+        _assert(not conn.in_transaction, "failed add leaked a transaction")
+    finally:
+        _cleanup(tmp, conn)
 
 def test_add_creates_active_priority_node():
     tmp, conn = _fresh_db()
@@ -787,6 +835,8 @@ def test_brief_omits_priorities_section_when_none():
 
 
 if __name__ == "__main__":
+    test_priority_mutations_begin_immediate_before_predicate_reads()
+    test_priority_add_rolls_back_node_when_order_insert_fails()
     test_add_creates_active_priority_node()
     test_add_stores_no_embedding()
     test_list_floating_is_newest_first()

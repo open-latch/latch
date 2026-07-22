@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -272,6 +273,42 @@ def test_automatic_open_accepts_verified_shared_target_without_sessions(kb):
     assert "recurred across 0 sessions" in result["receipt"]
 
 
+def test_automatic_open_shared_target_ignores_stale_members(kb):
+    project, conn = kb
+    active_member = _node(conn, "idea", "active shared-target member")
+    stale_member = _node(
+        conn, "progress", "stale shared-target member", status="stale",
+    )
+    target = _node(conn, "decision", "shared decision", status="canonical")
+    db.add_edge(conn, active_member, target, "advances")
+    db.add_edge(conn, stale_member, target, "advances")
+
+    with pytest.raises(
+        workstreams.WorkstreamValidationError,
+        match="automatic OPEN requires two-session recurrence or a verified shared target",
+    ):
+        workstreams.open_workstream(
+            conn,
+            title="Stale structural recurrence",
+            objective="Ignore stale evidence",
+            done_when="Only live strands qualify",
+            scope_boundary="Shared-target OPEN",
+            next_step="Wait for another active strand",
+            member_ids=[active_member, stale_member],
+            op_key="open:stale-shared-target",
+            candidate_key="candidate:stale-shared-target",
+            origin="auto",
+            recurrence={
+                "session_count": 0,
+                "session_ids": [],
+                "shared_target_ids": [target],
+                "shared_target_validated": True,
+            },
+            project_path=project,
+        )
+    assert db.get_workstream_op(conn, "open:stale-shared-target") is None
+
+
 def test_automatic_open_fails_closed_when_similarity_comparison_is_incomplete(kb):
     project, conn = kb
     _node(conn, "workstream", "Unembedded active lane")
@@ -528,6 +565,32 @@ def test_close_stale_preflight_and_mutation_failure_are_non_partial(kb):
     assert db.get_workstream_op(conn, "close:rollback") is None
 
 
+def test_close_captures_implicit_preflight_after_writer_lock(kb, monkeypatch):
+    project, conn = kb
+    workstream_id = _node(conn, "workstream", "Raced close lane")
+    feeder = _node(conn, "fact", "late feeder")
+    original_writer_lock = workstreams.lockfile.writer_lock
+
+    @contextmanager
+    def mutate_before_acquire(project_path, *args, **kwargs):
+        db.add_edge(conn, feeder, workstream_id, "advances")
+        with original_writer_lock(project_path, *args, **kwargs):
+            yield
+
+    monkeypatch.setattr(workstreams.lockfile, "writer_lock", mutate_before_acquire)
+    result = workstreams.close_workstream(
+        conn,
+        workstream_id,
+        outcome="completed",
+        reason="Attempted close",
+        op_key="close:locked-preflight",
+        project_path=project,
+    )
+    assert result["state"] == "failed"
+    assert result["error_code"] == "open_feeders"
+    assert db.get_node(conn, workstream_id)["status"] != "stale"
+
+
 @pytest.mark.parametrize("priority_status", ["canonical", "staging"])
 def test_close_fails_closed_on_legacy_priority_without_order_metadata(
     kb, priority_status,
@@ -732,6 +795,34 @@ def test_adopt_batch_relations_and_auto_guard(kb):
     assert db.get_node(conn, orphan)["workstream_id"] is None
 
 
+def test_adopt_captures_implicit_preflight_after_writer_lock(kb, monkeypatch):
+    project, conn = kb
+    wid = _node(conn, "workstream", "Locked adoption lane")
+    idea = _node(conn, "idea", "raced idea")
+    original_writer_lock = workstreams.lockfile.writer_lock
+
+    @contextmanager
+    def mutate_before_acquire(project_path, *args, **kwargs):
+        conn.execute(
+            "UPDATE nodes SET updated_at = '2040-01-01 00:00:00' WHERE id = ?",
+            (idea,),
+        )
+        conn.commit()
+        with original_writer_lock(project_path, *args, **kwargs):
+            yield
+
+    monkeypatch.setattr(workstreams.lockfile, "writer_lock", mutate_before_acquire)
+    result = workstreams.adopt_nodes(
+        conn,
+        wid,
+        [idea],
+        op_key="adopt:locked-preflight",
+        project_path=project,
+    )
+    assert result["state"] == "applied"
+    assert db.get_node(conn, idea)["workstream_id"] == wid
+
+
 def test_applied_receipts_surface_once(kb):
     project, conn = kb
     result = _open(project, conn, op_key="open:receipt", title="Receipt lane")
@@ -779,6 +870,19 @@ def test_merge_unmerge_full_round_trip(kb, monkeypatch):
     source_priority_order = [
         item["id"] for item in priorities.list_priorities(conn, workstream_id=source)
     ]
+    for index, node_id in enumerate([source, absorber, *lane["members"]], start=1):
+        conn.execute(
+            "UPDATE nodes SET updated_at = ?, updated_by = ? WHERE id = ?",
+            (f"2001-01-0{index} 00:00:00", f"pre-merge-{index}", node_id),
+        )
+    conn.commit()
+    node_metadata = {
+        node_id: {
+            "updated_at": db.get_node(conn, node_id)["updated_at"],
+            "updated_by": db.get_node(conn, node_id)["updated_by"],
+        }
+        for node_id in [source, absorber, *lane["members"]]
+    }
     source_focus = db.get_focus_row(conn, source)
     absorber_focus = db.get_focus_row(conn, absorber)
     source_body = db.get_node(conn, source)["body"]
@@ -852,6 +956,43 @@ def test_merge_unmerge_full_round_trip(kb, monkeypatch):
         "SELECT 1 FROM priority_order WHERE node_id = ?", (copied,),
     ).fetchone() is None
     assert db.get_node(conn, absorber_priority)["status"] == "canonical"
+    assert {
+        node_id: {
+            "updated_at": db.get_node(conn, node_id)["updated_at"],
+            "updated_by": db.get_node(conn, node_id)["updated_by"],
+        }
+        for node_id in [source, absorber, *lane["members"]]
+    } == node_metadata
+
+
+def test_merge_captures_implicit_preflight_after_writer_lock(kb, monkeypatch):
+    project, conn = kb
+    lane = _merge_fixture(project, conn)
+    raced_member = lane["members"][0]
+    original_writer_lock = workstreams.lockfile.writer_lock
+
+    @contextmanager
+    def mutate_before_acquire(project_path, *args, **kwargs):
+        conn.execute(
+            "UPDATE nodes SET status = 'canonical', "
+            "updated_at = '2040-01-01 00:00:00' WHERE id = ?",
+            (raced_member,),
+        )
+        conn.commit()
+        with original_writer_lock(project_path, *args, **kwargs):
+            yield
+
+    monkeypatch.setattr(workstreams.lockfile, "writer_lock", mutate_before_acquire)
+    result = workstreams.merge_workstreams(
+        conn,
+        lane["source"],
+        lane["absorber"],
+        op_key="merge:locked-preflight",
+        dispositions={lane["unknown_edge"]: "preserve"},
+        project_path=project,
+    )
+    assert result["state"] == "applied"
+    assert db.get_node(conn, raced_member)["workstream_id"] == lane["absorber"]
 
 
 def test_merge_unknown_relations_require_disposition_and_auto_cannot_force(kb):
@@ -981,6 +1122,67 @@ def test_unmerge_fails_closed_on_drift(kb):
     assert conn.execute(
         "SELECT status FROM edges WHERE id = ?", (merged["payload"]["merge_edge_id"],),
     ).fetchone()["status"] == "active"
+
+
+def test_unmerge_ignores_informational_focus_rank_drift(kb):
+    project, conn = kb
+    lane = _merge_fixture(project, conn)
+    merged = workstreams.merge_workstreams(
+        conn,
+        lane["source"],
+        lane["absorber"],
+        op_key="merge:focus-rank",
+        dispositions={lane["unknown_edge"]: "preserve"},
+        project_path=project,
+    )
+    conn.execute(
+        "UPDATE focus SET rank = rank + 100 WHERE workstream_id = ?",
+        (lane["absorber"],),
+    )
+    conn.commit()
+
+    result = workstreams.unmerge_workstreams(
+        conn,
+        "merge:focus-rank",
+        op_key="unmerge:focus-rank",
+        project_path=project,
+    )
+    assert result["state"] == "applied"
+    assert db.get_node(conn, lane["source"])["status"] != "stale"
+    assert conn.execute(
+        "SELECT status FROM edges WHERE id = ?",
+        (merged["payload"]["merge_edge_id"],),
+    ).fetchone()["status"] == "tombstoned"
+
+
+def test_unmerge_fails_closed_when_moved_member_metadata_drifted(kb):
+    project, conn = kb
+    lane = _merge_fixture(project, conn)
+    workstreams.merge_workstreams(
+        conn,
+        lane["source"],
+        lane["absorber"],
+        op_key="merge:member-metadata",
+        dispositions={lane["unknown_edge"]: "preserve"},
+        project_path=project,
+    )
+    moved = lane["members"][0]
+    conn.execute(
+        "UPDATE nodes SET updated_at = '2040-01-01 00:00:00', "
+        "updated_by = 'later-editor' WHERE id = ?",
+        (moved,),
+    )
+    conn.commit()
+
+    result = workstreams.unmerge_workstreams(
+        conn,
+        "merge:member-metadata",
+        op_key="unmerge:member-metadata",
+        project_path=project,
+    )
+    assert result["state"] == "failed"
+    assert f"member_metadata:{moved}" in result["drift"]
+    assert db.get_node(conn, moved)["workstream_id"] == lane["absorber"]
 
 
 def test_unmerge_preserves_edited_merge_created_priority(kb):

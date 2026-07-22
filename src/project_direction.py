@@ -115,10 +115,15 @@ def assemble_project_direction(
     decision_total = sum(len(row.governing_decisions) for row in rows)
     artifact_total = sum(len(row.artifacts) for row in rows)
     unanchored = _unanchored_candidates(conn, rows, limit=unanchored_limit)
-    # This is a delivery surface, not a receipt archive: claim each applied
-    # operation once, matching SessionStart's drift.latest_pending pattern.
+    # This report is strictly read-only.  SessionStart owns the one-way
+    # receipt-surfaced claim; direction reports may show the recent durable
+    # receipt history, but must not race that delivery channel or commit.
     try:
-        receipts = lifecycle_receipts.surface_pending_items(conn, limit=10)
+        receipts = (
+            lifecycle_receipts.recent_receipts(conn, limit=10)
+            if lifecycle_receipts.RECEIPTS_CHANNEL_LIVE
+            else []
+        )
     except Exception:
         receipts = []
     summary = (

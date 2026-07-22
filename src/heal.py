@@ -36,6 +36,7 @@ import budget  # noqa: E402
 import correlator  # noqa: E402
 import db  # noqa: E402
 import embeddings  # noqa: E402
+import lifecycle_signals  # noqa: E402
 import log_utils  # noqa: E402
 import model_backends  # noqa: E402
 import paths  # noqa: E402
@@ -1043,6 +1044,7 @@ def insert_with_heal(
             "lifecycle",
             {
                 "event": "cross_lane_duplicate",
+                "substrate_version": lifecycle_signals.SUBSTRATE_VERSION,
                 "node_a": new_id,
                 "node_b": matched_id,
                 "ws_a": workstream_id,
@@ -1304,6 +1306,7 @@ def nightly_heal(
                     "lifecycle",
                     {
                         "event": "cross_lane_contradiction",
+                        "substrate_version": lifecycle_signals.SUBSTRATE_VERSION,
                         "node_a": a_id,
                         "node_b": b_id,
                         "ws_a": a.get("workstream_id"),
