@@ -16,6 +16,10 @@
 </p>
 
 <p align="center">
+  <img src="./docs/assets/latch-hero.gif" alt="latch catching a coding agent before it revives a rejected project decision" width="900">
+</p>
+
+<p align="center">
   <a href="#the-receipt">The receipt</a> &middot;
   <a href="#why-a-gate-not-a-rule">Why a gate</a> &middot;
   <a href="#get-started">Get started</a> &middot;
