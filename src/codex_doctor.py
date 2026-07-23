@@ -89,6 +89,17 @@ def check_mcp_launch_target(python_path: str, server_py: str) -> Check:
     return Check("Codex MCP launch target", OK, f"{python_path} -> {server_py}")
 
 
+def _nearest_existing_ancestor(path: Path) -> Path:
+    """Find the first lexically existing path at or above ``path``."""
+    current = path
+    while not os.path.lexists(current):
+        parent = current.parent
+        if parent == current:
+            break
+        current = parent
+    return current
+
+
 def check_kb_access(cwd: str | None = None) -> Check:
     """Verify the selected KB is readable without mutating it.
 
@@ -98,19 +109,48 @@ def check_kb_access(cwd: str | None = None) -> Check:
     """
     db_file = paths.db_path(cwd)
     if not db_file.exists():
-        if os.access(db_file.parent, os.W_OK):
+        if os.path.lexists(db_file):
+            return Check(
+                "Latch KB access",
+                FAIL,
+                f"{db_file} exists but does not resolve to a usable KB file; "
+                "repair the dangling link before startup briefs or seed data",
+            )
+        creation_ancestor = _nearest_existing_ancestor(db_file.parent)
+        ancestor_is_dir = creation_ancestor.is_dir()
+        access_mode = os.W_OK | (os.X_OK if os.name != "nt" else 0)
+        ancestor_writable = ancestor_is_dir and os.access(
+            creation_ancestor, access_mode,
+        )
+        if ancestor_writable:
+            creation_detail = (
+                "the selected parent directory is writable"
+                if creation_ancestor == db_file.parent
+                else (
+                    f"its nearest existing ancestor {creation_ancestor} is "
+                    "writable, so the missing parent directories can be created"
+                )
+            )
             return Check(
                 "Latch KB access",
                 WARN,
-                f"{db_file} is not initialized yet; the selected parent directory "
-                "is writable, so quickstart may continue to the seed step. The "
+                f"{db_file} is not initialized yet; {creation_detail}, so "
+                "quickstart may continue to the seed step. The "
                 "startup brief is unavailable until the first DB creation",
+            )
+        if not ancestor_is_dir:
+            obstacle = f"its nearest existing ancestor {creation_ancestor} is not a directory"
+        elif creation_ancestor == db_file.parent:
+            obstacle = "its parent directory is not writable"
+        else:
+            obstacle = (
+                f"its nearest existing ancestor {creation_ancestor} is not writable"
             )
         return Check(
             "Latch KB access",
             FAIL,
-            f"{db_file} is not initialized and its parent directory is not writable; "
-            "the KB cannot be created for startup briefs or seed data",
+            f"{db_file} is not initialized and {obstacle}; the KB cannot be "
+            "created for startup briefs or seed data",
         )
     try:
         conn = db.connect_readonly(cwd)

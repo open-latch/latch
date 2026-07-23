@@ -21,6 +21,7 @@ import db
 import feeders
 import lifecycle_receipts
 import priorities
+import schema_version
 from paths import (
     KB_ROOT,
     is_disabled,
@@ -66,6 +67,87 @@ BRIEF_POLICIES = {
     # footprint instead of silently growing when they map to Full.
     "full": BriefPolicy(5, 3, 5, 320, 160, True, True),
 }
+
+_READ_ONLY_STARTUP_NOTICE = (
+    "_Latch loaded core KB context read-only. One or more write-side "
+    "SessionStart updates—session registration, startup retrieval "
+    "dedupe, and one-time lifecycle notices—could not run._\n"
+)
+_STARTUP_WRITE_WARNING_NOTICE = (
+    "_Latch loaded core KB context, but some SessionStart metadata "
+    "could not be updated; see the Latch hook log._\n"
+)
+
+
+def _brief_unavailable_stub(intensity: str, error: BaseException) -> str:
+    """Return a compact, non-sensitive receipt for a failed KB read."""
+    if isinstance(error, schema_version.SchemaTooNewError):
+        reason = (
+            "the configured KB is newer than this installed Latch engine "
+            "supports"
+        )
+        action = "update Latch before retrying; no downgrade was attempted"
+    elif isinstance(error, schema_version.SchemaMigrationRequiredError):
+        reason = (
+            "the configured KB requires a schema migration that this session "
+            "could not apply"
+        )
+        action = "run the Latch doctor and migrate the vault"
+    else:
+        reason = "the configured KB could not be read safely"
+        action = (
+            "run the Latch doctor and inspect the hook log before changing "
+            "the vault"
+        )
+    tier = intensity.capitalize()
+    return (
+        "# latch — session brief unavailable\n\n"
+        f"_Latch brief unavailable: {reason}. No {tier} startup context was "
+        "loaded. This is a degraded startup, not an empty-KB result; "
+        f"{action}._\n"
+    )
+
+
+def _with_startup_write_status(
+    briefing: str,
+    *,
+    read_only: bool = False,
+    startup_write_warning: bool = False,
+) -> str:
+    """Add or replace a startup write-status notice without rebuilding a brief."""
+    if not briefing:
+        return briefing
+
+    has_read_only = _READ_ONLY_STARTUP_NOTICE in briefing
+    has_write_warning = _STARTUP_WRITE_WARNING_NOTICE in briefing
+    if has_read_only:
+        # Never downgrade a stronger status discovered inside _build_briefing.
+        return briefing.replace(_STARTUP_WRITE_WARNING_NOTICE, "")
+    if read_only and has_write_warning:
+        return briefing.replace(
+            _STARTUP_WRITE_WARNING_NOTICE,
+            _READ_ONLY_STARTUP_NOTICE,
+        )
+    if has_write_warning or not (read_only or startup_write_warning):
+        return briefing
+    desired = (
+        _READ_ONLY_STARTUP_NOTICE if read_only else _STARTUP_WRITE_WARNING_NOTICE
+    )
+
+    # Session briefs start with a heading and a one-line intensity summary.
+    # Insert after those two lines so a late write failure stays prominent
+    # without rerunning the stateful lifecycle-receipt surfacing pass.
+    offset = 0
+    for line in briefing.splitlines(keepends=True)[:4]:
+        if line.startswith(("_Quiet:", "_Standard:", "_Full:")):
+            insert_at = offset + len(line)
+            return briefing[:insert_at] + "\n" + desired + briefing[insert_at:]
+        offset += len(line)
+
+    # Defensive fallback for a future brief shape without an intensity line.
+    heading_end = briefing.find("\n")
+    insert_at = heading_end + 1 if heading_end >= 0 else 0
+    return briefing[:insert_at] + "\n" + desired + briefing[insert_at:]
 
 
 def _bound_feeder_surface(
@@ -465,7 +547,7 @@ def _build_briefing(
             conn.close()
     except Exception as e:
         log(f"briefing build failed: {e}")
-        return ""
+        return _brief_unavailable_stub(resolved_intensity, e)
 
     # Pending body-edge / state drift from the last nightly sweep (id=1149
     # Part 3). Lightweight log read — drift.latest_pending pulls no DB and no
@@ -519,16 +601,9 @@ def _build_briefing(
             "surfacing; prompt retrieval depends on host support._\n"
         )
     if read_only_mode:
-        parts.append(
-            "_Latch loaded core KB context read-only. One or more write-side "
-            "SessionStart updates—session registration, startup retrieval "
-            "dedupe, and one-time lifecycle notices—could not run._\n"
-        )
+        parts.append(_READ_ONLY_STARTUP_NOTICE)
     elif startup_write_warning:
-        parts.append(
-            "_Latch loaded core KB context, but some SessionStart metadata "
-            "could not be updated; see the Latch hook log._\n"
-        )
+        parts.append(_STARTUP_WRITE_WARNING_NOTICE)
     # New-user onboarding leads the brief (and is the one thing a brand-new,
     # otherwise-empty KB has to show). Self-removes once the KB fills.
     if show_getting_started:

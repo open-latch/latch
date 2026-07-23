@@ -24,6 +24,7 @@ import budget  # noqa: E402
 import paths  # noqa: E402
 import session_start  # noqa: E402
 import lifecycle_receipts  # noqa: E402
+import schema_version  # noqa: E402
 
 
 def _assert(cond, msg):
@@ -65,6 +66,113 @@ def test_brief_empty_when_nothing_to_surface():
         print("PASS brief_empty_when_nothing_to_surface")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_brief_unavailable_stub_surfaces_total_read_failure_at_every_tier(
+    monkeypatch,
+):
+    writable_calls = []
+
+    def denied_write(*_args, **_kwargs):
+        writable_calls.append(True)
+        raise PermissionError("sensitive writable path")
+
+    def migration_required(*_args, **_kwargs):
+        raise schema_version.SchemaMigrationRequiredError(
+            "sensitive migration detail",
+        )
+
+    monkeypatch.setattr(db, "connect", denied_write)
+    monkeypatch.setattr(db, "connect_readonly", migration_required)
+
+    for intensity in ("quiet", "standard", "full"):
+        brief = session_start._build_briefing("/unavailable", intensity=intensity)
+        _assert("# latch — session brief unavailable" in brief, brief)
+        _assert("requires a schema migration" in brief, brief)
+        _assert(f"No {intensity.capitalize()} startup context was loaded" in brief, brief)
+        _assert("not an empty-KB result" in brief, brief)
+        _assert("sensitive" not in brief, brief)
+
+    _assert(len(writable_calls) == 3, writable_calls)
+    writable_calls.clear()
+    readonly_brief = session_start._build_briefing(
+        "/unavailable",
+        intensity="full",
+        read_only=True,
+    )
+    _assert("# latch — session brief unavailable" in readonly_brief, readonly_brief)
+    _assert("requires a schema migration" in readonly_brief, readonly_brief)
+    _assert(writable_calls == [], "explicit read-only mode must not try writable connect")
+
+    def schema_too_new(*_args, **_kwargs):
+        raise schema_version.SchemaTooNewError("sensitive future schema detail")
+
+    monkeypatch.setattr(db, "connect_readonly", schema_too_new)
+    too_new_brief = session_start._build_briefing(
+        "/unavailable",
+        intensity="standard",
+        read_only=True,
+    )
+    _assert("newer than this installed Latch engine supports" in too_new_brief,
+            too_new_brief)
+    _assert("update Latch before retrying" in too_new_brief, too_new_brief)
+    _assert("no downgrade was attempted" in too_new_brief, too_new_brief)
+    _assert("repair the vault" not in too_new_brief, too_new_brief)
+    _assert("sensitive" not in too_new_brief, too_new_brief)
+
+    def unexpected_read_failure(*_args, **_kwargs):
+        raise RuntimeError("sensitive internal detail")
+
+    monkeypatch.setattr(db, "connect_readonly", unexpected_read_failure)
+    generic_brief = session_start._build_briefing(
+        "/unavailable",
+        intensity="quiet",
+        read_only=True,
+    )
+    _assert("could not be read safely" in generic_brief, generic_brief)
+    _assert("inspect the hook log before changing the vault" in generic_brief,
+            generic_brief)
+    _assert("repair the vault" not in generic_brief, generic_brief)
+    _assert("sensitive" not in generic_brief, generic_brief)
+
+
+def test_late_startup_write_status_preserves_precedence_and_placement():
+    base = (
+        "# latch — session brief\n\n"
+        "_Full: broad startup context._\n\n"
+        "## Workstream lifecycle\n\n"
+        "- first-only receipt\n\n"
+        "_Quiet: quoted KB content, not the active tier._\n"
+    )
+
+    warned = session_start._with_startup_write_status(
+        base,
+        startup_write_warning=True,
+    )
+    _assert(
+        "_Full: broad startup context._\n\n"
+        "_Latch loaded core KB context, but some SessionStart metadata "
+        "could not be updated; see the Latch hook log._\n\n"
+        "## Workstream lifecycle" in warned,
+        warned,
+    )
+    _assert(warned.count("first-only receipt") == 1, warned)
+
+    upgraded = session_start._with_startup_write_status(
+        warned,
+        read_only=True,
+        startup_write_warning=True,
+    )
+    _assert("loaded core KB context read-only" in upgraded, upgraded)
+    _assert("some SessionStart metadata could not be updated" not in upgraded,
+            upgraded)
+    _assert(upgraded.count("first-only receipt") == 1, upgraded)
+
+    preserved = session_start._with_startup_write_status(
+        upgraded,
+        startup_write_warning=True,
+    )
+    _assert(preserved == upgraded, (preserved, upgraded))
 
 
 def test_brief_getting_started_for_new_kb():

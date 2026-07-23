@@ -195,6 +195,85 @@ def test_check_kb_access_missing_db_preserves_quickstart_seed_order():
     print("PASS check_kb_access_missing_db_preserves_quickstart_seed_order")
 
 
+def test_check_kb_access_missing_parent_uses_nearest_existing_ancestor():
+    d = _tmp()
+    db_file = d / "missing" / "nested" / "kb.db"
+    original_db_path = cd.paths.db_path
+    original_connect = cd.db.connect_readonly
+    original_access = cd.os.access
+    connect_calls: list[bool] = []
+
+    def unexpected_connect(_cwd=None):
+        connect_calls.append(True)
+        raise AssertionError("missing DB should not be opened read-only")
+
+    try:
+        cd.paths.db_path = lambda _cwd=None: db_file
+        cd.db.connect_readonly = unexpected_connect
+
+        warned = cd.check_kb_access("/repo")
+        _assert(warned.level == cd.WARN, warned)
+        _assert("nearest existing ancestor" in warned.detail, warned)
+        _assert("missing parent directories can be created" in warned.detail, warned)
+        _assert(not db_file.parent.exists(), "doctor must remain non-mutating")
+        _assert(not connect_calls, connect_calls)
+
+        blocker = d / "blocker"
+        blocker.write_text("not a directory", encoding="utf-8")
+        cd.paths.db_path = lambda _cwd=None: blocker / "nested" / "kb.db"
+        blocked = cd.check_kb_access("/repo")
+        _assert(blocked.level == cd.FAIL, blocked)
+        _assert("is not a directory" in blocked.detail, blocked)
+
+        denied_file = d / "denied" / "nested" / "kb.db"
+        cd.paths.db_path = lambda _cwd=None: denied_file
+        cd.os.access = lambda _path, _mode: False
+        denied = cd.check_kb_access("/repo")
+        _assert(denied.level == cd.FAIL, denied)
+        _assert("nearest existing ancestor" in denied.detail, denied)
+        _assert("is not writable" in denied.detail, denied)
+        _assert(not denied_file.parent.exists(), "doctor must remain non-mutating")
+        _assert(not connect_calls, connect_calls)
+    finally:
+        cd.paths.db_path = original_db_path
+        cd.db.connect_readonly = original_connect
+        cd.os.access = original_access
+        shutil.rmtree(d, ignore_errors=True)
+    print("PASS check_kb_access_missing_parent_uses_nearest_existing_ancestor")
+
+
+def test_check_kb_access_dangling_db_symlink_fails_closed():
+    d = _tmp()
+    db_file = d / "kb.db"
+    original_db_path = cd.paths.db_path
+    original_connect = cd.db.connect_readonly
+    connect_calls: list[bool] = []
+
+    def unexpected_connect(_cwd=None):
+        connect_calls.append(True)
+        raise AssertionError("dangling DB symlink should fail before open")
+
+    try:
+        try:
+            db_file.symlink_to(d / "missing" / "kb.db")
+        except (NotImplementedError, OSError):
+            print("SKIP check_kb_access_dangling_db_symlink_fails_closed")
+            return
+        cd.paths.db_path = lambda _cwd=None: db_file
+        cd.db.connect_readonly = unexpected_connect
+
+        result = cd.check_kb_access("/repo")
+        _assert(result.level == cd.FAIL, result)
+        _assert("does not resolve to a usable KB file" in result.detail, result)
+        _assert("dangling link" in result.detail, result)
+        _assert(not connect_calls, connect_calls)
+    finally:
+        cd.paths.db_path = original_db_path
+        cd.db.connect_readonly = original_connect
+        shutil.rmtree(d, ignore_errors=True)
+    print("PASS check_kb_access_dangling_db_symlink_fails_closed")
+
+
 def test_check_kb_access_fails_when_readonly_open_fails():
     d = _tmp()
     db_file = d / "kb.db"
@@ -363,6 +442,8 @@ if __name__ == "__main__":
     test_check_mcp_launch_target()
     test_check_kb_access_readable_warns_without_writes()
     test_check_kb_access_missing_db_preserves_quickstart_seed_order()
+    test_check_kb_access_missing_parent_uses_nearest_existing_ancestor()
+    test_check_kb_access_dangling_db_symlink_fails_closed()
     test_check_kb_access_fails_when_readonly_open_fails()
     test_run_all_includes_kb_access_check()
     test_check_codex_hooks()

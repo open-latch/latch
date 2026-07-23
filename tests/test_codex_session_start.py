@@ -17,6 +17,8 @@ import agents_md_sync as ams  # noqa: E402
 import codex_session_start as css  # noqa: E402
 import db  # noqa: E402
 import embeddings  # noqa: E402
+import lifecycle_receipts  # noqa: E402
+import schema_version  # noqa: E402
 import session_start  # noqa: E402
 import versioning  # noqa: E402
 
@@ -148,28 +150,119 @@ def test_main_emits_full_brief_when_session_write_is_readonly(monkeypatch, capsy
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def test_main_treats_marker_fallback_as_readonly_when_session_upsert_is_noop(
+def test_main_treats_marker_fallback_as_marker_only_when_db_is_writable(
     monkeypatch, capsys,
 ):
     tmp = Path(tempfile.mkdtemp(prefix="codex_marker_fallback_start_"))
     conn = db.connect(str(tmp))
     try:
-        vector = embeddings.embed("Existing session lane\n\nmarker fallback detects it")
+        vector = embeddings.embed("Marker fallback lane\n\nDB writes still run")
         db.insert_node(
             conn,
             kind="workstream",
-            title="Existing session lane",
-            body="Objective: marker fallback detects read-only startup",
+            title="Marker fallback lane",
+            body="Objective: marker failure stays independent from DB writability",
             status="canonical",
             embedding=embeddings.to_blob(vector),
+        )
+    finally:
+        conn.close()
+
+    fallback = tmp / "fallback-marker.json"
+    try:
+        monkeypatch.setattr(css, "is_in_compact", lambda: False)
+        monkeypatch.setattr(css, "is_unlatched_mode", lambda: False)
+        monkeypatch.setattr(css, "is_disabled", lambda: False)
+        monkeypatch.setattr(
+            css,
+            "read_hook_input",
+            lambda: {"cwd": str(tmp), "threadId": "marker-only-thread"},
+        )
+        monkeypatch.setattr(css, "transcript_path", lambda _payload: None)
+        monkeypatch.setattr(css, "_auto_sync_agents_md", lambda _cwd: None)
+        monkeypatch.setattr(css.budget, "brief_line", lambda _cwd: None)
+        monkeypatch.setattr(
+            css.codex_session,
+            "write_marker",
+            lambda *_args, **_kwargs: fallback,
+        )
+
+        assert css.main() == 0
+        output = json.loads(capsys.readouterr().out)
+        brief = output["hookSpecificOutput"]["additionalContext"]
+        _assert("Marker fallback lane" in brief, brief)
+        _assert("loaded core KB context read-only" not in brief, brief)
+
+        check = db.connect(str(tmp))
+        try:
+            _assert(
+                db.get_session(check, "marker-only-thread") is not None,
+                "marker-only fallback must not suppress session registration",
+            )
+            retrieval_count = check.execute(
+                "SELECT COUNT(*) AS n FROM session_retrievals "
+                "WHERE session_id = ?",
+                ("marker-only-thread",),
+            ).fetchone()["n"]
+            _assert(
+                retrieval_count > 0,
+                "marker-only fallback must not suppress retrieval dedupe writes",
+            )
+        finally:
+            check.close()
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_main_preserves_brief_when_retrieval_is_first_readonly_signal(
+    monkeypatch, capsys,
+):
+    tmp = Path(tempfile.mkdtemp(prefix="codex_retrieval_readonly_start_"))
+    conn = db.connect(str(tmp))
+    try:
+        vector = embeddings.embed("Existing session lane\n\nretrieval detects readonly")
+        wid = db.insert_node(
+            conn,
+            kind="workstream",
+            title="Existing session lane",
+            body="Objective: retrieval denial corrects the startup banner",
+            status="canonical",
+            embedding=embeddings.to_blob(vector),
+        )
+        receipt = lifecycle_receipts.opened(
+            "Existing session lane", 2, "2026-07-01", "startup remains honest",
+        )
+        db.begin_workstream_op(
+            conn,
+            op_key="open-codex-late-readonly",
+            op="OPEN",
+            origin="auto",
+            candidate_key="open:codex-late-readonly",
+            dst_workstream_id=wid,
+            payload={
+                "request": {
+                    "title": "Existing session lane",
+                    "done_when": "startup remains honest",
+                    "recurrence": {
+                        "session_count": 2,
+                        "since": "2026-07-01",
+                    },
+                },
+                "title": "Existing session lane",
+                "receipt": receipt,
+                "assigned_member_ids": [],
+                "watch_pair": None,
+                "probation": {},
+            },
+        )
+        db.finish_workstream_op(
+            conn, "open-codex-late-readonly", state="applied",
         )
         db.upsert_session(conn, "existing-thread", str(tmp), None)
     finally:
         conn.close()
 
     retrieval_calls = []
-    primary = tmp / "primary-marker.json"
-    fallback = tmp / "fallback-marker.json"
     try:
         monkeypatch.setattr(css, "is_in_compact", lambda: False)
         monkeypatch.setattr(css, "is_unlatched_mode", lambda: False)
@@ -182,26 +275,113 @@ def test_main_treats_marker_fallback_as_readonly_when_session_upsert_is_noop(
         monkeypatch.setattr(css, "transcript_path", lambda _payload: None)
         monkeypatch.setattr(css, "_auto_sync_agents_md", lambda _cwd: None)
         monkeypatch.setattr(css.budget, "brief_line", lambda _cwd: None)
-        monkeypatch.setattr(css.codex_session, "marker_path", lambda _cwd: primary)
         monkeypatch.setattr(
             css.codex_session,
             "write_marker",
-            lambda *_args, **_kwargs: fallback,
+            lambda *_args, **_kwargs: tmp / "primary-marker.json",
         )
-        monkeypatch.setattr(
-            db,
-            "record_retrievals",
-            lambda *_args, **_kwargs: retrieval_calls.append(True),
-        )
+
+        def denied_retrieval(*_args, **_kwargs):
+            retrieval_calls.append(True)
+            raise sqlite3.OperationalError("attempt to write a readonly database")
+
+        monkeypatch.setattr(db, "record_retrievals", denied_retrieval)
 
         assert css.main() == 0
         output = json.loads(capsys.readouterr().out)
         brief = output["hookSpecificOutput"]["additionalContext"]
         _assert("Existing session lane" in brief, brief)
         _assert("loaded core KB context read-only" in brief, brief)
-        _assert(retrieval_calls == [], retrieval_calls)
+        _assert(brief.count(receipt) == 1, brief)
+        _assert(retrieval_calls == [True], retrieval_calls)
+
+        check = db.connect(str(tmp))
+        try:
+            _assert(
+                lifecycle_receipts.pending_receipts(check) == [],
+                "the emitted lifecycle receipt should remain durably claimed",
+            )
+        finally:
+            check.close()
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_main_reports_nonreadonly_retrieval_write_failure(monkeypatch, capsys):
+    tmp = Path(tempfile.mkdtemp(prefix="codex_retrieval_warning_start_"))
+    conn = db.connect(str(tmp))
+    try:
+        vector = embeddings.embed("Retrieval warning lane\n\nmetadata failure is visible")
+        db.insert_node(
+            conn,
+            kind="workstream",
+            title="Retrieval warning lane",
+            body="Objective: non-read-only metadata failures remain visible",
+            status="canonical",
+            embedding=embeddings.to_blob(vector),
+        )
+    finally:
+        conn.close()
+
+    try:
+        monkeypatch.setattr(css, "is_in_compact", lambda: False)
+        monkeypatch.setattr(css, "is_unlatched_mode", lambda: False)
+        monkeypatch.setattr(css, "is_disabled", lambda: False)
+        monkeypatch.setattr(
+            css,
+            "read_hook_input",
+            lambda: {"cwd": str(tmp), "threadId": "warning-thread"},
+        )
+        monkeypatch.setattr(css, "transcript_path", lambda _payload: None)
+        monkeypatch.setattr(css, "_auto_sync_agents_md", lambda _cwd: None)
+        monkeypatch.setattr(css.budget, "brief_line", lambda _cwd: None)
+        monkeypatch.setattr(
+            css.codex_session,
+            "write_marker",
+            lambda *_args, **_kwargs: tmp / "primary-marker.json",
+        )
+
+        def broken_retrieval(*_args, **_kwargs):
+            raise sqlite3.IntegrityError("synthetic retrieval metadata failure")
+
+        monkeypatch.setattr(db, "record_retrievals", broken_retrieval)
+
+        assert css.main() == 0
+        output = json.loads(capsys.readouterr().out)
+        brief = output["hookSpecificOutput"]["additionalContext"]
+        _assert("Retrieval warning lane" in brief, brief)
+        _assert("some SessionStart metadata could not be updated" in brief, brief)
+        _assert("loaded core KB context read-only" not in brief, brief)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_main_emits_unavailable_stub_when_all_kb_opens_fail(monkeypatch, capsys):
+    def denied_write(*_args, **_kwargs):
+        raise PermissionError("sensitive writable path")
+
+    def migration_required(*_args, **_kwargs):
+        raise schema_version.SchemaMigrationRequiredError(
+            "sensitive migration detail",
+        )
+
+    monkeypatch.setattr(css, "is_in_compact", lambda: False)
+    monkeypatch.setattr(css, "is_unlatched_mode", lambda: False)
+    monkeypatch.setattr(css, "is_disabled", lambda: False)
+    monkeypatch.setattr(css, "read_hook_input", lambda: {"cwd": "/unavailable"})
+    monkeypatch.setattr(css, "codex_session_id", lambda _payload: None)
+    monkeypatch.setattr(css, "transcript_path", lambda _payload: None)
+    monkeypatch.setattr(css, "_auto_sync_agents_md", lambda _cwd: None)
+    monkeypatch.setattr(css.budget, "brief_line", lambda _cwd: None)
+    monkeypatch.setattr(db, "connect", denied_write)
+    monkeypatch.setattr(db, "connect_readonly", migration_required)
+
+    assert css.main() == 0
+    output = json.loads(capsys.readouterr().out)
+    brief = output["hookSpecificOutput"]["additionalContext"]
+    _assert("# latch — session brief unavailable" in brief, brief)
+    _assert("requires a schema migration" in brief, brief)
+    _assert("sensitive" not in brief, brief)
 
 
 if __name__ == "__main__":
