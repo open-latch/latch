@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <strong>latch stops your coding agent from rebuilding what your project already ruled out.</strong>
+  <strong>latch catches your coding agent before it rebuilds what your project already ruled out.</strong>
 </p>
 
 <p align="center">
@@ -52,9 +52,9 @@ Request: Implement email sending by adding a Redis-backed background job queue.
 
 ```text
 Recommendation: DO_NOT_PROCEED
-Summary: The request directly contradicts the canonical decision for this demo app: do not add a background job queue, with Redis-backed background jobs explicitly named as the rejected path (id=1). The allowed path is to keep the app single-process and, if background work is needed for email sending, use an inline task runner and document its limits.
-Risk if proceed: Adding Redis and a worker process would violate the install-light, easy-to-inspect demo constraint and repeat the rejected Redis-backed queue path.
-Better next action: Implement email sending with the single-process inline task runner approach and document the delivery/latency limits.
+Summary: The KB has a canonical decision for this no-history demo app: do not add a background job queue, and specifically reject a Redis-backed background job queue (id=1). The allowed path is to keep the app single-process and use an inline task runner if background work is needed, documenting the limit.
+Risk if proceed: Adding Redis and a worker process would violate the install-light, easy-to-inspect demo-app constraint already recorded in the KB.
+Better next action: Implement email sending through the allowed inline task runner path and document its limits instead of adding Redis-backed jobs.
 Cited evidence:
 - id=1 decision status=canonical: No background job queue for the no-history demo app
 Worktree changed before/after gate: no
@@ -88,17 +88,33 @@ paths, rationale, and evidence in a local KB, then puts a go/no-go verdict in th
 **before files change** — and shows you the receipt. That is decision continuity, not a bigger
 transcript or a generic recall layer.
 
-latch is an unlock, not just a guardrail — it guides the agent and protects you at the same time.
-Because it keeps the agent inside decisions you've already made instead of rebuilding a path you ruled
-out three sessions ago, you stop re-catching the same mistakes and start handing the agent more. That
-earned confidence is the part token-savers and history-search tools don't give you: not cheaper runs
-or better recall, but faith that the agent is working within your judgment — so you can watch less and
-run more agents in parallel without each one re-litigating what you already settled. The judgment
+The practical effect: you stop re-catching the same mistake across sessions, so you can hand the
+agent more without re-litigating settled decisions. You can override any verdict — the point is that
+reviving a rejected path becomes a visible, cited decision instead of silent drift. The judgment
 stays yours; latch just keeps the agent inside it.
 
 It runs locally on one SQLite KB, needs no cloud account, and targets macOS, Windows, and Linux.
 Claude Code, Codex, and Cursor share the same KB, so judgment captured through one agent can gate
 another.
+
+How the check reaches the agent is host-dependent, and latch is honest about it: on hosts with
+lifecycle hooks (Claude Code, and Cursor with hooks enabled) the gate runs before edits as part of
+the loop; on hosts without them the managed contract asks the agent to run it, and every receipt
+records whether the gate actually ran.
+
+**Where latch sits next to tools you already use.** Different layer, not a bigger prompt:
+
+| Tool | What it's for | How its authority works |
+| --- | --- | --- |
+| Instruction / memory files (`CLAUDE.md`, `AGENTS.md`, Cursor rules) | Standing guidance for the agent | Prompt-enforced — the agent can ignore it, rewrite it, or quote it while violating it |
+| Transcript / session search | Recover what was said or done before | Passive — surfaces the past only when a human thinks to look; checks nothing before an edit |
+| Issue / task trackers | Coordinate what to work on | Organizational — track the work; they don't gate how it gets implemented |
+| Spec / constitution frameworks (e.g. spec-kit) | Declare project rules and gates up front | Prompt-enforced — a "must pass" gate is markdown the agent reads, with no runtime check |
+| **latch** | Check the next action against decisions you've already ratified | Runtime-checked — a go/no-go verdict with a cited receipt, before files change |
+
+*Why not just a spec-kit extension?* An extension of a prompt-based framework inherits the same
+failure class — the rule still reaches the agent as text it can talk past. latch runs the check as
+code at the action boundary, so it complements those tools rather than competing with them.
 
 ## Get started
 
@@ -210,10 +226,10 @@ At natural stopping points, capture the session so tomorrow's agent inherits tod
 Compaction is user-initiated because it spends a model call and writes a durable summary into the KB:
 
 - Claude Code: `/latch-compact`
-- Codex: `/latch-compact`
+- Codex: run the installed `latch-compact` skill (Codex has no top-level `/latch-*` command)
 - Cursor: `/latch-compact` from the current hooked conversation
 
-Or, you can simply instruct latch with natural language, and the agent will handle the rest. 
+Or, you can simply ask latch in natural language, and the agent will offer the matching command.
 
 ## Safety and control
 
@@ -221,6 +237,13 @@ Or, you can simply instruct latch with natural language, and the agent will hand
 never uploads your KB. Data leaves your machine only when you run a model-backed path (gate,
 compaction, heal), which may send selected prompts, snippets, and evidence to the Claude, Codex, or
 Cursor backend *you* configured.
+
+**Overhead.** The per-prompt retrieval hook runs locally against the KB — roughly 120–150 ms on an
+Apple Silicon reference machine, inside a 250 ms budget — and injects a bounded, tier-controlled slice
+of context (0 / 1,712 / 3,056 characters for Quiet / Standard / Full in the frozen `intensity_v1`
+fixture). Freshening a plan uses a surgical append (~34 tokens) rather than a full-body rewrite
+(~9,900 tokens). The gate itself is a model call, so it runs only on write-shaped changes, not on
+every prompt. Reproduce with `tests/measure_hook_latency.py` and `tests/measure_write_path.py`.
 
 **Kill switch.** Stop latch hooks without uninstalling:
 
@@ -249,6 +272,20 @@ bash bin/uninstall.sh
 # Remove only latch-owned Cursor wiring from the current project:
 bash bin/uninstall.sh --yes --cursor-only --cursor-project "$PWD"
 ```
+
+## When a decision changes
+
+A decision isn't frozen forever, and the gate cites which state it's in:
+
+- **current** — the ruling still stands, so the gate holds the agent to it.
+- **rejected** — the specific path that was ruled out, carried with its reason.
+- **superseded** — a newer decision replaced it; the old one stops gating and the receipt points to
+  what replaced it.
+- **reconciled** — a newer decision narrowed it without fully replacing it; both stay in scope.
+
+Because the receipt names the status, a stale ruling is visible rather than silently binding — and
+overriding one is a single recorded decision, which itself becomes the trigger to supersede the old
+one. That is how a ratified decision avoids outliving its rationale.
 
 ## Where the gate doesn't help
 
