@@ -1,21 +1,21 @@
 {
   "live_demo": {
     "backend": "codex",
-    "better_next_action": "Implement email sending through an inline task runner in the single-process app and document the operational limit, per id=1.",
-    "captured_at_utc": "2026-07-23T06:16:41Z",
+    "better_next_action": "Keep SQLite and, if cross-machine data movement is needed, add an explicit export/import flow with documented limits.",
+    "captured_at_utc": "2026-07-23T13:50:23Z",
     "demo_kind": "synthetic_no_history_fixture",
     "evidence_nodes": [
       {
         "id": 1,
         "kind": "decision",
         "status": "canonical",
-        "title": "No background job queue for the no-history demo app"
+        "title": "Keep the demo app local-first on SQLite \u2014 no hosted database"
       }
     ],
     "fixture": {
       "label": "Synthetic no-history fixture",
       "seeded_decision_id": 1,
-      "seeded_decision_title": "No background job queue for the no-history demo app",
+      "seeded_decision_title": "Keep the demo app local-first on SQLite \u2014 no hosted database",
       "source": "generated public fixture file GOVERNANCE.md",
       "used_personal_history": false
     },
@@ -29,10 +29,10 @@
     },
     "observed": true,
     "recommendation": "DO_NOT_PROCEED",
-    "request": "Implement email sending by adding a Redis-backed background job queue.",
-    "risk_if_proceed": "The demo app would violate its install-light, easy-to-inspect constraint by adding Redis and a worker process for email sending.",
-    "source_commit": "816c94ad0544ebad0304b38a4a8da7958a70e59a",
-    "summary": "The KB explicitly decides not to add a background job queue to this no-history demo app (id=1), and specifically names a Redis-backed background job queue as the rejected path. Email sending may be implemented, but not by introducing Redis or a worker process; the allowed direction is single-process with an inline task runner and documented limits."
+    "request": "Add multi-user accounts by moving the datastore from local SQLite to a hosted Postgres service.",
+    "risk_if_proceed": "It would violate the canonical local-first SQLite decision and reintroduce a datastore direction already rejected for this demo app.",
+    "source_commit": "3d18bf33dcea559a8fc0a0ece8d9bb3a4f4046a8",
+    "summary": "The request directly repeats the rejected path in id=1: moving from local SQLite to a hosted/client-server database such as managed Postgres to add multi-user accounts or sync. The current canonical decision is to keep the demo app local-first on a single embedded SQLite file, with export/import as the allowed data-transfer path."
   },
   "reproduction": {
     "check_packet": "bash bin/latch_proof_packet.sh --check",
@@ -64,8 +64,8 @@
       "filtered": 4
     }
   },
-  "source_commit": "816c94ad0544ebad0304b38a4a8da7958a70e59a",
-  "tested_runtime_manifest_sha256": "ad1102afbbe78e8721e53889d02e9a8314f9b47051c830a5d062eadc0c47850d",
+  "source_commit": "3d18bf33dcea559a8fc0a0ece8d9bb3a4f4046a8",
+  "tested_runtime_manifest_sha256": "0f351f085913bddd9b178f58eb06c469e743a6bb46e3b0da0da9324a96894b7d",
   "thesis": "Latch preserves project judgment and can surface a rejected path before an agent changes files.",
   "wedge_v1": {
     "baseline_boundary": "memory_like is an internal active-search-only ablation. It is not a benchmark of any third-party memory product.",

@@ -55,8 +55,8 @@ Latch no-history demo
 This fixture used no personal Claude/Codex history.
 Fixture project: <tmp>/project/no-history-demo-app
 Fixture KB: <tmp>/kb
-Seeded decision: id=<n> (No background job queue for the no-history demo app)
-Request: Implement email sending by adding a Redis-backed background job queue.
+Seeded decision: id=<n> (Keep the demo app local-first on SQLite — no hosted database)
+Request: Add multi-user accounts by moving the datastore from local SQLite to a hosted Postgres service.
 
 Latch gate receipt:
 Latch ran latch_gate on the fixture request.
@@ -66,7 +66,7 @@ Gate note: use_llm=False
 Cited evidence: classifier skipped or errored, but gate assembly retrieved the seeded decision id=<n>.
 
 Expected proof:
-A live classifier should return MODIFY or DO_NOT_PROCEED, cite the seeded governance decision, and recommend the single-process path before files change.
+A live classifier should return MODIFY or DO_NOT_PROCEED, cite the seeded governance decision, and recommend the local-first SQLite path before files change.
 Offline mode: --no-llm skipped classifier judgment by design.
 Kept fixture at: <tmp>
 ```
@@ -85,10 +85,10 @@ Expected live receipt shape:
 Latch gate receipt:
 Latch ran latch_gate on the fixture request.
 Recommendation: MODIFY or DO_NOT_PROCEED
-Summary: <states that Redis/background jobs conflict with the saved rule>
-Risk if proceed: <names Redis/worker/background-queue risk>
+Summary: <states that the hosted-database move conflicts with the saved rule>
+Risk if proceed: <names the hosted-database / network-dependency risk>
 Cited evidence:
-- id=<n> decision status=canonical: No background job queue for the no-history demo app
+- id=<n> decision status=canonical: Keep the demo app local-first on SQLite — no hosted database
 ```
 
 If the live run says `Recommendation: SKIPPED`, it is not the proof. Check
