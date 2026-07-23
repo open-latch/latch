@@ -159,6 +159,18 @@ The full walkthrough and source options are in [See it catch](#see-it-catch-seed
 the installer first, pin a release, pick an intensity tier, or install to a custom directory, see
 [Install details](#install-details).
 
+## Using latch in more than one repo
+
+You install latch once. The runtime and your KB are shared, and for **Claude Code** and **Codex** the
+tools and hooks are registered per-user — so the engine is already reachable in every repo on your
+machine. What each repo still needs is its own **contract**: the managed `CLAUDE.md` / `AGENTS.md`
+block that tells the agent to actually consult latch and run the gate before it acts. (**Cursor** is
+wired entirely per-repo — its MCP server, rule, and commands all live in the project.)
+
+So to protect another repo, run the install command — or `/path/to/latch/bin/latch_quickstart.sh` —
+**from inside that repo**. It reuses the same pinned KB and just writes that repo's contract; then
+restart the agent. Without this step a new repo may show latch's tools but never be told to use them.
+
 ## See it catch: seed, then gate
 
 The fixture proves the mechanism. The value is catching a decision from *your* history that your
