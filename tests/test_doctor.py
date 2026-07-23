@@ -318,9 +318,44 @@ def test_mcp_lifecycle_ok_names_operational_contract(monkeypatch):
     )
     monkeypatch.setattr(mcp_broker, "read_discovery", lambda: {"pid": 123})
     monkeypatch.setattr(mcp_broker, "probe_discovery", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(doctor.paths, "maintenance_runner_status", lambda: {
+        "configured": True,
+        "backend": "codex",
+        "error": None,
+        "remedy": None,
+    })
     _name, level, detail = doctor.check_mcp_runtime_lifecycle()
     _assert(level == doctor.OK, detail)
     _assert("live leases=1/32" in detail and "retire idle=300s" in detail, detail)
+
+
+def test_mcp_lifecycle_warns_when_autonomous_maintenance_is_unconfigured(
+    monkeypatch,
+):
+    import mcp_broker
+
+    monkeypatch.setattr(mcp_broker, "lifecycle_summary", lambda **_kwargs: {
+        "warning_count": 0, "counts": {},
+    })
+    monkeypatch.setattr(mcp_broker, "proxy_policy", lambda: {
+        "cap": 32, "retire_idle_s": 300.0, "heartbeat_s": 30.0, "stale_s": 300.0,
+    })
+    monkeypatch.setattr(
+        mcp_broker, "proxy_lease_state", lambda **_kwargs: {"live": []}
+    )
+    monkeypatch.setattr(mcp_broker, "read_discovery", lambda: None)
+    monkeypatch.setattr(doctor.paths, "maintenance_runner_status", lambda: {
+        "configured": False,
+        "backend": None,
+        "error": "missing",
+        "remedy": "rerun latch quickstart for this vault",
+    })
+
+    _name, level, detail = doctor.check_mcp_runtime_lifecycle()
+
+    _assert(level == doctor.WARN, detail)
+    _assert("autonomous maintenance is not configured" in detail, detail)
+    _assert("rerun latch quickstart" in detail, detail)
 
 
 def test_mcp_lifecycle_warns_at_configured_75_percent_high_water(monkeypatch):

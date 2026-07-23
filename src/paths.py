@@ -28,11 +28,15 @@ again selects the on-disk DB. Multiple KBs are possible only by explicit opt-in
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import shlex
 import tempfile
+import warnings
 from pathlib import Path
+
+import mcp_runtime
 
 
 def _default_kb_root() -> Path:
@@ -72,6 +76,17 @@ LATCH_INTENSITIES = ("quiet", "standard", "full")
 LEGACY_LATCH_INTENSITY = "full"
 FRESH_INSTALL_LATCH_INTENSITY = "standard"
 INVALID_LATCH_INTENSITY_FALLBACK = "quiet"
+VAULT_RUNTIME_SETTINGS_FILENAME = "runtime_settings.json"
+MAINTENANCE_EXECUTABLE_ENV = {
+    "claude": "CLAUDE_BIN",
+    "codex": "CODEX_BIN",
+    "cursor": "CURSOR_AGENT_BIN",
+}
+MAINTENANCE_EXECUTABLE_COMMANDS = {
+    "claude": ("claude",),
+    "codex": ("codex",),
+    "cursor": ("agent", "cursor-agent"),
+}
 
 # Lazily-resolved, cached pinned KB dir. Sentinel ``False`` = "not yet resolved"
 # (distinct from a resolved ``None`` meaning "no pin configured → legacy mode").
@@ -175,14 +190,225 @@ def configured_latch_intensity(settings_file: Path | None = None) -> str | None:
     return normalize_latch_intensity(data.get("intensity"))
 
 
-def write_latch_intensity(value: str, settings_file: Path | None = None) -> Path:
-    """Atomically persist ``value`` while preserving unrelated settings keys."""
-    normalized = normalize_latch_intensity(value)
-    if normalized is None:
+def _validated_maintenance_runner(
+    backend: object,
+    executable: object,
+    home: object,
+    search_path: object,
+) -> tuple[str, str, str, str]:
+    normalized = (
+        backend.strip().lower() if isinstance(backend, str) else ""
+    )
+    if normalized not in mcp_runtime.SUPPORTED_MODEL_BACKENDS:
         raise ValueError(
-            f"unsupported Latch intensity {value!r}; choose "
-            + ", ".join(LATCH_INTENSITIES)
+            f"unsupported autonomous maintenance backend {backend!r}; choose "
+            + ", ".join(sorted(mcp_runtime.SUPPORTED_MODEL_BACKENDS))
         )
+    if not isinstance(executable, str) or not executable.strip():
+        raise ValueError("autonomous maintenance executable is missing")
+    candidate = Path(executable.strip())
+    if not candidate.is_absolute():
+        raise ValueError("autonomous maintenance executable must be absolute")
+    if not candidate.is_file() or not os.access(candidate, os.X_OK):
+        raise ValueError(
+            f"autonomous maintenance executable is not executable: {candidate}"
+        )
+    if not isinstance(home, str) or not home.strip():
+        raise ValueError("autonomous maintenance home is missing")
+    home_path = Path(home.strip())
+    if not home_path.is_absolute():
+        raise ValueError("autonomous maintenance home must be absolute")
+    if not home_path.is_dir():
+        raise ValueError(
+            f"autonomous maintenance home is unavailable: {home_path}"
+        )
+    if (
+        not isinstance(search_path, str)
+        or not search_path
+        or "\0" in search_path
+    ):
+        raise ValueError("autonomous maintenance PATH is missing or invalid")
+    search_entries = search_path.split(os.pathsep)
+    if any(not entry or not Path(entry).is_absolute() for entry in search_entries):
+        raise ValueError(
+            "every autonomous maintenance PATH entry must be absolute"
+        )
+    return (
+        normalized,
+        os.path.abspath(os.fspath(candidate)),
+        os.path.abspath(os.fspath(home_path)),
+        os.pathsep.join(os.path.abspath(entry) for entry in search_entries),
+    )
+
+
+def resolve_maintenance_executable(
+    backend: str,
+    *,
+    env: "dict[str, str] | os._Environ[str] | None" = None,
+) -> str:
+    """Resolve the backend executable during an explicit install action."""
+    values = os.environ if env is None else env
+    normalized = backend.strip().lower()
+    if normalized not in mcp_runtime.SUPPORTED_MODEL_BACKENDS:
+        raise ValueError(
+            f"unsupported autonomous maintenance backend {backend!r}; choose "
+            + ", ".join(sorted(mcp_runtime.SUPPORTED_MODEL_BACKENDS))
+        )
+    configured = values.get(MAINTENANCE_EXECUTABLE_ENV[normalized])
+    candidates = (
+        (configured,) if configured else MAINTENANCE_EXECUTABLE_COMMANDS[normalized]
+    )
+    path = values.get("PATH")
+    for command in candidates:
+        resolved = mcp_runtime.resolve_executable_on_path(command, path)
+        if resolved is not None:
+            return os.path.abspath(resolved)
+    raise ValueError(
+        f"could not resolve an executable for autonomous {normalized} maintenance"
+    )
+
+
+def resolve_maintenance_path(
+    executable: str | None,
+    *,
+    env: "dict[str, str] | os._Environ[str] | None" = None,
+) -> str:
+    """Freeze an absolute, cwd-independent PATH during explicit setup."""
+    values = os.environ if env is None else env
+    entries: list[str] = []
+    if executable and os.path.isabs(executable):
+        entries.append(os.path.abspath(os.path.dirname(executable)))
+    for raw in (values.get("PATH") or "").split(os.pathsep):
+        candidate = raw.strip().strip('"')
+        if not candidate or not os.path.isabs(candidate):
+            continue
+        entries.append(os.path.abspath(candidate))
+    deduplicated: list[str] = []
+    seen: set[str] = set()
+    for entry in entries:
+        identity = os.path.normcase(os.path.realpath(entry))
+        if identity in seen:
+            continue
+        seen.add(identity)
+        deduplicated.append(entry)
+    if not deduplicated:
+        raise ValueError(
+            "could not construct an absolute PATH for autonomous maintenance"
+        )
+    return os.pathsep.join(deduplicated)
+
+
+def configured_maintenance_runner(
+    runtime_settings_file: Path | None = None,
+    *,
+    project_path: str | os.PathLike | None = None,
+) -> tuple[str, str, str, str]:
+    """Return the explicit vault-owned autonomous maintenance runner."""
+    path = runtime_settings_file or (
+        project_dir(project_path) / VAULT_RUNTIME_SETTINGS_FILENAME
+    )
+    if path.is_symlink() or (path.exists() and not path.is_file()):
+        raise ValueError(
+            f"autonomous maintenance settings must be a regular vault-local file: {path}"
+        )
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise ValueError(
+            f"autonomous maintenance is not configured in {path}; rerun quickstart"
+        ) from exc
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"could not read autonomous maintenance settings: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ValueError(f"autonomous maintenance settings in {path} are not an object")
+    return _validated_maintenance_runner(
+        data.get("maintenance_backend"),
+        data.get("maintenance_executable"),
+        data.get("maintenance_home"),
+        data.get("maintenance_path"),
+    )
+
+
+def maintenance_runner_status(
+    project_path: str | os.PathLike | None = None,
+) -> dict[str, object]:
+    """Return a path-redacted autonomous-maintenance readiness receipt."""
+    try:
+        backend, _executable, _home, _search_path = configured_maintenance_runner(
+            project_path=project_path
+        )
+    except ValueError as exc:
+        return {
+            "configured": False,
+            "backend": None,
+            "error": str(exc),
+            "remedy": "rerun latch quickstart for this vault",
+        }
+    return {
+        "configured": True,
+        "backend": backend,
+        "error": None,
+        "remedy": None,
+    }
+
+
+def configured_daemon_idle_ttl(
+    *,
+    default: float,
+    runtime_settings_file: Path | None = None,
+    project_path: str | os.PathLike | None = None,
+) -> float:
+    """Return a vault-owned daemon TTL, or the fixed product default."""
+    path = runtime_settings_file or (
+        project_dir(project_path) / VAULT_RUNTIME_SETTINGS_FILENAME
+    )
+    if path.is_symlink() or (path.exists() and not path.is_file()):
+        warnings.warn(
+            f"ignoring invalid vault runtime settings path {path}; "
+            f"using daemon TTL default {default}",
+            RuntimeWarning,
+        )
+        return default
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return default
+    except (OSError, ValueError) as exc:
+        warnings.warn(
+            f"could not read vault runtime settings {path}: {exc}; "
+            f"using daemon TTL default {default}",
+            RuntimeWarning,
+        )
+        return default
+    if not isinstance(data, dict):
+        warnings.warn(
+            f"vault runtime settings in {path} are not an object; "
+            f"using daemon TTL default {default}",
+            RuntimeWarning,
+        )
+        return default
+    raw = data.get("daemon_idle_ttl_s")
+    if raw is None:
+        return default
+    if (
+        isinstance(raw, bool)
+        or not isinstance(raw, (int, float))
+        or not math.isfinite(float(raw))
+        or raw < 0.1
+    ):
+        warnings.warn(
+            f"invalid daemon_idle_ttl_s in {path}; using daemon TTL default {default}",
+            RuntimeWarning,
+        )
+        return default
+    return float(raw)
+
+
+def _write_latch_settings(
+    updates: dict[str, str],
+    settings_file: Path | None = None,
+) -> Path:
+    """Atomically merge validated settings with unrelated existing keys."""
     path = settings_file or LATCH_SETTINGS_FILE
     data: dict = {}
     try:
@@ -191,7 +417,7 @@ def write_latch_intensity(value: str, settings_file: Path | None = None) -> Path
             data.update(current)
     except (OSError, ValueError):
         pass
-    data["intensity"] = normalized
+    data.update(updates)
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
     tmp = Path(tmp_name)
@@ -207,6 +433,90 @@ def write_latch_intensity(value: str, settings_file: Path | None = None) -> Path
             pass
         raise
     return path
+
+
+def _write_vault_runtime_settings(
+    updates: dict[str, str | float],
+    runtime_settings_file: Path | None = None,
+    *,
+    project_path: str | os.PathLike | None = None,
+) -> Path:
+    """Atomically merge policy into the canonical pinned vault."""
+    path = runtime_settings_file or (
+        project_dir(project_path) / VAULT_RUNTIME_SETTINGS_FILENAME
+    )
+    data: dict = {}
+    try:
+        if path.is_file() and not path.is_symlink():
+            current = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(current, dict):
+                data.update(current)
+    except (OSError, ValueError):
+        pass
+    data.update(updates)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(data, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+        os.replace(tmp, path)
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+    except Exception:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+    return path
+
+
+def write_latch_intensity(value: str, settings_file: Path | None = None) -> Path:
+    """Atomically persist ``value`` while preserving unrelated settings keys."""
+    normalized = normalize_latch_intensity(value)
+    if normalized is None:
+        raise ValueError(
+            f"unsupported Latch intensity {value!r}; choose "
+            + ", ".join(LATCH_INTENSITIES)
+        )
+    return _write_latch_settings({"intensity": normalized}, settings_file)
+
+
+def write_maintenance_runner(
+    *,
+    backend: str,
+    executable: str,
+    home: str,
+    search_path: str,
+    runtime_settings_file: Path | None = None,
+    project_path: str | os.PathLike | None = None,
+) -> Path:
+    """Persist the explicit autonomous runner in the canonical pinned vault."""
+    (
+        normalized,
+        resolved_executable,
+        resolved_home,
+        resolved_search_path,
+    ) = _validated_maintenance_runner(
+        backend,
+        executable,
+        home,
+        search_path,
+    )
+    return _write_vault_runtime_settings(
+        {
+            "maintenance_backend": normalized,
+            "maintenance_executable": resolved_executable,
+            "maintenance_home": resolved_home,
+            "maintenance_path": resolved_search_path,
+        },
+        runtime_settings_file,
+        project_path=project_path,
+    )
 
 
 def _resolve_pinned_dir() -> Path | None:
@@ -239,6 +549,13 @@ def _resolve_pinned_dir() -> Path | None:
     return None
 
 
+def refresh_pinned_dir() -> Path | None:
+    """Forget an installer-time pin snapshot and resolve the current pin."""
+    global _PINNED_DIR
+    _PINNED_DIR = False
+    return _resolve_pinned_dir()
+
+
 def is_unlatched_mode() -> bool:
     """User-facing vanilla-agent escape hatch.
 
@@ -247,9 +564,12 @@ def is_unlatched_mode() -> bool:
     status commands enough metadata to show an explicit receipt instead of going
     silently dark.
     """
-    if os.environ.get("LATCH_UNLATCHED"):
+    if UNLATCHED_FILE.exists():
         return True
-    return UNLATCHED_FILE.exists()
+    connection = mcp_runtime.current_connection()
+    if connection is not None:
+        return connection.unlatched
+    return bool(os.environ.get("LATCH_UNLATCHED"))
 
 
 def is_disabled() -> bool:
@@ -258,9 +578,14 @@ def is_disabled() -> bool:
     command: `bash bin/latch_enable.sh` or `/unlatch`."""
     if is_unlatched_mode():
         return True
-    if os.environ.get("LATCH_DISABLE") or os.environ.get("CLAUDE_KB_DISABLE"):
+    if DISABLE_FILE.exists():
         return True
-    return DISABLE_FILE.exists()
+    connection = mcp_runtime.current_connection()
+    if connection is not None:
+        return connection.disabled
+    return bool(
+        os.environ.get("LATCH_DISABLE") or os.environ.get("CLAUDE_KB_DISABLE")
+    )
 
 
 def is_write_disabled() -> bool:
@@ -271,16 +596,28 @@ def is_write_disabled() -> bool:
     Stop->compactor path that fan-out'd in 2026-04-23. Implies is_disabled()."""
     if is_disabled():
         return True
-    if os.environ.get("LATCH_DISABLE_WRITE") or os.environ.get("CLAUDE_KB_DISABLE_WRITE"):
+    if DISABLE_WRITE_FILE.exists():
         return True
-    return DISABLE_WRITE_FILE.exists()
+    connection = mcp_runtime.current_connection()
+    if connection is not None:
+        return connection.write_disabled
+    return bool(
+        os.environ.get("LATCH_DISABLE_WRITE")
+        or os.environ.get("CLAUDE_KB_DISABLE_WRITE")
+    )
 
 
 def is_in_compact() -> bool:
     """Reentrancy guard: true if running inside a compactor-spawned `claude -p`
     session. Hooks must no-op so the compactor's own claude invocation cannot
     recursively trigger further compactions."""
-    return bool(os.environ.get("LATCH_IN_COMPACT") or os.environ.get("CLAUDE_KB_IN_COMPACT"))
+    connection = mcp_runtime.current_connection()
+    if connection is not None:
+        return connection.in_compact
+    return bool(
+        os.environ.get("LATCH_IN_COMPACT")
+        or os.environ.get("CLAUDE_KB_IN_COMPACT")
+    )
 
 
 _MINGW_PATH_RE = re.compile(r"^/([a-zA-Z])/")

@@ -14,6 +14,7 @@ import sys
 import tempfile
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +24,9 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 SERVER = ROOT / "src" / "mcp_server.py"
 PROMPT_HOOK = ROOT / "src" / "hooks" / "user_prompt_submit.py"
+EPOCH_2_COMMIT = "5c9f39cdc558b98e4736ba15a7e6f5011168c7c1"
+sys.path.insert(0, str(ROOT / "src"))
+import mcp_broker  # noqa: E402
 
 
 def _assert(condition: Any, message: str) -> None:
@@ -45,15 +49,21 @@ class McpClient:
         env_overrides: dict[str, str] | None = None,
         server_path: Path | None = None,
     ):
+        self.kb_dir = kb_dir
+        runtime_settings = kb_dir / "runtime_settings.json"
+        settings_data: dict[str, Any] = {}
+        if runtime_settings.is_file():
+            settings_data = json.loads(runtime_settings.read_text(encoding="utf-8"))
+        settings_data["daemon_idle_ttl_s"] = idle_ttl
+        runtime_settings.write_text(
+            json.dumps(settings_data, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
         env = os.environ.copy()
         env.update(
             {
                 "LATCH_KB_DIR": str(kb_dir),
                 "LATCH_SESSION_ID": session_id,
-                "LATCH_MCP_DAEMON_IDLE_TTL_SEC": str(idle_ttl),
-                # A disposable test vault must not start the unrelated nightly
-                # maintenance subprocess.
-                "CLAUDE_KB_IN_MAINTENANCE": "1",
             }
         )
         if force_legacy:
@@ -114,7 +124,21 @@ class McpClient:
                 continue
             if line is None:
                 stderr = self.stderr()
-                raise AssertionError(f"proxy exited waiting for {method}: {stderr}")
+                daemon_logs = []
+                for path in self.kb_dir.rglob("mcp-daemon.log"):
+                    try:
+                        daemon_logs.append(
+                            f"{path.name}: "
+                            + path.read_text(
+                                encoding="utf-8", errors="replace"
+                            )[-4000:]
+                        )
+                    except OSError:
+                        pass
+                raise AssertionError(
+                    f"proxy exited waiting for {method}: {stderr}; "
+                    f"daemon_logs={daemon_logs}"
+                )
             message = json.loads(line.decode("utf-8"))
             if message.get("id") == request_id:
                 if "error" in message:
@@ -190,8 +214,64 @@ def _stop_daemon(kb_dir: Path) -> None:
             continue
 
 
+def _wait_for_pid_exit(pid: int, timeout_s: float = 5.0) -> None:
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline and mcp_broker._pid_alive(pid):
+        time.sleep(0.05)
+
+
 def _temp_vault() -> Path:
-    return Path(tempfile.mkdtemp(prefix="latch_shared_mcp_"))
+    vault = Path(tempfile.mkdtemp(prefix="latch_shared_mcp_"))
+    now = datetime.now(timezone.utc).isoformat()
+    (vault / "maintenance_state.json").write_text(
+        json.dumps(
+            {
+                "last_backup_at": now,
+                "last_heal_at": now,
+                "last_weekly_at": now,
+                "last_workstream_shadow_at": now,
+            }
+        ),
+        encoding="utf-8",
+    )
+    return vault
+
+
+def _fake_codex_classifier(path: Path, marker: Path) -> None:
+    payload = json.dumps({
+        "recommendation": "PROCEED",
+        "summary": "mixed-path-fake",
+        "decision_chain": [],
+        "abandoned_paths": [],
+        "active_constraints": [],
+        "current_direction": [],
+        "risk_if_proceed": "",
+        "better_next_action": "",
+        "evidence_nodes": [],
+        "load_bearing_claims": [],
+    })
+    script = path.with_suffix(".py") if os.name == "nt" else path
+    preamble = "" if os.name == "nt" else f"#!{sys.executable}\n"
+    script.write_text(
+        preamble
+        + "import os, pathlib, sys\n"
+        f"PAYLOAD = {payload!r}\n"
+        f"MARKER = pathlib.Path({str(marker)!r})\n"
+        "args = sys.argv[1:]\n"
+        "out = pathlib.Path(args[args.index('--output-last-message') + 1])\n"
+        "sys.stdin.read()\n"
+        "out.write_text(PAYLOAD, encoding='utf-8')\n"
+        "MARKER.write_text("
+        "'used-with-auth' if os.environ.get('OPENAI_API_KEY') else 'used-without-auth', "
+        "encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+    if os.name == "nt":
+        path.with_suffix(".cmd").write_text(
+            f'@"{sys.executable}" "{script}" %*\n',
+            encoding="utf-8",
+        )
 
 
 def _copy_current_install_src(target: Path) -> None:
@@ -338,8 +418,26 @@ def test_parallel_clients_share_one_heavy_owner_and_keep_context_isolated() -> N
         project_a.mkdir(parents=True)
         project_b.mkdir(parents=True)
         clients = [
-            McpClient(kb_dir, "session-a", project_cwd=project_a),
-            McpClient(kb_dir, "session-b", project_cwd=project_b),
+            McpClient(
+                kb_dir,
+                "session-a",
+                project_cwd=project_a,
+                env_overrides={
+                    "LATCH_IN_COMPACT": "1",
+                    "LATCH_GATE_BACKEND": "claude",
+                    "LATCH_MAINTENANCE_BACKEND": "cursor",
+                },
+            ),
+            McpClient(
+                kb_dir,
+                "session-b",
+                project_cwd=project_b,
+                proxy_cap=7,
+                env_overrides={
+                    "LATCH_GATE_BACKEND": "codex",
+                    "LATCH_MAINTENANCE_BACKEND": "codex",
+                },
+            ),
         ]
         first = clients[0].status()
         second = clients[1].status()
@@ -348,6 +446,14 @@ def test_parallel_clients_share_one_heavy_owner_and_keep_context_isolated() -> N
         _assert(first["process_pid"] != clients[0].process.pid, "proxy loaded heavy server")
         _assert(first["connection"]["session_id"] == "session-a", str(first))
         _assert(second["connection"]["session_id"] == "session-b", str(second))
+        _assert(first["connection"]["in_compact"] is True, str(first))
+        _assert(second["connection"]["in_compact"] is False, str(second))
+        _assert(first["connection"]["gate_backend"] == "claude", str(first))
+        _assert(second["connection"]["gate_backend"] == "codex", str(second))
+        _assert(first["connection"]["maintenance_backend"] == "cursor", str(first))
+        _assert(second["connection"]["maintenance_backend"] == "codex", str(second))
+        _assert(first["proxy_pool"]["cap"] == 32, str(first))
+        _assert(second["proxy_pool"]["cap"] == 7, str(second))
         _assert(os.path.samefile(first["project_cwd"], project_a), str(first))
         _assert(os.path.samefile(second["project_cwd"], project_b), str(second))
         _assert(first["embedding"]["heavy_model_owner_count"] == 1, str(first))
@@ -370,6 +476,70 @@ def test_parallel_clients_share_one_heavy_owner_and_keep_context_isolated() -> N
         shutil.rmtree(kb_dir, ignore_errors=True)
 
 
+def test_second_client_invokes_backend_from_its_own_path() -> None:
+    kb_dir = _temp_vault()
+    clients: list[McpClient] = []
+    try:
+        first_bin = kb_dir / "first-bin"
+        second_bin = kb_dir / "second-bin"
+        first_bin.mkdir()
+        second_bin.mkdir()
+        marker = kb_dir / "second-codex-used"
+        _fake_codex_classifier(second_bin / "codex", marker)
+        inherited_path = os.environ.get("PATH", "")
+
+        clients.append(McpClient(
+            kb_dir,
+            "compact-first",
+            env_overrides={
+                "PATH": str(first_bin) + os.pathsep + inherited_path,
+                "LATCH_IN_COMPACT": "1",
+                "LATCH_GATE_BACKEND": "claude",
+            },
+        ))
+        owner = clients[0].status()["process_pid"]
+        clients.append(McpClient(
+            kb_dir,
+            "codex-second",
+            env_overrides={
+                "PATH": str(second_bin) + os.pathsep + inherited_path,
+                "LATCH_GATE_BACKEND": "codex",
+                "LATCH_MAINTENANCE_BACKEND": "codex",
+                "CLAUDE_KB_ADVERSARY": "0",
+                "OPENAI_API_KEY": "shared-runtime-secret-sentinel",
+            },
+        ))
+        result = clients[1].call_tool(
+            "latch_gate",
+            {"request": "add a focused regression test"},
+        )
+        _assert(result["gate_status"] == "OK", str(result))
+        _assert(result["verdict"]["backend"] == "codex", str(result))
+        _assert(result["verdict"]["summary"] == "mixed-path-fake", str(result))
+        _assert(
+            marker.read_text(encoding="utf-8") == "used-with-auth",
+            "second client's Codex/auth environment was not invoked",
+        )
+        _assert(clients[1].status()["process_pid"] == owner, "backend test changed owners")
+        for path in (
+            *kb_dir.glob("mcp_lifecycle-*.log"),
+            *(
+                kb_dir / "runtime" / "mcp-runtimes"
+            ).glob("*/mcp-proxies/*.json"),
+        ):
+            if path.exists():
+                _assert(
+                    "shared-runtime-secret-sentinel"
+                    not in path.read_text(encoding="utf-8", errors="replace"),
+                    f"private child environment leaked to {path}",
+                )
+    finally:
+        for client in clients:
+            client.close()
+        _stop_daemon(kb_dir)
+        shutil.rmtree(kb_dir, ignore_errors=True)
+
+
 def test_owner_crash_restarts_on_next_call_without_replaying_inflight_work() -> None:
     kb_dir = _temp_vault()
     client: McpClient | None = None
@@ -378,13 +548,7 @@ def test_owner_crash_restarts_on_next_call_without_replaying_inflight_work() -> 
         before = client.status()
         old_pid = before["process_pid"]
         os.kill(old_pid, signal.SIGTERM)
-        deadline = time.monotonic() + 5.0
-        while time.monotonic() < deadline:
-            try:
-                os.kill(old_pid, 0)
-            except ProcessLookupError:
-                break
-            time.sleep(0.05)
+        _wait_for_pid_exit(old_pid)
 
         # The proxy sees EOF, stays alive, replays initialize internally, and
         # forwards this new request to a newly elected owner.
@@ -477,13 +641,7 @@ def test_retained_proxy_recovers_after_in_place_compatible_upgrade() -> None:
         shutil.copy2(ROOT / "src" / "mcp_broker.py", broker_path)
         _assert(runtime_key() == current_key, "updated install key is not content-stable")
         os.kill(old_pid, signal.SIGTERM)
-        deadline = time.monotonic() + 5.0
-        while time.monotonic() < deadline:
-            try:
-                os.kill(old_pid, 0)
-            except ProcessLookupError:
-                break
-            time.sleep(0.05)
+        _wait_for_pid_exit(old_pid)
 
         after = client.status()
         _assert(after["process_pid"] != old_pid, str(after))
@@ -547,6 +705,17 @@ def _copy_git_src(commit: str, target: Path) -> None:
                 timeout=15.0,
             )
         )
+    for relative in ("VERSION", "KB_SCHEMA_VERSION", "WIRING_VERSION"):
+        result = subprocess.run(
+            ["git", "show", f"{commit}:{relative}"],
+            cwd=ROOT,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=15.0,
+            check=False,
+        )
+        if result.returncode == 0:
+            (target.parent / relative).write_bytes(result.stdout)
 
 
 def _require_historical_commit(commit: str) -> None:
@@ -563,7 +732,8 @@ def _require_historical_commit(commit: str) -> None:
 
 def _assert_historical_proxy_requires_fresh_task(commit: str) -> None:
     kb_dir = _temp_vault()
-    install = Path(tempfile.mkdtemp(prefix=f"latch-{commit}-install-"))
+    safe_commit = commit.replace("/", "-")
+    install = Path(tempfile.mkdtemp(prefix=f"latch-{safe_commit}-install-"))
     install_src = install / "src"
     client: McpClient | None = None
     try:
@@ -583,13 +753,7 @@ def _assert_historical_proxy_requires_fresh_task(commit: str) -> None:
         shutil.rmtree(install_src)
         _copy_current_install_src(install_src)
         os.kill(old_pid, signal.SIGTERM)
-        deadline = time.monotonic() + 5.0
-        while time.monotonic() < deadline:
-            try:
-                os.kill(old_pid, 0)
-            except ProcessLookupError:
-                break
-            time.sleep(0.05)
+        _wait_for_pid_exit(old_pid)
 
         started = time.monotonic()
         try:
@@ -599,7 +763,7 @@ def _assert_historical_proxy_requires_fresh_task(commit: str) -> None:
             _assert("start a fresh task" in message, message)
             _assert("request was not executed" in message, message)
         else:
-            raise AssertionError("pre-capability proxy joined the current runtime")
+            raise AssertionError("historical proxy joined the current runtime")
         _assert(time.monotonic() - started < 10.0, "fresh-task rejection was not bounded")
         _assert(client.process.poll() is None, "historical proxy exited before surfacing error")
         owner_pids = {
@@ -622,6 +786,11 @@ def test_pre_capability_registry_proxy_requires_fresh_task_after_upgrade() -> No
     _assert_historical_proxy_requires_fresh_task("7bcb86d")
 
 
+def test_epoch_2_registry_proxy_requires_fresh_task_after_upgrade() -> None:
+    _require_historical_commit(EPOCH_2_COMMIT)
+    _assert_historical_proxy_requires_fresh_task(EPOCH_2_COMMIT)
+
+
 @pytest.mark.skipif(
     os.name == "nt",
     reason="fa162bd's own os.kill(pid, 0) probe is destructive on Windows",
@@ -633,8 +802,13 @@ def test_fa162bd_pre_registry_proxy_requires_fresh_task_after_upgrade() -> None:
 
 @pytest.mark.parametrize(
     ("pre_registry", "capability_epoch"),
-    ((False, None), (False, 1), (True, None)),
-    ids=("keyed-pre-capability", "keyed-epoch-1", "fa162bd-pre-registry"),
+    ((False, None), (False, 1), (False, 2), (True, None)),
+    ids=(
+        "keyed-pre-capability",
+        "keyed-epoch-1",
+        "keyed-epoch-2",
+        "fa162bd-pre-registry",
+    ),
 )
 def test_historical_transport_receives_fresh_task_error_cross_platform(
     pre_registry: bool,
@@ -649,7 +823,6 @@ def test_historical_transport_receives_fresh_task_error_cross_platform(
         "LATCH_MCP_DAEMON_PROCESS": "1",
         "LATCH_MCP_RUNTIME_KEY": "historical-epochless",
         "LATCH_MCP_INITIAL_PROJECT_CWD": str(ROOT),
-        "LATCH_MCP_DAEMON_IDLE_TTL_SEC": "60",
         "CLAUDE_KB_IN_MAINTENANCE": "1",
         "PYTHONPATH": str(ROOT / "src"),
     })
@@ -857,7 +1030,6 @@ def test_prompt_after_idle_exit_wakes_owner_and_emits_truthful_bounded_receipt()
         env = os.environ.copy()
         env.update({
             "LATCH_KB_DIR": str(kb_dir),
-            "LATCH_MCP_DAEMON_IDLE_TTL_SEC": "60",
             "CLAUDE_KB_IN_MAINTENANCE": "1",
             "PYTHONPATH": str(ROOT / "src"),
         })

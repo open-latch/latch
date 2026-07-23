@@ -34,21 +34,25 @@ env-var based (`CLAUDE_CODE_SESSION_ID`), with no SessionStart-marker fallback.
 - `bin/latch_doctor.sh` reports the MCP runtime lifecycle check as `OK` (or a
   truthful pressure warning), never a crash.
 
-## Lifecycle knobs (set in the Claude MCP server env)
+## Lifecycle knobs
 
 Claude launches the MCP server from its MCP config (`mcp_server.py`, which
 delegates to the shared proxy). To make idle-exit and retirement observable in a
-short session, set small values in that server entry's `env`. Defaults are
-production-scale; these overrides are for the proof only.
+short session, add `daemon_idle_ttl_s: 10` to the pinned vault's
+`runtime_settings.json`. Set the proxy-only values in the Claude MCP server
+entry's `env`. Defaults are production-scale; these overrides are for the proof
+only.
 
-| Env var | Default | Proof value | Effect |
-|---|---|---|---|
-| `LATCH_MCP_DAEMON_IDLE_TTL_SEC` | 3600 | `10` | daemon idle-exits ~10s after the last activity |
-| `LATCH_MCP_PROXY_CAP` | 32 | `1` | pool is "over cap" with 2+ concurrent proxies |
-| `LATCH_MCP_PROXY_RETIRE_IDLE_SEC` | 300 | `10` | an over-cap idle proxy retires ~10s after going idle |
-| `LATCH_MCP_PROXY_HEARTBEAT_SEC` | 30 | `5` | leases refresh faster so status reflects reality sooner |
+| Setting | Scope | Default | Proof value | Effect |
+|---|---|---|---|---|
+| `daemon_idle_ttl_s` | vault JSON | 3600 | `10` | daemon idle-exits ~10s after the last activity |
+| `LATCH_MCP_PROXY_CAP` | proxy env | 32 | `1` | pool is "over cap" with 2+ concurrent proxies |
+| `LATCH_MCP_PROXY_RETIRE_IDLE_SEC` | proxy env | 300 | `10` | an over-cap idle proxy retires ~10s after going idle |
+| `LATCH_MCP_PROXY_HEARTBEAT_SEC` | proxy env | 30 | `5` | leases refresh faster so status reflects reality sooner |
 
-Do not ship these overrides; remove them after the proof.
+Preserve the autonomous-maintenance keys already in `runtime_settings.json`.
+Do not ship these proof overrides; remove the TTL key and proxy env overrides
+afterward.
 
 ## 1. Confirm shared runtime + Claude attribution
 
@@ -84,7 +88,7 @@ Two heavy owners for one vault+runtime fingerprint is a failure.
 
 ## 3. Prove idle reclamation + transparent reconnect
 
-With `LATCH_MCP_DAEMON_IDLE_TTL_SEC=10`:
+With vault `daemon_idle_ttl_s` set to `10`:
 
 1. Make one MCP call, then leave the session idle (no MCP calls) for ~15s.
 2. The owner should idle-exit. Confirm a `daemon_idle_exit` lifecycle event

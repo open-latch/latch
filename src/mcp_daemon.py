@@ -12,6 +12,7 @@ required.
 from __future__ import annotations
 
 import json
+import math
 import os
 import secrets
 import sys
@@ -197,7 +198,9 @@ from anyio.abc import SocketAttribute, SocketStream  # noqa: E402
 from mcp.shared.message import SessionMessage  # noqa: E402
 
 import mcp_runtime  # noqa: E402
+import paths  # noqa: E402
 import mcp_server  # noqa: E402
+import selfheal  # noqa: E402
 
 
 DEFAULT_IDLE_TTL_S = 60 * 60.0
@@ -210,11 +213,7 @@ def _utc_now() -> str:
 
 
 def _idle_ttl() -> float:
-    raw = os.environ.get("LATCH_MCP_DAEMON_IDLE_TTL_SEC")
-    try:
-        return max(1.0, float(raw)) if raw is not None else DEFAULT_IDLE_TTL_S
-    except ValueError:
-        return DEFAULT_IDLE_TTL_S
+    return paths.configured_daemon_idle_ttl(default=DEFAULT_IDLE_TTL_S)
 
 
 def _cold_start_duration_ms() -> float:
@@ -356,14 +355,61 @@ async def _read_line(
 
 def _context_from(metadata: dict[str, Any], connection_id: str) -> mcp_runtime.ConnectionContext:
     project_cwd = metadata.get("project_cwd")
-    if not isinstance(project_cwd, str) or not project_cwd:
-        project_cwd = os.environ.get("LATCH_MCP_INITIAL_PROJECT_CWD") or os.getcwd()
+    if (
+        not isinstance(project_cwd, str)
+        or not project_cwd
+        or not os.path.isabs(project_cwd)
+    ):
+        raise ValueError("invalid project_cwd connection metadata")
     session_id = metadata.get("session_id")
     if not isinstance(session_id, str) or not session_id.strip():
         session_id = None
     proxy_pid = metadata.get("proxy_pid")
     if not isinstance(proxy_pid, int):
         proxy_pid = -1
+
+    def required_bool(name: str) -> bool:
+        value = metadata.get(name)
+        if type(value) is not bool:
+            raise ValueError(f"invalid {name} connection metadata")
+        return value
+
+    def required_backend(name: str) -> str:
+        value = metadata.get(name)
+        if not isinstance(value, str) or value != value.strip().lower():
+            raise ValueError(f"invalid {name} connection metadata")
+        if value not in mcp_runtime.SUPPORTED_MODEL_BACKENDS:
+            raise ValueError(f"unsupported {name} connection metadata")
+        return value
+
+    def required_positive_int(name: str) -> int:
+        value = metadata.get(name)
+        if type(value) is not int or value < 1:
+            raise ValueError(f"invalid {name} connection metadata")
+        return value
+
+    def required_proxy_policy() -> dict[str, int | float]:
+        value = metadata.get("proxy_policy")
+        expected = {"cap", "retire_idle_s", "heartbeat_s", "stale_s"}
+        if not isinstance(value, dict) or set(value) != expected:
+            raise ValueError("invalid proxy_policy connection metadata")
+        cap = value.get("cap")
+        if type(cap) is not int or cap < 0:
+            raise ValueError("invalid proxy_policy cap")
+        policy: dict[str, int | float] = {"cap": cap}
+        for name in ("retire_idle_s", "heartbeat_s", "stale_s"):
+            raw = value.get(name)
+            if (
+                isinstance(raw, bool)
+                or not isinstance(raw, (int, float))
+                or not math.isfinite(float(raw))
+                or float(raw) < 0.1
+            ):
+                raise ValueError(f"invalid proxy_policy {name}")
+            policy[name] = float(raw)
+        return policy
+
+    proxy_policy = required_proxy_policy()
     return mcp_runtime.ConnectionContext(
         connection_id=connection_id,
         project_cwd=os.path.abspath(project_cwd),
@@ -372,6 +418,36 @@ def _context_from(metadata: dict[str, Any], connection_id: str) -> mcp_runtime.C
         proxy_pid=proxy_pid,
         proxy_started_at=str(metadata.get("proxy_started_at") or "unknown"),
         runtime_key=str(metadata.get("runtime_key") or "unknown"),
+        in_compact=required_bool("in_compact"),
+        unlatched=required_bool("unlatched"),
+        disabled=required_bool("disabled"),
+        write_disabled=required_bool("write_disabled"),
+        in_maintenance=required_bool("in_maintenance"),
+        gate_backend=required_backend("gate_backend"),
+        maintenance_backend=required_backend("maintenance_backend"),
+        gate_classifier_timeout_s=required_positive_int(
+            "gate_classifier_timeout_s"
+        ),
+        gate_adversary_timeout_s=required_positive_int(
+            "gate_adversary_timeout_s"
+        ),
+        gate_adversary_enabled=required_bool("gate_adversary_enabled"),
+        proxy_cap=int(proxy_policy["cap"]),
+        proxy_retire_idle_s=float(proxy_policy["retire_idle_s"]),
+        proxy_heartbeat_s=float(proxy_policy["heartbeat_s"]),
+        proxy_stale_s=float(proxy_policy["stale_s"]),
+    )
+
+
+def _child_environment_from(
+    metadata: dict[str, Any],
+    *,
+    allowed_backends: frozenset[str] | None = None,
+) -> mcp_runtime.PrivateChildEnvironment:
+    raw = metadata.pop("child_process_env", None)
+    return mcp_runtime.validate_child_environment(
+        raw,
+        allowed_backends=allowed_backends,
     )
 
 
@@ -381,8 +457,19 @@ async def _run_mcp_connection(
     metadata: dict[str, Any],
     state: DaemonState,
 ) -> None:
+    child_environment = _child_environment_from(
+        metadata,
+        allowed_backends=frozenset({
+            metadata.get("gate_backend"),
+            metadata.get("maintenance_backend"),
+        }),
+    )
     connection_id = state.register(metadata)
-    context = _context_from(metadata, connection_id)
+    try:
+        context = _context_from(metadata, connection_id)
+    except Exception:
+        state.unregister(connection_id)
+        raise
     read_send, read_receive = anyio.create_memory_object_stream[SessionMessage | Exception](0)
     write_send, write_receive = anyio.create_memory_object_stream[SessionMessage](0)
 
@@ -422,7 +509,10 @@ async def _run_mcp_connection(
         async with anyio.create_task_group() as tg:
             tg.start_soon(reader)
             tg.start_soon(writer)
-            with mcp_runtime.bind_connection(context):
+            with mcp_runtime.bind_connection(
+                context, child_environment=child_environment
+            ):
+                selfheal.maybe_trigger(context.project_cwd)
                 await mcp_server.run_shared_session(read_receive, write_send)
             tg.cancel_scope.cancel()
     finally:

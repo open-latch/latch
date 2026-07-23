@@ -72,6 +72,7 @@ import cursor_backend
 import db
 import log_utils
 import lifecycle_signals
+import mcp_runtime
 import paths
 import priorities
 import profiles
@@ -840,8 +841,8 @@ DEFAULT_REMEDY = "flag_to_user"
 # Default ON. This overrides the conservative-default-OFF posture because the
 # adversarial layer is part of the gate's value: it looks for a stronger
 # counter-node on permissive verdicts. NOTE: the actual per-gate token/latency
-# delta is still unmeasured. Opt out with CLAUDE_KB_ADVERSARY=0
-# (mcpServers.env is inherited here; this runs in the MCP process, not a hook).
+# delta is still unmeasured. Opt out with CLAUDE_KB_ADVERSARY=0. Shared mode
+# carries the choice as typed connection metadata; legacy mode reads process env.
 # 120s (was 60s): the adversary is a second model call on a comparable prompt, so
 # under the same startup overhead 60s timed out on most PROCEED gates and silently
 # dropped the default-ON adversarial layer (id=1365). Correctness over speed —
@@ -1399,6 +1400,11 @@ def _classifier_backend(name: str | None = None, *, default: str = "claude") -> 
     """
     raw = (
         name
+        or (
+            mcp_runtime.current_connection().gate_backend
+            if mcp_runtime.current_connection() is not None
+            else None
+        )
         or os.environ.get("LATCH_GATE_BACKEND")
         or os.environ.get("CLAUDE_KB_GATE_BACKEND")
         or os.environ.get("LATCH_MODEL_BACKEND")
@@ -1411,6 +1417,14 @@ def _classifier_backend(name: str | None = None, *, default: str = "claude") -> 
             f"expected one of {sorted(SUPPORTED_CLASSIFIER_BACKENDS)}"
         )
     return backend
+
+
+def _connection_binary(
+    name: str,
+    *,
+    process_default: str,
+) -> str:
+    return mcp_runtime.connection_binary(name, process_default=process_default)
 
 
 def _invoke_classifier_backend_once(
@@ -1447,12 +1461,15 @@ def _invoke_claude_classifier_once(
     claude_bin: str | None = None,
     purpose: str = "classifier",
 ) -> tuple[str | None, str | None, bool]:
-    bin_path = claude_bin or CLAUDE_BIN
-    env = os.environ.copy()
+    env = mcp_runtime.connection_subprocess_environment("claude")
     # Reentrancy guard: classifier's own model call must not trigger hooks /
     # nested compactions. Same convention as heal.arbitrate.
     env["CLAUDE_KB_IN_COMPACT"] = "1"
     try:
+        bin_path = claude_bin or _connection_binary(
+            "CLAUDE_BIN",
+            process_default=CLAUDE_BIN,
+        )
         proc = subprocess.run(
             [bin_path, "-p", "--no-session-persistence", "--output-format", "json"],
             input=prompt,
@@ -1466,9 +1483,11 @@ def _invoke_claude_classifier_once(
     except FileNotFoundError as e:
         return None, f"subprocess failed: {type(e).__name__}: {e}", False
     if proc.returncode != 0:
-        detail = (proc.stderr or proc.stdout or "").strip()
+        detail = mcp_runtime.redact_subprocess_output(
+            (proc.stderr or proc.stdout or "").strip()
+        )
         return None, f"claude backend exit {proc.returncode}: {detail[:300]}", False
-    return proc.stdout, None, False
+    return mcp_runtime.redact_subprocess_output(proc.stdout), None, False
 
 
 def _invoke_codex_classifier_once(
@@ -1485,11 +1504,17 @@ def _invoke_codex_classifier_once(
     keeps the backend from loading project AGENTS.md or re-entering latch hooks
     while it is only producing a classifier JSON object.
     """
-    bin_path = codex_bin or CODEX_BIN
-    env = os.environ.copy()
+    env = mcp_runtime.connection_subprocess_environment("codex")
     env["CLAUDE_KB_IN_COMPACT"] = "1"
-    model = os.environ.get("LATCH_GATE_CODEX_MODEL") or os.environ.get("CODEX_GATE_MODEL")
+    model = (
+        mcp_runtime.connection_env_value("LATCH_GATE_CODEX_MODEL")
+        or mcp_runtime.connection_env_value("CODEX_GATE_MODEL")
+    )
     try:
+        bin_path = codex_bin or _connection_binary(
+            "CODEX_BIN",
+            process_default=CODEX_BIN,
+        )
         with tempfile.TemporaryDirectory(prefix="latch-codex-gate-") as tmp:
             out_path = Path(tmp) / "last_message.txt"
             args = [
@@ -1519,13 +1544,16 @@ def _invoke_codex_classifier_once(
                 final_text = out_path.read_text(encoding="utf-8", errors="replace")
             if not final_text.strip():
                 final_text = proc.stdout
+            final_text = mcp_runtime.redact_subprocess_output(final_text)
     except subprocess.TimeoutExpired:
         return None, f"{purpose} timed out after {timeout_s}s", True
     except FileNotFoundError as e:
         return None, f"subprocess failed: {type(e).__name__}: {e}", False
 
     if proc.returncode != 0:
-        detail = (proc.stderr or proc.stdout or "").strip()
+        detail = mcp_runtime.redact_subprocess_output(
+            (proc.stderr or proc.stdout or "").strip()
+        )
         return None, f"codex backend exit {proc.returncode}: {detail[-1000:]}", False
     if not final_text.strip():
         return None, "codex backend returned empty final message", False
@@ -1540,7 +1568,10 @@ def _invoke_cursor_classifier_once(
     purpose: str = "classifier",
 ) -> tuple[str | None, str | None, bool]:
     """Run Cursor Agent headlessly in isolated read-only Ask mode."""
-    model = os.environ.get("LATCH_GATE_CURSOR_MODEL") or os.environ.get("CURSOR_GATE_MODEL")
+    model = (
+        mcp_runtime.connection_env_value("LATCH_GATE_CURSOR_MODEL")
+        or mcp_runtime.connection_env_value("CURSOR_GATE_MODEL")
+    )
     return cursor_backend.invoke_prompt(
         prompt,
         timeout_s=timeout_s,
@@ -1556,7 +1587,7 @@ def classify_gate(
     project_path: str | None,
     use_llm: bool = True,
     max_chains: int = 5,
-    timeout_s: int = CLASSIFIER_TIMEOUT_S,
+    timeout_s: int | None = None,
     backend: str | None = None,
 ) -> dict:
     """Run the classifier LLM call against an assembled chain.
@@ -1576,6 +1607,13 @@ def classify_gate(
         return {**_classifier_error("disabled/in-compact"), "skipped": True}
     if not use_llm:
         return {**_classifier_error("use_llm=False"), "skipped": True}
+    if timeout_s is None:
+        connection = mcp_runtime.current_connection()
+        timeout_s = (
+            connection.gate_classifier_timeout_s
+            if connection is not None
+            else CLASSIFIER_TIMEOUT_S
+        )
 
     try:
         resolved_backend = _classifier_backend(backend)
@@ -1836,7 +1874,7 @@ def adversary_classify(
     project_path: str | None,
     use_llm: bool = True,
     max_chains: int = 5,
-    timeout_s: int = ADVERSARY_TIMEOUT_S,
+    timeout_s: int | None = None,
     mode: str = "counter_node",
     backend: str | None = None,
 ) -> dict:
@@ -1855,6 +1893,13 @@ def adversary_classify(
         return {**_adversary_error("disabled/in-compact"), "skipped": True}
     if not use_llm:
         return {**_adversary_error("use_llm=False"), "skipped": True}
+    if timeout_s is None:
+        connection = mcp_runtime.current_connection()
+        timeout_s = (
+            connection.gate_adversary_timeout_s
+            if connection is not None
+            else ADVERSARY_TIMEOUT_S
+        )
 
     try:
         resolved_backend = _classifier_backend(backend)
@@ -1887,8 +1932,14 @@ def _should_fire_adversary(verdict: dict) -> bool:
     """PROCEED-only firing lever (scope §7). The adversary adds the most value
     on the over-permissive case; MODIFY/DO_NOT_PROCEED are already
     non-permissive and skipped/errored verdicts carry no judgment to attack.
-    Gated behind the conservative-default OFF flag (ADVERSARY_ENABLED)."""
-    if not ADVERSARY_ENABLED:
+    Gated behind the connection-owned adversary flag in shared mode."""
+    connection = mcp_runtime.current_connection()
+    enabled = (
+        connection.gate_adversary_enabled
+        if connection is not None
+        else ADVERSARY_ENABLED
+    )
+    if not enabled:
         return False
     return verdict.get("recommendation") == "PROCEED"
 

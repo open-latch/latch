@@ -8,11 +8,13 @@ import sys
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import gate  # noqa: E402
 import log_utils  # noqa: E402
+import mcp_runtime  # noqa: E402
 import paths  # noqa: E402
 
 
@@ -238,6 +240,143 @@ def test_adversary_structural_log_carries_backend():
     print("PASS adversary_structural_log_carries_backend")
 
 
+def test_connection_gate_backend_outranks_daemon_environment():
+    old = os.environ.get("LATCH_GATE_BACKEND")
+    context = mcp_runtime.ConnectionContext(
+        connection_id="codex-connection",
+        project_cwd="/tmp/project",
+        session_id=None,
+        session_source="test",
+        proxy_pid=123,
+        proxy_started_at="now",
+        runtime_key="test",
+        gate_backend="codex",
+        maintenance_backend="cursor",
+    )
+    try:
+        os.environ["LATCH_GATE_BACKEND"] = "claude"
+        with mcp_runtime.bind_connection(context):
+            _assert(gate._classifier_backend() == "codex", "daemon env won")
+            _assert(
+                gate._classifier_backend("cursor") == "cursor",
+                "explicit backend must remain authoritative",
+            )
+        _assert(gate._classifier_backend() == "claude", "legacy env fallback broke")
+    finally:
+        _restore_env("LATCH_GATE_BACKEND", old)
+    print("PASS connection_gate_backend_outranks_daemon_environment")
+
+
+def test_connection_gate_policy_and_private_codex_environment(monkeypatch):
+    context = mcp_runtime.ConnectionContext(
+        connection_id="codex-private",
+        project_cwd="/tmp/project",
+        session_id=None,
+        session_source="test",
+        proxy_pid=123,
+        proxy_started_at="now",
+        runtime_key="test",
+        gate_backend="codex",
+        maintenance_backend="codex",
+        gate_classifier_timeout_s=17,
+        gate_adversary_timeout_s=9,
+        gate_adversary_enabled=False,
+    )
+    private = mcp_runtime.validate_child_environment({
+        "PATH": "/client/bin",
+        "CODEX_BIN": "/client/bin/codex",
+        "OPENAI_API_KEY": "openai-sentinel-secret",
+        "OPENAI_BASE_URL": "https://user:base-secret@example.invalid/v1",
+        "ANTHROPIC_API_KEY": "anthropic-sentinel-secret",
+        "LATCH_GATE_CODEX_MODEL": "gpt-test",
+    })
+    policy_calls = []
+
+    monkeypatch.setattr(
+        gate.budget, "check_and_record", lambda *_args, **_kwargs: (True, {})
+    )
+    monkeypatch.setattr(
+        gate,
+        "_invoke_classifier_backend_once",
+        lambda _prompt, **kwargs: (
+            policy_calls.append(kwargs) or CLASSIFIER_JSON,
+            None,
+            False,
+        ),
+    )
+    with mcp_runtime.bind_connection(context, child_environment=private):
+        verdict = gate.classify_gate(
+            _chain(), project_path="/tmp/project", backend="codex"
+        )
+        _assert(verdict["recommendation"] == "PROCEED", verdict)
+        _assert(policy_calls[0]["timeout_s"] == 17, policy_calls)
+        _assert(gate._should_fire_adversary(verdict) is False, verdict)
+
+    captured = {}
+
+    def fake_run(args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        out_path = Path(args[args.index("--output-last-message") + 1])
+        out_path.write_text(
+            CLASSIFIER_JSON.replace(
+                "ok",
+                "openai-sentinel-secret "
+                "https://user:base-secret@example.invalid/v1",
+            ),
+            encoding="utf-8",
+        )
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(gate.subprocess, "run", fake_run)
+    with mcp_runtime.bind_connection(context, child_environment=private):
+        raw, error, timed_out = gate._invoke_codex_classifier_once(
+            "classify", timeout_s=17
+        )
+    _assert(error is None and timed_out is False, error)
+    _assert("openai-sentinel-secret" not in raw, raw)
+    _assert("base-secret" not in raw, raw)
+    _assert("<redacted>" in raw, raw)
+    _assert(captured["args"][0] == "/client/bin/codex", captured)
+    _assert(captured["args"][-3:-1] == ["--model", "gpt-test"], captured)
+    env = captured["kwargs"]["env"]
+    _assert(env["OPENAI_API_KEY"] == "openai-sentinel-secret", env)
+    _assert("ANTHROPIC_API_KEY" not in env, env)
+
+
+def test_shared_gate_missing_absolute_binary_fails_closed(monkeypatch):
+    context = mcp_runtime.ConnectionContext(
+        connection_id="missing-codex-bin",
+        project_cwd="/tmp/project",
+        session_id=None,
+        session_source="test",
+        proxy_pid=123,
+        proxy_started_at="now",
+        runtime_key="test",
+        gate_backend="codex",
+        maintenance_backend="codex",
+    )
+    private = mcp_runtime.validate_child_environment({
+        "PATH": "/client/bin",
+        "OPENAI_API_KEY": "openai-sentinel-secret",
+    })
+    monkeypatch.setattr(
+        gate.subprocess,
+        "run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("shared gate fell back to a daemon-global bare command")
+        ),
+    )
+
+    with mcp_runtime.bind_connection(context, child_environment=private):
+        text, error, timed_out = gate._invoke_codex_classifier_once(
+            "classify", timeout_s=1
+        )
+
+    _assert(text is None and timed_out is False, (text, error, timed_out))
+    _assert("CODEX_BIN was not resolved" in str(error), error)
+
+
 def _restore_env(name: str, old: str | None) -> None:
     if old is None:
         os.environ.pop(name, None)
@@ -251,4 +390,6 @@ if __name__ == "__main__":
     test_codex_backend_does_not_call_claude_adversary()
     test_cursor_backend_does_not_call_claude_or_codex_classifier()
     test_adversary_structural_log_carries_backend()
+    test_connection_gate_backend_outranks_daemon_environment()
+    # pytest-only monkeypatch fixture covers private child environment.
     print("\nAll gate_backends tests pass.")

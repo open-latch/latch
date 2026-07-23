@@ -9,6 +9,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import _isolation  # noqa: F401,E402  (hermetic on a pinned KB for direct runs; see conftest)
+import mcp_runtime  # noqa: E402
 import paths  # noqa: E402
 
 
@@ -244,6 +245,70 @@ def test_latch_kb_dir_precedes_legacy_env_pin():
             os.environ["CLAUDE_KB_DIR"] = saved_legacy
 
 
+def test_connection_state_outranks_daemon_process_environment():
+    names = (
+        "LATCH_IN_COMPACT",
+        "CLAUDE_KB_IN_COMPACT",
+        "LATCH_UNLATCHED",
+        "LATCH_DISABLE",
+        "CLAUDE_KB_DISABLE",
+        "LATCH_DISABLE_WRITE",
+        "CLAUDE_KB_DISABLE_WRITE",
+    )
+    saved = {name: os.environ.get(name) for name in names}
+    try:
+        for name in names:
+            os.environ[name] = "1"
+        safe = mcp_runtime.ConnectionContext(
+            connection_id="safe",
+            project_cwd="/tmp/project",
+            session_id=None,
+            session_source="test",
+            proxy_pid=123,
+            proxy_started_at="now",
+            runtime_key="test",
+            in_compact=False,
+            unlatched=False,
+            disabled=False,
+            write_disabled=False,
+        )
+        with mcp_runtime.bind_connection(safe):
+            _assert(paths.is_in_compact() is False, "ambient compact poison leaked")
+            _assert(paths.is_unlatched_mode() is False, "ambient unlatch poison leaked")
+            _assert(paths.is_disabled() is False, "ambient disable poison leaked")
+            _assert(
+                paths.is_write_disabled() is False,
+                "ambient write-disable poison leaked",
+            )
+
+        _assert(paths.is_in_compact() is True, "legacy compact env stopped working")
+        _assert(paths.is_unlatched_mode() is True, "legacy unlatch env stopped working")
+
+        guarded = mcp_runtime.ConnectionContext(
+            **{
+                **safe.__dict__,
+                "connection_id": "guarded",
+                "in_compact": True,
+                "write_disabled": True,
+            }
+        )
+        for name in names:
+            os.environ.pop(name, None)
+        with mcp_runtime.bind_connection(guarded):
+            _assert(paths.is_in_compact() is True, "connection compact guard ignored")
+            _assert(
+                paths.is_write_disabled() is True,
+                "connection write-disable guard ignored",
+            )
+    finally:
+        for name, value in saved.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+    print("PASS connection_state_outranks_daemon_process_environment")
+
+
 if __name__ == "__main__":
     test_normalize_mingw_drive_letter()
     test_normalize_preserves_native_windows()
@@ -257,4 +322,5 @@ if __name__ == "__main__":
     test_is_write_disabled_via_env_var()
     test_unlatched_mode_disables_full_latch()
     test_latch_kb_dir_precedes_legacy_env_pin()
+    test_connection_state_outranks_daemon_process_environment()
     print("\nAll paths tests pass.")

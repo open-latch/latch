@@ -6,10 +6,12 @@ import shutil
 import sys
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import heal  # noqa: E402
+import mcp_runtime  # noqa: E402
 import model_backends  # noqa: E402
 import tree  # noqa: E402
 
@@ -228,9 +230,94 @@ def test_heal_and_tree_use_cursor_maintenance_backend():
     print("PASS heal_and_tree_use_cursor_maintenance_backend")
 
 
+def test_connection_maintenance_backend_outranks_daemon_environment():
+    env = _snapshot_env()
+    context = mcp_runtime.ConnectionContext(
+        connection_id="cursor-maintenance",
+        project_cwd="/tmp/project",
+        session_id=None,
+        session_source="test",
+        proxy_pid=123,
+        proxy_started_at="now",
+        runtime_key="test",
+        gate_backend="codex",
+        maintenance_backend="cursor",
+    )
+    try:
+        os.environ["LATCH_MAINTENANCE_BACKEND"] = "claude"
+        with mcp_runtime.bind_connection(context):
+            _assert(
+                model_backends.resolve_backend(
+                    env_names=model_backends.MAINTENANCE_BACKEND_ENV
+                )
+                == "cursor",
+                "daemon environment won over connection maintenance backend",
+            )
+            _assert(
+                model_backends.resolve_backend(
+                    "codex", env_names=model_backends.MAINTENANCE_BACKEND_ENV
+                )
+                == "codex",
+                "explicit maintenance backend must remain authoritative",
+            )
+        _assert(
+            model_backends.resolve_backend(
+                env_names=model_backends.MAINTENANCE_BACKEND_ENV
+            )
+            == "claude",
+            "legacy environment fallback broke",
+        )
+    finally:
+        _restore_env(env)
+    print("PASS connection_maintenance_backend_outranks_daemon_environment")
+
+
+def test_private_claude_environment_is_backend_scoped_and_redacted(monkeypatch):
+    captured = {}
+
+    def fake_run(args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return SimpleNamespace(
+            returncode=0,
+            stdout="anthropic-sentinel-secret",
+            stderr="",
+        )
+
+    context = mcp_runtime.ConnectionContext(
+        connection_id="claude-private",
+        project_cwd="/tmp/project",
+        session_id=None,
+        session_source="test",
+        proxy_pid=123,
+        proxy_started_at="now",
+        runtime_key="test",
+        gate_backend="claude",
+        maintenance_backend="claude",
+    )
+    private = mcp_runtime.validate_child_environment({
+        "PATH": "/claude/bin",
+        "CLAUDE_BIN": "/claude/bin/claude",
+        "ANTHROPIC_API_KEY": "anthropic-sentinel-secret",
+        "OPENAI_API_KEY": "openai-sentinel-secret",
+    })
+    monkeypatch.setattr(model_backends.subprocess, "run", fake_run)
+    with mcp_runtime.bind_connection(context, child_environment=private):
+        result = model_backends._invoke_claude(
+            "prompt", timeout_s=2, purpose="test"
+        )
+    _assert(result.text == "<redacted>", result)
+    _assert(captured["args"][0] == "/claude/bin/claude", captured)
+    env = captured["kwargs"]["env"]
+    _assert(env["ANTHROPIC_API_KEY"] == "anthropic-sentinel-secret", env)
+    _assert("OPENAI_API_KEY" not in env, env)
+
+
 if __name__ == "__main__":
     test_heal_defaults_to_claude_backend()
     test_heal_codex_backend_uses_existing_gate_env_fallback()
     test_tree_codex_backend_uses_generic_model_env()
     test_heal_and_tree_use_cursor_maintenance_backend()
+    test_connection_maintenance_backend_outranks_daemon_environment()
+    # pytest-only monkeypatch fixture covers private child environment.
     print("\nAll maintenance backend tests pass.")

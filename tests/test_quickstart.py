@@ -199,6 +199,46 @@ def test_initial_kb_defaults_and_dry_run_plan_are_explicit():
     print("PASS initial_kb_defaults_and_dry_run_plan_are_explicit")
 
 
+def test_dry_run_reports_unresolved_maintenance_cli_without_stopping(
+    monkeypatch,
+    tmp_path,
+    capsys,
+):
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.delenv("LATCH_INTENSITY", raising=False)
+    monkeypatch.setattr(
+        qs,
+        "agent_preflight_errors",
+        lambda *_args, **_kwargs: ["Codex CLI (`codex`) is not on PATH"],
+    )
+    monkeypatch.setattr(
+        qs.paths,
+        "resolve_maintenance_executable",
+        lambda _backend: (_ for _ in ()).throw(
+            ValueError("could not resolve Codex")
+        ),
+    )
+    monkeypatch.setattr(
+        qs,
+        "pin_kb_for_quickstart",
+        lambda *_args, **_kwargs: ("DRY", "would pin"),
+    )
+
+    rc = qs.main([
+        "--agents", "codex",
+        "--project", str(project),
+        "--python", sys.executable,
+        "--latch-intensity", "standard",
+        "--dry-run",
+    ])
+
+    output = capsys.readouterr()
+    _assert(rc == 0, f"dry-run should remain available: {output}")
+    _assert("<unresolved: could not resolve Codex>" in output.out, output.out)
+    _assert("warning: Codex CLI" in output.out, output.out)
+
+
 def test_resolve_agents_requires_choice_noninteractive_even_with_context():
     try:
         qs.resolve_agents(
@@ -653,6 +693,10 @@ def test_quickstart_pins_after_preflight_before_wiring():
         "build_install_steps": qs.build_install_steps,
         "build_doctor_steps": qs.build_doctor_steps,
         "run_steps": qs.run_steps,
+        "resolve_maintenance_executable": qs.paths.resolve_maintenance_executable,
+        "write_latch_intensity": qs.paths.write_latch_intensity,
+        "write_maintenance_runner": qs.paths.write_maintenance_runner,
+        "refresh_pinned_dir": qs.paths.refresh_pinned_dir,
     }
     events: list[tuple[str, object]] = []
     try:
@@ -662,9 +706,17 @@ def test_quickstart_pins_after_preflight_before_wiring():
             events.append(("intensity", kwargs["kb_dir"]))
             or ("standard", "test choice")
         )
+        qs.paths.resolve_maintenance_executable = lambda _backend: "/bin/codex"
+        qs.paths.write_latch_intensity = lambda _value: (
+            root / "latch_settings.json"
+        )
+        qs.paths.write_maintenance_runner = lambda **_kwargs: (
+            root / "latch_settings.json"
+        )
         qs.pin_kb_for_quickstart = lambda value, *, dry_run: (
             events.append(("pin", (value, dry_run))) or ("OK", "pinned")
         )
+        qs.paths.refresh_pinned_dir = lambda: events.append(("refresh", None))
         qs.build_install_steps = lambda **_kwargs: [
             qs.Step("wire", ["wire"], project),
         ]
@@ -680,9 +732,10 @@ def test_quickstart_pins_after_preflight_before_wiring():
             "--no-seed",
         ])
         _assert(rc == 0, f"quickstart should complete, got {rc}")
-        _assert(events[:3] == [
+        _assert(events[:4] == [
             ("intensity", str(root / "isolated kb")),
             ("pin", (str(root / "isolated kb"), False)),
+            ("refresh", None),
             ("run", ["wire"]),
         ], f"intensity must inspect the target before pinning and wiring: {events}")
     finally:
@@ -693,6 +746,14 @@ def test_quickstart_pins_after_preflight_before_wiring():
         qs.build_install_steps = original["build_install_steps"]
         qs.build_doctor_steps = original["build_doctor_steps"]
         qs.run_steps = original["run_steps"]
+        qs.paths.resolve_maintenance_executable = original[
+            "resolve_maintenance_executable"
+        ]
+        qs.paths.write_latch_intensity = original["write_latch_intensity"]
+        qs.paths.write_maintenance_runner = original[
+            "write_maintenance_runner"
+        ]
+        qs.paths.refresh_pinned_dir = original["refresh_pinned_dir"]
         shutil.rmtree(root, ignore_errors=True)
     print("PASS quickstart_pins_after_preflight_before_wiring")
 
@@ -730,12 +791,14 @@ def test_quickstart_pin_conflict_stops_before_wiring():
         "resolve_python": qs.install_engine.resolve_python,
         "agent_preflight_errors": qs.agent_preflight_errors,
         "pin_kb_for_quickstart": qs.pin_kb_for_quickstart,
+        "resolve_maintenance_executable": qs.paths.resolve_maintenance_executable,
         "run_steps": qs.run_steps,
     }
     ran: list[bool] = []
     try:
         qs.install_engine.resolve_python = lambda _value: "/py"
         qs.agent_preflight_errors = lambda *_args, **_kwargs: []
+        qs.paths.resolve_maintenance_executable = lambda _backend: "/bin/codex"
         qs.pin_kb_for_quickstart = lambda *_args, **_kwargs: (
             "ERROR", "effective target conflicts with existing pin"
         )
@@ -752,6 +815,9 @@ def test_quickstart_pin_conflict_stops_before_wiring():
         qs.install_engine.resolve_python = original["resolve_python"]
         qs.agent_preflight_errors = original["agent_preflight_errors"]
         qs.pin_kb_for_quickstart = original["pin_kb_for_quickstart"]
+        qs.paths.resolve_maintenance_executable = original[
+            "resolve_maintenance_executable"
+        ]
         qs.run_steps = original["run_steps"]
         shutil.rmtree(root, ignore_errors=True)
     print("PASS quickstart_pin_conflict_stops_before_wiring")

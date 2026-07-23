@@ -25,6 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import codex_session  # noqa: E402
 import mcp_proxy  # noqa: E402
+import mcp_runtime  # noqa: E402
 import paths  # noqa: E402
 
 
@@ -145,6 +146,114 @@ def test_resolve_session_reports_missing_codex_marker():
     print("PASS resolve_session_reports_missing_codex_marker")
 
 
+def test_connection_metadata_carries_typed_settings_and_private_child_env():
+    with _clean_env(
+        LATCH_IN_COMPACT="1",
+        LATCH_UNLATCHED="1",
+        LATCH_DISABLE_WRITE="1",
+        CLAUDE_KB_IN_MAINTENANCE="1",
+        LATCH_GATE_BACKEND=" CoDeX ",
+        LATCH_MAINTENANCE_BACKEND="CURSOR",
+        LATCH_GATE_CLASSIFIER_TIMEOUT_S="44",
+        CLAUDE_KB_GATE_ADVERSARY_TIMEOUT_S="22",
+        CLAUDE_KB_ADVERSARY="0",
+        LATCH_MCP_PROXY_CAP="7",
+        LATCH_MCP_PROXY_RETIRE_IDLE_SEC="11",
+        LATCH_MCP_PROXY_HEARTBEAT_SEC="3",
+        LATCH_MCP_PROXY_STALE_SEC="19",
+        OPENAI_API_KEY="private-openai-secret",
+        ANTHROPIC_API_KEY="private-anthropic-secret",
+        LATCH_ARBITRARY_POISON="must-not-be-serialized",
+    ):
+        metadata = mcp_proxy.connection_metadata("/tmp/x")
+    _assert(metadata["in_compact"] is True, metadata)
+    _assert(metadata["unlatched"] is True, metadata)
+    _assert(metadata["disabled"] is False, metadata)
+    _assert(metadata["write_disabled"] is True, metadata)
+    _assert(metadata["in_maintenance"] is True, metadata)
+    _assert(metadata["gate_backend"] == "codex", metadata)
+    _assert(metadata["maintenance_backend"] == "cursor", metadata)
+    _assert(metadata["gate_classifier_timeout_s"] == 44, metadata)
+    _assert(metadata["gate_adversary_timeout_s"] == 22, metadata)
+    _assert(metadata["gate_adversary_enabled"] is False, metadata)
+    _assert(metadata["proxy_policy"] == {
+        "cap": 7,
+        "retire_idle_s": 11.0,
+        "heartbeat_s": 3.0,
+        "stale_s": 19.0,
+    }, metadata)
+    _assert("OPENAI_API_KEY" not in metadata, metadata)
+    _assert("ANTHROPIC_API_KEY" not in metadata, metadata)
+    _assert("LATCH_ARBITRARY_POISON" not in metadata, metadata)
+    private = metadata["child_process_env"]
+    _assert(private["OPENAI_API_KEY"] == "private-openai-secret", private)
+    _assert(
+        "ANTHROPIC_API_KEY" not in private,
+        "an unselected backend credential was serialized",
+    )
+    _assert("LATCH_ARBITRARY_POISON" not in private, private)
+
+    with _clean_env():
+        defaults = mcp_proxy.connection_metadata("/tmp/x")
+    _assert(defaults["in_compact"] is False, defaults)
+    _assert(defaults["in_maintenance"] is False, defaults)
+    _assert(defaults["gate_backend"] == "claude", defaults)
+    _assert(defaults["maintenance_backend"] == "claude", defaults)
+    _assert(defaults["gate_classifier_timeout_s"] == 300, defaults)
+    _assert(defaults["gate_adversary_timeout_s"] == 120, defaults)
+    _assert(defaults["gate_adversary_enabled"] is True, defaults)
+
+    with _clean_env(LATCH_GATE_BACKEND="not-a-backend"):
+        try:
+            mcp_proxy.connection_metadata("/tmp/x")
+        except ValueError as exc:
+            _assert("unsupported gate backend" in str(exc), exc)
+        else:
+            raise AssertionError("invalid backend did not fail before startup")
+    print("PASS connection_metadata_carries_typed_settings_and_private_child_env")
+
+
+def test_command_resolution_cannot_preempt_explicit_path_with_cwd():
+    allowed = str(Path(tempfile.mkdtemp(prefix="mcp-proxy-path-")))
+    repo_local = str(Path.cwd() / "codex.cmd")
+    try:
+        with mock.patch.object(
+            mcp_runtime.shutil, "which", return_value=repo_local
+        ):
+            _assert(
+                mcp_proxy._which_on_explicit_path("codex", allowed) is None,
+                "a cwd-local command absent from PATH was accepted",
+            )
+        allowed_command = str(Path(allowed) / "codex.cmd")
+        with mock.patch.object(
+            mcp_runtime.shutil, "which", return_value=allowed_command
+        ):
+            _assert(
+                mcp_proxy._which_on_explicit_path("codex", allowed)
+                == allowed_command,
+                "an executable inside the explicit PATH was rejected",
+            )
+    finally:
+        shutil.rmtree(allowed, ignore_errors=True)
+    print("PASS command_resolution_cannot_preempt_explicit_path_with_cwd")
+
+
+def test_windows_child_environment_deduplicates_case_insensitive_names():
+    source = {
+        "Path": r"C:\tools",
+        "https_proxy": "http://proxy.example",
+    }
+    with mock.patch.object(mcp_proxy.os, "name", "nt"):
+        child = mcp_proxy._child_process_environment(
+            source, backends=frozenset()
+        )
+    folded = [name.upper() for name in child]
+    _assert(len(folded) == len(set(folded)), child)
+    _assert(child["PATH"] == r"C:\tools", child)
+    _assert(child["HTTPS_PROXY"] == "http://proxy.example", child)
+    print("PASS windows_child_environment_deduplicates_case_insensitive_names")
+
+
 if __name__ == "__main__":
     test_resolve_session_prefers_neutral_latch_override()
     test_resolve_session_uses_claude_session_ahead_of_codex()
@@ -153,4 +262,7 @@ if __name__ == "__main__":
     test_resolve_session_leaves_cursor_mcp_calls_unattributed()
     test_resolve_session_reads_codex_marker_when_env_lacks_thread()
     test_resolve_session_reports_missing_codex_marker()
+    test_connection_metadata_carries_typed_settings_and_private_child_env()
+    test_command_resolution_cannot_preempt_explicit_path_with_cwd()
+    test_windows_child_environment_deduplicates_case_insensitive_names()
     print("\nAll mcp_proxy._resolve_session tests pass.")

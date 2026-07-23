@@ -753,6 +753,25 @@ def main(argv: list[str] | None = None) -> int:
         agents,
         cursor_model_backend=args.cursor_model_backend,
     )
+    try:
+        maintenance_executable = paths.resolve_maintenance_executable(backend)
+    except ValueError as e:
+        if not args.dry_run:
+            print(f"error: {e}", file=sys.stderr)
+            return 2
+        maintenance_executable = f"<unresolved: {e}>"
+    try:
+        maintenance_path = paths.resolve_maintenance_path(
+            maintenance_executable
+            if os.path.isabs(maintenance_executable)
+            else None
+        )
+    except ValueError as e:
+        if not args.dry_run:
+            print(f"error: {e}", file=sys.stderr)
+            return 2
+        maintenance_path = f"<unresolved: {e}>"
+    maintenance_home = str(Path.home().resolve())
     install_steps = build_install_steps(
         agents=agents,
         python_path=python_path,
@@ -788,6 +807,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  agents       : {', '.join(agents)}")
     print(f"  seed source  : {source}")
     print(f"  seed backend : {backend}")
+    print(f"  maintenance  : {backend} ({maintenance_executable})")
     print(f"  lookback days: {args.lookback_days}")
     print(f"  intensity    : {intensity} ({intensity_reason})")
     if "cursor" in agents:
@@ -802,6 +822,8 @@ def main(argv: list[str] | None = None) -> int:
     if pin_level == "ERROR":
         print("Quickstart stopped before agent configuration or seed writes.", file=sys.stderr)
         return 2
+    if not args.dry_run:
+        paths.refresh_pinned_dir()
 
     if args.dry_run:
         print_plan(steps, seed_cmd)
@@ -809,11 +831,19 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         settings_path = paths.write_latch_intensity(intensity)
+        runtime_settings_path = paths.write_maintenance_runner(
+            backend=backend,
+            executable=maintenance_executable,
+            home=maintenance_home,
+            search_path=maintenance_path,
+            project_path=project,
+        )
     except (OSError, ValueError) as e:
-        print(f"error: could not save Latch intensity: {e}", file=sys.stderr)
+        print(f"error: could not save Latch settings: {e}", file=sys.stderr)
         print("No agent configuration changes were written.", file=sys.stderr)
         return 2
     print(f"  settings     : {settings_path}")
+    print(f"  vault policy : {runtime_settings_path}")
 
     rc = run_steps(install_steps)
     if rc != 0:

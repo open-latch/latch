@@ -693,6 +693,12 @@ def check_mcp_runtime_lifecycle() -> tuple[str, str, str]:
             "heavyweight model per stdio process"
         )
     pressure: list[str] = []
+    maintenance_status = paths.maintenance_runner_status()
+    if not maintenance_status["configured"]:
+        pressure.append(
+            "autonomous maintenance is not configured for this vault; "
+            "rerun latch quickstart"
+        )
     if warning_count:
         signals = ", ".join(
             f"{event}={count}" for event, count in counts.items()
