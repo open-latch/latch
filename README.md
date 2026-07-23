@@ -237,9 +237,9 @@ Or, you can simply ask latch in natural language, and the agent will offer the m
 ## Safety and control
 
 **Local-first.** latch stores project judgment locally in SQLite and requires no cloud account. It
-never uploads your KB. Data leaves your machine only when you run a model-backed path (gate,
-compaction, heal), which may send selected prompts, snippets, and evidence to the Claude, Codex, or
-Cursor backend *you* configured.
+never uploads your KB. Data leaves your machine only when you run a model-backed path — the gate,
+compaction, or the nightly heal pass — which may send selected prompts, snippets, and evidence to the
+Claude, Codex, or Cursor backend *you* configured.
 
 **Overhead.** The per-prompt retrieval hook runs locally against the KB — roughly 120–150 ms on an
 Apple Silicon reference machine, inside a 250 ms budget — and injects a bounded, tier-controlled slice
@@ -247,6 +247,15 @@ of context (0 / 1,712 / 3,056 characters for Quiet / Standard / Full in the froz
 fixture). Freshening a plan uses a surgical append (~34 tokens) rather than a full-body rewrite
 (~9,900 tokens). The gate itself is a model call, so it runs only on write-shaped changes, not on
 every prompt. Reproduce with `tests/measure_hook_latency.py` and `tests/measure_write_path.py`.
+
+**What it costs.** latch has no account or API key of its own — model-backed steps run through the
+Claude, Codex, or Cursor CLI you already use, drawing on your existing subscription rather than a
+separate bill. The frequent work stays local and free: search, retrieval, the per-prompt hook, and
+assembling the decisions a gate cites all run against SQLite and a small on-device embedding model.
+Only discrete judgment steps spend a call — the gate (on write-shaped changes), compaction (when you
+ask), and a nightly background *heal* that reconciles contradictions. Per-day caps bound the
+background work (defaults: 100 foreground calls, 33 nightly heal), so a fresh install can't run up a
+surprise; `bin/latch_gate_report.sh` shows recent activity without spending anything.
 
 **Kill switch.** Stop latch hooks without uninstalling:
 
