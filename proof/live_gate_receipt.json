@@ -1,8 +1,8 @@
 {
   "backend": "codex",
-  "better_next_action": "Implement email sending via the allowed inline task runner path and document its limitations instead of adding Redis-backed queue infrastructure.",
+  "better_next_action": "Implement email sending with an inline task runner and document its limits, as directed by id=1.",
   "capture_command": "bash bin/latch_proof_packet.sh --capture-live --backend codex",
-  "captured_at_utc": "2026-07-23T05:55:54Z",
+  "captured_at_utc": "2026-07-23T06:08:01Z",
   "demo_kind": "synthetic_no_history_fixture",
   "evidence_nodes": [
     {
@@ -30,10 +30,10 @@
   "observed": true,
   "recommendation": "DO_NOT_PROCEED",
   "request": "Implement email sending by adding a Redis-backed background job queue.",
-  "risk_if_proceed": "Adding Redis and a worker process would violate the install-light, easy-to-inspect demo-app constraint.",
+  "risk_if_proceed": "Adding Redis and a worker process would directly violate the demo app's install-light, easy-to-inspect constraint.",
   "schema_version": 2,
-  "source_commit": "44a5aabcccc790e9548f3a4d57426320436c3a1c",
-  "summary": "The KB explicitly says not to add a background job queue to this no-history demo app (id=1), and specifically names a Redis-backed background job queue as the rejected path. Email sending can still be implemented, but the permitted direction is single-process behavior with an inline task runner and documented limits.",
+  "source_commit": "1a5648ec6256f8d0cb622a0b3fa7177fd61a5af6",
+  "summary": "The KB explicitly says not to add a background job queue to this no-history demo app (id=1), and specifically lists a Redis-backed background job queue as the rejected path. The allowed direction is to keep the app single-process and use an inline task runner if background work is needed.",
   "tested_runtime_git_blobs": {
     ".gitattributes": "6e851ff1196d8ea9cc45c5270f1c56a93177a2a9",
     "benchmarks/fixtures/intensity_v1.jsonl": "c68827cc1ec11b6775250155414a9deeb595e441",
@@ -107,7 +107,7 @@
     "src/mcp_broker.py": "1178aee9f1b6778353d3e4f754f5ae24682b2266",
     "src/mcp_daemon.py": "3f28298449bcbe250c88beab9b93f859b10b8112",
     "src/mcp_launcher_win.py": "99feec5aeee3e39d5ec5410c3c2932bc777f9d42",
-    "src/mcp_proxy.py": "737c761ed622c65e4debd7e83e7915649b2cff58",
+    "src/mcp_proxy.py": "b1683d163824a589c0fd235fa17e304cfec2ad8a",
     "src/mcp_runtime.py": "01e299b1909d8436556eb90d57d8a0e4a4e88070",
     "src/mcp_server.py": "207765069bd21ee6a7697bb40416b26f0c87ea02",
     "src/migrate_v2.py": "ba243da076ef11eb00546542445e1680f9ff5776",
