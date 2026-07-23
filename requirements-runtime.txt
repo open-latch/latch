@@ -7,6 +7,7 @@
 #   --generate-hashes --python-version 3.11 --universal \
 #   --output-file requirements.lock
 mcp==1.28.1
+filelock==3.29.7
 onnxruntime==1.23.2
 tokenizers==0.22.2
 numpy==2.4.6

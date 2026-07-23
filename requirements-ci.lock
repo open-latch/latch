@@ -182,7 +182,9 @@ cryptography==49.0.0 \
 filelock==3.29.7 \
     --hash=sha256:5b481979797ae69e72f0b389d89a80bdd585c260c5b3f1fb9c0a5ba9bb3f195d \
     --hash=sha256:987db6f789a3a2a59f55081801b2b3697cb97e2a736b5f1a9e99b559285fbc51
-    # via huggingface-hub
+    # via
+    #   -r requirements-ci.txt
+    #   huggingface-hub
 flatbuffers==25.12.19 \
     --hash=sha256:7634f50c427838bb021c2d66a3d1168e9d199b0607e6329399f04846d42e20b4
     # via onnxruntime

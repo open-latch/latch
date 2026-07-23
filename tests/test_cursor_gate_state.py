@@ -341,7 +341,7 @@ def test_seed_operation_requires_preview_then_explicit_apply():
     preview_digest = "a" * 64
     seed = paths.KB_ROOT / "bin" / "latch_seed.sh"
     try:
-        cgs.begin_prompt(root, sid, "/latch-seed apply")
+        cgs.begin_prompt(root, sid, "/latch-seed apply all")
         apply_payload = _shell(
             f"bash {seed} --source cursor --cursor-session-id {sid} "
             f"--format json --preview-digest {preview_digest} --apply --yes", root, sid,
@@ -370,7 +370,7 @@ def test_seed_operation_requires_preview_then_explicit_apply():
         assert cpre.decision(preview) == {}
         assert cpre.decision(preview)["permission"] == "deny"
 
-        cgs.begin_prompt(root, sid, "/latch-seed apply")
+        cgs.begin_prompt(root, sid, "/latch-seed apply all")
         apply_payload = _shell(
             f"LATCH_PYTHON={sys.executable} bash {seed} --source cursor --cursor-session-id {sid} "
             f"--format json --preview-digest {preview_digest} --apply --yes", root, sid,
@@ -390,7 +390,7 @@ def test_seed_operation_requires_preview_then_explicit_apply():
         assert cpost.record_operation_success(success) == (
             True, "verified successful seed preview",
         )
-        cgs.begin_prompt(root, sid, "/latch-seed apply")
+        cgs.begin_prompt(root, sid, "/latch-seed apply all")
         assert cpre.decision(apply_payload) == {}
 
         for output in (
@@ -414,14 +414,375 @@ def test_seed_operation_requires_preview_then_explicit_apply():
             failed = {**preview, "tool_output": output}
             recorded = cpost.record_operation_success(failed)
             assert recorded is not None and recorded[0] is False
-            cgs.begin_prompt(root, sid, "/latch-seed apply")
+            cgs.begin_prompt(root, sid, "/latch-seed apply all")
             assert cpre.decision(apply_payload)["permission"] == "deny"
 
         cgs.begin_prompt(root, sid, "/latch-seed")
         unexecuted = {**preview, "tool_output": success["tool_output"]}
         assert cpost.record_operation_success(unexecuted) is None
-        cgs.begin_prompt(root, sid, "/latch-seed apply")
+        cgs.begin_prompt(root, sid, "/latch-seed apply all")
         assert cpre.decision(apply_payload)["permission"] == "deny"
+    finally:
+        shutil.rmtree(project_dir, ignore_errors=True)
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_seed_operation_binds_scoped_apply_ids_to_preview():
+    import cursor_post_tool_use as cpost
+    import cursor_pre_tool_use as cpre
+
+    root, project_dir = _tmp()
+    seed_script = paths.KB_ROOT / "bin" / "latch_seed.sh"
+    preview_digest = "b" * 64
+    candidate_id = "cand-" + "c" * 12
+    other_candidate_id = "cand-" + "e" * 12
+    cluster_id = "cluster-" + "d" * 12
+    other_cluster_id = "cluster-" + "f" * 12
+
+    def arm_preview(sid: str):
+        cgs.begin_prompt(root, sid, "/latch-seed")
+        preview = _shell(
+            f"LATCH_PYTHON={sys.executable} bash {seed_script} "
+            f"--source cursor --cursor-session-id {sid} --format json",
+            root,
+            sid,
+        )
+        assert cpre.decision(preview) == {}
+        success = {
+            **preview,
+            "tool_output": json.dumps({
+                "ok": True,
+                "source": "cursor",
+                "apply": False,
+                "project": str(Path(root).resolve()),
+                "candidates": [
+                    {"review_id": candidate_id},
+                    {"review_id": other_candidate_id},
+                ],
+                "review_clusters": [
+                    {"cluster_id": cluster_id},
+                    {"cluster_id": other_cluster_id},
+                ],
+                "preview_digest": preview_digest,
+            }),
+        }
+        assert cpost.record_operation_success(success) == (
+            True,
+            "verified successful seed preview",
+        )
+
+    try:
+        allowed_sid = "seed-scoped-allowed"
+        arm_preview(allowed_sid)
+        state = cgs.begin_prompt(
+            root,
+            allowed_sid,
+            f"/latch-seed apply {candidate_id} {cluster_id}",
+        )
+        assert state["operation_receipt"]["selection_mode"] == "scoped"
+        assert state["operation_receipt"]["candidate_ids"] == [candidate_id]
+        assert state["operation_receipt"]["cluster_ids"] == [cluster_id]
+        missing_confirmed_id = _shell(
+            f"LATCH_PYTHON={sys.executable} bash {seed_script} "
+            f"--source cursor --cursor-session-id {allowed_sid} --format json "
+            f"--preview-digest {preview_digest} --apply "
+            f"--approve-candidate {candidate_id}",
+            root,
+            allowed_sid,
+        )
+        assert cpre.decision(missing_confirmed_id)["permission"] == "deny"
+        scoped = _shell(
+            f"LATCH_PYTHON={sys.executable} bash {seed_script} "
+            f"--source cursor --cursor-session-id {allowed_sid} --format json "
+            f"--preview-digest {preview_digest} --apply "
+            f"--approve-candidate {candidate_id} --approve-cluster {cluster_id}",
+            root,
+            allowed_sid,
+        )
+        assert cpre.decision(scoped) == {}
+        assert cpre.decision(scoped)["permission"] == "deny"
+
+        mismatch_sid = "seed-scoped-mismatch"
+        arm_preview(mismatch_sid)
+        cgs.begin_prompt(
+            root,
+            mismatch_sid,
+            f"/latch-seed apply {candidate_id}",
+        )
+        wrong_preview_member = _shell(
+            f"LATCH_PYTHON={sys.executable} bash {seed_script} "
+            f"--source cursor --cursor-session-id {mismatch_sid} --format json "
+            f"--preview-digest {preview_digest} --apply "
+            f"--approve-candidate {other_candidate_id}",
+            root,
+            mismatch_sid,
+        )
+        assert cpre.decision(wrong_preview_member)["permission"] == "deny"
+
+        extra_preview_member = _shell(
+            f"LATCH_PYTHON={sys.executable} bash {seed_script} "
+            f"--source cursor --cursor-session-id {mismatch_sid} --format json "
+            f"--preview-digest {preview_digest} --apply "
+            f"--approve-candidate {candidate_id} "
+            f"--approve-candidate {other_candidate_id}",
+            root,
+            mismatch_sid,
+        )
+        assert cpre.decision(extra_preview_member)["permission"] == "deny"
+
+        candidate_to_cluster_substitution = _shell(
+            f"LATCH_PYTHON={sys.executable} bash {seed_script} "
+            f"--source cursor --cursor-session-id {mismatch_sid} --format json "
+            f"--preview-digest {preview_digest} --apply "
+            f"--approve-cluster {cluster_id}",
+            root,
+            mismatch_sid,
+        )
+        assert cpre.decision(
+            candidate_to_cluster_substitution
+        )["permission"] == "deny"
+
+        reverse_substitution_sid = "seed-scoped-reverse-substitution"
+        arm_preview(reverse_substitution_sid)
+        cgs.begin_prompt(
+            root,
+            reverse_substitution_sid,
+            f"/latch-seed apply {cluster_id}",
+        )
+        cluster_to_candidate_substitution = _shell(
+            f"LATCH_PYTHON={sys.executable} bash {seed_script} "
+            f"--source cursor --cursor-session-id {reverse_substitution_sid} "
+            f"--format json --preview-digest {preview_digest} --apply "
+            f"--approve-candidate {candidate_id}",
+            root,
+            reverse_substitution_sid,
+        )
+        assert cpre.decision(
+            cluster_to_candidate_substitution
+        )["permission"] == "deny"
+
+        duplicate_selector = _shell(
+            f"LATCH_PYTHON={sys.executable} bash {seed_script} "
+            f"--source cursor --cursor-session-id {mismatch_sid} --format json "
+            f"--preview-digest {preview_digest} --apply "
+            f"--approve-candidate {candidate_id} "
+            f"--approve-candidate {candidate_id}",
+            root,
+            mismatch_sid,
+        )
+        assert cpre.decision(duplicate_selector)["permission"] == "deny"
+
+        whole_after_scoped = _shell(
+            f"LATCH_PYTHON={sys.executable} bash {seed_script} "
+            f"--source cursor --cursor-session-id {mismatch_sid} --format json "
+            f"--preview-digest {preview_digest} --apply --yes",
+            root,
+            mismatch_sid,
+        )
+        assert cpre.decision(whole_after_scoped)["permission"] == "deny"
+
+        wrong_digest = _shell(
+            f"LATCH_PYTHON={sys.executable} bash {seed_script} "
+            f"--source cursor --cursor-session-id {mismatch_sid} --format json "
+            f"--preview-digest {'9' * 64} --apply "
+            f"--approve-candidate {candidate_id}",
+            root,
+            mismatch_sid,
+        )
+        assert cpre.decision(wrong_digest)["permission"] == "deny"
+
+        wrong_session = _shell(
+            f"LATCH_PYTHON={sys.executable} bash {seed_script} "
+            f"--source cursor --cursor-session-id another-session --format json "
+            f"--preview-digest {preview_digest} --apply "
+            f"--approve-candidate {candidate_id}",
+            root,
+            mismatch_sid,
+        )
+        assert cpre.decision(wrong_session)["permission"] == "deny"
+
+        extra_flag = _shell(
+            f"LATCH_PYTHON={sys.executable} bash {seed_script} "
+            f"--source cursor --cursor-session-id {mismatch_sid} --format json "
+            f"--preview-digest {preview_digest} --apply "
+            f"--approve-candidate {candidate_id} --force-reimport",
+            root,
+            mismatch_sid,
+        )
+        assert cpre.decision(extra_flag)["permission"] == "deny"
+
+        unknown_sid = "seed-scoped-unknown"
+        arm_preview(unknown_sid)
+        unknown_id = "cand-" + "0" * 12
+        state = cgs.begin_prompt(
+            root,
+            unknown_sid,
+            f"/latch-seed apply {unknown_id}",
+        )
+        assert state["operation_receipt"] is None
+        unknown = _shell(
+            f"LATCH_PYTHON={sys.executable} bash {seed_script} "
+            f"--source cursor --cursor-session-id {unknown_sid} --format json "
+            f"--preview-digest {preview_digest} --apply "
+            f"--approve-candidate {unknown_id}",
+            root,
+            unknown_sid,
+        )
+        assert cpre.decision(unknown)["permission"] == "deny"
+
+        whole_sid = "seed-whole-allowed"
+        arm_preview(whole_sid)
+        state = cgs.begin_prompt(root, whole_sid, "/latch-seed apply all")
+        assert state["operation_receipt"]["selection_mode"] == "all"
+        assert state["operation_receipt"]["candidate_ids"] == []
+        assert state["operation_receipt"]["cluster_ids"] == []
+        whole = _shell(
+            f"LATCH_PYTHON={sys.executable} bash {seed_script} "
+            f"--source cursor --cursor-session-id {whole_sid} --format json "
+            f"--preview-digest {preview_digest} --apply --yes",
+            root,
+            whole_sid,
+        )
+        assert cpre.decision(whole) == {}
+
+        scoped_after_whole_sid = "seed-whole-mismatch"
+        arm_preview(scoped_after_whole_sid)
+        cgs.begin_prompt(root, scoped_after_whole_sid, "/latch-seed apply all")
+        scoped_after_whole = _shell(
+            f"LATCH_PYTHON={sys.executable} bash {seed_script} "
+            f"--source cursor --cursor-session-id {scoped_after_whole_sid} "
+            f"--format json --preview-digest {preview_digest} --apply "
+            f"--approve-candidate {candidate_id}",
+            root,
+            scoped_after_whole_sid,
+        )
+        assert cpre.decision(scoped_after_whole)["permission"] == "deny"
+
+        powershell_sid = "seed-scoped-powershell"
+        arm_preview(powershell_sid)
+        cgs.begin_prompt(
+            root,
+            powershell_sid,
+            f"/latch-seed apply {other_cluster_id}",
+        )
+        seed_ps1 = paths.KB_ROOT / "bin" / "latch_seed.ps1"
+        powershell_scoped = _shell(
+            f'$env:LATCH_PYTHON = "{sys.executable}"\n'
+            f'& "{seed_ps1}" --source cursor '
+            f'--cursor-session-id "{powershell_sid}" --format json '
+            f'--preview-digest "{preview_digest}" --apply '
+            f'--approve-cluster "{other_cluster_id}"',
+            root,
+            powershell_sid,
+        )
+        assert cpre.decision(powershell_scoped) == {}
+
+        for invalid_confirmation in (
+            "/latch-seed apply",
+            f"/latch-seed apply all {candidate_id}",
+            f"/latch-seed apply none {candidate_id}",
+            "/latch-seed apply none none",
+            f"/latch-seed apply {candidate_id} {candidate_id}",
+            "/latch-seed apply cand-not-a-review-id",
+        ):
+            invalid_sid = "seed-invalid-" + str(abs(hash(invalid_confirmation)))
+            arm_preview(invalid_sid)
+            state = cgs.begin_prompt(root, invalid_sid, invalid_confirmation)
+            assert state["operation_receipt"] is None
+    finally:
+        shutil.rmtree(project_dir, ignore_errors=True)
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_seed_operation_binds_reject_all_to_nonempty_preview():
+    import cursor_post_tool_use as cpost
+    import cursor_pre_tool_use as cpre
+
+    root, project_dir = _tmp()
+    seed_script = paths.KB_ROOT / "bin" / "latch_seed.sh"
+    seed_ps1 = paths.KB_ROOT / "bin" / "latch_seed.ps1"
+    preview_digest = "7" * 64
+    candidate_id = "cand-" + "8" * 12
+
+    def arm_preview(sid: str, candidates: list[dict[str, str]]):
+        cgs.begin_prompt(root, sid, "/latch-seed")
+        preview = _shell(
+            f"LATCH_PYTHON={sys.executable} bash {seed_script} "
+            f"--source cursor --cursor-session-id {sid} --format json",
+            root,
+            sid,
+        )
+        assert cpre.decision(preview) == {}
+        success = {
+            **preview,
+            "tool_output": json.dumps({
+                "ok": True,
+                "source": "cursor",
+                "apply": False,
+                "project": str(Path(root).resolve()),
+                "candidates": candidates,
+                "preview_digest": preview_digest,
+            }),
+        }
+        assert cpost.record_operation_success(success) == (
+            True,
+            "verified successful seed preview",
+        )
+
+    def dismiss_payload(sid: str, suffix: str):
+        return _shell(
+            f"LATCH_PYTHON={sys.executable} bash {seed_script} "
+            f"--source cursor --cursor-session-id {sid} --format json "
+            f"--preview-digest {preview_digest} --apply {suffix}".rstrip(),
+            root,
+            sid,
+        )
+
+    try:
+        allowed_sid = "seed-none-allowed"
+        arm_preview(allowed_sid, [{"review_id": candidate_id}])
+        state = cgs.begin_prompt(root, allowed_sid, "/latch-seed apply none")
+        receipt = state["operation_receipt"]
+        assert receipt["selection_mode"] == "none"
+        assert receipt["candidate_ids"] == []
+        assert receipt["cluster_ids"] == []
+
+        for suffix in (
+            "",
+            "--yes",
+            f"--approve-candidate {candidate_id}",
+            "--dismiss-all --yes",
+            f"--dismiss-all --approve-candidate {candidate_id}",
+            "--dismiss-all --force-reimport",
+        ):
+            assert cpre.decision(
+                dismiss_payload(allowed_sid, suffix)
+            )["permission"] == "deny"
+
+        exact = dismiss_payload(allowed_sid, "--dismiss-all")
+        assert cpre.decision(exact) == {}
+        assert cpre.decision(exact)["permission"] == "deny"
+
+        empty_sid = "seed-none-empty"
+        arm_preview(empty_sid, [])
+        state = cgs.begin_prompt(root, empty_sid, "/latch-seed apply none")
+        assert state["operation_receipt"] is None
+        assert cpre.decision(
+            dismiss_payload(empty_sid, "--dismiss-all")
+        )["permission"] == "deny"
+
+        powershell_sid = "seed-none-powershell"
+        arm_preview(powershell_sid, [{"review_id": candidate_id}])
+        cgs.begin_prompt(root, powershell_sid, "/latch-seed apply none")
+        powershell_none = _shell(
+            f'$env:LATCH_PYTHON = "{sys.executable}"\n'
+            f'& "{seed_ps1}" --source cursor '
+            f'--cursor-session-id "{powershell_sid}" --format json '
+            f'--preview-digest "{preview_digest}" --apply --dismiss-all',
+            root,
+            powershell_sid,
+        )
+        assert cpre.decision(powershell_none) == {}
     finally:
         shutil.rmtree(project_dir, ignore_errors=True)
         shutil.rmtree(root, ignore_errors=True)
@@ -534,7 +895,7 @@ def test_managed_operation_intent_never_falls_through_to_general_gate():
 
     try:
         seed = paths.KB_ROOT / "bin" / "latch_seed.sh"
-        prompt = "/latch-seed apply"
+        prompt = "/latch-seed apply all"
         state = cgs.begin_prompt(root, sid, prompt)
         assert state["operation_intent"]["name"] == "latch-seed"
         assert state["operation_receipt"] is None

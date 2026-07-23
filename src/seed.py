@@ -9,6 +9,7 @@ preview-first.
 from __future__ import annotations
 
 import argparse
+import copy
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 import hashlib
@@ -19,6 +20,7 @@ from pathlib import Path
 import re
 import shlex
 import sqlite3
+import stat
 import sys
 from typing import Any
 
@@ -50,6 +52,10 @@ SEED_EXTRACTOR_VERSION = "seed-v2"
 # upgrading extraction must not duplicate an unchanged reviewed claim.
 SEED_CLAIM_KEY_VERSION = 1
 MAX_INLINE_CORROBORATIONS = 8
+SOURCE_SUBJECT_CHARS = 96
+REVIEW_BODY_CHARS = 720
+SEED_PREVIEW_MAX_AGE_HOURS = 24
+SEED_PREVIEW_CACHE_MAX_FILES = 8
 SOURCE_CHOICES = ("claude", "codex", "cursor", "both", "all")
 AGENT_MISTAKE_MIN_CONFIDENCE = 0.85
 KB_HOME = Path(__file__).resolve().parent.parent
@@ -209,6 +215,7 @@ class SeedSource:
     content_digest: str = ""
     value_score: float = 0.0
     redaction_count: int = 0
+    subject: str = ""
 
 
 @dataclass
@@ -224,9 +231,14 @@ class SeedCandidate:
     source_mtimes: list[str] = field(default_factory=list)
     source_digests: list[str] = field(default_factory=list)
     workstream_key: str | None = None
+    source_excerpts: list[str] = field(default_factory=list)
 
 
-class CursorSeedPreviewError(RuntimeError):
+class SeedPreviewError(RuntimeError):
+    pass
+
+
+class CursorSeedPreviewError(SeedPreviewError):
     pass
 
 
@@ -236,11 +248,26 @@ class SeedWriteBlocked(RuntimeError):
         self.reason = reason
 
 
+class SeedApprovalError(ValueError):
+    pass
+
+
+class SeedSourceLedgerError(RuntimeError):
+    """The existing source-import ledger could not be read safely."""
+
+
 @dataclass
 class SeedReportSection:
     key: str
     title: str
     summary: str
+    items: list[SeedCandidate]
+
+
+@dataclass
+class SeedReviewCluster:
+    cluster_id: str
+    section_key: str
     items: list[SeedCandidate]
 
 
@@ -253,6 +280,7 @@ class SeedApplyResult:
     corroborated_node_ids: list[int] = field(default_factory=list)
     resumed_import_keys: list[str] = field(default_factory=list)
     resumed_node_ids: list[int] = field(default_factory=list)
+    pending_source_import_keys: list[str] = field(default_factory=list)
     failures: list[dict[str, str]] = field(default_factory=list)
     workstream_attachments: dict[str, int] = field(default_factory=dict)
 
@@ -339,6 +367,34 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     ap.add_argument("--apply", action="store_true",
                     help="write the approved seed candidates to the KB as staging evidence")
+    ap.add_argument(
+        "--approve-candidate",
+        action="append",
+        default=[],
+        metavar="ID",
+        help=(
+            "with --apply, approve one candidate review ID from this report "
+            "(repeatable)"
+        ),
+    )
+    ap.add_argument(
+        "--approve-cluster",
+        action="append",
+        default=[],
+        metavar="ID",
+        help=(
+            "with --apply, approve one possible-duplicate cluster as one "
+            "corroborated candidate (repeatable)"
+        ),
+    )
+    ap.add_argument(
+        "--dismiss-all",
+        action="store_true",
+        help=(
+            "with --apply and an exact --preview-digest, reject every candidate "
+            "and finalize the reviewed source revisions"
+        ),
+    )
     ap.add_argument("--yes", "-y", action="store_true",
                     help="accept confirmations for non-interactive runs")
     ap.add_argument("--format", choices=("text", "json"), default="text",
@@ -355,12 +411,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                     help=("exact current Cursor session id surfaced by SessionStart; "
                           "required for marker-based --source cursor"))
     ap.add_argument("--preview-digest",
-                    help=("exact digest returned by a Cursor seed preview; required "
-                          "with --source cursor --apply so apply uses the reviewed set"))
+                    help=("exact digest returned by a seed preview; required for "
+                          "scoped non-interactive approval and for Cursor apply"))
     return ap.parse_args(argv)
 
 
 def prompt_choices(args: argparse.Namespace) -> None:
+    stream = sys.stderr if args.format == "json" else sys.stdout
     for raw in args.cursor_transcript:
         path = Path(raw).expanduser()
         if not path.is_file():
@@ -370,53 +427,84 @@ def prompt_choices(args: argparse.Namespace) -> None:
             "Retention horizon in days [5/14/30/90]",
             default=DEFAULT_LOOKBACK_DAYS,
             choices=LOOKBACK_CHOICES,
+            stream=stream,
         )
     if args.source == "auto":
-        args.source = _prompt_source(args)
+        args.source = _prompt_source(args, stream=stream)
     if args.max_sessions is None:
         args.max_sessions = _prompt_positive_int(
             "Maximum sessions to select after value/recency ranking",
             default=DEFAULT_MAX_SESSIONS,
+            stream=stream,
         )
 
 
-def _prompt_int(prompt: str, *, default: int, choices: tuple[int, ...]) -> int:
+def _prompt_int(
+    prompt: str,
+    *,
+    default: int,
+    choices: tuple[int, ...],
+    stream: Any = sys.stdout,
+) -> int:
     if not sys.stdin.isatty():
         return default
     suffix = f" (default {default}): "
     while True:
-        raw = input(prompt + suffix).strip()
+        print(prompt + suffix, end="", file=stream, flush=True)
+        try:
+            raw = input().strip()
+        except EOFError:
+            return default
         if not raw:
             return default
         try:
             value = int(raw)
         except ValueError:
-            print(f"Please enter one of: {', '.join(map(str, choices))}")
+            print(
+                f"Please enter one of: {', '.join(map(str, choices))}",
+                file=stream,
+            )
             continue
         if value in choices:
             return value
-        print(f"Please enter one of: {', '.join(map(str, choices))}")
+        print(
+            f"Please enter one of: {', '.join(map(str, choices))}",
+            file=stream,
+        )
 
 
-def _prompt_positive_int(prompt: str, *, default: int) -> int:
+def _prompt_positive_int(
+    prompt: str,
+    *,
+    default: int,
+    stream: Any = sys.stdout,
+) -> int:
     if not sys.stdin.isatty():
         return default
     suffix = f" (default {default}): "
     while True:
-        raw = input(prompt + suffix).strip()
+        print(prompt + suffix, end="", file=stream, flush=True)
+        try:
+            raw = input().strip()
+        except EOFError:
+            return default
         if not raw:
             return default
         try:
             value = int(raw)
         except ValueError:
-            print("Please enter a positive whole number.")
+            print("Please enter a positive whole number.", file=stream)
             continue
         if value > 0:
             return value
-        print("Please enter a positive whole number.")
+        print("Please enter a positive whole number.", file=stream)
 
 
-def _prompt_source(args: argparse.Namespace) -> str:
+def _prompt_source(
+    args: argparse.Namespace,
+    *,
+    stream: Any = sys.stdout,
+) -> str:
     default = default_source_choice(args)
     if not sys.stdin.isatty():
         if default is None:
@@ -429,15 +517,35 @@ def _prompt_source(args: argparse.Namespace) -> str:
     choices = "/".join(SOURCE_CHOICES)
     suffix = f" (default {default})" if default else ""
     while True:
-        raw = input(f"Transcript source [{choices}]{suffix}: ").strip().lower()
+        print(
+            f"Transcript source [{choices}]{suffix}: ",
+            end="",
+            file=stream,
+            flush=True,
+        )
+        try:
+            raw = input().strip().lower()
+        except EOFError as exc:
+            if default:
+                return default
+            raise SystemExit(
+                "Choose a transcript source: --source claude, --source codex, "
+                "--source cursor, --source both, or --source all."
+            ) from exc
         if not raw and default:
             return default
         if not raw:
-            print(f"Please enter one of: {', '.join(SOURCE_CHOICES)}")
+            print(
+                f"Please enter one of: {', '.join(SOURCE_CHOICES)}",
+                file=stream,
+            )
             continue
         if raw in SOURCE_CHOICES:
             return raw
-        print(f"Please enter one of: {', '.join(SOURCE_CHOICES)}")
+        print(
+            f"Please enter one of: {', '.join(SOURCE_CHOICES)}",
+            file=stream,
+        )
 
 
 def default_source_choice(args: argparse.Namespace) -> str | None:
@@ -470,10 +578,27 @@ def available_sources(args: argparse.Namespace) -> list[str]:
 
 
 def _prompt_yes_no(prompt: str, *, default: bool) -> bool:
+    return _prompt_yes_no_on_stream(
+        prompt,
+        default=default,
+        stream=sys.stdout,
+    )
+
+
+def _prompt_yes_no_on_stream(
+    prompt: str,
+    *,
+    default: bool,
+    stream: Any,
+) -> bool:
     if not sys.stdin.isatty():
         return default
     suffix = " [Y/n]: " if default else " [y/N]: "
-    raw = input(prompt + suffix).strip().lower()
+    print(prompt + suffix, end="", file=stream, flush=True)
+    try:
+        raw = input().strip().lower()
+    except EOFError:
+        return default
     if not raw:
         return default
     return raw in {"y", "yes"}
@@ -512,6 +637,65 @@ def public_source_id(source_id: str) -> str:
     return WHITESPACE_RE.sub(" ", redacted).strip()
 
 
+SEED_SOURCE_ID_PREFIX = "seed-source-id:"
+SEED_SOURCE_ID_RE = re.compile(r"^seed-source-id:[0-9a-f]{64}$")
+
+
+def seed_source_identity(source_id: str) -> str:
+    """Return one idempotent opaque identity for a local source locator."""
+    value = str(source_id)
+    if SEED_SOURCE_ID_RE.fullmatch(value):
+        return value
+    digest = hashlib.sha256(
+        value.encode("utf-8", errors="replace")
+    ).hexdigest()
+    return f"{SEED_SOURCE_ID_PREFIX}{digest}"
+
+
+def source_subject(text: str) -> str:
+    """Derive a short local-review subject only from already-redacted text."""
+    safe_text, _ = redact_seed_text(text)
+
+    def cleaned(candidate: str) -> str:
+        if should_skip_subject_candidate(candidate):
+            return ""
+        candidate = re.sub(r"<(?!redacted:)[^>]{1,80}>", " ", candidate)
+        candidate = WHITESPACE_RE.sub(" ", candidate).strip(" -#*")
+        if not candidate or candidate.startswith("/"):
+            return ""
+        return clip(candidate, SOURCE_SUBJECT_CHARS) if len(candidate) >= 12 else ""
+
+    # Codex exposes a user-facing thread name in session metadata. Prefer it
+    # over guessing from a first request, but only after the same redaction and
+    # structural filtering used for transcript-derived subjects.
+    for raw in safe_text.splitlines():
+        if not raw.startswith("[session_meta] "):
+            continue
+        match = re.search(r"\bthread_name=(.+)$", raw)
+        if match and (subject := cleaned(match.group(1))):
+            return subject
+
+    in_user_turn = False
+    for raw in safe_text.splitlines():
+        raw = raw.strip()
+        if not raw:
+            continue
+        match = ROLE_LINE_RE.match(raw)
+        if match:
+            role = match.group(1).split()[0].lower()
+            in_user_turn = role in USER_ROLES
+            if not in_user_turn:
+                continue
+            candidate = match.group(2).strip()
+        elif in_user_turn:
+            candidate = raw
+        else:
+            continue
+        if subject := cleaned(candidate):
+            return subject
+    return ""
+
+
 def source_content_digest(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()
 
@@ -519,7 +703,9 @@ def source_content_digest(text: str) -> str:
 def source_revision_token(source: SeedSource) -> str:
     """Privacy-safe in-memory key for one exact source revision."""
     payload = json.dumps(
-        [source.id, source.content_digest], ensure_ascii=False, separators=(",", ":"),
+        [seed_source_identity(source.id), source.content_digest],
+        ensure_ascii=False,
+        separators=(",", ":"),
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
@@ -726,6 +912,7 @@ def discover_sources(
         # Redact before truncation so a token/private-key envelope straddling
         # the retention boundary cannot leak an unrecognizable suffix.
         redacted_text, redaction_count = redact_seed_text(raw_text)
+        subject = source_subject(redacted_text)
         text = redacted_text[-MAX_SOURCE_CHARS:]
         digest = source_content_digest(text)
         eligible.append(SeedSource(
@@ -737,6 +924,7 @@ def discover_sources(
             content_digest=digest,
             value_score=source_value_score(text, focus_query=focus_query),
             redaction_count=redaction_count,
+            subject=subject,
         ))
     selected = select_sources(eligible, max_sessions=max_sessions)
     if stats is not None:
@@ -937,6 +1125,7 @@ def deterministic_candidates(sources: list[SeedSource], *, max_candidates: int) 
                     existing.source_paths.append(src.path)
                     existing.source_mtimes.append(src.mtime)
                     existing.source_digests.append(src.content_digest)
+                    existing.source_excerpts.append(excerpt)
                 else:
                     idx = next(
                         idx for idx, ref in enumerate(candidate_source_refs(existing))
@@ -949,10 +1138,15 @@ def deterministic_candidates(sources: list[SeedSource], *, max_candidates: int) 
                         existing.source_mtimes.append("")
                     while len(existing.source_digests) <= idx:
                         existing.source_digests.append("")
+                    while len(existing.source_excerpts) <= idx:
+                        existing.source_excerpts.append("")
                     existing.source_paths[idx] = existing.source_paths[idx] or src.path
                     existing.source_mtimes[idx] = existing.source_mtimes[idx] or src.mtime
                     existing.source_digests[idx] = (
                         existing.source_digests[idx] or src.content_digest
+                    )
+                    existing.source_excerpts[idx] = (
+                        existing.source_excerpts[idx] or excerpt
                     )
                 existing.body = candidate_body(
                     excerpt=excerpt,
@@ -975,6 +1169,7 @@ def deterministic_candidates(sources: list[SeedSource], *, max_candidates: int) 
                 source_paths=[src.path],
                 source_mtimes=[src.mtime],
                 source_digests=[src.content_digest],
+                source_excerpts=[excerpt],
             )
     return balanced_candidate_selection(
         list(by_excerpt.values()), max_candidates=max_candidates,
@@ -1008,8 +1203,7 @@ def user_signal_lines(text: str) -> list[str]:
     return lines
 
 
-def should_skip_user_candidate(text: str) -> bool:
-    """Drop injected context/structural fragments from otherwise user turns."""
+def _is_injected_user_fragment(text: str) -> bool:
     stripped = text.strip()
     if not stripped:
         return True
@@ -1018,6 +1212,8 @@ def should_skip_user_candidate(text: str) -> bool:
     normalized = re.sub(r"^\d+\.\s+", "", normalized)
     if normalized.startswith((
         "# agents.md instructions",
+        "# files mentioned by the user",
+        "## my request for ",
         "## kb ",
         "## selection ",
         "<instructions>",
@@ -1071,6 +1267,30 @@ def should_skip_user_candidate(text: str) -> bool:
         "injected context",
     )):
         return True
+    if lower in {"<instructions>", "</instructions>", "```", "```json"}:
+        return True
+    # JSON/markdown fragments are frequently injected KB/tool context rather
+    # than direct user decisions. Keep full prose sentences; drop fragments.
+    if stripped[0] in {"{", "}", "[", "]"}:
+        return True
+    if stripped[0] in {'"', "'"} and ":" in stripped[:80]:
+        return True
+    return False
+
+
+def should_skip_subject_candidate(text: str) -> bool:
+    """Drop injected structure while retaining useful question/request subjects."""
+    return _is_injected_user_fragment(text)
+
+
+def should_skip_user_candidate(text: str) -> bool:
+    """Drop injected context/structural fragments from otherwise user turns."""
+    if _is_injected_user_fragment(text):
+        return True
+    stripped = text.strip()
+    lower = stripped.lower()
+    normalized = re.sub(r"^[-*]\s+", "", lower)
+    normalized = re.sub(r"^\d+\.\s+", "", normalized)
     # Questions are often useful session context, but they are not confirmed
     # seed evidence. LLM mode can turn them into suggestions with nuance later.
     if "?" in normalized:
@@ -1080,14 +1300,6 @@ def should_skip_user_candidate(text: str) -> bool:
         "please commit",
         "can you try to ",
     )):
-        return True
-    if lower in {"<instructions>", "</instructions>", "```", "```json"}:
-        return True
-    # JSON/markdown fragments are frequently injected KB/tool context rather
-    # than direct user decisions. Keep full prose sentences; drop fragments.
-    if stripped[0] in {"{", "}", "[", "]"}:
-        return True
-    if stripped[0] in {'"', "'"} and ":" in stripped[:80]:
         return True
     return False
 
@@ -1182,11 +1394,35 @@ def confirm_llm_budget(args: argparse.Namespace, source_count: int) -> bool:
         return True
     if estimate <= args.llm_warning_threshold or args.yes:
         return True
+    stream = sys.stderr if args.format == "json" else sys.stdout
     print(
         f"\nLLM seed refinement may make up to {estimate} call(s) "
-        f"({source_count} session(s), capped at {args.max_llm_calls})."
+        f"({source_count} session(s), capped at {args.max_llm_calls}).",
+        file=stream,
     )
-    return _prompt_yes_no("Continue with LLM refinement", default=False)
+    return _prompt_yes_no_on_stream(
+        "Continue with LLM refinement",
+        default=False,
+        stream=stream,
+    )
+
+
+def prepare_llm_budget_storage(project_path: str) -> bool:
+    """Fail before source consent when local budget state is not writable."""
+    import budget  # noqa: WPS433
+
+    try:
+        budget.prepare_storage(project_path)
+    except OSError:
+        print(
+            "Initial-KB extraction stopped before source consent: "
+            "budget_storage_unavailable. Latch could not prepare its local "
+            "budget directory; grant access to the configured Latch data "
+            "directory and rerun.",
+            file=sys.stderr,
+        )
+        return False
+    return True
 
 
 def source_review_lines(sources: list[SeedSource]) -> list[str]:
@@ -1194,10 +1430,16 @@ def source_review_lines(sources: list[SeedSource]) -> list[str]:
         "Selected local source receipts (transcript text is redacted before model use):"
     ]
     for source in sources:
+        safe_subject, _ = redact_seed_text(source.subject)
+        subject = (
+            f"; subject={json.dumps(clip(safe_subject, SOURCE_SUBJECT_CHARS))}"
+            if safe_subject.strip() else ""
+        )
         lines.append(
             f"- {public_source_id(source.id)}; provider={source.agent}; "
             f"observed_at={source.mtime}; "
             f"digest={source.content_digest[:16]}; redactions={source.redaction_count}"
+            f"{subject}"
         )
     return lines
 
@@ -1205,12 +1447,14 @@ def source_review_lines(sources: list[SeedSource]) -> list[str]:
 def confirm_source_use(args: argparse.Namespace, sources: list[SeedSource]) -> bool:
     if args.llm != "yes" or not sources:
         return True
-    print("\n" + "\n".join(source_review_lines(sources)))
+    stream = sys.stderr if args.format == "json" else sys.stdout
+    print("\n" + "\n".join(source_review_lines(sources)), file=stream)
     if args.yes:
         return True
-    return _prompt_yes_no(
+    return _prompt_yes_no_on_stream(
         "Use these redacted sources for LLM-backed initial-KB extraction",
         default=False,
+        stream=stream,
     )
 
 
@@ -1252,6 +1496,7 @@ def llm_candidates(
             "failed_source_revision_tokens": [],
             "accepted_candidates_by_source": {},
             "accepted_candidates_by_revision": {},
+            "budget_storage_unavailable": False,
         })
     if max_calls <= 0:
         return []
@@ -1259,15 +1504,38 @@ def llm_candidates(
     import model_backends  # noqa: WPS433
 
     out: list[SeedCandidate] = []
-    for src in sources[:max_calls]:
-        allowed, state = budget.check_and_record(project_path, category="nonheal")
+    call_sources = sources[:max_calls]
+    total_calls = len(call_sources)
+    for index, src in enumerate(call_sources, start=1):
+        try:
+            allowed, state = budget.check_and_record(
+                project_path, category="nonheal",
+            )
+        except OSError:
+            if stats is not None:
+                stats["budget_storage_unavailable"] = True
+            print(
+                "LLM seed refinement stopped before model use: "
+                "budget_storage_unavailable. Latch could not write its local "
+                "budget state; grant access to the configured Latch data "
+                "directory and rerun.",
+                file=sys.stderr,
+                flush=True,
+            )
+            break
         if not allowed:
             print(
                 "LLM seed refinement stopped: latch non-heal budget cap reached "
                 f"({state.get('count_nonheal')}/{budget.DEFAULT_NONHEAL_DAILY_CAP}).",
                 file=sys.stderr,
+                flush=True,
             )
             break
+        print(
+            f"Seed extraction progress: {index}/{total_calls} started.",
+            file=sys.stderr,
+            flush=True,
+        )
         prompt = seed_prompt(
             project_path=project_path,
             source=src,
@@ -1293,10 +1561,16 @@ def llm_candidates(
                     source_revision_token(src)
                 )
             print(
-                f"LLM seed refinement skipped {public_source_id(src.id)}: "
+                f"LLM seed refinement skipped source {index}/{total_calls}: "
                 "extractor_failed "
                 "(backend details withheld; retryable).",
                 file=sys.stderr,
+                flush=True,
+            )
+            print(
+                f"Seed extraction progress: {index}/{total_calls} failed safely.",
+                file=sys.stderr,
+                flush=True,
             )
             continue
         safe_output, output_redactions = redact_seed_text(result.text)
@@ -1332,6 +1606,19 @@ def llm_candidates(
                 stats["failed_source_revision_tokens"].append(
                     source_revision_token(src)
                 )
+        if valid_envelope:
+            print(
+                f"Seed extraction progress: {index}/{total_calls} completed; "
+                f"accepted={accepted}.",
+                file=sys.stderr,
+                flush=True,
+            )
+        else:
+            print(
+                f"Seed extraction progress: {index}/{total_calls} failed safely.",
+                file=sys.stderr,
+                flush=True,
+            )
     return balanced_candidate_selection(
         dedupe_candidates(out), max_candidates=max_candidates,
     )
@@ -1387,10 +1674,13 @@ def seed_prompt(
         "For every candidate carrying the rejected_path signal, also return a "
         "rejected_path field that names only the disallowed approach in affirmative "
         "language, without 'do not', 'never', 'avoid', or the governing replacement. "
+        "For source_excerpt, copy one short exact supporting excerpt from the "
+        "transcript; do not paraphrase or invent it. "
         "Example: rejected_path='sandboxed preview first, followed by an elevated retry'. "
         "Return JSON only with this shape:\n"
         '{"seed_candidates":[{"kind":"workstream|decision|preference|fact|idea|open_question",'
         '"title":"short title","body":"evidence-backed markdown body",'
+        '"source_excerpt":"short exact excerpt copied from the transcript",'
         '"confidence":0.0,"signals":["decision","rejected_path"],'
         '"rejected_path":"affirmative description of disallowed approach",'
         '"workstream_key":"optional stable key matching a returned workstream"}]}\n\n'
@@ -1427,6 +1717,104 @@ def parse_json_envelope(raw: str) -> dict:
     return obj if isinstance(obj, dict) else {}
 
 
+def grounded_source_excerpt(
+    value: Any,
+    *,
+    source: SeedSource,
+    title: str,
+    body: str,
+) -> str:
+    """Return a redacted transcript-grounded excerpt, never model-only prose."""
+    # The model-provided excerpt is only a hint. Never return it directly:
+    # evidence is re-selected from redacted user turns below.
+    del value
+
+    def normalized(text: str) -> str:
+        return re.sub(
+            r"[^a-z0-9 ]+", " ",
+            WHITESPACE_RE.sub(" ", text.lower()),
+        ).strip()
+
+    focus_terms = {
+        term for term in normalized(f"{title} {body}").split()
+        if len(term) > 3
+    }
+    focus_candidate = SeedCandidate(
+        kind="decision",
+        title=title,
+        body=body,
+        confidence=0.0,
+        signals=[],
+        source_ids=[],
+        source_paths=[],
+    )
+    focus_targets = candidate_choice_targets(focus_candidate)
+    ranked_candidates: list[tuple[float, int, str]] = []
+    in_user_turn = False
+    user_turn_index = 0
+    for raw in source.text.splitlines():
+        raw = raw.strip()
+        if not raw:
+            continue
+        match = ROLE_LINE_RE.match(raw)
+        if match:
+            role = match.group(1).split()[0].lower()
+            in_user_turn = role in USER_ROLES
+            if not in_user_turn:
+                continue
+            candidate = match.group(2).strip()
+        elif in_user_turn:
+            candidate = raw
+        else:
+            continue
+        if should_skip_user_candidate(candidate) or len(candidate) < 20:
+            continue
+        user_turn_index += 1
+        normalized_candidate = normalized(candidate)
+        candidate_terms = {
+            term for term in normalized_candidate.split() if len(term) > 3
+        }
+        shared = focus_terms & candidate_terms
+        if len(shared) < 2:
+            continue
+        safe_candidate, _ = redact_seed_text(candidate)
+        evidence_candidate = SeedCandidate(
+            kind="decision",
+            title="",
+            body=safe_candidate,
+            confidence=0.0,
+            signals=[],
+            source_ids=[],
+            source_paths=[],
+        )
+        evidence_targets = candidate_choice_targets(evidence_candidate)
+        if focus_targets and not (focus_targets & evidence_targets):
+            # A newer user correction to a different explicit choice makes
+            # older support stale. Fail closed instead of citing that history.
+            if candidates_directionally_conflict(
+                focus_candidate, evidence_candidate,
+            ):
+                ranked_candidates.clear()
+                ranked_candidates.append((-1.0, user_turn_index, ""))
+            continue
+        if candidates_directionally_conflict(
+            focus_candidate, evidence_candidate,
+        ):
+            ranked_candidates.clear()
+            ranked_candidates.append((-1.0, user_turn_index, ""))
+            continue
+        score = len(shared) / max(1, min(len(focus_terms), len(candidate_terms)))
+        ranked_candidates.append((
+            score,
+            user_turn_index,
+            clip(safe_candidate, 360),
+        ))
+    if not ranked_candidates:
+        return ""
+    best = max(ranked_candidates, key=lambda item: (item[0], item[1]))
+    return best[2] if best[0] >= 0 else ""
+
+
 def candidate_from_llm_item(item: Any, src: SeedSource) -> SeedCandidate | None:
     if not isinstance(item, dict):
         return None
@@ -1457,7 +1845,16 @@ def candidate_from_llm_item(item: Any, src: SeedSource) -> SeedCandidate | None:
         return None
     if llm_candidate_skip_reason(kind=kind, title=title, body=body_text, signals=signals):
         return None
+    source_excerpt = grounded_source_excerpt(
+        item.get("source_excerpt"),
+        source=src,
+        title=title,
+        body=body_text,
+    )
     rejected_path_block = f"\n\nRejected path:\n> {rejected_path}" if rejected_path else ""
+    excerpt_block = (
+        f"\n\nExcerpt:\n> {source_excerpt}" if source_excerpt else ""
+    )
     body = (
         "Seed candidate from prior local agent history. Treat as low-authority "
         "staging evidence until reviewed/promoted.\n\n"
@@ -1465,6 +1862,7 @@ def candidate_from_llm_item(item: Any, src: SeedSource) -> SeedCandidate | None:
         f"Signals: {', '.join(sorted(set(signals)))}\n\n"
         "Source evidence:\n"
         f"- {src.id}; observed_at={src.mtime}; digest={src.content_digest[:16]}"
+        f"{excerpt_block}"
     )
     return SeedCandidate(
         kind=kind,
@@ -1478,6 +1876,7 @@ def candidate_from_llm_item(item: Any, src: SeedSource) -> SeedCandidate | None:
         source_mtimes=[src.mtime],
         source_digests=[src.content_digest],
         workstream_key=workstream_key,
+        source_excerpts=[source_excerpt],
     )
 
 
@@ -1805,13 +2204,141 @@ def candidate_term_polarities(candidate: SeedCandidate) -> dict[str, str]:
     return out
 
 
+def candidate_choice_targets(candidate: SeedCandidate) -> set[str]:
+    """Extract a single-word target from an explicit technology choice."""
+    text = normalize_for_quality_filter(
+        candidate.title + " " + candidate_core_text(candidate)
+    )
+    tokens = re.findall(r"[a-z0-9]+", text)
+    choice_verbs = {"use", "choose", "prefer", "adopt", "select"}
+    target_fillers = {
+        "a", "an", "the", "our", "this", "that", "new", "existing",
+        "local", "remote", "managed", "embedded", "self", "hosted",
+    }
+    targets: set[str] = set()
+    for idx, token in enumerate(tokens):
+        if token not in choice_verbs:
+            continue
+        for target in tokens[idx + 1:idx + 5]:
+            if target in target_fillers:
+                continue
+            targets.add(target)
+            break
+    return targets
+
+
+def _has_opposing_action_stance(a: SeedCandidate, b: SeedCandidate) -> bool:
+    left = set(re.findall(
+        r"[a-z0-9]+",
+        normalize_for_quality_filter(
+            a.title + " " + candidate_core_text(a)
+        ),
+    ))
+    right = set(re.findall(
+        r"[a-z0-9]+",
+        normalize_for_quality_filter(
+            b.title + " " + candidate_core_text(b)
+        ),
+    ))
+    action_pairs = (
+        (
+            {"enable", "enabled", "enabling", "activate", "activated", "activating"},
+            {"disable", "disabled", "disabling", "deactivate", "deactivated", "deactivating"},
+        ),
+        (
+            {"allow", "allows", "allowed", "allowing", "permit", "permits", "permitted"},
+            {"disallow", "disallows", "disallowed", "forbid", "forbids", "forbidden", "prohibit", "prohibited"},
+        ),
+    )
+    for positive, negative in action_pairs:
+        left_positive, left_negative = bool(left & positive), bool(left & negative)
+        right_positive, right_negative = bool(right & positive), bool(right & negative)
+        if left_positive != left_negative and right_positive != right_negative:
+            if left_positive != right_positive:
+                return True
+    return False
+
+
+def _has_opposing_lexical_stance(a: SeedCandidate, b: SeedCandidate) -> bool:
+    left_text = normalize_for_quality_filter(
+        a.title + " " + candidate_core_text(a)
+    )
+    right_text = normalize_for_quality_filter(
+        b.title + " " + candidate_core_text(b)
+    )
+    left_tokens = set(re.findall(r"[a-z0-9]+", left_text))
+    right_tokens = set(re.findall(r"[a-z0-9]+", right_text))
+    token_pairs = (
+        ({"public"}, {"private"}),
+        (
+            {"manual", "manually"},
+            {"automatic", "automated", "automatically"},
+        ),
+        ({"required", "mandatory"}, {"optional"}),
+        (
+            {"retain", "retained", "retaining", "keep", "kept"},
+            {
+                "delete", "deleted", "deleting", "remove", "removed",
+                "removing", "drop", "dropped", "dropping",
+            },
+        ),
+    )
+    for positive, negative in token_pairs:
+        left_positive, left_negative = (
+            bool(left_tokens & positive), bool(left_tokens & negative)
+        )
+        right_positive, right_negative = (
+            bool(right_tokens & positive), bool(right_tokens & negative)
+        )
+        if left_positive != left_negative and right_positive != right_negative:
+            if left_positive != right_positive:
+                return True
+
+    read_only = re.compile(r"\bread(?:\s*[-/]\s*|\s+)only\b|\breadonly\b")
+    read_write = re.compile(
+        r"\bread(?:\s*[-/]\s*|\s+(?:and\s+)?)write\b"
+        r"|\breadwrite\b|\bwriteable\b|\bwritable\b"
+    )
+    left_only, left_write = bool(read_only.search(left_text)), bool(
+        read_write.search(left_text)
+    )
+    right_only, right_write = bool(read_only.search(right_text)), bool(
+        read_write.search(right_text)
+    )
+    return (
+        left_only != left_write
+        and right_only != right_write
+        and left_only != right_only
+    )
+
+
 def candidates_directionally_conflict(a: SeedCandidate, b: SeedCandidate) -> bool:
     left = candidate_term_polarities(a)
     right = candidate_term_polarities(b)
-    return any(
+    if any(
         left[term] != right[term]
         for term in left.keys() & right.keys()
+    ):
+        return True
+    if _has_opposing_action_stance(a, b):
+        return True
+    if _has_opposing_lexical_stance(a, b):
+        return True
+
+    left_targets = candidate_choice_targets(a)
+    right_targets = candidate_choice_targets(b)
+    if len(left_targets) != 1 or len(right_targets) != 1:
+        return False
+    if left_targets == right_targets:
+        return False
+    left_context = candidate_terms(a) - left_targets
+    right_context = candidate_terms(b) - right_targets
+    shared_context = left_context & right_context
+    context_overlap = (
+        len(shared_context) / min(len(left_context), len(right_context))
+        if left_context and right_context else 0.0
     )
+    return len(shared_context) >= 2 and context_overlap >= 0.60
 
 
 def safe_candidates_equivalent(a: SeedCandidate, b: SeedCandidate) -> bool:
@@ -1831,6 +2358,10 @@ def safe_candidates_equivalent(a: SeedCandidate, b: SeedCandidate) -> bool:
     exact_b = normalize_excerpt(b.title + " " + candidate_core_text(b))
     if exact_a == exact_b:
         return True
+    anchor_a = candidate_semantic_anchor_terms(a)
+    anchor_b = candidate_semantic_anchor_terms(b)
+    if not anchor_a or anchor_a != anchor_b:
+        return False
     a_terms, b_terms = candidate_terms(a), candidate_terms(b)
     if not a_terms or not b_terms:
         return False
@@ -1847,27 +2378,33 @@ def candidate_source_refs(candidate: SeedCandidate) -> list[dict[str, str]]:
             "path": candidate.source_paths[idx] if idx < len(candidate.source_paths) else "",
             "mtime": candidate.source_mtimes[idx] if idx < len(candidate.source_mtimes) else "",
             "digest": candidate.source_digests[idx] if idx < len(candidate.source_digests) else "",
+            "excerpt": (
+                candidate.source_excerpts[idx]
+                if idx < len(candidate.source_excerpts) else ""
+            ),
         })
     return refs
 
 
 def candidate_revision_keys(candidate: SeedCandidate) -> set[tuple[str, str]]:
     return {
-        (ref["id"], ref["digest"]) for ref in candidate_source_refs(candidate)
+        (seed_source_identity(ref["id"]), ref["digest"])
+        for ref in candidate_source_refs(candidate)
     }
 
 
 def merge_candidate_provenance(target: SeedCandidate, incoming: SeedCandidate) -> None:
     refs = {
-        (ref["id"], ref["digest"]): ref for ref in candidate_source_refs(target)
+        (seed_source_identity(ref["id"]), ref["digest"]): ref
+        for ref in candidate_source_refs(target)
     }
     for ref in candidate_source_refs(incoming):
-        revision = (ref["id"], ref["digest"])
+        revision = (seed_source_identity(ref["id"]), ref["digest"])
         current = refs.get(revision)
         if current is None:
             refs[revision] = ref
         else:
-            for key in ("path", "mtime", "digest"):
+            for key in ("path", "mtime", "digest", "excerpt"):
                 if not current.get(key) and ref.get(key):
                     current[key] = ref[key]
     ordered = [refs[key] for key in sorted(refs)]
@@ -1875,6 +2412,7 @@ def merge_candidate_provenance(target: SeedCandidate, incoming: SeedCandidate) -
     target.source_paths = [ref["path"] for ref in ordered]
     target.source_mtimes = [ref["mtime"] for ref in ordered]
     target.source_digests = [ref["digest"] for ref in ordered]
+    target.source_excerpts = [ref["excerpt"] for ref in ordered]
     target.signals = sorted(set(target.signals) | set(incoming.signals) | {"corroborated"})
     target.confidence = min(0.95, max(target.confidence, incoming.confidence) + 0.03)
     target.llm_used = target.llm_used or incoming.llm_used
@@ -1967,8 +2505,542 @@ def candidate_terms(candidate: SeedCandidate) -> set[str]:
         "seed", "seeded", "candidate", "local", "agent", "history", "treat",
         "staging", "evidence", "confidence", "signals", "source", "from",
         "prior", "with", "this", "that", "because", "before", "after",
+        "depend", "depends", "dependency", "prerequisite", "prerequisites",
     }
     return {w for w in text.split() if len(w) > 3 and w not in stop}
+
+
+SEMANTIC_ANCHOR_TOKEN_RE = re.compile(
+    r"v\d+(?:\.\d+)*|\d+(?:[./]\d+)*|[a-z]+"
+)
+SEMANTIC_SHORT_ANCHORS = {
+    "ai", "api", "db", "go", "js", "ml", "off", "on", "ssl", "tls", "ui",
+}
+SEMANTIC_ANCHOR_FRAMING = {
+    "a", "about", "adopt", "adopted", "agent", "an", "candidate",
+    "choose", "chosen", "decide", "decided", "decision", "decisions",
+    "depend", "dependent", "depends", "evidence", "excerpt", "expose",
+    "for", "from", "have", "into", "is", "keep", "kept", "local", "make",
+    "must", "path", "prefer", "prerequisite", "prerequisites", "project",
+    "reject", "rejected", "rejection", "require", "requires", "required",
+    "ruled", "seed", "seeded", "select", "selected", "should", "staging",
+    "stated", "that", "the", "through", "use", "user", "uses", "using",
+    "with",
+}
+SEMANTIC_ANCHOR_CANONICAL = {
+    "alter": "change",
+    "altered": "change",
+    "alters": "change",
+    "approvals": "approval",
+    "changed": "change",
+    "changes": "change",
+    "changing": "change",
+    "deployments": "deployment",
+    "endpoints": "endpoint",
+    "modified": "change",
+    "modifies": "change",
+    "modify": "change",
+    "reporting": "report",
+    "reports": "report",
+}
+
+
+def _semantic_raw_tokens(text: str) -> list[str]:
+    normalized = normalize_for_quality_filter(text)
+    normalized = re.sub(
+        r"\bread[\s/-]*only\b|\breadonly\b", " read only ", normalized,
+    )
+    normalized = re.sub(
+        r"\bread[\s/-]*(?:and[\s/-]*)?write\b|\breadwrite\b",
+        " read write ",
+        normalized,
+    )
+    return SEMANTIC_ANCHOR_TOKEN_RE.findall(normalized)
+
+
+def _semantic_anchor_value(
+    token: str,
+    *,
+    previous: str = "",
+) -> str | None:
+    if token == "on" and previous in {
+        "depend", "depends", "relies", "rely",
+    }:
+        return None
+    if token in SEMANTIC_ANCHOR_FRAMING:
+        return None
+    if (
+        len(token) <= 3
+        and token not in SEMANTIC_SHORT_ANCHORS
+        and not re.fullmatch(r"v?\d+(?:[./]\d+)*", token)
+    ):
+        return None
+    return SEMANTIC_ANCHOR_CANONICAL.get(token, token)
+
+
+def _nearest_semantic_anchor(
+    raw_tokens: list[str],
+    start: int,
+    step: int,
+) -> str | None:
+    index = start
+    while 0 <= index < len(raw_tokens):
+        previous = raw_tokens[index - 1] if index else ""
+        value = _semantic_anchor_value(
+            raw_tokens[index], previous=previous,
+        )
+        if value not in {"after", "before"} and value is not None:
+            return value
+        index += step
+    return None
+
+
+def _semantic_relation_anchors(text: str) -> set[str]:
+    raw_tokens = _semantic_raw_tokens(text)
+    relations: set[str] = set()
+    for index, token in enumerate(raw_tokens):
+        if token in {"before", "after"}:
+            left = _nearest_semantic_anchor(raw_tokens, index - 1, -1)
+            right = _nearest_semantic_anchor(raw_tokens, index + 1, 1)
+            if left and right:
+                earlier, later = (
+                    (left, right) if token == "before" else (right, left)
+                )
+                relations.add(f"order:{earlier}>{later}")
+        if token in {"depend", "depends"} \
+                and index + 1 < len(raw_tokens) \
+                and raw_tokens[index + 1] == "on":
+            dependent = _nearest_semantic_anchor(
+                raw_tokens, index - 1, -1,
+            )
+            prerequisite = _nearest_semantic_anchor(
+                raw_tokens, index + 2, 1,
+            )
+            if dependent and prerequisite:
+                relations.add(
+                    f"dependency:{dependent}>{prerequisite}"
+                )
+        if token == "prerequisite":
+            try:
+                for_index = raw_tokens.index("for", index + 1)
+            except ValueError:
+                continue
+            prerequisite = _nearest_semantic_anchor(
+                raw_tokens, index - 1, -1,
+            )
+            dependent = _nearest_semantic_anchor(
+                raw_tokens, for_index + 1, 1,
+            )
+            if dependent and prerequisite:
+                relations.add(
+                    f"dependency:{dependent}>{prerequisite}"
+                )
+    return relations
+
+
+def _semantic_assignment_anchors(text: str) -> set[str]:
+    """Bind repeated choice targets to their roles without broad NLP."""
+    normalized = normalize_for_quality_filter(text)
+    match = re.search(
+        r"\b(?:adopt|choose|prefer|select|use)\b(?P<tail>.+)",
+        normalized,
+    )
+    if match is None:
+        return set()
+    assignments: list[tuple[str, str]] = []
+    for raw_segment in re.split(r"\band\b|[,;]", match.group("tail")):
+        segment = re.sub(
+            r"^\s*(?:adopt|choose|prefer|select|use)\s+", "",
+            raw_segment,
+        ).strip()
+        pair = re.match(
+            r"(?P<target>.+?)\s+(?:as|for)\s+(?P<role>.+)$",
+            segment,
+        )
+        if pair is None:
+            continue
+        target_terms = [
+            value for index, token in enumerate(
+                _semantic_raw_tokens(pair.group("target"))
+            )
+            if (
+                value := _semantic_anchor_value(
+                    token,
+                    previous=(
+                        _semantic_raw_tokens(pair.group("target"))[index - 1]
+                        if index else ""
+                    ),
+                )
+            ) is not None
+        ]
+        role_terms = {
+            value for index, token in enumerate(
+                _semantic_raw_tokens(pair.group("role"))
+            )
+            if (
+                value := _semantic_anchor_value(
+                    token,
+                    previous=(
+                        _semantic_raw_tokens(pair.group("role"))[index - 1]
+                        if index else ""
+                    ),
+                )
+            ) is not None
+        }
+        if target_terms and role_terms:
+            assignments.append((
+                target_terms[-1],
+                "|".join(sorted(role_terms)),
+            ))
+    if len(assignments) < 2:
+        return set()
+    return {
+        f"assignment:{target}>{role}" for target, role in assignments
+    }
+
+
+def candidate_semantic_anchor_terms(candidate: SeedCandidate) -> set[str]:
+    """Normalize claim-bearing anchors whose mismatch must block merging."""
+    anchors: set[str] = set()
+    for text in (candidate.title, candidate_core_text(candidate)):
+        raw_tokens = _semantic_raw_tokens(text)
+        for index, token in enumerate(raw_tokens):
+            previous = raw_tokens[index - 1] if index else ""
+            value = _semantic_anchor_value(token, previous=previous)
+            if value is not None:
+                anchors.add(value)
+        anchors.update(_semantic_relation_anchors(text))
+        anchors.update(_semantic_assignment_anchors(text))
+    return anchors
+
+
+def candidate_review_id(candidate: SeedCandidate) -> str:
+    payload = {
+        "kind": candidate.kind,
+        "title": normalize_for_quality_filter(candidate.title),
+        "claim": normalize_for_quality_filter(candidate_core_text(candidate)),
+        "signals": sorted(durable_signal_set(candidate)),
+        "workstream_key": candidate.workstream_key,
+    }
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return "cand-" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:12]
+
+
+def _review_terms(text: str) -> set[str]:
+    stop = {
+        "about", "after", "before", "candidate", "evidence", "from", "have",
+        "into", "project", "seed", "seeded", "should", "that", "their",
+        "there", "these", "this", "with",
+    }
+    normalized = re.sub(
+        r"[^a-z0-9]+", " ", WHITESPACE_RE.sub(" ", text.lower())
+    )
+    return {
+        term for term in normalized.split()
+        if len(term) > 3 and term not in stop
+    }
+
+
+def _term_overlap(left: set[str], right: set[str]) -> float:
+    if not left or not right:
+        return 0.0
+    return len(left & right) / min(len(left), len(right))
+
+
+def review_cluster_compatible(a: SeedCandidate, b: SeedCandidate) -> bool:
+    """Looser review-only paraphrase grouping with the write safety rails."""
+    if a.kind != b.kind or report_section_key(a) != report_section_key(b):
+        return False
+    if a.workstream_key != b.workstream_key:
+        return False
+    if candidate_negation_signature(a) != candidate_negation_signature(b):
+        return False
+    if candidates_directionally_conflict(a, b):
+        return False
+    a_signals, b_signals = durable_signal_set(a), durable_signal_set(b)
+    if a_signals and b_signals and not (a_signals & b_signals):
+        return False
+    if safe_candidates_equivalent(a, b):
+        return True
+    anchor_left = candidate_semantic_anchor_terms(a)
+    anchor_right = candidate_semantic_anchor_terms(b)
+    if not anchor_left or anchor_left != anchor_right:
+        return False
+
+    title_left = _review_terms(a.title)
+    title_right = _review_terms(b.title)
+    claim_left = _review_terms(candidate_core_text(a))
+    claim_right = _review_terms(candidate_core_text(b))
+    title_shared = len(title_left & title_right)
+    claim_shared = len(claim_left & claim_right)
+    title_overlap = _term_overlap(title_left, title_right)
+    claim_overlap = _term_overlap(claim_left, claim_right)
+    exact_title = normalize_excerpt(a.title) == normalize_excerpt(b.title)
+    return (
+        title_shared >= 2
+        and claim_shared >= 2
+        and title_overlap >= 0.60
+        and claim_overlap >= 0.45
+    ) or (
+        exact_title
+        and claim_shared >= 2
+        and claim_overlap >= 0.35
+    )
+
+
+def review_cluster_id(items: list[SeedCandidate]) -> str:
+    payload = {
+        "section": report_section_key(items[0]) if items else "",
+        "candidate_ids": sorted(candidate_review_id(item) for item in items),
+    }
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return "cluster-" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:12]
+
+
+def build_review_clusters(
+    candidates: list[SeedCandidate],
+) -> list[SeedReviewCluster]:
+    groups: list[list[SeedCandidate]] = []
+    for candidate in sorted(candidates, key=candidate_review_id):
+        group = next(
+            (
+                existing for existing in groups
+                if all(
+                    review_cluster_compatible(candidate, member)
+                    for member in existing
+                )
+            ),
+            None,
+        )
+        if group is None:
+            groups.append([candidate])
+        else:
+            group.append(candidate)
+    clusters = [
+        SeedReviewCluster(
+            cluster_id=review_cluster_id(items),
+            section_key=report_section_key(items[0]),
+            items=items,
+        )
+        for items in groups
+    ]
+    return sorted(clusters, key=lambda cluster: cluster.cluster_id)
+
+
+def review_cluster_representative(cluster: SeedReviewCluster) -> SeedCandidate:
+    """Choose a stable representative independent of source recency/ranking."""
+    return sorted(
+        cluster.items,
+        key=lambda candidate: (
+            0 if candidate.llm_used else 1,
+            normalize_for_quality_filter(candidate.title),
+            candidate_review_id(candidate),
+        ),
+    )[0]
+
+
+def merge_review_cluster(cluster: SeedReviewCluster) -> SeedCandidate:
+    source_representative = review_cluster_representative(cluster)
+    representative = copy.deepcopy(source_representative)
+    for candidate in cluster.items:
+        if candidate is source_representative:
+            continue
+        merge_candidate_provenance(representative, candidate)
+    return representative
+
+
+def candidate_observation_window(
+    candidate: SeedCandidate,
+    *,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    observed: list[datetime] = []
+    for value in candidate.source_mtimes:
+        if not str(value).strip():
+            continue
+        try:
+            observed.append(
+                datetime.fromisoformat(
+                    normalize_seed_observed_at(value)
+                )
+            )
+        except ValueError:
+            continue
+    if not observed:
+        return {
+            "oldest_observed_at": None,
+            "latest_observed_at": None,
+            "age_days": None,
+            "freshness_note": (
+                "Observation time unavailable; verify current authority before approval."
+            ),
+        }
+    oldest = min(observed)
+    latest = max(observed)
+    current = now or utc_now()
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    age_days = max(0, (current.astimezone(timezone.utc) - latest).days)
+    return {
+        "oldest_observed_at": oldest.isoformat(),
+        "latest_observed_at": latest.isoformat(),
+        "age_days": age_days,
+        "freshness_note": (
+            f"Latest evidence is {age_days} day(s) old; seed evidence is "
+            "historical and must be checked against newer decisions before promotion."
+        ),
+    }
+
+
+def candidate_review_claim(candidate: SeedCandidate) -> str:
+    claim, _ = redact_seed_text(candidate_core_text(candidate))
+    return clip(claim, REVIEW_BODY_CHARS)
+
+
+def candidate_review_rationale(candidate: SeedCandidate) -> str:
+    signals = normalized_signals(candidate.signals)
+    source_count = len(candidate_revision_keys(candidate))
+    corroboration = (
+        f" {source_count} distinct source revisions corroborate it."
+        if source_count > 1 else ""
+    )
+    if signals & AGENT_MISTAKE_SIGNALS:
+        purpose = "Future gates can check for a previously observed alignment failure."
+    elif "rejected_path" in signals:
+        purpose = "Future agents can avoid reviving a previously rejected approach."
+    elif candidate.kind == "decision":
+        purpose = "Future agents can preserve an explicit prior judgment."
+    elif candidate.kind == "preference":
+        purpose = "Future agents can preserve a reusable working preference."
+    elif candidate.kind == "workstream":
+        purpose = "Future agents can reconnect related decisions and follow-up work."
+    else:
+        purpose = "Future agents can compare new work with this prior project evidence."
+    return purpose + corroboration
+
+
+def resolve_approval_selection(
+    candidates: list[SeedCandidate],
+    *,
+    candidate_ids: list[str] | tuple[str, ...] = (),
+    cluster_ids: list[str] | tuple[str, ...] = (),
+) -> tuple[list[SeedCandidate], bool]:
+    """Resolve exact review IDs and report whether every item was covered."""
+    clusters = build_review_clusters(candidates)
+    candidate_map = {
+        candidate_review_id(candidate): candidate for candidate in candidates
+    }
+    cluster_map = {cluster.cluster_id: cluster for cluster in clusters}
+    normalized_candidates = [
+        str(value).strip() for value in candidate_ids if str(value).strip()
+    ]
+    normalized_clusters = [
+        str(value).strip() for value in cluster_ids if str(value).strip()
+    ]
+    if (candidate_ids or cluster_ids) \
+            and not normalized_candidates and not normalized_clusters:
+        raise SeedApprovalError("approval selectors must contain a non-empty review ID")
+    if len(normalized_candidates) != len(set(normalized_candidates)) \
+            or len(normalized_clusters) != len(set(normalized_clusters)):
+        raise SeedApprovalError("approval selectors must not contain duplicate review IDs")
+    requested_candidates = set(normalized_candidates)
+    requested_clusters = set(normalized_clusters)
+    unknown_candidates = requested_candidates - set(candidate_map)
+    unknown_clusters = requested_clusters - set(cluster_map)
+    if unknown_candidates or unknown_clusters:
+        parts: list[str] = []
+        if unknown_candidates:
+            parts.append(
+                "unknown candidate IDs: " + ", ".join(sorted(unknown_candidates))
+            )
+        if unknown_clusters:
+            parts.append(
+                "unknown cluster IDs: " + ", ".join(sorted(unknown_clusters))
+            )
+        raise SeedApprovalError("; ".join(parts))
+
+    selected: list[SeedCandidate] = []
+    covered_ids: set[str] = set()
+    for cluster_id in sorted(requested_clusters):
+        cluster = cluster_map[cluster_id]
+        selected.append(merge_review_cluster(cluster))
+        covered_ids.update(candidate_review_id(item) for item in cluster.items)
+    for candidate_id in sorted(requested_candidates):
+        if candidate_id in covered_ids:
+            continue
+        selected.append(candidate_map[candidate_id])
+        covered_ids.add(candidate_id)
+
+    selected_parent_keys = {
+        candidate.workstream_key
+        for candidate in selected
+        if candidate.kind == "workstream" and candidate.workstream_key
+    }
+    available_parent_keys = {
+        candidate.workstream_key
+        for candidate in candidates
+        if candidate.kind == "workstream" and candidate.workstream_key
+    }
+    missing_parent_keys = {
+        candidate.workstream_key
+        for candidate in selected
+        if candidate.kind != "workstream"
+        and candidate.workstream_key
+        and not candidate.workstream_key.startswith("existing:")
+        and candidate.workstream_key in available_parent_keys
+        and candidate.workstream_key not in selected_parent_keys
+    }
+    if missing_parent_keys:
+        raise SeedApprovalError(
+            "selected child candidates require their reviewable workstream "
+            "parent(s): " + ", ".join(sorted(missing_parent_keys))
+        )
+    all_ids = {candidate_review_id(candidate) for candidate in candidates}
+    return selected, covered_ids == all_ids
+
+
+def prompt_approval_selection(
+    candidates: list[SeedCandidate],
+    *,
+    stream: Any = None,
+) -> tuple[list[SeedCandidate], bool]:
+    stream = stream or sys.stdout
+    if not sys.stdin.isatty():
+        return [], False
+    prompt = (
+        "Approve seed review items (all, none, candidate/cluster IDs separated "
+        "by spaces, or blank to cancel): "
+    )
+    while True:
+        print(prompt, end="", file=stream, flush=True)
+        try:
+            raw = input().strip()
+        except EOFError:
+            return [], False
+        if not raw:
+            return [], False
+        if raw.lower() in {"all", "y", "yes"}:
+            return list(candidates), True
+        if raw.lower() == "none":
+            return [], True
+        tokens = [token for token in re.split(r"[\s,]+", raw) if token]
+        candidate_ids = [token for token in tokens if token.startswith("cand-")]
+        cluster_ids = [token for token in tokens if token.startswith("cluster-")]
+        invalid = [
+            token for token in tokens
+            if not token.startswith("cand-") and not token.startswith("cluster-")
+        ]
+        if invalid:
+            print("Unrecognized review IDs: " + ", ".join(invalid), file=stream)
+            continue
+        try:
+            return resolve_approval_selection(
+                candidates,
+                candidate_ids=candidate_ids,
+                cluster_ids=cluster_ids,
+            )
+        except SeedApprovalError as exc:
+            print(f"Approval selection unavailable: {exc}", file=stream)
 
 
 def build_seed_report(candidates: list[SeedCandidate]) -> list[SeedReportSection]:
@@ -2017,6 +3089,72 @@ def candidate_evidence_line(candidate: SeedCandidate) -> str:
         if candidate.source_ids else "source"
     )
     return f"receipt: {first_source}"
+
+
+def candidate_review_source_lines(candidate: SeedCandidate) -> list[str]:
+    lines: list[str] = []
+    for ref in candidate_source_refs(candidate):
+        safe_excerpt, _ = redact_seed_text(ref.get("excerpt") or "")
+        excerpt = (
+            f"; excerpt={json.dumps(clip(safe_excerpt, 220))}"
+            if safe_excerpt.strip() else ""
+        )
+        lines.append(
+            f"    - {public_source_id(ref['id'])}; "
+            f"observed_at={ref['mtime'] or 'unknown'}; "
+            f"digest={(ref['digest'][:16] if ref['digest'] else 'unknown')}"
+            f"{excerpt}"
+        )
+    return lines or ["    - source receipt unavailable"]
+
+
+def render_review_cluster_lines(cluster: SeedReviewCluster) -> list[str]:
+    lines: list[str] = []
+    if len(cluster.items) > 1:
+        source_revisions = {
+            revision
+            for candidate in cluster.items
+            for revision in candidate_revision_keys(candidate)
+        }
+        lines.extend([
+            (
+                f"### Possible duplicate cluster {cluster.cluster_id}: "
+                f"{len(cluster.items)} non-conflicting variants; "
+                f"{len(source_revisions)} source revision(s)"
+            ),
+            (
+                "Approving the cluster writes one stable representative with "
+                "the combined provenance; approve a candidate ID to keep only "
+                "that exact variant."
+            ),
+        ])
+    for candidate in cluster.items:
+        safe_title, _ = redact_seed_text(candidate.title)
+        signals = ", ".join(sorted(set(candidate.signals)))
+        source_count = len(candidate_revision_keys(candidate))
+        source_label = "source revision" if source_count == 1 else "source revisions"
+        observation = candidate_observation_window(candidate)
+        lines.extend([
+            f"- [{candidate.kind}] {safe_title}",
+            (
+                f"  review_id={candidate_review_id(candidate)}; "
+                f"cluster_id={cluster.cluster_id}"
+            ),
+            f"  signals={signals}; {source_count} {source_label}",
+            f"  rationale: {candidate_review_rationale(candidate)}",
+            f"  candidate body: {candidate_review_claim(candidate)}",
+            f"  evidence: {candidate_evidence_line(candidate)}",
+            (
+                "  observation: "
+                f"oldest={observation['oldest_observed_at'] or 'unknown'}; "
+                f"latest={observation['latest_observed_at'] or 'unknown'}; "
+                f"age_days={observation['age_days'] if observation['age_days'] is not None else 'unknown'}"
+            ),
+            f"  freshness: {observation['freshness_note']}",
+            "  source evidence:",
+            *candidate_review_source_lines(candidate),
+        ])
+    return lines
 
 
 def alignment_direction_items(candidates: list[SeedCandidate], *, limit: int = 3) -> list[SeedCandidate]:
@@ -2218,7 +3356,29 @@ def seed_report_receipt(
 
 def write_boundary_message(args: argparse.Namespace) -> str:
     if not args.apply:
+        if getattr(args, "preview_digest", None):
+            return (
+                "Preview only. This exact review is cached for 24 hours. Re-run "
+                f"with --preview-digest {args.preview_digest} --apply and the "
+                "candidate/cluster IDs you approve."
+            )
         return "Preview only. Re-run with --apply to write these as staging seed candidates."
+    if getattr(args, "preview_digest", None):
+        if getattr(args, "dismiss_all", False):
+            return (
+                "Digest-bound reject-all mode. No candidates will be written; "
+                "the exact reviewed source revisions will be finalized as dismissed."
+            )
+        return (
+            "Digest-bound apply mode. Only candidates from the exact reviewed "
+            "preview can be written as staging evidence."
+        )
+    if args.approve_candidate or args.approve_cluster:
+        return (
+            "Apply mode with scoped review IDs. Only the selected candidates "
+            "or cluster representatives will be written as staging evidence; "
+            "unselected items are dismissed for these exact source revisions."
+        )
     if args.yes:
         return (
             "Apply mode with --yes. These candidates will be written as staging "
@@ -2243,6 +3403,10 @@ def apply_success_message(
         f"Exact import no-ops: {len(apply_result.skipped_import_keys)}",
         f"Provenance corroborations: {len(apply_result.corroborated_import_keys)}",
         f"Resumed incomplete imports: {len(apply_result.resumed_import_keys)}",
+        (
+            "Source revisions left pending for later candidate review: "
+            f"{len(apply_result.pending_source_import_keys)}"
+        ),
     ]
     if apply_result.workstream_attachments:
         lines.append(
@@ -2282,6 +3446,32 @@ def apply_success_message(
             "Latch gate check is pending until the retryable import failures are resolved.",
         ])
     return "\n".join(lines)
+
+
+def public_apply_receipt(
+    result: SeedApplyResult,
+    *,
+    approved_candidates: list[SeedCandidate],
+    dismissed_all: bool,
+) -> dict[str, Any]:
+    """Return a truthful apply receipt without exposing local import keys."""
+    return {
+        "complete": result.complete,
+        "dismissed_all": bool(dismissed_all),
+        "approved_candidate_count": len(approved_candidates),
+        "inserted_ids": list(result.inserted_ids),
+        "inserted_count": len(result.inserted_ids),
+        "exact_import_noop_count": len(result.skipped_import_keys),
+        "corroboration_count": len(result.corroborated_import_keys),
+        "resumed_import_count": len(result.resumed_import_keys),
+        "pending_source_count": len(result.pending_source_import_keys),
+        "failure_count": len(result.failures),
+        "failures": [
+            {"error_code": str(failure.get("error_code") or "internal")}
+            for failure in result.failures
+        ],
+        "workstream_attachments": dict(result.workstream_attachments),
+    }
 
 
 def no_llm_disabled_reason(args: argparse.Namespace) -> str | None:
@@ -2367,7 +3557,30 @@ def render_text(
         f"Why this mattered: {receipt['why_it_matters']}",
         f"Next step: {receipt['next_step']}",
     ])
-    lines.extend(["", "Seed report:"])
+    lines.extend([
+        "",
+        "Seed report:",
+        (
+            "Review controls: each item has a stable candidate ID. Possible "
+            "duplicates share a cluster ID. With --apply, use repeatable "
+            "--approve-candidate ID or --approve-cluster ID for scoped approval; "
+            "--yes without selectors preserves whole-report approval. A scoped "
+            "selection is final for the reviewed source revisions, so include "
+            "every candidate or cluster you want to keep in that one command."
+        ),
+    ])
+    if getattr(args, "preview_digest", None):
+        lines.append(
+            "Exact preview binding: "
+            f"{args.preview_digest} (expires after "
+            f"{SEED_PREVIEW_MAX_AGE_HOURS} hours)."
+        )
+    elif getattr(args, "preview_cache_unavailable", False):
+        lines.append(
+            "Exact preview cache unavailable at the configured Latch vault. "
+            "Scoped non-interactive approval is disabled; use --apply without "
+            "selectors to review and choose IDs in one interactive run."
+        )
     for section in build_seed_report(candidates):
         lines.extend(["", f"## {section.title}", section.summary])
         if section.key == "agent_alignment_check":
@@ -2391,15 +3604,15 @@ def render_text(
                 if section.key == "agent_alignment_check" else "No candidates in this section."
             lines.append(empty)
             continue
-        for cand in section.items:
-            signals = ", ".join(sorted(set(cand.signals)))
-            source_count = len(cand.source_ids)
-            source_label = "source" if source_count == 1 else "sources"
-            lines.extend([
-                f"- [{cand.kind}] {cand.title}",
-                f"  signals={signals}; {source_count} {source_label}",
-                f"  evidence: {candidate_evidence_line(cand)}",
-            ])
+        clusters = build_review_clusters(section.items)
+        clusters.sort(
+            key=lambda cluster: candidate_rank_score(
+                review_cluster_representative(cluster)
+            ),
+            reverse=True,
+        )
+        for cluster in clusters:
+            lines.extend(render_review_cluster_lines(cluster))
     demo = catch_demo_candidate(candidates)
     if demo:
         payload = catch_demo_payload(demo)
@@ -2448,6 +3661,9 @@ def render_json(
                 "mtime": source.mtime,
                 "digest": source.content_digest,
                 "redaction_count": source.redaction_count,
+                "subject": clip(
+                    redact_seed_text(source.subject)[0], SOURCE_SUBJECT_CHARS,
+                ),
             }
             for source in sources
         ],
@@ -2462,6 +3678,23 @@ def render_json(
             "Sections preserve high-value coverage; items within each "
             "section are strongest-first using an internal score."
         ),
+        "review_controls": {
+            "candidate_option": "--approve-candidate ID",
+            "cluster_option": "--approve-cluster ID",
+            "whole_report_option": "--yes",
+            "reject_report_option": "--dismiss-all",
+            "preview_digest": getattr(args, "preview_digest", None),
+            "preview_max_age_hours": SEED_PREVIEW_MAX_AGE_HOURS,
+            "scoped_apply_requires_preview_digest": True,
+            "scoped_selection_finalizes_source_revisions": True,
+            "preview_cache_available": not bool(
+                getattr(args, "preview_cache_unavailable", False)
+            ),
+        },
+        "review_clusters": [
+            public_review_cluster_dict(cluster)
+            for cluster in build_review_clusters(candidates)
+        ],
         "report": [
             public_report_section_dict(section, candidates=candidates)
             for section in build_seed_report(candidates)
@@ -2498,9 +3731,45 @@ def public_candidate_dict(candidate: SeedCandidate) -> dict[str, Any]:
     data.pop("confidence", None)
     data.pop("source_paths", None)
     data["source_ids"] = [public_source_id(value) for value in candidate.source_ids]
+    data["source_excerpts"] = [
+        redact_seed_text(str(value))[0] for value in candidate.source_excerpts
+    ]
     data["title"] = redact_seed_text(str(data.get("title") or ""))[0]
     data["body"] = redact_seed_text(str(data.get("body") or ""))[0]
+    data["review_id"] = candidate_review_id(candidate)
+    data["review_rationale"] = candidate_review_rationale(candidate)
+    data["review_claim"] = candidate_review_claim(candidate)
+    data["observation"] = candidate_observation_window(candidate)
+    data["source_receipts"] = [
+        {
+            "id": public_source_id(ref["id"]),
+            "observed_at": ref["mtime"] or None,
+            "digest": ref["digest"],
+            "excerpt": redact_seed_text(ref.get("excerpt") or "")[0] or None,
+        }
+        for ref in candidate_source_refs(candidate)
+    ]
     return data
+
+
+def public_review_cluster_dict(cluster: SeedReviewCluster) -> dict[str, Any]:
+    representative = review_cluster_representative(cluster)
+    source_revisions = {
+        revision
+        for candidate in cluster.items
+        for revision in candidate_revision_keys(candidate)
+    }
+    return {
+        "cluster_id": cluster.cluster_id,
+        "section": cluster.section_key,
+        "possible_duplicates": len(cluster.items) > 1,
+        "candidate_ids": [
+            candidate_review_id(candidate) for candidate in cluster.items
+        ],
+        "representative_candidate_id": candidate_review_id(representative),
+        "source_revision_count": len(source_revisions),
+        "items": [public_candidate_dict(candidate) for candidate in cluster.items],
+    }
 
 
 def public_seed_stats(stats: dict[str, Any]) -> dict[str, Any]:
@@ -2542,6 +3811,86 @@ def _cursor_seed_preview_digest(payload: dict[str, Any]) -> str:
     return hashlib.sha256(canonical).hexdigest()
 
 
+def seed_preview_source_locator(agent: str, source_id: str) -> str:
+    """Return a stable non-path locator suitable for short-lived caches."""
+    provider = re.sub(r"[^a-z0-9_-]+", "-", agent.lower()).strip("-") \
+        or "unknown"
+    identity = hashlib.sha256(
+        str(source_id).encode("utf-8", errors="replace")
+    ).hexdigest()[:24]
+    return f"seed-source:{provider}:{identity}"
+
+
+def _cached_seed_source_dict(source: SeedSource) -> dict[str, Any]:
+    data = asdict(source)
+    data["id"] = seed_source_identity(source.id)
+    data["path"] = seed_preview_source_locator(source.agent, source.id)
+    data["text"] = ""
+    data["subject"] = redact_seed_text(source.subject)[0]
+    return data
+
+
+def _cached_seed_candidate_dict(
+    candidate: SeedCandidate,
+    *,
+    source_agents: dict[str, str],
+) -> dict[str, Any]:
+    data = asdict(candidate)
+    data["title"] = redact_seed_text(candidate.title)[0]
+    data["body"] = redact_seed_text(candidate.body)[0]
+    data["signals"] = [
+        redact_seed_text(signal)[0] for signal in candidate.signals
+    ]
+    data["source_ids"] = [
+        seed_source_identity(source_id) for source_id in candidate.source_ids
+    ]
+    data["source_paths"] = [
+        seed_preview_source_locator(
+            source_agents.get(
+                source_id, source_id.partition(":")[0] or "unknown",
+            ),
+            source_id,
+        )
+        for source_id in candidate.source_ids
+    ]
+    data["source_excerpts"] = [
+        redact_seed_text(excerpt)[0]
+        for excerpt in candidate.source_excerpts
+    ]
+    if candidate.workstream_key is not None:
+        data["workstream_key"] = redact_seed_text(
+            candidate.workstream_key
+        )[0]
+    return data
+
+
+def _validate_seed_preview_age(
+    body: dict[str, Any],
+    *,
+    label: str,
+    error_type: type[SeedPreviewError],
+    now: datetime | None = None,
+) -> None:
+    raw_created_at = body.get("created_at")
+    try:
+        created_at = datetime.fromisoformat(str(raw_created_at))
+    except (TypeError, ValueError) as exc:
+        raise error_type(f"{label} seed preview timestamp is missing or invalid") from exc
+    if created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=timezone.utc)
+    current = now or utc_now()
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    age = current.astimezone(timezone.utc) - created_at.astimezone(timezone.utc)
+    if age < timedelta(minutes=-5):
+        raise error_type(f"{label} seed preview timestamp is in the future")
+    if age > timedelta(hours=SEED_PREVIEW_MAX_AGE_HOURS):
+        raise error_type(
+            f"{label} seed preview expired after "
+            f"{SEED_PREVIEW_MAX_AGE_HOURS} hours; rerun preview"
+        )
+
+
 def write_cursor_seed_preview(
     *,
     project_path: str,
@@ -2557,30 +3906,50 @@ def write_cursor_seed_preview(
     llm_refinement_empty: bool = False,
 ) -> str:
     """Cache the exact reviewed Cursor set without retaining transcript text."""
+    cached_sources = list(sources)
+    cached_apply_sources = (
+        list(apply_sources) if apply_sources is not None else cached_sources
+    )
+    source_agents = {
+        source.id: source.agent
+        for source in [*cached_sources, *cached_apply_sources]
+    }
     payload = {
-        "version": 2,
+        "version": 4,
         "extractor_version": SEED_EXTRACTOR_VERSION,
-        "project": str(Path(project_path).resolve()),
-        "session_id": session_id,
+        "created_at": utc_now().isoformat(),
+        "project_fingerprint": project_scope_fingerprint(project_path),
+        "session_fingerprint": hashlib.sha256(
+            session_id.encode("utf-8", errors="replace")
+        ).hexdigest(),
         "sources": [
-            {**asdict(source), "text": ""}
-            for source in sources
+            _cached_seed_source_dict(source)
+            for source in cached_sources
         ],
         "apply_sources": [
-            {**asdict(source), "text": ""}
-            for source in (apply_sources if apply_sources is not None else sources)
+            _cached_seed_source_dict(source)
+            for source in cached_apply_sources
         ],
         "source_failure_codes": dict(source_failure_codes or {}),
         "workstream_scope": workstream_scope,
-        "llm_stats": dict(llm_stats or {}),
+        "llm_stats": public_seed_stats(dict(llm_stats or {})),
         "discovery_stats": dict(discovery_stats or {}),
         "llm_refinement_empty": bool(llm_refinement_empty),
-        "candidates": [asdict(candidate) for candidate in candidates],
+        "candidates": [
+            _cached_seed_candidate_dict(
+                candidate, source_agents=source_agents,
+            )
+            for candidate in candidates
+        ],
         "llm_estimate": int(llm_estimate),
     }
     digest = _cursor_seed_preview_digest(payload)
     body = {**payload, "preview_digest": digest}
     path = _cursor_seed_preview_path(project_path, session_id)
+    prune_cursor_seed_preview_cache(
+        project_path,
+        keep=SEED_PREVIEW_CACHE_MAX_FILES - 1,
+    )
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(body, indent=2) + "\n", encoding="utf-8")
     try:
@@ -2594,6 +3963,7 @@ def write_cursor_seed_preview(
 def load_cursor_seed_preview(
     *, project_path: str, session_id: str, preview_digest: str,
     include_apply_state: bool = False,
+    now: datetime | None = None,
 ) -> Any:
     """Load only the exact cached Cursor preview approved by digest."""
     if not re.fullmatch(r"[0-9a-f]{64}", preview_digest or ""):
@@ -2608,13 +3978,31 @@ def load_cursor_seed_preview(
     recorded_digest = body.pop("preview_digest", None)
     if recorded_digest != preview_digest or _cursor_seed_preview_digest(body) != preview_digest:
         raise CursorSeedPreviewError("Cursor seed preview digest does not match cached candidates")
-    if body.get("project") != str(Path(project_path).resolve()) \
-            or body.get("session_id") != session_id:
+    session_fingerprint = hashlib.sha256(
+        session_id.encode("utf-8", errors="replace")
+    ).hexdigest()
+    if body.get("project_fingerprint") != project_scope_fingerprint(
+        project_path
+    ) or body.get("session_fingerprint") != session_fingerprint:
         raise CursorSeedPreviewError("Cursor seed preview belongs to another project or session")
-    if body.get("extractor_version") != SEED_EXTRACTOR_VERSION:
+    if body.get("version") != 4 \
+            or body.get("extractor_version") != SEED_EXTRACTOR_VERSION:
         raise CursorSeedPreviewError(
             "seed extractor changed; rerun preview before apply"
         )
+    try:
+        _validate_seed_preview_age(
+            body,
+            label="Cursor",
+            error_type=CursorSeedPreviewError,
+            now=now,
+        )
+    except CursorSeedPreviewError:
+        try:
+            path.unlink()
+        except OSError:
+            pass
+        raise
     try:
         sources = [SeedSource(**item) for item in body.get("sources", [])]
         candidates = [SeedCandidate(**item) for item in body.get("candidates", [])]
@@ -2623,10 +4011,6 @@ def load_cursor_seed_preview(
         raise CursorSeedPreviewError("Cursor seed preview candidates are malformed") from exc
     if not include_apply_state:
         return sources, candidates, estimate
-    if body.get("version") != 2:
-        raise CursorSeedPreviewError(
-            "Cursor seed preview lacks exact apply-state metadata; rerun preview"
-        )
     try:
         apply_sources = [
             SeedSource(**item) for item in body.get("apply_sources", [])
@@ -2664,8 +4048,250 @@ def load_cursor_seed_preview(
 def remove_cursor_seed_preview(project_path: str, session_id: str) -> None:
     try:
         _cursor_seed_preview_path(project_path, session_id).unlink()
-    except FileNotFoundError:
+    except OSError:
         pass
+
+
+def _seed_preview_path(project_path: str, preview_digest: str) -> Path:
+    return (
+        paths.project_dir(project_path)
+        / f"seed_preview.{preview_digest[:24]}.json"
+    )
+
+
+def write_seed_preview(
+    *,
+    project_path: str,
+    source_choice: str,
+    sources: list[SeedSource],
+    candidates: list[SeedCandidate],
+    llm_estimate: int,
+    apply_sources: list[SeedSource],
+    source_failure_codes: dict[str, str],
+    workstream_scope: str,
+    llm_stats: dict[str, Any],
+    discovery_stats: dict[str, Any],
+    llm_refinement_empty: bool,
+) -> str:
+    """Cache one exact shared-provider review without retaining transcript text.
+
+    Exact current-session Cursor slash commands keep their separate
+    session-bound receipt cache.
+    """
+    cached_sources = list(sources)
+    cached_apply_sources = list(apply_sources)
+    source_agents = {
+        source.id: source.agent
+        for source in [*cached_sources, *cached_apply_sources]
+    }
+    payload = {
+        "version": 3,
+        "extractor_version": SEED_EXTRACTOR_VERSION,
+        "created_at": utc_now().isoformat(),
+        "project_fingerprint": project_scope_fingerprint(project_path),
+        "source_choice": source_choice,
+        "sources": [
+            _cached_seed_source_dict(source) for source in cached_sources
+        ],
+        "apply_sources": [
+            _cached_seed_source_dict(source)
+            for source in cached_apply_sources
+        ],
+        "source_failure_codes": dict(source_failure_codes),
+        "workstream_scope": workstream_scope,
+        "llm_stats": public_seed_stats(dict(llm_stats)),
+        "discovery_stats": dict(discovery_stats),
+        "llm_refinement_empty": bool(llm_refinement_empty),
+        "candidates": [
+            _cached_seed_candidate_dict(
+                candidate, source_agents=source_agents,
+            )
+            for candidate in candidates
+        ],
+        "llm_estimate": int(llm_estimate),
+    }
+    digest = _cursor_seed_preview_digest(payload)
+    body = {**payload, "preview_digest": digest}
+    path = _seed_preview_path(project_path, digest)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    prune_seed_preview_cache(
+        project_path,
+        keep=SEED_PREVIEW_CACHE_MAX_FILES - 1,
+    )
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(body, indent=2) + "\n", encoding="utf-8")
+    try:
+        tmp.chmod(0o600)
+    except OSError:
+        pass
+    os.replace(tmp, path)
+    return digest
+
+
+def load_seed_preview(
+    *,
+    project_path: str,
+    source_choice: str,
+    preview_digest: str,
+    now: datetime | None = None,
+) -> tuple[
+    list[SeedSource],
+    list[SeedCandidate],
+    int,
+    list[SeedSource],
+    dict[str, str],
+    str,
+    dict[str, Any],
+    dict[str, Any],
+    bool,
+]:
+    """Load an exact shared-provider review approved by digest."""
+    if not re.fullmatch(r"[0-9a-f]{64}", preview_digest or ""):
+        raise SeedPreviewError("seed preview digest is missing or invalid")
+    path = _seed_preview_path(project_path, preview_digest)
+    try:
+        body = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SeedPreviewError("seed preview cache is missing or unreadable") from exc
+    if not isinstance(body, dict):
+        raise SeedPreviewError("seed preview cache is malformed")
+    recorded_digest = body.pop("preview_digest", None)
+    if recorded_digest != preview_digest \
+            or _cursor_seed_preview_digest(body) != preview_digest:
+        raise SeedPreviewError("seed preview digest does not match cached candidates")
+    if body.get("project_fingerprint") != project_scope_fingerprint(project_path) \
+            or body.get("source_choice") != source_choice:
+        raise SeedPreviewError("seed preview belongs to another project or source choice")
+    if body.get("version") != 3 \
+            or body.get("extractor_version") != SEED_EXTRACTOR_VERSION:
+        raise SeedPreviewError("seed extractor changed; rerun preview before apply")
+    try:
+        _validate_seed_preview_age(
+            body,
+            label="Reviewed",
+            error_type=SeedPreviewError,
+            now=now,
+        )
+    except SeedPreviewError:
+        try:
+            path.unlink()
+        except OSError:
+            pass
+        raise
+    try:
+        sources = [SeedSource(**item) for item in body.get("sources", [])]
+        candidates = [SeedCandidate(**item) for item in body.get("candidates", [])]
+        llm_estimate = int(body.get("llm_estimate", 0))
+        apply_sources = [
+            SeedSource(**item) for item in body.get("apply_sources", [])
+        ]
+        source_failure_codes = {
+            str(key): str(value)
+            for key, value in dict(body.get("source_failure_codes") or {}).items()
+        }
+        workstream_scope = str(body["workstream_scope"])
+        llm_stats = dict(body.get("llm_stats") or {})
+        discovery_stats = dict(body.get("discovery_stats") or {})
+        refinement_empty = bool(body.get("llm_refinement_empty", False))
+    except (KeyError, TypeError, ValueError) as exc:
+        raise SeedPreviewError("seed preview apply state is malformed") from exc
+    if not workstream_scope or any(
+        code not in {"extractor_failed", "source_unavailable", "source_invalid"}
+        for code in source_failure_codes.values()
+    ):
+        raise SeedPreviewError("seed preview apply state is invalid")
+    return (
+        sources,
+        candidates,
+        llm_estimate,
+        apply_sources,
+        source_failure_codes,
+        workstream_scope,
+        llm_stats,
+        discovery_stats,
+        refinement_empty,
+    )
+
+
+def remove_seed_preview(project_path: str, preview_digest: str) -> None:
+    try:
+        _seed_preview_path(project_path, preview_digest).unlink()
+    except OSError:
+        pass
+
+
+def _prune_seed_preview_pattern(
+    project_path: str,
+    *,
+    pattern: str,
+    keep: int,
+    now: datetime | None,
+) -> None:
+    parent = paths.project_dir(project_path)
+    current = now or utc_now()
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    retained: list[tuple[datetime, Path]] = []
+    try:
+        cache_paths = list(parent.glob(pattern))
+    except OSError:
+        return
+    for path in cache_paths:
+        try:
+            body = json.loads(path.read_text(encoding="utf-8"))
+            created_at = datetime.fromisoformat(str(body.get("created_at")))
+            if created_at.tzinfo is None:
+                created_at = created_at.replace(tzinfo=timezone.utc)
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            try:
+                path.unlink()
+            except OSError:
+                pass
+            continue
+        age = current.astimezone(timezone.utc) - created_at.astimezone(timezone.utc)
+        if age > timedelta(hours=SEED_PREVIEW_MAX_AGE_HOURS):
+            try:
+                path.unlink()
+            except OSError:
+                pass
+            continue
+        retained.append((created_at, path))
+    retained.sort(key=lambda item: item[0], reverse=True)
+    for _created_at, path in retained[max(0, keep):]:
+        try:
+            path.unlink()
+        except OSError:
+            pass
+
+
+def prune_seed_preview_cache(
+    project_path: str,
+    *,
+    keep: int = SEED_PREVIEW_CACHE_MAX_FILES,
+    now: datetime | None = None,
+) -> None:
+    """Bound abandoned generic review metadata and delete expired previews."""
+    _prune_seed_preview_pattern(
+        project_path,
+        pattern="seed_preview.*.json",
+        keep=keep,
+        now=now,
+    )
+
+
+def prune_cursor_seed_preview_cache(
+    project_path: str,
+    *,
+    keep: int = SEED_PREVIEW_CACHE_MAX_FILES,
+    now: datetime | None = None,
+) -> None:
+    """Bound abandoned Cursor review metadata and delete expired previews."""
+    _prune_seed_preview_pattern(
+        project_path,
+        pattern="cursor_seed_preview.*.json",
+        keep=keep,
+        now=now,
+    )
 
 
 def project_scope_fingerprint(project_path: str) -> str:
@@ -2722,7 +4348,7 @@ def seed_source_import_key(
         "version": SEED_EXTRACTOR_VERSION,
         "project": project_scope_fingerprint(project_path),
         "workstream_scope": workstream_scope,
-        "source_id": source.id,
+        "source_id": seed_source_identity(source.id),
         "content_digest": source.content_digest,
     }
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
@@ -2732,15 +4358,42 @@ def seed_source_import_key(
 def split_applied_sources(
     sources: list[SeedSource], *, project_path: str, workstream_scope: str,
 ) -> tuple[list[SeedSource], list[SeedSource]]:
-    """Read an existing ledger without creating/migrating a preview-time DB."""
+    """Read an existing ledger without creating or migrating preview-time state.
+
+    A genuinely absent database or ledger table is a valid first run. Once a
+    database exists, read failures are ambiguous and must stop extraction so a
+    corrupt or inaccessible ledger cannot silently trigger duplicate imports.
+    """
     if not sources:
         return [], []
     try:
         db_file = paths.db_path(project_path)
-    except Exception:
-        return sources, []
-    if not db_file.is_file():
-        return sources, []
+    except Exception as exc:
+        raise SeedSourceLedgerError(
+            "The seed source ledger location could not be resolved safely."
+        ) from exc
+    try:
+        mode = db_file.stat().st_mode
+    except FileNotFoundError:
+        try:
+            db_file.lstat()
+        except FileNotFoundError:
+            return sources, []
+        except OSError as exc:
+            raise SeedSourceLedgerError(
+                "The seed source ledger could not be inspected safely."
+            ) from exc
+        raise SeedSourceLedgerError(
+            "The seed source ledger points to unavailable existing state."
+        )
+    except OSError as exc:
+        raise SeedSourceLedgerError(
+            "The seed source ledger could not be inspected safely."
+        ) from exc
+    if not stat.S_ISREG(mode):
+        raise SeedSourceLedgerError(
+            "The seed source ledger location is not a readable database file."
+        )
     conn: sqlite3.Connection | None = None
     try:
         conn = sqlite3.connect(db_file.resolve().as_uri() + "?mode=ro", uri=True)
@@ -2767,8 +4420,10 @@ def split_applied_sources(
         pending = [source for key, source in keyed.items() if key not in applied_keys]
         applied = [source for key, source in keyed.items() if key in applied_keys]
         return pending, applied
-    except sqlite3.Error:
-        return sources, []
+    except (OSError, sqlite3.Error) as exc:
+        raise SeedSourceLedgerError(
+            "The existing seed source ledger is unavailable or unreadable."
+        ) from exc
     finally:
         if conn is not None:
             conn.close()
@@ -2781,7 +4436,8 @@ def candidate_import_key(
     target_workstream_id: int | None = None,
 ) -> str:
     refs = sorted(
-        f"{ref['id']}:{ref['digest']}" for ref in candidate_source_refs(candidate)
+        f"{seed_source_identity(ref['id'])}:{ref['digest']}"
+        for ref in candidate_source_refs(candidate)
     )
     payload = {
         "version": SEED_EXTRACTOR_VERSION,
@@ -2822,7 +4478,8 @@ def candidate_claim_key(
 
 def candidate_source_fingerprint(candidate: SeedCandidate) -> str:
     refs = sorted(
-        f"{ref['id']}:{ref['digest']}" for ref in candidate_source_refs(candidate)
+        f"{seed_source_identity(ref['id'])}:{ref['digest']}"
+        for ref in candidate_source_refs(candidate)
     )
     return hashlib.sha256("\n".join(refs).encode("utf-8")).hexdigest()
 
@@ -3033,6 +4690,7 @@ def apply_candidates(
     sources: list[SeedSource] | None = None,
     workstream_scope: str = "project",
     source_failure_codes: dict[str, str] | None = None,
+    finalize_sources: bool = True,
 ) -> SeedApplyResult:
     import heal  # noqa: WPS433
     import db  # noqa: WPS433
@@ -3071,7 +4729,9 @@ def apply_candidates(
 
     def mark_candidate_sources(candidate: SeedCandidate, error_code: str) -> None:
         for ref in candidate_source_refs(candidate):
-            source_key = source_key_by_ref.get((ref["id"], ref["digest"]))
+            source_key = source_key_by_ref.get(
+                (seed_source_identity(ref["id"]), ref["digest"])
+            )
             if source_key is not None:
                 source_error_by_key.setdefault(source_key, error_code)
 
@@ -3112,7 +4772,7 @@ def apply_candidates(
                     row = db.begin_seed_source_import(
                         conn,
                         import_key=source_key,
-                        source_id=source.id,
+                        source_id=seed_source_identity(source.id),
                         source_agent=source.agent,
                         source_path=source.path,
                         source_mtime=source.mtime,
@@ -3127,7 +4787,9 @@ def apply_candidates(
                         retry_pending=True,
                     )
                     source_rows[source_key] = row
-                    source_key_by_ref[(source.id, source.content_digest)] = source_key
+                    source_key_by_ref[
+                        (seed_source_identity(source.id), source.content_digest)
+                    ] = source_key
                     revision_token = source_revision_token(source)
                     if revision_token in (source_failure_codes or {}):
                         source_error_by_key[source_key] = (
@@ -3252,9 +4914,14 @@ def apply_candidates(
                         continue
 
                     source_import_keys = [
-                        source_key_by_ref[(ref["id"], ref["digest"])]
+                        source_key_by_ref[
+                            (seed_source_identity(ref["id"]), ref["digest"])
+                        ]
                         for ref in candidate_source_refs(candidate)
-                        if (ref["id"], ref["digest"]) in source_key_by_ref
+                        if (
+                            seed_source_identity(ref["id"]),
+                            ref["digest"],
+                        ) in source_key_by_ref
                     ]
                     ledger_row: dict[str, Any] | None = None
                     node_id: int | None = None
@@ -3328,7 +4995,10 @@ def apply_candidates(
                             extractor_version=SEED_EXTRACTOR_VERSION,
                             observed_at=latest_candidate_observed_at(candidate),
                             source_import_keys=source_import_keys,
-                            source_ids=candidate.source_ids,
+                            source_ids=[
+                                seed_source_identity(source_id)
+                                for source_id in candidate.source_ids
+                            ],
                             workstream_key=key,
                             workstream_id=(
                                 None if candidate.kind == "workstream"
@@ -3438,6 +5108,9 @@ def apply_candidates(
                             })
                         continue
                     source_error = source_error_by_key.get(source_key)
+                    if not finalize_sources and not source_error:
+                        result.pending_source_import_keys.append(source_key)
+                        continue
                     source_state = "failed" if source_error else "applied"
                     source_outcomes[source_key] = (source_state, source_error)
                     if source_error:
@@ -3479,8 +5152,86 @@ def clip(text: str, limit: int) -> str:
     return text[: max(0, limit - 15)].rstrip() + "...[truncated]"
 
 
+def emit_seed_cli_failure(
+    args: argparse.Namespace,
+    *,
+    code: str,
+    message: str,
+) -> None:
+    if args.format == "json":
+        print(json.dumps({"ok": False, "error": code}))
+        print(message, file=sys.stderr)
+    else:
+        print(message, file=sys.stderr)
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    if args.dismiss_all and not args.apply:
+        emit_seed_cli_failure(
+            args,
+            code="invalid_seed_arguments",
+            message="--dismiss-all requires --apply.",
+        )
+        return 2
+    if args.dismiss_all and not args.preview_digest:
+        emit_seed_cli_failure(
+            args,
+            code="invalid_seed_arguments",
+            message=(
+                "--dismiss-all requires the exact --preview-digest from the "
+                "reviewed preview."
+            ),
+        )
+        return 2
+    if args.dismiss_all and (
+        args.yes or args.approve_candidate or args.approve_cluster
+    ):
+        emit_seed_cli_failure(
+            args,
+            code="invalid_seed_arguments",
+            message=(
+                "--dismiss-all cannot be combined with --yes, "
+                "--approve-candidate, or --approve-cluster."
+            ),
+        )
+        return 2
+    if args.yes and (args.approve_candidate or args.approve_cluster):
+        emit_seed_cli_failure(
+            args,
+            code="invalid_seed_arguments",
+            message=(
+                "--yes cannot be combined with --approve-candidate or "
+                "--approve-cluster."
+            ),
+        )
+        return 2
+    if (args.approve_candidate or args.approve_cluster) and not args.apply:
+        emit_seed_cli_failure(
+            args,
+            code="invalid_seed_arguments",
+            message="--approve-candidate and --approve-cluster require --apply.",
+        )
+        return 2
+    if args.preview_digest and not args.apply:
+        emit_seed_cli_failure(
+            args,
+            code="invalid_seed_arguments",
+            message="--preview-digest is valid only with --apply.",
+        )
+        return 2
+    if (args.approve_candidate or args.approve_cluster) \
+            and not args.preview_digest:
+        emit_seed_cli_failure(
+            args,
+            code="invalid_seed_arguments",
+            message=(
+                "Scoped --approve-candidate/--approve-cluster requires the exact "
+                "--preview-digest from the reviewed preview. Alternatively run "
+                "--apply without selectors and choose IDs in that same prompt."
+            ),
+        )
+        return 2
     disabled = no_llm_disabled_reason(args)
     if disabled:
         print(disabled, file=sys.stderr)
@@ -3527,13 +5278,23 @@ def main(argv: list[str] | None = None) -> int:
     args.sources_deferred = 0
     args.llm_stats = {}
     args.discovery_stats = {}
-    cached_cursor_apply = args.source == "cursor" and args.apply
+    args.preview_cache_unavailable = False
+    cursor_session_preview = args.source == "cursor"
+    cached_cursor_apply = cursor_session_preview and args.apply
+    cached_seed_apply = (
+        not cursor_session_preview
+        and args.apply
+        and bool(args.preview_digest)
+    )
     if cached_cursor_apply:
         if not args.cursor_session_id or not args.preview_digest:
-            print(
-                "Cursor seed apply requires --cursor-session-id and the exact "
-                "--preview-digest returned by the reviewed preview.",
-                file=sys.stderr,
+            emit_seed_cli_failure(
+                args,
+                code="invalid_seed_arguments",
+                message=(
+                    "Cursor seed apply requires --cursor-session-id and the exact "
+                    "--preview-digest returned by the reviewed preview."
+                ),
             )
             return 2
         try:
@@ -3554,13 +5315,65 @@ def main(argv: list[str] | None = None) -> int:
                 include_apply_state=True,
             )
         except CursorSeedPreviewError as exc:
-            print(f"Cursor seed apply unavailable: {exc}", file=sys.stderr)
+            emit_seed_cli_failure(
+                args,
+                code="seed_preview_unavailable",
+                message=f"Cursor seed apply unavailable: {exc}",
+            )
             return 2
         if cached_scope != scope_key:
-            print(
-                "Cursor seed apply scope does not match the reviewed preview; "
-                "rerun preview with the same workstream options.",
-                file=sys.stderr,
+            emit_seed_cli_failure(
+                args,
+                code="seed_preview_scope_mismatch",
+                message=(
+                    "Cursor seed apply scope does not match the reviewed preview; "
+                    "rerun preview with the same workstream options."
+                ),
+            )
+            return 2
+        args.llm_refinement_empty = cached_refinement_empty
+        args.llm_stats = {**cached_llm_stats, "cached_preview": True}
+        args.discovery_stats = cached_discovery_stats
+        args.sources_selected = len(sources)
+        attempted_tokens = {
+            source_revision_token(source) for source in apply_sources
+        }
+        args.sources_deferred = sum(
+            source_revision_token(source) not in attempted_tokens
+            for source in sources
+        )
+    elif cached_seed_apply:
+        try:
+            (
+                sources,
+                candidates,
+                llm_estimate,
+                apply_sources,
+                apply_failure_codes,
+                cached_scope,
+                cached_llm_stats,
+                cached_discovery_stats,
+                cached_refinement_empty,
+            ) = load_seed_preview(
+                project_path=args.project,
+                source_choice=args.source,
+                preview_digest=args.preview_digest,
+            )
+        except SeedPreviewError as exc:
+            emit_seed_cli_failure(
+                args,
+                code="seed_preview_unavailable",
+                message=f"Seed apply unavailable: {exc}",
+            )
+            return 2
+        if cached_scope != scope_key:
+            emit_seed_cli_failure(
+                args,
+                code="seed_preview_scope_mismatch",
+                message=(
+                    "Seed apply scope does not match the reviewed preview; rerun "
+                    "preview with the same workstream options."
+                ),
             )
             return 2
         args.llm_refinement_empty = cached_refinement_empty
@@ -3593,11 +5406,22 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Cursor seed source unavailable: {e}", file=sys.stderr)
             return 2
         if not args.force_reimport:
-            sources, already_applied = split_applied_sources(
-                sources,
-                project_path=args.project,
-                workstream_scope=scope_key,
-            )
+            try:
+                sources, already_applied = split_applied_sources(
+                    sources,
+                    project_path=args.project,
+                    workstream_scope=scope_key,
+                )
+            except SeedSourceLedgerError:
+                emit_seed_cli_failure(
+                    args,
+                    code="seed_source_ledger_unavailable",
+                    message=(
+                        "Seed extraction stopped because the existing source "
+                        "ledger could not be read safely."
+                    ),
+                )
+                return 1
             args.sources_skipped_unchanged = len(already_applied)
 
         args.sources_selected = len(sources)
@@ -3611,11 +5435,27 @@ def main(argv: list[str] | None = None) -> int:
             max_llm_calls=args.max_llm_calls,
         ) if args.llm == "yes" else 0
 
+        if args.llm == "yes" and call_sources \
+                and not prepare_llm_budget_storage(args.project):
+            if args.format == "json":
+                print(json.dumps({
+                    "ok": False,
+                    "error": "budget_storage_unavailable",
+                }))
+            return 1
         if not confirm_source_use(args, call_sources):
-            print("Initial-KB extraction cancelled before any LLM calls.")
+            emit_seed_cli_failure(
+                args,
+                code="source_consent_cancelled",
+                message="Initial-KB extraction cancelled before any LLM calls.",
+            )
             return 1
         if not confirm_llm_budget(args, len(call_sources)):
-            print("Seed pass cancelled before any LLM calls.")
+            emit_seed_cli_failure(
+                args,
+                code="llm_budget_cancelled",
+                message="Seed pass cancelled before any LLM calls.",
+            )
             return 1
 
         llm = []
@@ -3629,6 +5469,13 @@ def main(argv: list[str] | None = None) -> int:
                 focus_workstream=args.new_workstream,
                 stats=args.llm_stats,
             )
+            if args.llm_stats.get("budget_storage_unavailable"):
+                if args.format == "json":
+                    print(json.dumps({
+                        "ok": False,
+                        "error": "budget_storage_unavailable",
+                    }))
+                return 1
         if args.llm == "yes":
             attempted_revisions = set(
                 args.llm_stats.get("source_revision_tokens", [])
@@ -3692,58 +5539,202 @@ def main(argv: list[str] | None = None) -> int:
                 "failed_source_revision_tokens", []
             )
         }
-        if args.source == "cursor":
+        if cursor_session_preview:
             if not args.cursor_session_id:
                 print("Cursor seed preview requires --cursor-session-id.", file=sys.stderr)
                 return 2
-            args.preview_digest = write_cursor_seed_preview(
-                project_path=args.project,
-                session_id=args.cursor_session_id,
-                sources=sources,
-                candidates=candidates,
-                llm_estimate=llm_estimate,
-                apply_sources=apply_sources,
-                source_failure_codes=apply_failure_codes,
-                workstream_scope=scope_key,
-                llm_stats=args.llm_stats,
-                discovery_stats=args.discovery_stats,
-                llm_refinement_empty=args.llm_refinement_empty,
-            )
+            try:
+                args.preview_digest = write_cursor_seed_preview(
+                    project_path=args.project,
+                    session_id=args.cursor_session_id,
+                    sources=sources,
+                    candidates=candidates,
+                    llm_estimate=llm_estimate,
+                    apply_sources=apply_sources,
+                    source_failure_codes=apply_failure_codes,
+                    workstream_scope=scope_key,
+                    llm_stats=args.llm_stats,
+                    discovery_stats=args.discovery_stats,
+                    llm_refinement_empty=args.llm_refinement_empty,
+                )
+            except OSError:
+                emit_seed_cli_failure(
+                    args,
+                    code="seed_preview_cache_unavailable",
+                    message=(
+                        "Cursor seed preview stopped because its exact-review "
+                        "cache could not be written safely."
+                    ),
+                )
+                return 1
+        elif candidates and not args.apply:
+            try:
+                args.preview_digest = write_seed_preview(
+                    project_path=args.project,
+                    source_choice=args.source,
+                    sources=sources,
+                    candidates=candidates,
+                    llm_estimate=llm_estimate,
+                    apply_sources=apply_sources,
+                    source_failure_codes=apply_failure_codes,
+                    workstream_scope=scope_key,
+                    llm_stats=args.llm_stats,
+                    discovery_stats=args.discovery_stats,
+                    llm_refinement_empty=args.llm_refinement_empty,
+                )
+            except OSError:
+                args.preview_digest = None
+                args.preview_cache_unavailable = True
+                print(
+                    "Seed preview remains available, but exact-preview caching "
+                    "is unavailable at the configured Latch vault. Scoped "
+                    "non-interactive apply is disabled; use one interactive "
+                    "--apply run or repair vault write access.",
+                    file=sys.stderr,
+                )
 
-    output = render_json(args=args, sources=sources, candidates=candidates, llm_estimate=llm_estimate) \
-        if args.format == "json" else render_text(
-            args=args, sources=sources, candidates=candidates, llm_estimate=llm_estimate,
+    if args.dismiss_all and not candidates:
+        emit_seed_cli_failure(
+            args,
+            code="seed_approval_selection_unavailable",
+            message=(
+                "--dismiss-all requires a reviewed preview containing at least "
+                "one candidate."
+            ),
         )
-    print(output, end="")
+        return 2
 
+    output = (
+        render_json(
+            args=args,
+            sources=sources,
+            candidates=candidates,
+            llm_estimate=llm_estimate,
+        )
+        if args.format == "json"
+        else render_text(
+            args=args,
+            sources=sources,
+            candidates=candidates,
+            llm_estimate=llm_estimate,
+        )
+    )
     if not args.apply:
+        print(output, end="")
         return 0
-    if args.llm_refinement_empty and not candidates:
-        print("Nothing was applied because LLM extraction did not complete successfully.")
-        return 1
-    if candidates and not args.yes and not _prompt_yes_no(
-        f"Write {len(candidates)} candidate(s) to the KB as staging evidence",
-        default=False,
+    status_stream = sys.stderr if args.format == "json" else sys.stdout
+    if args.format == "text":
+        print(output, end="")
+    elif (
+        candidates
+        and not args.yes
+        and not args.dismiss_all
+        and not args.approve_candidate
+        and not args.approve_cluster
     ):
-        print("Seed candidates were not written.")
+        # Interactive JSON apply still needs to expose the review IDs, while
+        # stdout remains reserved for exactly one final machine receipt.
+        print(output, end="", file=sys.stderr)
+    if args.llm_refinement_empty and not candidates:
+        emit_seed_cli_failure(
+            args,
+            code="llm_extraction_incomplete",
+            message=(
+                "Nothing was applied because LLM extraction did not complete "
+                "successfully."
+            ),
+        )
         return 1
+
+    approved_candidates = list(candidates)
+    selection_confirmed = bool(args.yes) or not candidates
+    if args.dismiss_all:
+        approved_candidates = []
+        selection_confirmed = True
+    elif args.approve_candidate or args.approve_cluster:
+        try:
+            approved_candidates, _selection_covers_all = resolve_approval_selection(
+                candidates,
+                candidate_ids=args.approve_candidate,
+                cluster_ids=args.approve_cluster,
+            )
+        except SeedApprovalError as exc:
+            emit_seed_cli_failure(
+                args,
+                code="seed_approval_selection_unavailable",
+                message=f"Seed approval selection unavailable: {exc}",
+            )
+            return 2
+        selection_confirmed = True
+    elif candidates and not args.yes:
+        approved_candidates, selection_finalized = prompt_approval_selection(
+            candidates,
+            stream=status_stream,
+        )
+        selection_confirmed = bool(approved_candidates) or selection_finalized
+    if candidates and not approved_candidates and not selection_confirmed:
+        emit_seed_cli_failure(
+            args,
+            code="seed_approval_cancelled",
+            message="Seed candidates were not written because approval was cancelled.",
+        )
+        return 1
+    dismissed_all = bool(
+        args.dismiss_all
+        or (candidates and selection_confirmed and not approved_candidates)
+    )
     try:
         applied = apply_candidates(
-            candidates,
+            approved_candidates,
             project_path=args.project,
             existing_workstream_id=args.workstream_id,
             sources=apply_sources,
             workstream_scope=scope_key,
             source_failure_codes=apply_failure_codes,
+            # Choosing a scoped subset is a completed review: selected items
+            # are approved and every unselected item is intentionally dismissed
+            # for these exact source revisions.
+            finalize_sources=True,
         )
     except SeedWriteBlocked as exc:
-        print(f"Initial-KB apply blocked ({exc.reason}): {exc}", file=sys.stderr)
+        emit_seed_cli_failure(
+            args,
+            code=exc.reason,
+            message=f"Initial-KB apply blocked ({exc.reason}): {exc}",
+        )
         return 1
     if isinstance(applied, list):  # compatibility for embedders/tests of the old helper
         applied = SeedApplyResult(inserted_ids=list(applied))
     if cached_cursor_apply and args.cursor_session_id and applied.complete:
         remove_cursor_seed_preview(args.project, args.cursor_session_id)
-    print(apply_success_message(applied, candidates))
+    if cached_seed_apply and args.preview_digest and applied.complete:
+        remove_seed_preview(args.project, args.preview_digest)
+    print(
+        apply_success_message(applied, approved_candidates),
+        file=status_stream,
+    )
+    if args.format == "json":
+        final_payload = json.loads(output)
+        approved_demo = (
+            catch_demo_candidate(approved_candidates)
+            if applied.complete else None
+        )
+        final_payload.update({
+            "ok": applied.complete,
+            "apply": True,
+            "write_performed": True,
+            "catch_demo": (
+                catch_demo_payload(approved_demo) if approved_demo else None
+            ),
+            "apply_receipt": public_apply_receipt(
+                applied,
+                approved_candidates=approved_candidates,
+                dismissed_all=dismissed_all,
+            ),
+        })
+        if not applied.complete:
+            final_payload["error"] = "apply_incomplete"
+        print(json.dumps(final_payload, indent=2))
     return 0 if applied.complete else 1
 
 

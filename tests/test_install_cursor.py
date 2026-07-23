@@ -381,6 +381,12 @@ def test_current_session_workflows_use_prompt_time_id_handoff():
         _assert("LATCH_PYTHON" in text and ".cursor/mcp.json" in text, path)
         if "latch-seed" in str(path):
             _assert("preview_digest" in text and "second model call" in text, path)
+            _assert("--approve-candidate" in text and "--approve-cluster" in text, path)
+            _assert("/latch-seed apply all" in text
+                    and "/latch-seed apply none" in text
+                    and "/latch-seed apply <ID> [<ID> ...]" in text,
+                    path)
+            _assert("--dismiss-all" in text and "nonempty" in text, path)
             _assert("apply Shell call" in text and "first and only attempt" in text, path)
     print("PASS current_session_workflows_use_prompt_time_id_handoff")
 
@@ -499,6 +505,12 @@ def test_cursor_commands_sync_status_and_remove():
         _assert("--source cursor" in seed_command and "--format json" in seed_command
                 and "Never add `--yes`" in seed_command,
                 seed_command)
+        _assert("/latch-seed apply all" in seed_command
+                and "/latch-seed apply none" in seed_command
+                and "/latch-seed apply <ID> [<ID> ...]" in seed_command,
+                seed_command)
+        _assert("--dismiss-all" in seed_command and "nonempty" in seed_command,
+                seed_command)
         pm_command = (commands / "latch-pm.md").read_text(encoding="utf-8")
         _assert("Latch operation id: latch-pm prepare" in pm_command, pm_command)
         _assert("latch_pm_preview" in pm_command and "/latch-pm apply" in pm_command,
@@ -599,8 +611,14 @@ def test_cursor_skills_sync_status_remove_and_plugin_manifest():
         seed_body = seed_skill.read_text(encoding="utf-8")
         _assert("Latch operation id: latch-seed preview" in seed_body, seed_body)
         _assert("--cursor-session-id" in seed_body and "--format json" in seed_body
-                and "/latch-seed apply" in seed_body,
+                and "/latch-seed apply all" in seed_body,
                 seed_body)
+        _assert("/latch-seed apply none" in seed_body and "--dismiss-all" in seed_body,
+                seed_body)
+        _assert("nonempty" in seed_body, seed_body)
+        _assert("--approve-candidate" in seed_body and "--approve-cluster" in seed_body,
+                seed_body)
+        _assert("/latch-seed apply <ID> [<ID> ...]" in seed_body, seed_body)
         compact_body = (skills / "source-command-latch-compact" / "SKILL.md").read_text(
             encoding="utf-8",
         )

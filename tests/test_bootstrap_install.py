@@ -565,17 +565,23 @@ def test_bootstrap_script_contracts_and_syntax():
     assert "LATCH_INSTALL_REF=vX.Y.Z bash" in readme
     assert "))) -Ref vX.Y.Z" in readme
     runtime_inputs = (ROOT / "requirements-runtime.txt").read_text(encoding="utf-8")
+    ci_inputs = (ROOT / "requirements-ci.txt").read_text(encoding="utf-8")
     runtime_lock = (ROOT / "requirements.lock").read_text(encoding="utf-8")
     ci_lock = (ROOT / "requirements-ci.lock").read_text(encoding="utf-8")
     for requirement in (
         "mcp==1.28.1",
+        "filelock==3.29.7",
         "onnxruntime==1.23.2",
         "tokenizers==0.22.2",
         "numpy==2.4.6",
         "sqlite-vec==0.1.9",
     ):
         assert requirement in runtime_inputs
+        assert requirement in ci_inputs
         assert requirement in runtime_lock
+        assert requirement in ci_lock
+    compatibility_inputs = (ROOT / "requirements.txt").read_text(encoding="utf-8")
+    assert "filelock>=3.29.7,<4" in compatibility_inputs
     for test_requirement in ("pytest==", "pytest-asyncio==", "iniconfig==", "pluggy=="):
         assert test_requirement not in runtime_lock
     lock_pattern = re.compile(r"^([a-z0-9][a-z0-9._-]*)==([^ ;\\]+)", re.MULTILINE)

@@ -1172,9 +1172,15 @@ def test_cursor_cache_round_trips_apply_state_and_main_rejects_scope_mismatch(
         discovery_stats,
         refinement_empty,
     ) = loaded
-    assert [item.id for item in loaded_sources] == [first.id, second.id]
+    assert [item.id for item in loaded_sources] == [
+        seed.seed_source_identity(first.id),
+        seed.seed_source_identity(second.id),
+    ]
     assert all(item.text == "" for item in loaded_sources)
-    assert loaded_candidates == [candidate]
+    assert len(loaded_candidates) == 1
+    assert seed.candidate_import_key(
+        loaded_candidates[0], project_path=str(project),
+    ) == seed.candidate_import_key(candidate, project_path=str(project))
     assert [item.content_digest for item in apply_sources] == [
         first.content_digest, second.content_digest,
     ]
@@ -1273,7 +1279,7 @@ def test_force_reimport_allows_touched_mtime_but_failed_force_returns_nonzero(
     captured = capsys.readouterr()
     assert calls == 1
     assert rc == 1
-    assert "did not complete successfully" in captured.out
+    assert "did not complete successfully" in captured.err
 
 
 def test_source_batch_finalization_rolls_back_every_outcome_on_one_failure(tmp_path):
@@ -1771,7 +1777,10 @@ def test_pending_workstream_checkpoint_is_reused_by_stable_key(
             project_path=str(project.resolve()),
             extractor_name="latch_seed",
             extractor_version=seed.SEED_EXTRACTOR_VERSION,
-            source_ids=original_parent.source_ids,
+            source_ids=[
+                seed.seed_source_identity(source_id)
+                for source_id in original_parent.source_ids
+            ],
             workstream_key=key,
         )
         parent_id = db.insert_node(
@@ -1923,11 +1932,12 @@ def test_source_ids_are_redacted_on_model_report_and_durable_surfaces(
     try:
         node = db.get_node(conn, applied.inserted_ids[0])
         assert node is not None and secret not in node["body"]
-        # Exact raw provenance remains local and structured, never retrieval text.
+        # Durable identity is opaque and stable across direct and cached apply.
         ledger_id = conn.execute(
             "SELECT source_id FROM seed_source_import"
         ).fetchone()[0]
-        assert ledger_id == source.id
+        assert ledger_id == seed.seed_source_identity(source.id)
+        assert secret not in ledger_id
     finally:
         conn.close()
 
