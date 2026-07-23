@@ -541,7 +541,16 @@ def run_compaction(
         # Budget gate — the backstop against auto-hook runaways. Check AND
         # reserve in one shot so the count is accurate even if the compaction
         # itself fails afterward (tokens were still spent).
-        allowed, state = budget.check_and_record(project_path, category="nonheal")
+        try:
+            allowed, state = budget.check_and_record(project_path, category="nonheal")
+        except OSError as exc:
+            _log(f"budget state unavailable for {project_path}: {exc} — "
+                 f"compaction blocked without spend")
+            return {
+                "ok": False,
+                "reason": "budget_state_error",
+                "session_id": session_id,
+            }
         if not allowed:
             _log(f"budget cap hit for {project_path}: "
                  f"{state['count_nonheal']}/day non-heal — "

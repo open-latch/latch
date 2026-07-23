@@ -52,11 +52,34 @@ The preview attempt does not arm apply. Only the matching successful JSON tool
 result recorded by `postToolUse` does. A failed, malformed, missing, or
 cross-session result requires a new preview.
 
-Only after the user approves the displayed candidates, ask them to reply
-exactly `/latch-seed apply`, then rerun the same JSON command with
-`--preview-digest "<PREVIEW_DIGEST>" --apply --yes`. Use the exact digest
-from the approved preview. Apply loads that cached candidate set and makes no
-second model call; a missing, changed, or stale digest must fail closed.
+Only after the user reviews the displayed candidates, ask for one exact
+selection-bearing confirmation:
+
+- Whole report: reply exactly `/latch-seed apply all`.
+- Reject the whole nonempty report: reply exactly `/latch-seed apply none`.
+- Scoped approval: reply exactly `/latch-seed apply <ID> [<ID> ...]`, using
+  each approved `cand-...` and/or `cluster-...` review ID as a separate
+  space-delimited token. For example:
+  `/latch-seed apply cand-0123456789ab cluster-abcdef012345`.
+
+Do not accept bare `/latch-seed apply`, prose standing in for IDs, duplicated
+IDs, or `all`/`none` mixed with IDs. The managed receipt validates every scoped
+ID against the bound preview and records only that exact selection. A `none`
+confirmation is valid only for a successful preview containing at least one
+candidate.
+
+For `/latch-seed apply all`, rerun the same JSON command with
+`--preview-digest "<PREVIEW_DIGEST>" --apply --yes`. For
+`/latch-seed apply none`, rerun it with
+`--preview-digest "<PREVIEW_DIGEST>" --apply --dismiss-all`; do not add `--yes`
+or any approval selector. For a scoped confirmation, omit `--yes` and translate
+exactly the confirmed tokens to
+`--approve-candidate "<CANDIDATE_ID>"` and/or
+`--approve-cluster "<CLUSTER_ID>"`; do not add, remove, or substitute IDs.
+Unselected items are dismissed for those exact source revisions. Use the exact
+digest from the approved preview. Apply loads that cached candidate set and
+makes no second model call; a missing, changed, stale digest, malformed
+confirmation, or unknown ID must fail closed.
 On this apply Shell call, again request Cursor
 `required_permissions: ["all"]` on the first and only attempt: apply writes
 staging KB state outside the workspace, and its one-shot receipt cannot be

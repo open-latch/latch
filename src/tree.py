@@ -611,7 +611,11 @@ def build_tree(
 
         # CACHE MISS — generate via LLM (budget-gated).
         if use_llm:
-            allowed, _ = budget.check_and_record(project_path, category="nonheal")
+            try:
+                allowed, _ = budget.check_and_record(project_path, category="nonheal")
+            except OSError as exc:
+                allowed = False
+                _debug(f"    -> budget state unavailable: {exc}")
             if not allowed:
                 result["budget_blocked"] += 1
                 _debug(f"    -> SKIP: budget cap hit")

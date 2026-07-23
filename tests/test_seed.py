@@ -643,7 +643,23 @@ def test_cursor_seed_apply_loads_exact_digest_bound_preview():
         loaded_sources, loaded_candidates, estimate = seed.load_cursor_seed_preview(
             project_path=str(project), session_id="session", preview_digest=digest,
         )
-        _assert(estimate == 1 and loaded_candidates == [candidate], loaded_candidates)
+        _assert(estimate == 1 and len(loaded_candidates) == 1, loaded_candidates)
+        loaded_candidate = loaded_candidates[0]
+        _assert(
+            loaded_candidate.title == candidate.title
+            and loaded_candidate.body == candidate.body
+            and loaded_candidate.signals == candidate.signals,
+            loaded_candidate,
+        )
+        _assert(
+            loaded_candidate.source_ids
+            == [seed.seed_source_identity(candidate.source_ids[0])],
+            loaded_candidate.source_ids,
+        )
+        _assert(
+            loaded_candidate.source_paths[0].startswith("seed-source:cursor:"),
+            loaded_candidate.source_paths,
+        )
         _assert(loaded_sources[0].text == "", "preview cache must not retain transcript text")
         try:
             seed.load_cursor_seed_preview(
@@ -676,7 +692,13 @@ def test_cursor_seed_apply_loads_exact_digest_bound_preview():
         finally:
             seed.llm_candidates = original_llm
             seed.apply_candidates = original_apply
-        _assert(rc == 0 and applied == [candidate], applied)
+        _assert(
+            rc == 0
+            and len(applied) == 1
+            and seed.candidate_import_key(applied[0], project_path=str(project))
+            == seed.candidate_import_key(candidate, project_path=str(project)),
+            applied,
+        )
         _assert(not seed._cursor_seed_preview_path(str(project), "session").exists(),
                 "successful apply should consume the cached preview")
     finally:

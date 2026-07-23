@@ -1620,7 +1620,15 @@ def classify_gate(
     except ValueError as e:
         return {**_classifier_error(str(e)), "prompt_chars": 0}
 
-    allowed, _ = budget.check_and_record(project_path, category="nonheal")
+    try:
+        allowed, _ = budget.check_and_record(project_path, category="nonheal")
+    except OSError as exc:
+        # Corrupt/locked budget state blocks spend without crashing the gate
+        # surface: reuse the designed no-spend degrade path.
+        return {
+            **_classifier_error(f"budget state unavailable: {exc}"),
+            "skipped": True,
+        }
     if not allowed:
         return {**_classifier_error("daily budget cap hit"), "skipped": True}
 
@@ -1908,7 +1916,13 @@ def adversary_classify(
 
     # A real second LLM call — counts toward the same daily cap as the
     # classifier (scope §7 acknowledges the doubled per-gate cost on PROCEED).
-    allowed, _ = budget.check_and_record(project_path, category="nonheal")
+    try:
+        allowed, _ = budget.check_and_record(project_path, category="nonheal")
+    except OSError as exc:
+        return {
+            **_adversary_error(f"budget state unavailable: {exc}"),
+            "skipped": True,
+        }
     if not allowed:
         return {**_adversary_error("daily budget cap hit"), "skipped": True}
 

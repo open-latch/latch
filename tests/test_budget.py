@@ -14,8 +14,13 @@ import json
 import shutil
 import sys
 import tempfile
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+from filelock import Timeout as FileLockTimeout
 
 
 def _utc_date_iso(offset_days: int = 0) -> str:
@@ -40,6 +45,18 @@ def _cleanup(tmp):
     shutil.rmtree(tmp, ignore_errors=True)
 
 
+def _assert_raises_oserror(call, message):
+    try:
+        call()
+    except OSError:
+        return
+    except Exception as exc:
+        raise AssertionError(
+            f"{message}: expected OSError-compatible failure, got {type(exc).__name__}"
+        ) from exc
+    raise AssertionError(f"{message}: expected OSError-compatible failure")
+
+
 def test_initial_state_is_empty():
     tmp = _tmp_project()
     try:
@@ -52,6 +69,15 @@ def test_initial_state_is_empty():
         print("PASS initial_state_is_empty")
     finally:
         _cleanup(tmp)
+
+
+def test_filelock_timeout_is_oserror_compatible():
+    _assert(
+        issubclass(FileLockTimeout, OSError),
+        f"seed sanitization requires OSError-compatible lock timeouts: "
+        f"{FileLockTimeout.__mro__}",
+    )
+    print("PASS filelock_timeout_is_oserror_compatible")
 
 
 def test_record_invocation_increments_per_category():
@@ -80,6 +106,37 @@ def test_check_and_record_gates_at_cap_per_category():
         _assert(state["count_nonheal"] == cap, f"counter stays at cap on denial: {state}")
         print("PASS check_and_record_gates_at_cap_per_category")
     finally:
+        _cleanup(tmp)
+
+
+def test_check_and_record_is_atomic_across_concurrent_callers():
+    tmp = _tmp_project()
+    original_save = budget._save_state
+
+    def delayed_save(project_path, state):
+        # Widen the read/write race deterministically. A correct lock covers
+        # both the load and this save, so only one cap=1 caller can proceed.
+        time.sleep(0.05)
+        original_save(project_path, state)
+
+    budget._save_state = delayed_save
+    try:
+        workers = 8
+        ready = threading.Barrier(workers)
+
+        def attempt():
+            ready.wait(timeout=5)
+            return budget.check_and_record(tmp, category="nonheal", cap=1)[0]
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            allowed = list(pool.map(lambda _index: attempt(), range(workers)))
+
+        _assert(sum(allowed) == 1, f"cap=1 must allow exactly one caller: {allowed}")
+        state = budget.status(tmp, nonheal_cap=1)
+        _assert(state["nonheal"]["count"] == 1, state)
+        print("PASS check_and_record_is_atomic_across_concurrent_callers")
+    finally:
+        budget._save_state = original_save
         _cleanup(tmp)
 
 
@@ -202,6 +259,60 @@ def test_corrupt_json_falls_back_to_empty():
         _assert(s["heal"]["count"] == 0, f"corrupt file should fall back: {s}")
         _assert(s["approved_today"] is False, s)
         print("PASS corrupt_json_falls_back_to_empty")
+    finally:
+        _cleanup(tmp)
+
+
+def test_corrupt_json_fails_closed_for_budget_consumers():
+    tmp = _tmp_project()
+    try:
+        state_path = paths.project_dir(tmp) / "budget.json"
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state_path.write_text("{{not json", encoding="utf-8")
+
+        calls = (
+            ("under_cap", lambda: budget.under_cap(tmp, cap=1)),
+            (
+                "check_and_record",
+                lambda: budget.check_and_record(tmp, category="nonheal", cap=1),
+            ),
+            (
+                "record_invocation",
+                lambda: budget.record_invocation(tmp, category="nonheal"),
+            ),
+            ("approve_today", lambda: budget.approve_today(tmp)),
+        )
+        for name, call in calls:
+            _assert_raises_oserror(call, name)
+            _assert(
+                state_path.read_text(encoding="utf-8") == "{{not json",
+                f"{name} must not overwrite corrupt state",
+            )
+        print("PASS corrupt_json_fails_closed_for_budget_consumers")
+    finally:
+        _cleanup(tmp)
+
+
+def test_prepare_storage_detects_corrupt_state_before_consent():
+    tmp = _tmp_project()
+    try:
+        state_path = paths.project_dir(tmp) / "budget.json"
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state_path.write_text("{{not json", encoding="utf-8")
+
+        _assert_raises_oserror(
+            lambda: budget.prepare_storage(tmp),
+            "prepare_storage",
+        )
+        _assert(
+            state_path.read_text(encoding="utf-8") == "{{not json",
+            "prepare_storage must not overwrite corrupt state",
+        )
+        _assert(
+            not list(state_path.parent.glob(".latch-budget-write-probe-*")),
+            "corrupt state should fail before the write probe",
+        )
+        print("PASS prepare_storage_detects_corrupt_state_before_consent")
     finally:
         _cleanup(tmp)
 
@@ -334,14 +445,18 @@ def test_brief_line_surfaces_approved_state():
 
 if __name__ == "__main__":
     test_initial_state_is_empty()
+    test_filelock_timeout_is_oserror_compatible()
     test_record_invocation_increments_per_category()
     test_check_and_record_gates_at_cap_per_category()
+    test_check_and_record_is_atomic_across_concurrent_callers()
     test_categories_are_independent()
     test_approve_today_resets_both_and_unlocks()
     test_approve_today_is_idempotent()
     test_date_rollover_resets_both_counts()
     test_date_rollover_preserves_past_approvals()
     test_corrupt_json_falls_back_to_empty()
+    test_corrupt_json_fails_closed_for_budget_consumers()
+    test_prepare_storage_detects_corrupt_state_before_consent()
     test_legacy_count_field_migrates_to_nonheal()
     test_brief_line_quiet_when_both_below_threshold()
     test_brief_line_surfaces_only_loud_category()
@@ -350,3 +465,51 @@ if __name__ == "__main__":
     test_brief_line_at_cap_heal_only_shows_approve_hint()
     test_brief_line_surfaces_approved_state()
     print("\nAll budget tests pass.")
+
+
+def test_unreadable_budget_state_degrades_gate_without_spend(tmp_path, monkeypatch):
+    """A corrupt budget store must route the gate to its designed no-spend
+    degrade path (skipped verdict), not crash the tool surface."""
+    import gate
+    import paths
+
+    monkeypatch.setattr(paths, "is_unlatched_mode", lambda: False)
+    monkeypatch.setattr(paths, "is_disabled", lambda: False)
+    monkeypatch.setattr(paths, "is_in_compact", lambda: False)
+
+    def broken(*args, **kwargs):
+        raise budget.BudgetStateError("budget state at /tmp/x is unreadable")
+
+    monkeypatch.setattr(budget, "check_and_record", broken)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("classifier must not spend on unreadable budget state")
+
+    monkeypatch.setattr(gate, "_invoke_classifier_backend_once", forbidden)
+    verdict = gate.classify_gate(
+        {"chains": []}, project_path=str(tmp_path), backend="claude",
+    )
+    assert verdict.get("skipped") is True
+    assert "budget state unavailable" in (verdict.get("error") or "")
+
+
+def test_unreadable_budget_state_degrades_compaction_without_spend(
+    tmp_path, monkeypatch,
+):
+    import compactor
+    import paths
+
+    monkeypatch.setattr(paths, "is_unlatched_mode", lambda: False)
+    monkeypatch.setattr(paths, "is_disabled", lambda: False)
+    monkeypatch.setattr(paths, "is_in_compact", lambda: False)
+
+    def broken(*args, **kwargs):
+        raise budget.BudgetStateError("budget state at /tmp/x is unreadable")
+
+    monkeypatch.setattr(budget, "check_and_record", broken)
+    result = compactor.run_compaction("sid", str(tmp_path), None)
+    assert result == {
+        "ok": False,
+        "reason": "budget_state_error",
+        "session_id": "sid",
+    }

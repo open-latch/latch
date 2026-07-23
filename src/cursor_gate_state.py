@@ -295,10 +295,92 @@ def _pending_operation(previous: dict[str, Any]) -> dict[str, Any] | None:
     return {**pending, "age_turns": age}
 
 
+def _seed_confirmation(tokens: list[str]) -> dict[str, Any] | None:
+    """Parse the exact user-confirmed seed selection from a slash invocation."""
+    if tokens in (["all"], ["none"]):
+        return {
+            "mode": tokens[0],
+            "candidate_ids": [],
+            "cluster_ids": [],
+        }
+    if not tokens or {"all", "none"} & set(tokens) \
+            or len(tokens) != len(set(tokens)):
+        return None
+    candidate_ids: list[str] = []
+    cluster_ids: list[str] = []
+    for token in tokens:
+        if re.fullmatch(r"cand-[0-9a-f]{12}", token):
+            candidate_ids.append(token)
+        elif re.fullmatch(r"cluster-[0-9a-f]{12}", token):
+            cluster_ids.append(token)
+        else:
+            return None
+    return {
+        "mode": "scoped",
+        "candidate_ids": sorted(candidate_ids),
+        "cluster_ids": sorted(cluster_ids),
+    }
+
+
+def _validated_seed_confirmation(
+    confirmation: Any,
+    pending: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Bind a parsed confirmation to IDs from the successful preview receipt."""
+    if not isinstance(confirmation, dict) or not isinstance(pending, dict):
+        return None
+    available_candidates = pending.get("candidate_ids")
+    available_clusters = pending.get("cluster_ids")
+    if not isinstance(available_candidates, list) \
+            or not isinstance(available_clusters, list):
+        return None
+    if any(
+        not isinstance(value, str)
+        or not re.fullmatch(r"cand-[0-9a-f]{12}", value)
+        for value in available_candidates
+    ) or any(
+        not isinstance(value, str)
+        or not re.fullmatch(r"cluster-[0-9a-f]{12}", value)
+        for value in available_clusters
+    ):
+        return None
+    mode = confirmation.get("mode")
+    candidate_ids = confirmation.get("candidate_ids")
+    cluster_ids = confirmation.get("cluster_ids")
+    if not isinstance(candidate_ids, list) or not isinstance(cluster_ids, list):
+        return None
+    if mode == "all":
+        if candidate_ids or cluster_ids:
+            return None
+        return {
+            "mode": "all",
+            "candidate_ids": [],
+            "cluster_ids": [],
+        }
+    if mode == "none":
+        if candidate_ids or cluster_ids or not available_candidates:
+            return None
+        return {
+            "mode": "none",
+            "candidate_ids": [],
+            "cluster_ids": [],
+        }
+    if mode != "scoped" or (not candidate_ids and not cluster_ids):
+        return None
+    if not set(candidate_ids).issubset(set(available_candidates)) \
+            or not set(cluster_ids).issubset(set(available_clusters)):
+        return None
+    return {
+        "mode": "scoped",
+        "candidate_ids": sorted(candidate_ids),
+        "cluster_ids": sorted(cluster_ids),
+    }
+
+
 def _operation_invocation(
     prompt: str,
     pending: dict[str, Any] | None,
-) -> tuple[str, str, str | None] | None:
+) -> tuple[str, str, Any] | None:
     """Recognize an explicit managed operation, never general prose.
 
     Returns ``(name, phase, confirmation)``.  Command assets carry a managed
@@ -318,16 +400,22 @@ def _operation_invocation(
     if literal.startswith("/"):
         literal = literal[1:]
     tokens = literal.split()
-    if not tokens or len(tokens) > 2:
+    if not tokens:
         return None
     name = tokens[0]
+    if name == "latch-seed":
+        if len(tokens) == 1:
+            return name, "preview", None
+        if tokens[1] != "apply":
+            return None
+        return name, "apply", _seed_confirmation(tokens[2:])
+    if len(tokens) > 2:
+        return None
     arg = tokens[1] if len(tokens) == 2 else None
     if name in {"latch", "unlatch"} and arg is None \
             and pending and pending.get("name") == "unlatch":
         return "unlatch", "confirm", name
     if name in _OPERATION_NAMES:
-        if name == "latch-seed":
-            return name, "apply" if arg == "apply" else "preview", None
         if name == "latch-pm":
             return name, "apply" if arg == "apply" else "prepare", None
         if name == "unlatch":
@@ -398,6 +486,7 @@ def _begin_prompt_unlocked(
     operation_receipt: dict[str, Any] | None = None
     if invocation:
         name, phase, confirmation = invocation
+        seed_confirmation: dict[str, Any] | None = None
         operation_intent = {
             "name": name,
             "phase": phase,
@@ -406,10 +495,15 @@ def _begin_prompt_unlocked(
         }
         allowed = True
         if name == "latch-seed" and phase == "apply":
+            seed_confirmation = _validated_seed_confirmation(
+                confirmation,
+                pending,
+            )
             allowed = bool(
                 pending and pending.get("name") == name
                 and pending.get("stage") == "previewed"
                 and isinstance(pending.get("preview_digest"), str)
+                and seed_confirmation is not None
             )
         elif name == "latch-pm" and phase == "apply":
             allowed = bool(
@@ -441,6 +535,13 @@ def _begin_prompt_unlocked(
                 operation_receipt["candidate_digest"] = pending["candidate_digest"]
             if name == "latch-seed" and phase == "apply":
                 operation_receipt["preview_digest"] = pending["preview_digest"]
+                operation_receipt["selection_mode"] = seed_confirmation["mode"]
+                operation_receipt["candidate_ids"] = list(
+                    seed_confirmation["candidate_ids"]
+                )
+                operation_receipt["cluster_ids"] = list(
+                    seed_confirmation["cluster_ids"]
+                )
 
     state = {
         "version": 1,
@@ -953,6 +1054,62 @@ def _report_args_are_read_only(args: list[str]) -> bool:
     return True
 
 
+def _seed_apply_args_match(
+    args: list[str],
+    *,
+    operation: dict[str, Any],
+) -> bool:
+    expected = [
+        "--source", "cursor", "--cursor-session-id", operation.get("session_id"),
+        "--format", "json",
+        "--preview-digest", operation.get("preview_digest"), "--apply",
+    ]
+    if args[:len(expected)] != expected:
+        return False
+    selection = args[len(expected):]
+    mode = operation.get("selection_mode")
+    candidate_ids = operation.get("candidate_ids")
+    cluster_ids = operation.get("cluster_ids")
+    if not isinstance(candidate_ids, list) or not isinstance(cluster_ids, list):
+        return False
+    if len(candidate_ids) != len(set(candidate_ids)) \
+            or len(cluster_ids) != len(set(cluster_ids)):
+        return False
+    if any(
+        not isinstance(value, str)
+        or not re.fullmatch(r"cand-[0-9a-f]{12}", value)
+        for value in candidate_ids
+    ) or any(
+        not isinstance(value, str)
+        or not re.fullmatch(r"cluster-[0-9a-f]{12}", value)
+        for value in cluster_ids
+    ):
+        return False
+    if mode == "all":
+        return not candidate_ids and not cluster_ids and selection == ["--yes"]
+    if mode == "none":
+        return (
+            not candidate_ids
+            and not cluster_ids
+            and selection == ["--dismiss-all"]
+        )
+    if mode != "scoped" or not selection or len(selection) % 2:
+        return False
+    expected_selection = {
+        ("--approve-candidate", value) for value in candidate_ids
+    } | {
+        ("--approve-cluster", value) for value in cluster_ids
+    }
+    seen: set[tuple[str, str]] = set()
+    for index in range(0, len(selection), 2):
+        flag, review_id = selection[index:index + 2]
+        key = (flag, review_id)
+        if key not in expected_selection or key in seen:
+            return False
+        seen.add(key)
+    return bool(seen) and seen == expected_selection
+
+
 def _operation_tool_matches(
     operation: dict[str, Any],
     payload: dict[str, Any],
@@ -994,9 +1151,7 @@ def _operation_tool_matches(
             "--format", "json",
         ]
         if phase == "apply":
-            expected += [
-                "--preview-digest", operation.get("preview_digest"), "--apply", "--yes",
-            ]
+            return _seed_apply_args_match(args, operation=operation)
         return args == expected
     if name == "latch-gate-report":
         return (
@@ -1247,9 +1402,33 @@ def record_operation_success(
                     or pending.get("stage") != "preview":
                 return False, "no pending seed preview operation"
             preview_digest = preview["preview_digest"]
+            candidate_ids = sorted({
+                str(candidate.get("review_id"))
+                for candidate in preview.get("candidates", [])
+                if isinstance(candidate, dict)
+                and re.fullmatch(
+                    r"cand-[0-9a-f]{12}",
+                    str(candidate.get("review_id") or ""),
+                )
+            })
+            preview_clusters = preview.get("review_clusters")
+            cluster_ids = sorted({
+                str(cluster.get("cluster_id"))
+                for cluster in (
+                    preview_clusters if isinstance(preview_clusters, list) else []
+                )
+                if isinstance(cluster, dict)
+                and re.fullmatch(
+                    r"cluster-[0-9a-f]{12}",
+                    str(cluster.get("cluster_id") or ""),
+                )
+            })
             state["pending_operation"] = {
                 "name": "latch-seed", "stage": "previewed",
-                "preview_digest": preview_digest, "age_turns": 0,
+                "preview_digest": preview_digest,
+                "candidate_ids": candidate_ids,
+                "cluster_ids": cluster_ids,
+                "age_turns": 0,
             }
             state["updated_at"] = _now()
             _atomic_write(path, state)

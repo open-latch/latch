@@ -160,9 +160,16 @@ def render_review_text(payload: dict) -> str:
             "Latch receipt:",
             str(receipt.get("summary") or ""),
             f"Why this mattered: {receipt.get('why_it_matters') or ''}",
-            f"Next proof: {receipt.get('next_proof') or ''}",
+            f"Next step: {receipt.get('next_step') or ''}",
         ])
-    lines.extend(["", "Seed report:"])
+    lines.extend([
+        "",
+        "Seed report:",
+        (
+            "Review controls: use the stable candidate or cluster IDs shown "
+            "below for scoped apply."
+        ),
+    ])
 
     for section in payload.get("report") or []:
         lines.extend(["", f"## {section['title']}", section["summary"]])
@@ -183,11 +190,19 @@ def render_review_text(payload: dict) -> str:
             else:
                 lines.append("No source-backed direction or priority synthesis found in this pass.")
             lines.extend(["", "Agent behavior:"])
+        clusters = [
+            cluster for cluster in payload.get("review_clusters") or []
+            if cluster.get("section") == section.get("key")
+        ]
         items = section.get("items") or []
-        if not items:
+        if not clusters and not items:
             empty = "No high-confidence agent contradictions found in this pass." \
                 if section.get("key") == "agent_alignment_check" else "No candidates in this section."
             lines.append(empty)
+            continue
+        if clusters:
+            for cluster in clusters:
+                lines.extend(render_payload_cluster(cluster))
             continue
         for item in items:
             signals = ", ".join(sorted(set(item.get("signals") or [])))
@@ -204,6 +219,55 @@ def render_review_text(payload: dict) -> str:
         "Preview only. Re-run with --apply to write these as staging seed candidates.",
     ])
     return "\n".join(lines) + "\n"
+
+
+def render_payload_cluster(cluster: dict) -> list[str]:
+    lines: list[str] = []
+    items = cluster.get("items") or []
+    if cluster.get("possible_duplicates"):
+        lines.extend([
+            (
+                f"### Possible duplicate cluster {cluster.get('cluster_id')}: "
+                f"{len(items)} variants; "
+                f"{cluster.get('source_revision_count', 0)} source revision(s)"
+            ),
+            "Cluster approval writes one representative with combined provenance.",
+        ])
+    for item in items:
+        signals = ", ".join(sorted(set(item.get("signals") or [])))
+        receipts = item.get("source_receipts") or []
+        observation = item.get("observation") or {}
+        lines.extend([
+            f"- [{item.get('kind')}] {item.get('title')}",
+            (
+                f"  review_id={item.get('review_id')}; "
+                f"cluster_id={cluster.get('cluster_id')}"
+            ),
+            f"  signals={signals}; {len(receipts)} source revision(s)",
+            f"  rationale: {item.get('review_rationale') or ''}",
+            f"  candidate body: {item.get('review_claim') or ''}",
+            f"  evidence: {item_evidence_line(item)}",
+            (
+                "  observation: "
+                f"oldest={observation.get('oldest_observed_at') or 'unknown'}; "
+                f"latest={observation.get('latest_observed_at') or 'unknown'}; "
+                f"age_days={observation.get('age_days') if observation.get('age_days') is not None else 'unknown'}"
+            ),
+            f"  freshness: {observation.get('freshness_note') or ''}",
+            "  source evidence:",
+        ])
+        for receipt in receipts:
+            excerpt = (
+                f"; excerpt={json.dumps(receipt.get('excerpt'))}"
+                if receipt.get("excerpt") else ""
+            )
+            lines.append(
+                f"    - {receipt.get('id')}; "
+                f"observed_at={receipt.get('observed_at') or 'unknown'}; "
+                f"digest={str(receipt.get('digest') or 'unknown')[:16]}"
+                f"{excerpt}"
+            )
+    return lines
 
 
 def item_evidence_line(item: dict) -> str:
@@ -316,6 +380,43 @@ def write_fixture_transcripts(*, project: Path, claude_home: Path, codex_home: P
         title="Negative: ambiguous correction with no prior decision",
         expected="No agent mistake. At most a low-authority correction/open-question signal.",
         review_focus="Does ambiguity stay modest instead of becoming a bold accusation?",
+    ))
+    cases.append(write_codex_case(
+        codex_home=codex_home,
+        project=project,
+        sid="dogfood-project-direction-read-only",
+        filename="rollout-dogfood-project-direction-read-only.jsonl",
+        mtime=now + 5,
+        user_messages=[
+            "We decided project direction reporting is read-only and must not modify KB state.",
+        ],
+        assistant_messages=["Understood; reporting will remain read-only."],
+        title="Dogfood duplicate: project direction is read-only",
+        expected="Cluster with the equivalent Claude phrasing as corroboration.",
+        review_focus="Does repetition become one visible possible-duplicate cluster?",
+    ))
+    cases.append(write_claude_case(
+        claude_home=claude_home,
+        encoded_project=encoded,
+        project=project,
+        filename="dogfood-project-direction-reporting-read-only.jsonl",
+        mtime=now,
+        rows=[
+            {"type": "system", "cwd": str(project.resolve())},
+            {
+                "type": "user",
+                "message": {
+                    "content": (
+                        "The decision is that project-direction reports are "
+                        "read-only and do not alter KB state."
+                    )
+                },
+            },
+            {"type": "assistant", "message": {"content": "Understood."}},
+        ],
+        title="Dogfood duplicate: project direction reporting is read-only",
+        expected="Cluster with the equivalent Codex phrasing as corroboration.",
+        review_focus="Are both bodies, timestamps, and source receipts visible?",
     ))
 
     return cases

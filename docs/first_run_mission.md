@@ -22,10 +22,12 @@ cd /path/to/user/project
 Use `--source claude`, `--source codex`, `--source cursor`, `--source both`, or
 `--source all` depending on where your relevant sessions live. Cursor uses only
 the current hook-provided transcript or an explicit `--cursor-transcript`; it
-never scans private Cursor history. `--apply` still prints the structured report
-first
-and writes only if you approve the prompt. Omit `--apply` for a preview-only
-run.
+never scans private Cursor history. `--apply` still prints the structured
+report first and writes only if you approve the prompt. Enter `none` to dismiss the whole
+report and finalize those exact source revisions without creating nodes. For a
+cached review, repeat the preview's exact `--source` (and workstream flags)
+alongside `--preview-digest DIGEST --apply --dismiss-all`. Omit
+`--apply` for a preview-only run.
 
 Review the structured report. Pick one strongest example where the report found
 a rejected path, governing rule, or "do not do this again" decision. Good

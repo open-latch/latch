@@ -151,6 +151,10 @@ sessions:
 ```
 
 It is review-first — the pass prints a structured report and writes only the candidates you approve.
+At the prompt, enter `none` to explicitly dismiss the whole report and finalize
+those exact source revisions without creating KB nodes. For a cached
+digest-bound review, repeat the preview's exact `--source` (and workstream
+flags) alongside `--preview-digest DIGEST --apply --dismiss-all`.
 The full walkthrough and source options are in [See it catch](#see-it-catch-seed-then-gate); to read
 the installer first, pin a release, pick an intensity tier, or install to a custom directory, see
 [Install details](#install-details).
