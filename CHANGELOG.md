@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0 - Unreleased
+## 1.0.0 - 2026-07-23
 
 - Add separate release, KB schema, and project-wiring versions.
 - Add offline version and commit diagnostics to installers and doctor output.
