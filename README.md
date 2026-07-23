@@ -45,18 +45,18 @@
 **A fresh agent proposes a path this project already rejected:**
 
 ```text
-Request: Implement email sending by adding a Redis-backed background job queue.
+Request: Add multi-user accounts by moving the datastore from local SQLite to a hosted Postgres service.
 ```
 
 **latch's gate fires before any edit — and returns the receipt:**
 
 ```text
 Recommendation: DO_NOT_PROCEED
-Summary: The KB has a canonical decision for this no-history demo app: do not add a background job queue, and specifically reject a Redis-backed background job queue (id=1). The allowed path is to keep the app single-process and use an inline task runner if background work is needed, documenting the limit.
-Risk if proceed: Adding Redis and a worker process would violate the install-light, easy-to-inspect demo-app constraint already recorded in the KB.
-Better next action: Implement email sending through the allowed inline task runner path and document its limits instead of adding Redis-backed jobs.
+Summary: The KB explicitly decides to keep the demo app local-first on a single embedded SQLite file and rejects moving to any hosted or client-server database, including managed Postgres, for multi-user accounts or sync (id=1). The requested change directly contradicts that decision. The permitted direction is export/import on local SQLite, with documented limits.
+Risk if proceed: The app would abandon the local-first demo constraint and repeat an explicitly rejected hosted-database path.
+Better next action: Keep SQLite and implement an explicit export/import workflow for moving data between machines, documenting that it is not multi-user sync.
 Cited evidence:
-- id=1 decision status=canonical: No background job queue for the no-history demo app
+- id=1 decision status=canonical: Keep the demo app local-first on SQLite — no hosted database
 Worktree changed before/after gate: no
 ```
 

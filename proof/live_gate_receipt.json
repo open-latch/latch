@@ -1,21 +1,21 @@
 {
   "backend": "codex",
-  "better_next_action": "Implement email sending through the allowed inline task runner path and document its limits instead of adding Redis-backed jobs.",
+  "better_next_action": "Keep SQLite and implement an explicit export/import workflow for moving data between machines, documenting that it is not multi-user sync.",
   "capture_command": "bash bin/latch_proof_packet.sh --capture-live --backend codex",
-  "captured_at_utc": "2026-07-22T15:35:05Z",
+  "captured_at_utc": "2026-07-23T06:14:57Z",
   "demo_kind": "synthetic_no_history_fixture",
   "evidence_nodes": [
     {
       "id": 1,
       "kind": "decision",
       "status": "canonical",
-      "title": "No background job queue for the no-history demo app"
+      "title": "Keep the demo app local-first on SQLite \u2014 no hosted database"
     }
   ],
   "fixture": {
     "label": "Synthetic no-history fixture",
     "seeded_decision_id": 1,
-    "seeded_decision_title": "No background job queue for the no-history demo app",
+    "seeded_decision_title": "Keep the demo app local-first on SQLite \u2014 no hosted database",
     "source": "generated public fixture file GOVERNANCE.md",
     "used_personal_history": false
   },
@@ -29,11 +29,11 @@
   },
   "observed": true,
   "recommendation": "DO_NOT_PROCEED",
-  "request": "Implement email sending by adding a Redis-backed background job queue.",
-  "risk_if_proceed": "Adding Redis and a worker process would violate the install-light, easy-to-inspect demo-app constraint already recorded in the KB.",
+  "request": "Add multi-user accounts by moving the datastore from local SQLite to a hosted Postgres service.",
+  "risk_if_proceed": "The app would abandon the local-first demo constraint and repeat an explicitly rejected hosted-database path.",
   "schema_version": 2,
-  "source_commit": "f7d741e0499f20740259e3b4a23e53263b4453a4",
-  "summary": "The KB has a canonical decision for this no-history demo app: do not add a background job queue, and specifically reject a Redis-backed background job queue (id=1). The allowed path is to keep the app single-process and use an inline task runner if background work is needed, documenting the limit.",
+  "source_commit": "df54f14577ab82a5233d66bf4f5fc7a8a2e62052",
+  "summary": "The KB explicitly decides to keep the demo app local-first on a single embedded SQLite file and rejects moving to any hosted or client-server database, including managed Postgres, for multi-user accounts or sync (id=1). The requested change directly contradicts that decision. The permitted direction is export/import on local SQLite, with documented limits.",
   "tested_runtime_git_blobs": {
     ".gitattributes": "6e851ff1196d8ea9cc45c5270f1c56a93177a2a9",
     "benchmarks/fixtures/intensity_v1.jsonl": "c68827cc1ec11b6775250155414a9deeb595e441",
@@ -114,7 +114,7 @@
     "src/migrate_v3.py": "ba1b2a8d40c38b9319b0f8208c5825fb2dff8d31",
     "src/model_backends.py": "2f3605b06d3f94c3221d058f639960b0df79a537",
     "src/move_classifier.py": "1f7b4db96e2c51d2814b9bf08ebea18787a775aa",
-    "src/no_history_demo.py": "65fb98d210636d379c914ef799f4ca6bc4f2892b",
+    "src/no_history_demo.py": "7fb1c956451700b17f3fee1a91a49dbcc1a13a1f",
     "src/paths.py": "8114c6768f9e05b0f8f23ff17c31a49a58b06965",
     "src/priorities.py": "965065051b686ab67800cba58dc97334682ec07f",
     "src/profiles.py": "84599dc72c9bb32aca54b4779199474f3cc2adf7",
