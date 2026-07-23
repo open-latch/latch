@@ -216,6 +216,7 @@ class SeedSource:
     value_score: float = 0.0
     redaction_count: int = 0
     subject: str = ""
+    history_discovered: bool = False
 
 
 @dataclass
@@ -326,7 +327,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                     help="project path whose transcripts should be seeded (default: cwd)")
     ap.add_argument("--source", choices=("auto", *SOURCE_CHOICES), default="auto",
                     help=("transcript source to scan. 'both' means Claude+Codex; "
-                          "'all' also includes the exact current/explicit Cursor transcript"))
+                          "'all' also includes Cursor when an exact transcript or "
+                          "--cursor-history is supplied"))
     ap.add_argument("--lookback-days", type=int, choices=LOOKBACK_CHOICES,
                     help="retention horizon to scan: 5, 14, 30, or 90 days")
     ap.add_argument("--llm", choices=("yes", "no"), default="yes",
@@ -405,8 +407,27 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                     help="Codex home directory for transcript discovery")
     ap.add_argument("--cursor-transcript", action="append", default=[], metavar="PATH",
                     help=("explicit Cursor transcript path (repeatable). Without this, "
-                          "--source cursor uses only the current-session marker; "
-                          "latch never scans Cursor history storage"))
+                          "--source cursor uses only the current-session marker "
+                          "unless --cursor-history is explicitly enabled"))
+    ap.add_argument(
+        "--cursor-history",
+        action="store_true",
+        help=(
+            "opt in to metadata-verified local Cursor IDE history for this "
+            "project; excludes Cursor CLI, cloud chats, other projects, and "
+            "subagents"
+        ),
+    )
+    ap.add_argument(
+        "--cursor-home",
+        default=os.environ.get("CURSOR_HOME") or str(Path.home() / ".cursor"),
+        help=argparse.SUPPRESS,
+    )
+    ap.add_argument(
+        "--cursor-state-db",
+        default=os.environ.get("CURSOR_STATE_DB"),
+        help=argparse.SUPPRESS,
+    )
     ap.add_argument("--cursor-session-id",
                     help=("exact current Cursor session id shown in prompt context; "
                           "required for marker-based --source cursor"))
@@ -564,6 +585,17 @@ def available_sources(args: argparse.Namespace) -> list[str]:
     explicit = [Path(path).expanduser() for path in getattr(args, "cursor_transcript", [])]
     if any(path.is_file() for path in explicit):
         out.append("cursor")
+    elif getattr(args, "cursor_history", False):
+        try:
+            history = cursor_transcript.discover_project_history(
+                str(Path(args.project).expanduser().resolve()),
+                cursor_home=getattr(args, "cursor_home", None),
+                state_db=getattr(args, "cursor_state_db", None),
+            )
+        except cursor_transcript.CursorTranscriptError:
+            history = []
+        if history:
+            out.append("cursor")
     elif not explicit and getattr(args, "cursor_session_id", None):
         try:
             cursor_transcript.resolve_current(
@@ -763,7 +795,10 @@ def select_sources(
         return []
     cap = min(max_sessions, len(sources))
     mandatory = sorted(
-        (source for source in sources if source.agent == "cursor"),
+        (
+            source for source in sources
+            if source.agent == "cursor" and not source.history_discovered
+        ),
         key=lambda src: src.mtime,
         reverse=True,
     )[:cap]
@@ -799,6 +834,9 @@ def discover_sources(
     codex_home: str,
     cursor_transcripts: list[str] | tuple[str, ...] = (),
     cursor_session_id: str | None = None,
+    cursor_history: bool = False,
+    cursor_home: str | None = None,
+    cursor_state_db: str | None = None,
     all_projects: bool = False,
     focus_query: str | None = None,
     stats: dict[str, Any] | None = None,
@@ -810,6 +848,8 @@ def discover_sources(
             "source_unavailable": 0,
             "source_invalid": 0,
             "project_excluded": 0,
+            "cursor_history_discovered": 0,
+            "cursor_history_unavailable": 0,
         })
     cutoff = (now or utc_now()) - timedelta(days=lookback_days)
     roots: list[tuple[str, Path, str]] = []
@@ -819,7 +859,7 @@ def discover_sources(
     if "codex" in selected_agents:
         roots.append(("codex", Path(codex_home) / "sessions", "**/rollout-*.jsonl"))
 
-    paths: list[tuple[datetime, str, Path, str | None]] = []
+    paths: list[tuple[datetime, str, Path, str | None, bool]] = []
     for agent, root, pattern in roots:
         if not root.is_dir():
             continue
@@ -830,7 +870,7 @@ def discover_sources(
                 continue
             if mtime < cutoff:
                 continue
-            paths.append((mtime, agent, path, None))
+            paths.append((mtime, agent, path, None, False))
 
     if "cursor" in selected_agents:
         explicit = list(dict.fromkeys(str(Path(raw).expanduser().resolve()) for raw in cursor_transcripts))
@@ -854,38 +894,76 @@ def discover_sources(
                         sid = current_sid
                 resolved_cursor.append((sid, path))
         else:
-            try:
+            if cursor_session_id:
+                try:
+                    sid, path = cursor_transcript.resolve_current(
+                        project_path, session_id=cursor_session_id,
+                    )
+                except cursor_transcript.CursorTranscriptError:
+                    if source == "cursor" and not cursor_history:
+                        raise
+                else:
+                    resolved_cursor.append((sid, path))
+            elif not cursor_history and source == "cursor":
+                # Preserve the exact-current default and its actionable error.
                 sid, path = cursor_transcript.resolve_current(
                     project_path, session_id=cursor_session_id,
                 )
-            except cursor_transcript.CursorTranscriptError:
-                if source == "cursor":
-                    raise
-            else:
                 resolved_cursor.append((sid, path))
 
+        exact_paths: set[Path] = set()
         for sid, path in resolved_cursor:
             try:
                 mtime = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
             except OSError:
                 continue
             if mtime >= cutoff:
-                paths.append((mtime, "cursor", path, sid))
+                resolved = path.resolve()
+                exact_paths.add(resolved)
+                paths.append((mtime, "cursor", resolved, sid, True))
+
+        if cursor_history:
+            try:
+                history = cursor_transcript.discover_project_history(
+                    project_path,
+                    cursor_home=cursor_home,
+                    state_db=cursor_state_db,
+                )
+            except cursor_transcript.CursorTranscriptError:
+                if source == "cursor":
+                    raise
+                history = []
+                if stats is not None:
+                    stats["source_unavailable"] += 1
+                    stats["cursor_history_unavailable"] = 1
+            if stats is not None:
+                stats["cursor_history_discovered"] = len(history)
+            for sid, path in history:
+                if path in exact_paths:
+                    continue
+                try:
+                    mtime = datetime.fromtimestamp(
+                        path.stat().st_mtime, tz=timezone.utc,
+                    )
+                except OSError:
+                    continue
+                if mtime >= cutoff:
+                    paths.append((mtime, "cursor", path, sid, False))
 
     ordered = sorted(paths, key=lambda item: item[0], reverse=True)
     # Exact current/explicit Cursor inputs are user-selected and must not be
-    # crowded out by provider history, but even explicit inventory remains
-    # bounded so a generated path list cannot cause an unbounded scan.
-    cursor_items = [item for item in ordered if item[1] == "cursor"][
+    # crowded out by provider history. Opt-in Cursor history joins the normal
+    # bounded inventory and receives no provider-level priority.
+    cursor_items = [item for item in ordered if item[4]][
         :MAX_SOURCE_INVENTORY
     ]
-    history_items = [item for item in ordered if item[1] != "cursor"]
+    history_items = [item for item in ordered if not item[4]]
     scan_items = cursor_items + history_items[
         : max(0, MAX_SOURCE_SCAN - len(cursor_items))
     ]
 
     eligible: list[SeedSource] = []
-    for mtime, agent, path, session_id in scan_items:
+    for mtime, agent, path, session_id, _exact in scan_items:
         if len(eligible) >= MAX_SOURCE_INVENTORY:
             break
         if stats is not None:
@@ -925,6 +1003,7 @@ def discover_sources(
             value_score=source_value_score(text, focus_query=focus_query),
             redaction_count=redaction_count,
             subject=subject,
+            history_discovered=bool(agent == "cursor" and not _exact),
         ))
     selected = select_sources(eligible, max_sessions=max_sessions)
     if stats is not None:
@@ -943,6 +1022,11 @@ def source_agents(source: str) -> tuple[str, ...]:
     if source == "all":
         return ("claude", "codex", "cursor")
     return ("claude", "codex")
+
+
+def uses_cursor_session_preview(args: argparse.Namespace) -> bool:
+    """Keep the slash-command digest lane exclusive to exact current-session seed."""
+    return args.source == "cursor" and not bool(args.cursor_history)
 
 
 def _mtime(path: Path) -> float:
@@ -3556,9 +3640,15 @@ def seed_report_receipt(
 def write_boundary_message(args: argparse.Namespace) -> str:
     if not args.apply:
         if getattr(args, "preview_digest", None):
+            cursor_history_flag = (
+                " --cursor-history"
+                if getattr(args, "cursor_history", False)
+                else ""
+            )
             return (
                 "Preview only. This exact review is cached for 24 hours. Re-run "
-                f"with --preview-digest {args.preview_digest} --apply and the "
+                f"with{cursor_history_flag} --preview-digest "
+                f"{args.preview_digest} --apply and the "
                 "candidate/cluster IDs you approve."
             )
         return "Preview only. Re-run with --apply to write these as staging seed candidates."
@@ -3703,6 +3793,13 @@ def render_text(
         "",
         f"Project: {Path(args.project).resolve()}",
         f"Transcript source: {args.source}",
+        "Cursor IDE history: "
+        + (
+            "opted in (metadata-verified current project only; "
+            "CLI/cloud/subagents excluded)"
+            if getattr(args, "cursor_history", False)
+            else "not selected"
+        ),
         f"Lookback: {args.lookback_days} day(s)",
         f"Selection cap: {session_cap} session(s) after value/recency ranking",
         f"Sources selected: {len(sources)} ({format_source_counts(sources)})",
@@ -3844,6 +3941,11 @@ def render_json(
         "intro": SEED_INTRO,
         "project": str(Path(args.project).resolve()),
         "source": args.source,
+        "cursor_history": {
+            "enabled": bool(getattr(args, "cursor_history", False)),
+            "scope": "current_project_local_ide_only",
+            "excluded": ["cursor_cli", "cloud_chats", "other_projects", "subagents"],
+        },
         "lookback_days": args.lookback_days,
         "max_sessions": session_cap,
         "sources_scanned": len(sources),
@@ -4280,11 +4382,12 @@ def write_seed_preview(
     llm_stats: dict[str, Any],
     discovery_stats: dict[str, Any],
     llm_refinement_empty: bool,
+    cursor_history: bool = False,
 ) -> str:
     """Cache one exact shared-provider review without retaining transcript text.
 
     Exact current-session Cursor slash commands keep their separate
-    session-bound receipt cache.
+    session-bound receipt cache. Opt-in Cursor history uses this shared lane.
     """
     cached_sources = list(sources)
     cached_apply_sources = list(apply_sources)
@@ -4298,6 +4401,7 @@ def write_seed_preview(
         "created_at": utc_now().isoformat(),
         "project_fingerprint": project_scope_fingerprint(project_path),
         "source_choice": source_choice,
+        "cursor_history": bool(cursor_history),
         "sources": [
             _cached_seed_source_dict(source) for source in cached_sources
         ],
@@ -4335,6 +4439,7 @@ def load_seed_preview(
     project_path: str,
     source_choice: str,
     preview_digest: str,
+    cursor_history: bool = False,
     now: datetime | None = None,
 ) -> tuple[
     list[SeedSource],
@@ -4364,6 +4469,14 @@ def load_seed_preview(
     if body.get("project_fingerprint") != project_scope_fingerprint(project_path) \
             or body.get("source_choice") != source_choice:
         raise SeedPreviewError("seed preview belongs to another project or source choice")
+    cached_cursor_history = body.get("cursor_history", False)
+    if not isinstance(cached_cursor_history, bool):
+        raise SeedPreviewError("seed preview apply state is malformed")
+    if cached_cursor_history != bool(cursor_history):
+        raise SeedPreviewError(
+            "seed preview Cursor history consent does not match; rerun apply "
+            "with the same --cursor-history choice"
+        )
     if body.get("version") != 3 \
             or body.get("extractor_version") != SEED_EXTRACTOR_VERSION:
         raise SeedPreviewError("seed extractor changed; rerun preview before apply")
@@ -5440,6 +5553,14 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     prompt_choices(args)
     args.project = str(Path(args.project).resolve())
+    if args.cursor_history and "cursor" not in source_agents(args.source):
+        print(
+            "--cursor-history requires Cursor in the selected source; use "
+            "--source cursor or --source all (or --source auto when it "
+            "resolves to one of them).",
+            file=sys.stderr,
+        )
+        return 2
     if args.max_sessions is None or args.max_sessions <= 0:
         print("--last-sessions must be positive.", file=sys.stderr)
         return 2
@@ -5481,7 +5602,7 @@ def main(argv: list[str] | None = None) -> int:
     args.llm_stats = {}
     args.discovery_stats = {}
     args.preview_cache_unavailable = False
-    cursor_session_preview = args.source == "cursor"
+    cursor_session_preview = uses_cursor_session_preview(args)
     cached_cursor_apply = cursor_session_preview and args.apply
     cached_seed_apply = (
         not cursor_session_preview
@@ -5560,6 +5681,7 @@ def main(argv: list[str] | None = None) -> int:
                 project_path=args.project,
                 source_choice=args.source,
                 preview_digest=args.preview_digest,
+                cursor_history=bool(args.cursor_history),
             )
         except SeedPreviewError as exc:
             emit_seed_cli_failure(
@@ -5600,6 +5722,9 @@ def main(argv: list[str] | None = None) -> int:
                 codex_home=args.codex_home,
                 cursor_transcripts=args.cursor_transcript,
                 cursor_session_id=args.cursor_session_id,
+                cursor_history=args.cursor_history,
+                cursor_home=args.cursor_home,
+                cursor_state_db=args.cursor_state_db,
                 all_projects=args.all_projects,
                 focus_query=args.new_workstream,
                 stats=args.discovery_stats,
@@ -5783,6 +5908,7 @@ def main(argv: list[str] | None = None) -> int:
                     llm_stats=args.llm_stats,
                     discovery_stats=args.discovery_stats,
                     llm_refinement_empty=args.llm_refinement_empty,
+                    cursor_history=bool(args.cursor_history),
                 )
             except OSError:
                 args.preview_digest = None

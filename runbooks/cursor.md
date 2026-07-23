@@ -117,8 +117,21 @@ similarly uses the read-only `latch_pm_preview` MCP result—not agent prose—t
 display and digest-bind every load-bearing decision field before one matching
 staging insert.
 
-`--cursor-transcript PATH` is available for a user-explicit file. latch never
-enumerates Cursor's private history folders.
+`--cursor-transcript PATH` is available for a user-explicit file. For a bounded
+historical initial-KB backfill, run the shell seed flow with
+`--source cursor --cursor-history`. That flag is explicit consent to enumerate
+only local IDE transcripts whose id agrees across Cursor's project row,
+conversation/project membership, and typed composer header for this exact
+workspace. Cursor-marked subagents are excluded even if their JSONL is stored
+at top level; a lossy project-folder collision cannot authorize another
+workspace's conversation. The normal redacted-source confirmation still occurs
+before model use, and writes remain reviewed staging evidence. Cursor CLI
+sessions, cloud chats, other projects, and subagents are excluded. The adapter
+opens Cursor's state database read-only and fails closed for Cursor history if
+the required private metadata or transcript layout changes. Cursor-only seeding
+stops; `--source all` records the unavailable history leg and continues with
+other authorized sources. A digest-bound apply must repeat `--cursor-history`;
+the opt-in itself is signed into the cached preview scope.
 
 ## Install And Verify
 

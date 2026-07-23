@@ -130,6 +130,18 @@ def test_seed_source_follows_agents_by_default():
             "Explicit seed source should win")
     _assert(qs.seed_source_for_agents(("cursor",), "cursor") == "cursor",
             "Explicit Cursor-origin seed source should win")
+    _assert(
+        qs.seed_source_for_agents(
+            ("cursor",), "auto", cursor_history=True,
+        ) == "all",
+        "Cursor history opt-in should add Cursor without dropping existing sources",
+    )
+    _assert(
+        qs.seed_source_for_agents(
+            ("claude", "codex", "cursor"), "auto", cursor_history=True,
+        ) == "all",
+        "all-agent Cursor history opt-in should retain every selected provider",
+    )
     print("PASS seed_source_follows_agents_by_default")
 
 
@@ -171,6 +183,36 @@ def test_seed_command_includes_project_source_sessions_and_apply():
     _assert("'/tmp/example project'" in formatted,
             f"formatted command should quote project paths with spaces: {formatted}")
     print("PASS seed_command_includes_project_source_sessions_and_apply")
+
+
+def test_seed_command_propagates_cursor_history_only_when_opted_in():
+    base = qs.seed_command_args(
+        python_path="/py",
+        project=Path("/tmp/example-project"),
+        source="cursor",
+        backend="cursor",
+    )
+    opted_in = qs.seed_command_args(
+        python_path="/py",
+        project=Path("/tmp/example-project"),
+        source="cursor",
+        backend="cursor",
+        cursor_history=True,
+    )
+    _assert("--cursor-history" not in base, base)
+    _assert(opted_in[-1] == "--cursor-history", opted_in)
+    parsed = qs.parse_args([
+        "--agents", "cursor",
+        "--project", "/tmp/example-project",
+        "--cursor-history",
+    ])
+    defaulted = qs.parse_args([
+        "--agents", "cursor",
+        "--project", "/tmp/example-project",
+    ])
+    _assert(parsed.cursor_history is True, parsed)
+    _assert(defaulted.cursor_history is False, defaulted)
+    print("PASS seed_command_propagates_cursor_history_only_when_opted_in")
 
 
 def test_initial_kb_defaults_and_dry_run_plan_are_explicit():
@@ -581,6 +623,7 @@ if __name__ == "__main__":
     test_seed_source_follows_agents_by_default()
     test_seed_backend_follows_selected_agent_surface()
     test_seed_command_includes_project_source_sessions_and_apply()
+    test_seed_command_propagates_cursor_history_only_when_opted_in()
     test_initial_kb_defaults_and_dry_run_plan_are_explicit()
     test_resolve_agents_requires_choice_noninteractive_even_with_context()
     test_resolve_agents_uses_detected_default_when_interactive()

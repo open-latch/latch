@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import sys
 import tempfile
 from datetime import datetime, timezone
@@ -31,6 +32,65 @@ def _has_key(obj, key: str) -> bool:
 def _write_jsonl(path: Path, rows: list[dict]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+
+
+def _write_cursor_state_db(
+    path: Path,
+    *,
+    projects: list[dict],
+    memberships: dict[str, str],
+    headers: list[tuple[str, str, int]],
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(path)
+    try:
+        conn.execute(
+            "CREATE TABLE ItemTable "
+            "(key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB)"
+        )
+        conn.execute(
+            "CREATE TABLE composerHeaders ("
+            "composerId TEXT PRIMARY KEY, workspaceId TEXT, "
+            "createdAt INTEGER, lastUpdatedAt INTEGER, isArchived INTEGER, "
+            "isSubagent INTEGER, recency INTEGER, checkpointAt INTEGER, "
+            "value TEXT)"
+        )
+        conn.executemany(
+            "INSERT INTO ItemTable(key, value) VALUES (?, ?)",
+            [
+                ("glass.localAgentProjects.v1", json.dumps(projects)),
+                (
+                    "glass.localAgentProjectMembership.v1",
+                    json.dumps(memberships),
+                ),
+            ],
+        )
+        conn.executemany(
+            "INSERT INTO composerHeaders("
+            "composerId, workspaceId, isSubagent"
+            ") VALUES (?, ?, ?)",
+            headers,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _cursor_project_row(
+    project_id: str,
+    workspace_id: str,
+    project: Path,
+) -> dict:
+    return {
+        "id": project_id,
+        "workspace": {
+            "id": workspace_id,
+            "uri": {
+                "fsPath": str(project),
+                "path": str(project),
+            },
+        },
+    }
 
 
 def test_deterministic_seed_candidates_from_claude_transcript():
@@ -211,6 +271,432 @@ def test_cursor_source_accepts_only_explicit_path_without_marker():
         shutil.rmtree(root, ignore_errors=True)
 
 
+def test_cursor_history_opt_in_is_project_scoped_and_excludes_subagents():
+    root = Path(tempfile.mkdtemp(prefix="latch-seed-cursor-history-"))
+    project = root / "repo" / "latch"
+    other_project = root / "repo" / "other"
+    project.mkdir(parents=True)
+    other_project.mkdir(parents=True)
+    cursor_home = root / ".cursor"
+    state_db = root / "Cursor" / "User" / "globalStorage" / "state.vscdb"
+    session_id = "49ed7582-55f4-4f72-b1b2-c388dc227c30"
+    subagent_id = "fc8551a4-d5d7-4675-a069-3086cea46aaa"
+    other_id = "15b8b7db-b121-471a-9312-2deae6794806"
+
+    def history_root(target: Path) -> Path:
+        key = cursor_transcript.cursor_project_storage_keys(str(target))[0]
+        return cursor_home / "projects" / key / "agent-transcripts"
+
+    transcript = history_root(project) / session_id / f"{session_id}.jsonl"
+    _write_jsonl(transcript, [
+        {
+            "role": "user",
+            "content": "We decided to keep Cursor history opt-in.",
+        },
+    ])
+    _write_jsonl(
+        history_root(project) / session_id / "subagents" / f"{subagent_id}.jsonl",
+        [{"role": "user", "content": "Do not import this nested subagent."}],
+    )
+    _write_jsonl(
+        history_root(project) / subagent_id / f"{subagent_id}.jsonl",
+        [{"role": "user", "content": "Do not import a typed top-level subagent."}],
+    )
+    _write_jsonl(
+        history_root(other_project) / other_id / f"{other_id}.jsonl",
+        [{"role": "user", "content": "Do not import another project."}],
+    )
+    _write_jsonl(
+        history_root(project) / "not-a-session" / "not-a-session.jsonl",
+        [{"role": "user", "content": "Do not import an invalid session directory."}],
+    )
+    _write_cursor_state_db(
+        state_db,
+        projects=[
+            _cursor_project_row("project-latch", "workspace-latch", project),
+            _cursor_project_row("project-other", "workspace-other", other_project),
+        ],
+        memberships={
+            session_id: "project-latch",
+            subagent_id: "project-latch",
+            other_id: "project-other",
+        },
+        headers=[
+            (session_id, "workspace-latch", 0),
+            (subagent_id, "workspace-latch", 1),
+            (other_id, "workspace-other", 0),
+        ],
+    )
+    try:
+        found = cursor_transcript.discover_project_history(
+            str(project),
+            cursor_home=str(cursor_home),
+            state_db=str(state_db),
+        )
+        _assert(found == [(session_id, transcript.resolve())], found)
+
+        stats: dict = {}
+        sources = seed.discover_sources(
+            source="cursor",
+            project_path=str(project),
+            lookback_days=5,
+            max_sessions=10,
+            claude_home=str(root / ".claude"),
+            codex_home=str(root / ".codex"),
+            cursor_history=True,
+            cursor_home=str(cursor_home),
+            cursor_state_db=str(state_db),
+            stats=stats,
+            now=datetime.now(timezone.utc),
+        )
+        _assert(len(sources) == 1, sources)
+        _assert(sources[0].id == f"cursor:{session_id}", sources[0])
+        _assert(sources[0].history_discovered, sources[0])
+        _assert("other project" not in sources[0].text, sources[0].text)
+        _assert("nested subagent" not in sources[0].text, sources[0].text)
+        _assert("typed top-level subagent" not in sources[0].text, sources[0].text)
+        _assert(stats["cursor_history_discovered"] == 1, stats)
+    finally:
+        import shutil
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_cursor_history_dedupes_exact_current_transcript():
+    root = Path(tempfile.mkdtemp(prefix="latch-seed-cursor-history-current-"))
+    project = root / "repo"
+    project.mkdir()
+    cursor_home = root / ".cursor"
+    state_db = root / "Cursor" / "User" / "globalStorage" / "state.vscdb"
+    session_id = "2272005e-2fcf-47e6-81b8-3998ea19ffba"
+    key = cursor_transcript.cursor_project_storage_keys(str(project))[0]
+    transcript = (
+        cursor_home / "projects" / key / "agent-transcripts"
+        / session_id / f"{session_id}.jsonl"
+    )
+    _write_jsonl(transcript, [
+        {"role": "user", "content": "Always dedupe the current Cursor transcript."},
+    ])
+    _write_cursor_state_db(
+        state_db,
+        projects=[
+            _cursor_project_row("project-repo", "workspace-repo", project),
+        ],
+        memberships={session_id: "project-repo"},
+        headers=[(session_id, "workspace-repo", 0)],
+    )
+    project_dir = paths.project_dir(str(project))
+    try:
+        cursor_session.write_marker(
+            str(project), session_id, transcript_path=str(transcript),
+        )
+        sources = seed.discover_sources(
+            source="cursor",
+            project_path=str(project),
+            lookback_days=5,
+            max_sessions=10,
+            claude_home=str(root / ".claude"),
+            codex_home=str(root / ".codex"),
+            cursor_session_id=session_id,
+            cursor_history=True,
+            cursor_home=str(cursor_home),
+            cursor_state_db=str(state_db),
+            now=datetime.now(timezone.utc),
+        )
+        _assert(len(sources) == 1, sources)
+        _assert(sources[0].id == f"cursor:{session_id}", sources[0])
+        _assert(not sources[0].history_discovered, sources[0])
+    finally:
+        import shutil
+        shutil.rmtree(project_dir, ignore_errors=True)
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_cursor_history_membership_prevents_lossy_bucket_cross_project_reads():
+    root = Path(tempfile.mkdtemp(prefix="latch-seed-cursor-collision-"))
+    project = root / "team-a" / "repo"
+    other_project = root / "team" / "a-repo"
+    project.mkdir(parents=True)
+    other_project.mkdir(parents=True)
+    cursor_home = root / ".cursor"
+    state_db = root / "Cursor" / "User" / "globalStorage" / "state.vscdb"
+    project_id = "49ed7582-55f4-4f72-b1b2-c388dc227c30"
+    other_id = "15b8b7db-b121-471a-9312-2deae6794806"
+    project_key = cursor_transcript.cursor_project_storage_keys(str(project))[0]
+    other_key = cursor_transcript.cursor_project_storage_keys(str(other_project))[0]
+    _assert(project_key == other_key, (project_key, other_key))
+    history_root = cursor_home / "projects" / project_key / "agent-transcripts"
+    project_transcript = history_root / project_id / f"{project_id}.jsonl"
+    other_transcript = history_root / other_id / f"{other_id}.jsonl"
+    _write_jsonl(
+        project_transcript,
+        [{"role": "user", "content": "Keep the current project decision."}],
+    )
+    _write_jsonl(
+        other_transcript,
+        [{"role": "user", "content": "Never expose this colliding project."}],
+    )
+    _write_cursor_state_db(
+        state_db,
+        projects=[
+            _cursor_project_row("project-one", "workspace-one", project),
+            _cursor_project_row("project-two", "workspace-two", other_project),
+        ],
+        memberships={
+            project_id: "project-one",
+            other_id: "project-two",
+        },
+        headers=[
+            (project_id, "workspace-one", 0),
+            (other_id, "workspace-two", 0),
+        ],
+    )
+    try:
+        found = cursor_transcript.discover_project_history(
+            str(project),
+            cursor_home=str(cursor_home),
+            state_db=str(state_db),
+        )
+        _assert(found == [(project_id, project_transcript.resolve())], found)
+        sources = seed.discover_sources(
+            source="cursor",
+            project_path=str(project),
+            lookback_days=5,
+            max_sessions=10,
+            claude_home=str(root / ".claude"),
+            codex_home=str(root / ".codex"),
+            cursor_history=True,
+            cursor_home=str(cursor_home),
+            cursor_state_db=str(state_db),
+            now=datetime.now(timezone.utc),
+        )
+        _assert(len(sources) == 1, sources)
+        _assert("colliding project" not in sources[0].text, sources[0].text)
+    finally:
+        import shutil
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_cursor_history_fails_closed_without_authoritative_metadata():
+    root = Path(tempfile.mkdtemp(prefix="latch-seed-cursor-no-metadata-"))
+    project = root / "repo"
+    project.mkdir()
+    cursor_home = root / ".cursor"
+    session_id = "49ed7582-55f4-4f72-b1b2-c388dc227c30"
+    key = cursor_transcript.cursor_project_storage_keys(str(project))[0]
+    transcript = (
+        cursor_home / "projects" / key / "agent-transcripts"
+        / session_id / f"{session_id}.jsonl"
+    )
+    _write_jsonl(
+        transcript,
+        [{"role": "user", "content": "Do not trust only the bucket name."}],
+    )
+    try:
+        try:
+            cursor_transcript.discover_project_history(
+                str(project),
+                cursor_home=str(cursor_home),
+                state_db=str(root / "missing.vscdb"),
+            )
+        except cursor_transcript.CursorTranscriptError as exc:
+            _assert("metadata is unavailable" in str(exc), exc)
+        else:
+            raise AssertionError("Cursor history without metadata must fail closed")
+    finally:
+        import shutil
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_cursor_history_unavailable_degrades_for_aggregate_sources():
+    root = Path(tempfile.mkdtemp(prefix="latch-seed-cursor-degrade-"))
+    project = root / "repo"
+    project.mkdir()
+    encoded = seed._encoded_claude_project_path(str(project.resolve()))
+    transcript = root / ".claude" / "projects" / encoded / "session.jsonl"
+    _write_jsonl(transcript, [
+        {"type": "system", "cwd": str(project.resolve())},
+        {
+            "type": "user",
+            "message": {
+                "content": "Keep available Claude history when Cursor metadata is absent.",
+            },
+        },
+    ])
+    stats: dict = {}
+    try:
+        sources = seed.discover_sources(
+            source="all",
+            project_path=str(project),
+            lookback_days=5,
+            max_sessions=10,
+            claude_home=str(root / ".claude"),
+            codex_home=str(root / ".codex"),
+            cursor_history=True,
+            cursor_home=str(root / ".cursor"),
+            cursor_state_db=str(root / "missing.vscdb"),
+            stats=stats,
+            now=datetime.now(timezone.utc),
+        )
+        _assert(len(sources) == 1, sources)
+        _assert(sources[0].agent == "claude", sources[0])
+        _assert(stats["source_unavailable"] == 1, stats)
+        _assert(stats["cursor_history_unavailable"] == 1, stats)
+        _assert(stats["cursor_history_discovered"] == 0, stats)
+    finally:
+        import shutil
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_cursor_history_unavailable_still_fails_for_cursor_only():
+    root = Path(tempfile.mkdtemp(prefix="latch-seed-cursor-only-fail-"))
+    project = root / "repo"
+    project.mkdir()
+    try:
+        try:
+            seed.discover_sources(
+                source="cursor",
+                project_path=str(project),
+                lookback_days=5,
+                max_sessions=10,
+                claude_home=str(root / ".claude"),
+                codex_home=str(root / ".codex"),
+                cursor_history=True,
+                cursor_home=str(root / ".cursor"),
+                cursor_state_db=str(root / "missing.vscdb"),
+                now=datetime.now(timezone.utc),
+            )
+        except cursor_transcript.CursorTranscriptError as exc:
+            _assert("metadata is unavailable" in str(exc), exc)
+        else:
+            raise AssertionError(
+                "Cursor-only history must fail closed when metadata is unavailable"
+            )
+    finally:
+        import shutil
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_cursor_project_storage_keys_keep_exact_path_spellings():
+    root = Path(tempfile.mkdtemp(prefix="latch-seed-cursor-keys-"))
+    real = root / "real" / "repo"
+    alias = root / "alias"
+    real.mkdir(parents=True)
+    alias.symlink_to(real, target_is_directory=True)
+    try:
+        keys = cursor_transcript.cursor_project_storage_keys(str(alias))
+        _assert(
+            cursor_transcript._cursor_project_storage_key(str(alias)) in keys,
+            keys,
+        )
+        _assert(
+            cursor_transcript._cursor_project_storage_key(
+                str(real.resolve()),
+            ) in keys,
+            keys,
+        )
+        windows = cursor_transcript.cursor_project_storage_keys(
+            r"C:\Users\Example\Repo",
+        )
+        _assert(
+            windows == ("C-Users-Example-Repo", "c-Users-Example-Repo"),
+            windows,
+        )
+        unc = cursor_transcript.cursor_project_storage_keys(
+            r"\\server\share\Repo",
+        )
+        _assert(unc == ("server-share-Repo",), unc)
+        if str(Path("/var").resolve()) == "/private/var":
+            mac_aliases = cursor_transcript.cursor_project_storage_keys(
+                "/var/folders/example",
+            )
+            _assert("var-folders-example" in mac_aliases, mac_aliases)
+            _assert("private-var-folders-example" in mac_aliases, mac_aliases)
+    finally:
+        import shutil
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_cursor_history_uses_workspace_path_spelling_from_metadata():
+    root = Path(tempfile.mkdtemp(prefix="latch-seed-cursor-windows-case-"))
+    cursor_home = root / ".cursor"
+    state_db = root / "Cursor" / "User" / "globalStorage" / "state.vscdb"
+    stored_project = Path(r"C:\Users\Example\Repo")
+    requested_project = r"c:\users\example\repo"
+    session_id = "49ed7582-55f4-4f72-b1b2-c388dc227c30"
+    stored_key = cursor_transcript.cursor_project_storage_keys(
+        str(stored_project),
+    )[0]
+    transcript = (
+        cursor_home / "projects" / stored_key / "agent-transcripts"
+        / session_id / f"{session_id}.jsonl"
+    )
+    _write_jsonl(
+        transcript,
+        [{"role": "user", "content": "Keep native workspace path casing."}],
+    )
+    _write_cursor_state_db(
+        state_db,
+        projects=[
+            _cursor_project_row(
+                "project-repo", "workspace-repo", stored_project,
+            ),
+        ],
+        memberships={session_id: "project-repo"},
+        headers=[(session_id, "workspace-repo", 0)],
+    )
+    try:
+        found = cursor_transcript.discover_project_history(
+            requested_project,
+            cursor_home=str(cursor_home),
+            state_db=str(state_db),
+        )
+        _assert(found == [(session_id, transcript.resolve())], found)
+    finally:
+        import shutil
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_cursor_history_recovers_workspace_spelling_after_main_resolution():
+    root = Path(tempfile.mkdtemp(prefix="latch-seed-cursor-path-alias-"))
+    stored_project = root / "repo"
+    stored_project.mkdir()
+    requested_project = str(stored_project.resolve())
+    cursor_home = root / ".cursor"
+    state_db = root / "Cursor" / "User" / "globalStorage" / "state.vscdb"
+    session_id = "2272005e-2fcf-47e6-81b8-3998ea19ffba"
+    stored_key = cursor_transcript.cursor_project_storage_keys(
+        str(stored_project),
+    )[0]
+    transcript = (
+        cursor_home / "projects" / stored_key / "agent-transcripts"
+        / session_id / f"{session_id}.jsonl"
+    )
+    _write_jsonl(
+        transcript,
+        [{"role": "user", "content": "Preserve Cursor's workspace spelling."}],
+    )
+    _write_cursor_state_db(
+        state_db,
+        projects=[
+            _cursor_project_row(
+                "project-repo", "workspace-repo", stored_project,
+            ),
+        ],
+        memberships={session_id: "project-repo"},
+        headers=[(session_id, "workspace-repo", 0)],
+    )
+    try:
+        found = cursor_transcript.discover_project_history(
+            requested_project,
+            cursor_home=str(cursor_home),
+            state_db=str(state_db),
+        )
+        _assert(found == [(session_id, transcript.resolve())], found)
+    finally:
+        import shutil
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def test_both_source_selection_uses_global_recency_split():
     root = Path(tempfile.mkdtemp(prefix="latch-seed-both-"))
     project = root / "repo" / "latch"
@@ -319,6 +805,13 @@ def test_source_agents_keeps_both_stable_and_all_adds_cursor():
             "both must preserve the existing Claude+Codex contract")
     _assert(seed.source_agents("all") == ("claude", "codex", "cursor"),
             "all must be the explicit opt-in that adds Cursor")
+    exact = seed.parse_args(["--source", "cursor"])
+    history = seed.parse_args(["--source", "cursor", "--cursor-history"])
+    _assert(seed.uses_cursor_session_preview(exact), exact)
+    _assert(
+        not seed.uses_cursor_session_preview(history),
+        "Cursor history should use the shared provider preview/apply lane",
+    )
 
 
 def test_llm_call_estimate_is_capped():
@@ -1130,6 +1623,15 @@ if __name__ == "__main__":
     test_cursor_source_uses_exact_current_marker_without_history_scan()
     test_cursor_transcript_excludes_injected_command_prompt_from_user_query()
     test_cursor_source_accepts_only_explicit_path_without_marker()
+    test_cursor_history_opt_in_is_project_scoped_and_excludes_subagents()
+    test_cursor_history_dedupes_exact_current_transcript()
+    test_cursor_history_membership_prevents_lossy_bucket_cross_project_reads()
+    test_cursor_history_fails_closed_without_authoritative_metadata()
+    test_cursor_history_unavailable_degrades_for_aggregate_sources()
+    test_cursor_history_unavailable_still_fails_for_cursor_only()
+    test_cursor_project_storage_keys_keep_exact_path_spellings()
+    test_cursor_history_uses_workspace_path_spelling_from_metadata()
+    test_cursor_history_recovers_workspace_spelling_after_main_resolution()
     test_both_source_selection_uses_global_recency_split()
     test_auto_source_noninteractive_requires_explicit_choice_when_ambiguous()
     test_auto_source_noninteractive_uses_only_available_source()

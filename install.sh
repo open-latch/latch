@@ -44,6 +44,7 @@ Bootstrap options:
 Other arguments are forwarded to latch_quickstart, for example:
   --agents claude|codex|cursor|both|all
   --seed-source claude|codex|cursor|both|all
+  --cursor-history
   --no-seed
 
 Rerunning without --upgrade keeps the installed source revision and reconciles

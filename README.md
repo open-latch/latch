@@ -148,6 +148,9 @@ sessions:
 ```bash
 /path/to/latch/bin/latch_seed.sh --source both --last-sessions 20 --apply
 # Windows: C:\path\to\latch\bin\latch_seed.ps1 --source both --last-sessions 20 --apply
+
+# Opt in to this project's local Cursor IDE history:
+/path/to/latch/bin/latch_seed.sh --source cursor --cursor-history --last-sessions 20 --apply
 ```
 
 It is review-first — the pass prints a structured report and writes only the candidates you approve.
@@ -155,6 +158,18 @@ At the prompt, enter `none` to explicitly dismiss the whole report and finalize
 those exact source revisions without creating KB nodes. For a cached
 digest-bound review, repeat the preview's exact `--source` (and workstream
 flags) alongside `--preview-digest DIGEST --apply --dismiss-all`.
+`--cursor-history` is never implicit. It intersects Cursor's local project
+membership and typed conversation metadata before reading a transcript, so only
+IDE conversations assigned to the selected project and marked non-subagent are
+eligible—even if two project paths collide in Cursor's lossy folder naming.
+Cursor CLI sessions, cloud chats, other projects, and subagents are excluded.
+If that metadata is missing or changes shape, the Cursor-history leg fails
+closed. Cursor-only seeding stops; `--source all` records Cursor history as
+unavailable and continues with any authorized Claude, Codex, or exact-current
+Cursor sources. Interactive quickstart asks with a default of **No**;
+non-interactive runs require the flag.
+Applying a cached history preview must repeat `--cursor-history`; that consent
+choice is included in the preview digest.
 The full walkthrough and source options are in [See it catch](#see-it-catch-seed-then-gate); to read
 the installer first, pin a release, or install to a custom directory, see
 [Install details](#install-details).
@@ -180,7 +195,9 @@ next agent would plausibly revive.
 options). Use `--source claude`, `codex`, `cursor`, `both`, or `all`; `--apply` is review-first and
 writes only the candidates you approve, while omitting it previews only. From a hooked Cursor
 conversation, `/latch-seed` is the normal path; Cursor uses only that exact hook-provided transcript
-and never scans its private history folders.
+and never scans history. For an explicit project-history backfill, run the shell
+seed command with `--cursor-history`; the normal bounded source and staging
+review still apply.
 
 **2. Pick one strong proof target** the seed surfaced:
 
@@ -225,7 +242,7 @@ The guided quickstart wires whichever you choose.
 | --- | --- | --- |
 | Claude Code | MCP tools, hooks, slash commands, `/latch-compact`, managed `CLAUDE.md` contract | Restart after install so tools and hooks load |
 | Codex | Shared MCP tools + KB, user skills, `AGENTS.md`, silent startup hook, Codex backend defaults | Start a new task after install; compaction is manual |
-| Cursor | Project MCP, Rule, commands, skills, `AGENTS.md`; optional session/gate/activity hooks | Current-session seed/compact only; no historical transcript discovery |
+| Cursor | Project MCP, Rule, commands, skills, `AGENTS.md`; optional session/gate/activity hooks | Current-session seed/compact; opt-in project-local IDE history backfill |
 | Multiple agents | One shared local latch KB | A decision captured through one agent can gate the others |
 
 Cursor also needs three user-controlled live steps: authenticate with `agent login`, approve the

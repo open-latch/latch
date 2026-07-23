@@ -20,10 +20,16 @@ cd /path/to/user/project
 ```
 
 Use `--source claude`, `--source codex`, `--source cursor`, `--source both`, or
-`--source all` depending on where your relevant sessions live. Cursor uses only
-the current hook-provided transcript or an explicit `--cursor-transcript`; it
-never scans private Cursor history. `--apply` still prints the structured
-report first and writes only if you approve the prompt. Enter `none` to dismiss the whole
+`--source all` depending on where your relevant sessions live. Cursor defaults
+to the current hook-provided transcript or an explicit `--cursor-transcript`.
+Add `--cursor-history` to opt in to top-level local IDE conversations for this
+project only. Latch requires each conversation id to match Cursor's local
+project membership and non-subagent header; Cursor CLI sessions, cloud chats,
+other projects, and subagents remain excluded. Missing metadata fails closed
+for Cursor history: Cursor-only seeding stops, while `--source all` continues
+with other authorized sources and reports Cursor history unavailable. `--apply`
+still prints the structured report first and writes only if you approve the
+prompt. Enter `none` to dismiss the whole
 report and finalize those exact source revisions without creating nodes. For a
 cached review, repeat the preview's exact `--source` (and workstream flags)
 alongside `--preview-digest DIGEST --apply --dismiss-all`. Omit

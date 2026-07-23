@@ -25,6 +25,7 @@ def _source(
     mtime: str = "2026-07-20T12:00:00+00:00",
     text: str = "[user] Project direction reporting is read-only.",
     path: str | None = None,
+    history_discovered: bool = False,
 ) -> seed.SeedSource:
     return seed.SeedSource(
         id=source_id,
@@ -34,6 +35,7 @@ def _source(
         text=text,
         content_digest=seed.source_content_digest(text),
         subject=seed.source_subject(text),
+        history_discovered=history_discovered,
     )
 
 
@@ -1022,6 +1024,147 @@ def test_scoped_apply_uses_exact_digest_bound_preview(
     assert apply_output["preview_digest"] == digest
     assert [seed.candidate_review_id(item) for item in applied] == [candidate_id]
     assert not seed._seed_preview_path(str(tmp_path), digest).exists()
+
+
+def test_cursor_history_consent_is_bound_to_generic_preview_digest(
+    tmp_path, monkeypatch, capsys,
+):
+    monkeypatch.setattr(paths, "is_unlatched_mode", lambda: False)
+    source = _source(
+        "cursor:history-consent",
+        agent="cursor",
+        history_discovered=True,
+    )
+    candidate = _candidate(
+        source,
+        title="Keep Cursor history opt-in",
+        claim="Require the same explicit Cursor history choice at apply time.",
+    )
+    digest = seed.write_seed_preview(
+        project_path=str(tmp_path),
+        source_choice="all",
+        sources=[source],
+        candidates=[candidate],
+        llm_estimate=0,
+        apply_sources=[source],
+        source_failure_codes={},
+        workstream_scope="project",
+        llm_stats={},
+        discovery_stats={"cursor_history_discovered": 1},
+        llm_refinement_empty=False,
+        cursor_history=True,
+    )
+    candidate_id = seed.candidate_review_id(candidate)
+
+    def forbidden_discovery(**_kwargs):
+        raise AssertionError("digest-bound apply must not rediscover history")
+
+    monkeypatch.setattr(seed, "discover_sources", forbidden_discovery)
+    rejected_rc = seed.main([
+        "--project", str(tmp_path),
+        "--source", "all",
+        "--lookback-days", "5",
+        "--last-sessions", "1",
+        "--llm", "no",
+        "--allow-internal-no-llm",
+        "--format", "json",
+        "--preview-digest", digest,
+        "--approve-candidate", candidate_id,
+        "--apply",
+    ])
+    rejected = capsys.readouterr()
+    assert rejected_rc == 2
+    assert "Cursor history consent does not match" in rejected.err
+    assert seed._seed_preview_path(str(tmp_path), digest).exists()
+
+    applied: list[seed.SeedCandidate] = []
+    monkeypatch.setattr(
+        seed,
+        "apply_candidates",
+        lambda candidates, **_kwargs: (
+            applied.extend(candidates)
+            or seed.SeedApplyResult(inserted_ids=[303])
+        ),
+    )
+    accepted_rc = seed.main([
+        "--project", str(tmp_path),
+        "--source", "all",
+        "--cursor-history",
+        "--lookback-days", "5",
+        "--last-sessions", "1",
+        "--llm", "no",
+        "--allow-internal-no-llm",
+        "--format", "json",
+        "--preview-digest", digest,
+        "--approve-candidate", candidate_id,
+        "--apply",
+    ])
+    accepted = json.loads(capsys.readouterr().out)
+    assert accepted_rc == 0
+    assert accepted["cursor_history"]["enabled"] is True
+    assert [seed.candidate_review_id(item) for item in applied] == [candidate_id]
+    assert not seed._seed_preview_path(str(tmp_path), digest).exists()
+
+    preview_args = seed.parse_args([
+        "--project", str(tmp_path),
+        "--source", "all",
+        "--cursor-history",
+        "--lookback-days", "5",
+        "--last-sessions", "1",
+    ])
+    preview_args.preview_digest = digest
+    assert "--cursor-history --preview-digest" in seed.write_boundary_message(
+        preview_args,
+    )
+
+
+def test_cursor_history_main_signs_opt_in_into_preview(
+    tmp_path, monkeypatch, capsys,
+):
+    source = _source(
+        "cursor:history-main-preview",
+        agent="cursor",
+        history_discovered=True,
+    )
+    candidate = _candidate(
+        source,
+        title="Sign Cursor history consent",
+        claim="Bind Cursor history consent into the generated preview.",
+    )
+    monkeypatch.setattr(seed, "discover_sources", lambda **_kwargs: [source])
+    monkeypatch.setattr(
+        seed,
+        "split_applied_sources",
+        lambda sources, **_kwargs: (sources, []),
+    )
+    monkeypatch.setattr(
+        seed,
+        "deterministic_candidates",
+        lambda _sources, **_kwargs: [candidate],
+    )
+    observed: dict[str, object] = {}
+
+    def record_preview(**kwargs):
+        observed.update(kwargs)
+        return "a" * 64
+
+    monkeypatch.setattr(seed, "write_seed_preview", record_preview)
+    rc = seed.main([
+        "--project", str(tmp_path),
+        "--source", "all",
+        "--cursor-history",
+        "--lookback-days", "5",
+        "--last-sessions", "1",
+        "--llm", "no",
+        "--allow-internal-no-llm",
+        "--format", "json",
+        "--yes",
+    ])
+    output = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert observed["cursor_history"] is True
+    assert output["cursor_history"]["enabled"] is True
+    assert "--cursor-history --preview-digest" in output["write_boundary"]
 
 
 def test_scoped_apply_finalizes_review_and_dismisses_unselected_items(

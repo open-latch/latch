@@ -109,6 +109,38 @@ def test_source_selection_reserves_recent_value_and_exact_cursor_inputs():
     assert valuable_old[0].id in selected_ids
 
 
+def test_source_selection_does_not_make_cursor_history_mandatory():
+    cursor_history = seed.SeedSource(
+        **{
+            **_source(
+                "cursor:history",
+                agent="cursor",
+                mtime="2026-01-01T00:00:00+00:00",
+                value_score=0.0,
+            ).__dict__,
+            "history_discovered": True,
+        }
+    )
+    recent = _source(
+        "claude:recent",
+        mtime="2026-07-16T12:00:00+00:00",
+        value_score=0.0,
+    )
+    valuable = _source(
+        "codex:valuable",
+        agent="codex",
+        mtime="2026-05-01T12:00:00+00:00",
+        value_score=100.0,
+    )
+
+    selected = seed.select_sources(
+        [cursor_history, recent, valuable],
+        max_sessions=2,
+    )
+
+    assert {source.id for source in selected} == {recent.id, valuable.id}
+
+
 def test_redaction_precedes_prompt_preview_cache_and_persisted_body(
     tmp_path, monkeypatch,
 ):
