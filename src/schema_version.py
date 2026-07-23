@@ -16,6 +16,10 @@ class SchemaTooNewError(RuntimeError):
     pass
 
 
+class SchemaMigrationRequiredError(RuntimeError):
+    pass
+
+
 def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
     row = conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
@@ -97,6 +101,13 @@ def backup_database(
 
 
 def stamp_current(conn: sqlite3.Connection, *, record_migration: bool) -> None:
+    # Reopening a current KB is a read operation.  In particular, SessionStart
+    # hooks may be allowed to read an externally pinned vault without being
+    # allowed to mutate it.  Avoid issuing even an idempotent UPSERT in the
+    # overwhelmingly common already-current case.
+    if not record_migration and read(conn) == KB_SCHEMA_VERSION:
+        return
+
     conn.execute(
         f"CREATE TABLE IF NOT EXISTS {META_TABLE} ("
         "key TEXT PRIMARY KEY, value TEXT NOT NULL)"

@@ -20,6 +20,7 @@ import agents_md_sync
 import codex_hooks
 import compactor
 import codex_transcript
+import db
 import install_codex
 import install_engine
 import paths
@@ -86,6 +87,61 @@ def check_mcp_launch_target(python_path: str, server_py: str) -> Check:
     if missing:
         return Check("Codex MCP launch target", FAIL, "; ".join(missing))
     return Check("Codex MCP launch target", OK, f"{python_path} -> {server_py}")
+
+
+def check_kb_access(cwd: str | None = None) -> Check:
+    """Verify the selected KB is readable without mutating it.
+
+    SessionStart can still render its brief through the read-only connection
+    when Codex's sandbox denies metadata writes.  Writability is therefore a
+    warning rather than a failed readiness check.
+    """
+    db_file = paths.db_path(cwd)
+    if not db_file.exists():
+        if os.access(db_file.parent, os.W_OK):
+            return Check(
+                "Latch KB access",
+                WARN,
+                f"{db_file} is not initialized yet; the selected parent directory "
+                "is writable, so quickstart may continue to the seed step. The "
+                "startup brief is unavailable until the first DB creation",
+            )
+        return Check(
+            "Latch KB access",
+            FAIL,
+            f"{db_file} is not initialized and its parent directory is not writable; "
+            "the KB cannot be created for startup briefs or seed data",
+        )
+    try:
+        conn = db.connect_readonly(cwd)
+        conn.close()
+    except Exception as e:
+        return Check(
+            "Latch KB access",
+            FAIL,
+            f"{db_file} could not be opened read-only with a compatible schema: {e}",
+        )
+
+    unwritable: list[str] = []
+    if not os.access(db_file, os.W_OK):
+        unwritable.append("database file")
+    if not os.access(db_file.parent, os.W_OK):
+        unwritable.append("parent directory")
+    if unwritable:
+        return Check(
+            "Latch KB access",
+            WARN,
+            f"{db_file} is readable and schema compatible, but "
+            f"{' and '.join(unwritable)} {'are' if len(unwritable) > 1 else 'is'} "
+            "not writable; the startup brief remains available read-only, but "
+            "SessionStart hook metadata writes may be skipped",
+        )
+    return Check(
+        "Latch KB access",
+        OK,
+        f"{db_file} is readable, schema compatible, and appears writable for "
+        "SessionStart hook metadata",
+    )
 
 
 def check_compact_resolution(session_id: str | None, *, require: bool = False) -> Check:
@@ -218,6 +274,7 @@ def run_all(
         check_latch_intensity(),
         check_codex_config(config_path, python_path, server_py),
         check_mcp_launch_target(python_path, server_py),
+        check_kb_access(),
     ]
     if skip_hooks:
         checks.append(Check("Codex SessionStart hook", WARN, "skipped (--skip-hooks)"))

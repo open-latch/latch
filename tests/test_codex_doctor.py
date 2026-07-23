@@ -87,6 +87,173 @@ def test_check_mcp_launch_target():
     print("PASS check_mcp_launch_target")
 
 
+def test_check_kb_access_readable_warns_without_writes():
+    d = _tmp()
+    db_file = d / "kb.db"
+    db_file.write_bytes(b"fixture")
+    original_db_path = cd.paths.db_path
+    original_connect = cd.db.connect_readonly
+    original_access = cd.os.access
+    closed: list[bool] = []
+
+    class FakeConnection:
+        def close(self):
+            closed.append(True)
+
+    try:
+        cd.paths.db_path = lambda _cwd=None: db_file
+        cd.db.connect_readonly = lambda _cwd=None: FakeConnection()
+
+        cd.os.access = lambda path, mode: Path(path) == db_file.parent
+        warned = cd.check_kb_access("/repo")
+        _assert(warned.level == cd.WARN, warned)
+        _assert("database file is not writable" in warned.detail, warned)
+        _assert("startup brief remains available read-only" in warned.detail, warned)
+        _assert("metadata writes may be skipped" in warned.detail, warned)
+
+        cd.os.access = lambda path, mode: Path(path) == db_file
+        parent_warned = cd.check_kb_access("/repo")
+        _assert(parent_warned.level == cd.WARN, parent_warned)
+        _assert("parent directory is not writable" in parent_warned.detail, parent_warned)
+
+        cd.os.access = lambda _path, _mode: True
+        ok = cd.check_kb_access("/repo")
+        _assert(ok.level == cd.OK and "schema compatible" in ok.detail, ok)
+        _assert(len(closed) == 3, closed)
+    finally:
+        cd.paths.db_path = original_db_path
+        cd.db.connect_readonly = original_connect
+        cd.os.access = original_access
+        shutil.rmtree(d, ignore_errors=True)
+    print("PASS check_kb_access_readable_warns_without_writes")
+
+
+def test_check_kb_access_missing_db_preserves_quickstart_seed_order():
+    d = _tmp()
+    db_file = d / "kb.db"
+    original_db_path = cd.paths.db_path
+    original_connect = cd.db.connect_readonly
+    original_access = cd.os.access
+    original_intensity = cd.check_latch_intensity
+    original_config = cd.check_codex_config
+    original_launch = cd.check_mcp_launch_target
+    connect_calls: list[bool] = []
+
+    def unexpected_connect(_cwd=None):
+        connect_calls.append(True)
+        raise AssertionError("missing DB should be classified before read-only open")
+
+    try:
+        cd.paths.db_path = lambda _cwd=None: db_file
+        cd.db.connect_readonly = unexpected_connect
+        cd.os.access = lambda path, mode: Path(path) == db_file.parent
+
+        warned = cd.check_kb_access("/repo")
+        _assert(warned.level == cd.WARN, warned)
+        _assert("not initialized yet" in warned.detail, warned)
+        _assert("quickstart may continue to the seed step" in warned.detail, warned)
+        _assert("startup brief is unavailable until the first DB creation" in warned.detail,
+                warned)
+        _assert(not connect_calls, connect_calls)
+
+        # Quickstart runs doctor before offering seed. WARN must leave run_all
+        # free of failures so that ordering remains install -> doctor -> seed.
+        cd.check_latch_intensity = lambda: cd.Check("Latch intensity", cd.OK, "ok")
+        cd.check_codex_config = lambda *_args: cd.Check("Codex config", cd.OK, "ok")
+        cd.check_mcp_launch_target = lambda *_args: cd.Check("MCP launch", cd.OK, "ok")
+        checks = cd.run_all(
+            config_path=d / "config.toml",
+            hooks_path=d / "hooks.json",
+            agents_path=d / "AGENTS.md",
+            python_path=sys.executable,
+            server_py=str(Path(__file__)),
+            hook_py="/repo/src/hooks/codex_session_start.py",
+            session_id=None,
+            skip_agents=True,
+            skip_hooks=True,
+            skip_compact=True,
+            skip_summarizer=True,
+        )
+        kb_check = next(c for c in checks if c.name == "Latch KB access")
+        _assert(kb_check.level == cd.WARN, checks)
+        _assert(not any(c.level == cd.FAIL for c in checks), checks)
+
+        cd.os.access = lambda _path, _mode: False
+        failed = cd.check_kb_access("/repo")
+        _assert(failed.level == cd.FAIL, failed)
+        _assert("parent directory is not writable" in failed.detail, failed)
+        _assert("cannot be created" in failed.detail, failed)
+        _assert(not connect_calls, connect_calls)
+    finally:
+        cd.paths.db_path = original_db_path
+        cd.db.connect_readonly = original_connect
+        cd.os.access = original_access
+        cd.check_latch_intensity = original_intensity
+        cd.check_codex_config = original_config
+        cd.check_mcp_launch_target = original_launch
+        shutil.rmtree(d, ignore_errors=True)
+    print("PASS check_kb_access_missing_db_preserves_quickstart_seed_order")
+
+
+def test_check_kb_access_fails_when_readonly_open_fails():
+    d = _tmp()
+    db_file = d / "kb.db"
+    db_file.write_bytes(b"fixture")
+    original_db_path = cd.paths.db_path
+    original_connect = cd.db.connect_readonly
+    original_access = cd.os.access
+    access_calls: list[Path] = []
+
+    def fail_open(_cwd=None):
+        raise RuntimeError("KB schema 9 is newer than this latch engine supports")
+
+    try:
+        cd.paths.db_path = lambda _cwd=None: db_file
+        cd.db.connect_readonly = fail_open
+        cd.os.access = lambda path, _mode: access_calls.append(Path(path)) or True
+        failed = cd.check_kb_access("/repo")
+        _assert(failed.level == cd.FAIL, failed)
+        _assert("could not be opened read-only with a compatible schema" in failed.detail, failed)
+        _assert("schema 9 is newer" in failed.detail, failed)
+        _assert(not access_calls, access_calls)
+    finally:
+        cd.paths.db_path = original_db_path
+        cd.db.connect_readonly = original_connect
+        cd.os.access = original_access
+        shutil.rmtree(d, ignore_errors=True)
+    print("PASS check_kb_access_fails_when_readonly_open_fails")
+
+
+def test_run_all_includes_kb_access_check():
+    d = _tmp()
+    original = cd.check_kb_access
+    calls: list[bool] = []
+    try:
+        cd.check_kb_access = lambda: (
+            calls.append(True)
+            or cd.Check("Latch KB access", cd.OK, "read-only probe passed")
+        )
+        checks = cd.run_all(
+            config_path=d / "missing.toml",
+            hooks_path=d / "missing-hooks.json",
+            agents_path=d / "missing-AGENTS.md",
+            python_path=sys.executable,
+            server_py=str(Path(__file__)),
+            hook_py="/repo/src/hooks/codex_session_start.py",
+            session_id=None,
+            skip_agents=True,
+            skip_hooks=True,
+            skip_compact=True,
+            skip_summarizer=True,
+        )
+        _assert(calls == [True], calls)
+        _assert(any(c.name == "Latch KB access" for c in checks), checks)
+    finally:
+        cd.check_kb_access = original
+        shutil.rmtree(d, ignore_errors=True)
+    print("PASS run_all_includes_kb_access_check")
+
+
 def test_check_codex_hooks():
     d = _tmp()
     try:
@@ -194,6 +361,10 @@ if __name__ == "__main__":
     test_check_codex_config_ok_and_missing()
     test_check_agents_md_status()
     test_check_mcp_launch_target()
+    test_check_kb_access_readable_warns_without_writes()
+    test_check_kb_access_missing_db_preserves_quickstart_seed_order()
+    test_check_kb_access_fails_when_readonly_open_fails()
+    test_run_all_includes_kb_access_check()
     test_check_codex_hooks()
     test_check_compact_resolution()
     test_check_summarizer_backend()

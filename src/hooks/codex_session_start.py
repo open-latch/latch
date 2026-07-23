@@ -69,21 +69,63 @@ def main() -> int:
     tpath = transcript_path(payload)
 
     surfaced_ids: list[int] = []
-    try:
-        conn = db.connect(cwd)
+    read_only_startup = False
+    startup_write_warning = False
+    if sid:
+        # Session attribution is independent of KB setup.  In particular, a
+        # readable external vault may be outside this hook's writable sandbox;
+        # codex_session supplies a private runtime fallback for that case.
         try:
-            if sid:
-                db.upsert_session(conn, sid, cwd, tpath)
+            written_marker = codex_session.write_marker(
+                cwd, sid, transcript_path=tpath,
+            )
+            if written_marker != codex_session.marker_path(cwd):
+                # The vault-local rendezvous was not writable.  An existing
+                # session row can make upsert_session a read-only no-op, so the
+                # marker destination is the reliable degradation signal.
+                read_only_startup = True
+        except Exception as e:
+            startup_write_warning = True
+            log(f"codex_session_start marker write failed: {e}")
+
+    if read_only_startup:
+        try:
+            conn = db.connect_readonly(cwd)
+            try:
+                orphan_count = len(db.orphaned_sessions(conn, cwd))
+            finally:
+                conn.close()
+        except Exception as e:
+            log(f"codex_session_start read-only setup failed: {e}")
+            orphan_count = 0
+    else:
+        try:
+            conn = db.connect(cwd)
+            try:
+                if sid:
+                    try:
+                        db.upsert_session(conn, sid, cwd, tpath)
+                    except Exception as e:
+                        if db.is_readonly_error(e):
+                            read_only_startup = True
+                        else:
+                            startup_write_warning = True
+                        log(f"codex_session_start session upsert failed: {e}")
+                orphan_count = len(db.orphaned_sessions(conn, cwd))
+            finally:
+                conn.close()
+        except Exception as e:
+            log(f"codex_session_start db error: {e}")
+            orphan_count = 0
+            try:
+                conn = db.connect_readonly(cwd)
                 try:
-                    codex_session.write_marker(cwd, sid, transcript_path=tpath)
-                except Exception as e:
-                    log(f"codex_session_start marker write failed: {e}")
-            orphan_count = len(db.orphaned_sessions(conn, cwd))
-        finally:
-            conn.close()
-    except Exception as e:
-        log(f"codex_session_start db error: {e}")
-        orphan_count = 0
+                    orphan_count = len(db.orphaned_sessions(conn, cwd))
+                    read_only_startup = True
+                finally:
+                    conn.close()
+            except Exception as read_error:
+                log(f"codex_session_start read-only fallback failed: {read_error}")
 
     try:
         budget_line = budget.brief_line(cwd)
@@ -106,9 +148,11 @@ def main() -> int:
         claude_md_synced=(agents_md_action == "synced"),
         synced_doc_name="AGENTS.md",
         wiring_notice=wiring_notice,
+        read_only=read_only_startup,
+        startup_write_warning=startup_write_warning,
     )
 
-    if sid and surfaced_ids:
+    if sid and surfaced_ids and not read_only_startup:
         try:
             conn = db.connect(cwd)
             try:

@@ -471,6 +471,63 @@ def test_brief_surfaces_lifecycle_receipt_once_with_auto_annotation():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_readonly_brief_keeps_core_context_without_claiming_receipts():
+    tmp, conn = _fresh_db()
+    try:
+        wid = _mk(
+            conn, kind="workstream", title="Read-only startup lane",
+            body="Objective: preserve startup context", status="canonical",
+        )
+        receipt = lifecycle_receipts.opened(
+            "Read-only startup lane", 2, "2026-07-01", "context remains visible",
+        )
+        db.begin_workstream_op(
+            conn,
+            op_key="open-readonly-brief",
+            op="OPEN",
+            origin="auto",
+            candidate_key="open:readonly-brief",
+            dst_workstream_id=wid,
+            payload={
+                "request": {
+                    "title": "Read-only startup lane",
+                    "done_when": "context remains visible",
+                    "recurrence": {"session_count": 2, "since": "2026-07-01"},
+                },
+                "title": "Read-only startup lane",
+                "receipt": receipt,
+                "assigned_member_ids": [],
+                "watch_pair": None,
+                "probation": {},
+            },
+        )
+        db.finish_workstream_op(conn, "open-readonly-brief", state="applied")
+        conn.close()
+        conn = None
+
+        brief = session_start._build_briefing(
+            tmp, intensity="full", read_only=True,
+        )
+        _assert("Read-only startup lane" in brief, brief)
+        _assert("loaded core KB context read-only" in brief, brief)
+        _assert(receipt not in brief, brief)
+
+        check = db.connect(tmp)
+        try:
+            pending = lifecycle_receipts.pending_receipts(check)
+            _assert(
+                [item["op_key"] for item in pending] == ["open-readonly-brief"],
+                pending,
+            )
+        finally:
+            check.close()
+        print("PASS readonly_brief_keeps_core_context_without_claiming_receipts")
+    finally:
+        if conn is not None:
+            conn.close()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_brief_receipt_channel_kill_switch_preserves_pending_receipt():
     tmp, conn = _fresh_db()
     previous = lifecycle_receipts.RECEIPTS_CHANNEL_LIVE

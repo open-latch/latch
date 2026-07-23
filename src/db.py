@@ -192,6 +192,53 @@ def connect(cwd: str | None = None) -> sqlite3.Connection:
         raise
 
 
+def connect_readonly(cwd: str | None = None) -> sqlite3.Connection:
+    """Open an existing, current-schema KB without any setup writes.
+
+    Read-side product surfaces such as SessionStart must remain usable when a
+    pinned vault is readable but intentionally outside the host's writable
+    sandbox.  This connector never creates a directory or database, migrates a
+    schema, stamps metadata, or commits.
+    """
+    path = Path(db_path(cwd)).expanduser().resolve()
+    uri = path.as_uri() + "?mode=ro"
+    conn = sqlite3.connect(uri, uri=True, factory=_Connection)
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("PRAGMA query_only = ON")
+        conn.execute("PRAGMA foreign_keys = ON")
+        installed_schema = schema_version.ensure_supported(conn)
+        if installed_schema < schema_version.KB_SCHEMA_VERSION:
+            raise schema_version.SchemaMigrationRequiredError(
+                f"KB schema {installed_schema} must be migrated to "
+                f"{schema_version.KB_SCHEMA_VERSION} before read-only access"
+            )
+        _load_vec(conn)
+        return conn
+    except Exception:
+        conn.close()
+        raise
+
+
+def is_readonly_error(exc: BaseException) -> bool:
+    """Whether an exception represents a denied filesystem/SQLite write."""
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, PermissionError):
+            return True
+        if isinstance(current, sqlite3.Error):
+            code = getattr(current, "sqlite_errorcode", None)
+            if isinstance(code, int) and (code & 0xFF) == sqlite3.SQLITE_READONLY:
+                return True
+            message = str(current).lower()
+            if "readonly database" in message or "read-only database" in message:
+                return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
 def _load_vec(conn: sqlite3.Connection) -> bool:
     """Load the sqlite-vec extension. Returns True on success, False otherwise
     (e.g. package missing, platform DLL mismatch). Callers should honour

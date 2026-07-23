@@ -333,6 +333,8 @@ def _build_briefing(
     synced_doc_name: str = "CLAUDE.md",
     wiring_notice: str | None = None,
     intensity: str | None = None,
+    read_only: bool = False,
+    startup_write_warning: bool = False,
 ) -> str:
     """Build the SessionStart additionalContext brief.
 
@@ -349,8 +351,23 @@ def _build_briefing(
     resolved_intensity = resolved_intensity or latch_intensity()
     policy = BRIEF_POLICIES[resolved_intensity]
 
+    read_only_mode = bool(read_only)
     try:
-        conn = db.connect(cwd)
+        if read_only_mode:
+            conn = db.connect_readonly(cwd)
+        else:
+            try:
+                conn = db.connect(cwd)
+            except Exception as write_open_error:
+                # Rendering the brief is a read-side product surface.  A
+                # readable external vault must not disappear merely because
+                # this hook cannot run setup or metadata writes there.
+                log(
+                    "briefing writable connection failed; retrying read-only: "
+                    f"{write_open_error}"
+                )
+                conn = db.connect_readonly(cwd)
+                read_only_mode = True
         try:
             focus_rows = db.get_focus(conn, limit=policy.max_workstreams)
             # Fallback: focus table empty (fresh DB, freshly evicted, or before
@@ -418,7 +435,7 @@ def _build_briefing(
             show_getting_started = db.node_count(conn) < NEW_USER_NODE_THRESHOLD
             receipt_items = []
             lifecycle_suggestions = []
-            if lifecycle_receipts.RECEIPTS_CHANNEL_LIVE:
+            if lifecycle_receipts.RECEIPTS_CHANNEL_LIVE and not read_only_mode:
                 try:
                     receipt_items = lifecycle_receipts.surface_pending_items(
                         conn,
@@ -426,6 +443,8 @@ def _build_briefing(
                     )
                 except Exception as e:
                     log(f"lifecycle receipt surfacing failed: {e}")
+                    if db.is_readonly_error(e):
+                        read_only_mode = True
                 suggestion_budget = max(
                     0,
                     LIFECYCLE_RECEIPT_LIMITS[resolved_intensity] - len(receipt_items),
@@ -436,10 +455,12 @@ def _build_briefing(
                             conn,
                             limit=suggestion_budget,
                         )
-                        if suggestion_budget else []
+                        if suggestion_budget and not read_only_mode else []
                     )
                 except Exception as e:
                     log(f"lifecycle suggestion surfacing failed: {e}")
+                    if db.is_readonly_error(e):
+                        read_only_mode = True
         finally:
             conn.close()
     except Exception as e:
@@ -473,7 +494,8 @@ def _build_briefing(
             and not prio and not orphan_count and not budget_line and not n_drift
             and not show_getting_started and not claude_md_synced
             and not wiring_notice and not receipt_items
-            and not lifecycle_suggestions):
+            and not lifecycle_suggestions and not read_only_mode
+            and not startup_write_warning):
         # Intensity bounds real startup pointers; it does not manufacture a
         # tier-advertisement banner when an established KB has nothing in the
         # brief's workstream/question/idea/progress surfaces.
@@ -495,6 +517,17 @@ def _build_briefing(
         parts.append(
             "_Full: Latch uses its broadest available startup and prompt-time "
             "surfacing; prompt retrieval depends on host support._\n"
+        )
+    if read_only_mode:
+        parts.append(
+            "_Latch loaded core KB context read-only. One or more write-side "
+            "SessionStart updates—session registration, startup retrieval "
+            "dedupe, and one-time lifecycle notices—could not run._\n"
+        )
+    elif startup_write_warning:
+        parts.append(
+            "_Latch loaded core KB context, but some SessionStart metadata "
+            "could not be updated; see the Latch hook log._\n"
         )
     # New-user onboarding leads the brief (and is the one thing a brand-new,
     # otherwise-empty KB has to show). Self-removes once the KB fills.

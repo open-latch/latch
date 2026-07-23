@@ -68,3 +68,61 @@ def test_newer_schema_refuses_before_migration_or_backup(tmp_path, monkeypatch):
         db.connect(str(tmp_path))
     assert path.read_bytes() == before
     assert list(tmp_path.glob("*.bak.*")) == []
+
+
+def test_current_schema_stamp_is_noop_on_readonly_connection(tmp_path, monkeypatch):
+    path = tmp_path / "kb.db"
+    _patch_db_path(monkeypatch, path)
+    conn = db.connect(str(tmp_path))
+    conn.close()
+    before = path.read_bytes()
+    before_mtime = path.stat().st_mtime_ns
+
+    readonly = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
+    try:
+        schema_version.stamp_current(readonly, record_migration=False)
+    finally:
+        readonly.close()
+
+    assert path.read_bytes() == before
+    assert path.stat().st_mtime_ns == before_mtime
+
+
+def test_connect_readonly_reads_current_schema_without_mutation(tmp_path, monkeypatch):
+    path = tmp_path / "kb.db"
+    _patch_db_path(monkeypatch, path)
+    conn = db.connect(str(tmp_path))
+    conn.execute(
+        "INSERT INTO nodes(kind,title,body,status) "
+        "VALUES('fact','read me','durable','canonical')"
+    )
+    conn.commit()
+    conn.close()
+    before = path.read_bytes()
+    before_mtime = path.stat().st_mtime_ns
+
+    readonly = db.connect_readonly(str(tmp_path))
+    try:
+        assert db.node_count(readonly) == 1
+        with pytest.raises(sqlite3.OperationalError):
+            db.upsert_session(readonly, "sid", str(tmp_path))
+    finally:
+        readonly.close()
+
+    assert path.read_bytes() == before
+    assert path.stat().st_mtime_ns == before_mtime
+
+
+def test_connect_readonly_does_not_create_or_migrate(tmp_path, monkeypatch):
+    missing = tmp_path / "missing.db"
+    _patch_db_path(monkeypatch, missing)
+    with pytest.raises(sqlite3.OperationalError):
+        db.connect_readonly(str(tmp_path))
+    assert not missing.exists()
+
+    legacy = sqlite3.connect(missing)
+    legacy.executescript((ROOT / "src" / "schema.sql").read_text(encoding="utf-8"))
+    legacy.commit()
+    legacy.close()
+    with pytest.raises(schema_version.SchemaMigrationRequiredError):
+        db.connect_readonly(str(tmp_path))
