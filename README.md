@@ -88,10 +88,13 @@ paths, rationale, and evidence in a local KB, then puts a go/no-go verdict in th
 **before files change** — and shows you the receipt. That is decision continuity, not a bigger
 transcript or a generic recall layer.
 
-The practical effect: you stop re-catching the same mistake across sessions, so you can hand the
-agent more without re-litigating settled decisions. You can override any verdict — the point is that
-reviving a rejected path becomes a visible, cited decision instead of silent drift. The judgment
-stays yours; latch just keeps the agent inside it.
+The payoff isn't only fewer mistakes — it's speed. Because the agent stays inside decisions you've
+already made instead of re-opening a settled call, you re-catch less and can hand it more: run several
+agents in parallel without babysitting each one to check it isn't rebuilding a path you ruled out
+three sessions ago. That's the part cheaper-context and history-search tools don't give you — not
+better recall, but earned confidence that the agent is working inside your judgment. You can still
+override any verdict; reviving a rejected path just becomes a visible, cited decision instead of
+silent drift. The judgment stays yours; latch just keeps the agent inside it.
 
 It runs locally on one SQLite KB, needs no cloud account, and targets macOS, Windows, and Linux.
 Claude Code, Codex, and Cursor share the same KB, so judgment captured through one agent can gate
