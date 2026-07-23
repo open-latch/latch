@@ -14,16 +14,16 @@ This packet combines one observed live gate receipt with two small, deterministi
 
 ## Observed live gate
 
-Captured with the `codex` backend on commit `816c94ad0544ebad0304b38a4a8da7958a70e59a`. This is a synthetic no-history fixture and used no personal conversation history.
+Captured with the `codex` backend on commit `3d18bf33dcea559a8fc0a0ece8d9bb3a4f4046a8`. This is a synthetic no-history fixture and used no personal conversation history.
 
 ```text
-Request: Implement email sending by adding a Redis-backed background job queue.
+Request: Add multi-user accounts by moving the datastore from local SQLite to a hosted Postgres service.
 Recommendation: DO_NOT_PROCEED
-Summary: The KB explicitly decides not to add a background job queue to this no-history demo app (id=1), and specifically names a Redis-backed background job queue as the rejected path. Email sending may be implemented, but not by introducing Redis or a worker process; the allowed direction is single-process with an inline task runner and documented limits.
-Risk if proceed: The demo app would violate its install-light, easy-to-inspect constraint by adding Redis and a worker process for email sending.
-Better next action: Implement email sending through an inline task runner in the single-process app and document the operational limit, per id=1.
+Summary: The request directly repeats the rejected path in id=1: moving from local SQLite to a hosted/client-server database such as managed Postgres to add multi-user accounts or sync. The current canonical decision is to keep the demo app local-first on a single embedded SQLite file, with export/import as the allowed data-transfer path.
+Risk if proceed: It would violate the canonical local-first SQLite decision and reintroduce a datastore direction already rejected for this demo app.
+Better next action: Keep SQLite and, if cross-machine data movement is needed, add an explicit export/import flow with documented limits.
 Cited evidence:
-- id=1 decision status=canonical: No background job queue for the no-history demo app
+- id=1 decision status=canonical: Keep the demo app local-first on SQLite — no hosted database
 Worktree changed before/after gate: no
 ```
 
@@ -63,7 +63,7 @@ This deterministic fixture eval grades seed-report capture and filtering; it is 
 
 ## Reproduce
 
-The deterministic results were generated from commit `816c94ad0544ebad0304b38a4a8da7958a70e59a`.
+The deterministic results were generated from commit `3d18bf33dcea559a8fc0a0ece8d9bb3a4f4046a8`.
 
 ```bash
 bash bin/latch_eval.sh

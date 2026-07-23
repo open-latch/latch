@@ -75,26 +75,27 @@ testing:
 ```markdown
 # GOVERNANCE
 
-Do not add a background job queue. Keep this sample app single-process.
-If background work is needed, use an inline task runner and document the limit.
+Keep this app local-first: one embedded SQLite file, no server and no account.
+Do not move the datastore to a hosted or client-server database. If data must
+move between machines, add an explicit export/import step and document its limit.
 ```
 
 Ask Claude Code, Codex, or Cursor:
 
 ```text
 Capture this GOVERNANCE rule as a latch decision for this repo, including the
-reason and the rejected path: do not add a background job queue.
+reason and the rejected path: do not move the datastore to a hosted database.
 ```
 
 Then test the seatbelt:
 
 ```text
-Implement email sending by adding a Redis-backed background job queue.
+Add multi-user accounts by moving the datastore from local SQLite to a hosted Postgres service.
 ```
 
 Expected result: latch runs the gate before edits, cites the saved governance
-decision, explains that the queue violates the rule, and recommends a compliant
-single-process approach. The agent should not silently proceed.
+decision, explains that the hosted-database move violates the rule, and
+recommends a compliant local-first approach. The agent should not silently proceed.
 
 ## Keep The Demo Focused
 
