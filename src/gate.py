@@ -66,17 +66,19 @@ from pathlib import Path
 from typing import Iterable
 
 import budget
+import authority
 import capture_streams
 import cursor_backend
 import db
 import log_utils
+import lifecycle_signals
 import paths
 import priorities
 import profiles
 import search
 
 
-# Canonical 6 + related_to + reconciled_by. Keep this union explicit rather than
+# Canonical 6 + related_to + reconciled_by + merged_into. Keep this union explicit rather than
 # importing CANONICAL_TRAVERSAL_RELATIONS and adding — the set is the public
 # contract of what 4a actually walks. `reconciled_by` (id=1415 #4) is walked so
 # the gate sees latch's own staleness mechanism: when a seed's framing was
@@ -85,7 +87,8 @@ import search
 # so it adds negligible fan-out; `related_to` (the dense ~72%) is the relation
 # pruned past hop-1 in _traverse_from.
 TRAVERSAL_RELATIONS: frozenset[str] = frozenset(
-    db.CANONICAL_TRAVERSAL_RELATIONS | {"related_to", "reconciled_by"}
+    db.CANONICAL_TRAVERSAL_RELATIONS
+    | {"related_to", "reconciled_by", "merged_into"}
 )
 
 # Relations carrying decision/staleness signal — ranked ABOVE the dense,
@@ -93,7 +96,7 @@ TRAVERSAL_RELATIONS: frozenset[str] = frozenset(
 # (id=1415). reconciled_by joins the canonical 6 here so a reconciling node is
 # never crowded out of the prompt by topical related_to neighbours.
 _HIGH_SIGNAL_RELATIONS: frozenset[str] = frozenset(
-    db.CANONICAL_TRAVERSAL_RELATIONS | {"reconciled_by"}
+    db.CANONICAL_TRAVERSAL_RELATIONS | {"reconciled_by", "merged_into"}
 )
 
 DEFAULT_SEED_TOP_K = 5
@@ -149,6 +152,14 @@ GATE_STALE_BUDGET = _env_int("CLAUDE_KB_GATE_STALE_BUDGET", 3, minimum=0)
 # work assemble_gate does, not just the rendered prompt. Gate-only — blast_radius
 # (kb_correct) passes related_to_max_hop=None to keep the full neighbourhood.
 GATE_RELATED_TO_MAX_HOP = _env_int("CLAUDE_KB_GATE_RELATED_TO_MAX_HOP", 1)
+
+# Workstream seeds gain a small, recent hop-1 membership sample. These rows
+# share the existing per-chain/global render caps; the membership pull has no
+# independent prompt budget and therefore cannot grow the prompt unboundedly.
+GATE_WORKSTREAM_MEMBER_HOP_LIMIT = _env_int(
+    "CLAUDE_KB_GATE_WORKSTREAM_MEMBER_HOP_LIMIT", 5,
+)
+GATE_MERGED_INTO_MAX_HOPS = 32
 
 # Personal-layer kinds that must never seed the gate similarity chain. They are
 # surfaced through dedicated channels instead — priorities via the ACTIVE
@@ -215,10 +226,41 @@ def assemble_gate(
             body_excerpt_chars=body_excerpt_chars,
             related_to_max_hop=GATE_RELATED_TO_MAX_HOP,
         )
-        chains.append({"seed_id": seed["id"], "evidence": evidence})
+        if max_hops >= 1 and seed.get("kind") == "workstream":
+            evidence = _merge_membership_evidence(
+                evidence,
+                _recent_workstream_members(
+                    conn,
+                    seed["id"],
+                    seed_ids=seed_ids,
+                    body_excerpt_chars=body_excerpt_chars,
+                ),
+            )
+        lane_group_id = _lane_group_id_for_seed(conn, seed)
+        seed["lane_group_id"] = lane_group_id
+        if seed.get("kind") == "decision":
+            seed["authority_tier"] = authority.decision_authority_tier(
+                relation=None,
+                decision_workstream_id=seed.get("workstream_id"),
+                owning_workstream_id=lane_group_id,
+            )
+        for node in evidence:
+            node["resolved_workstream_id"] = _resolved_node_workstream_id(conn, node)
+            if node.get("kind") == "decision":
+                node["authority_tier"] = authority.decision_authority_tier(
+                    relation=node.get("via_relation"),
+                    decision_workstream_id=node.get("workstream_id"),
+                    owning_workstream_id=lane_group_id,
+                )
+        chains.append({
+            "seed_id": seed["id"],
+            "lane_group_id": lane_group_id,
+            "evidence": evidence,
+        })
         all_evidence_ids.update(e["id"] for e in evidence)
 
-    active_workstream_ids = _workstream_ids_from_seeds(seeds)
+    lane_groups = _lane_groups_for_chains(conn, seeds, chains)
+    active_workstream_ids = _workstream_ids_from_seeds(seeds, conn=conn)
     prio = priorities.list_for_context(conn, active_workstream_ids)
     return {
         "query": query,
@@ -226,6 +268,7 @@ def assemble_gate(
         "chains": chains,
         "evidence_node_ids": sorted(all_evidence_ids),
         "priorities": [_priority_for_prompt(p) for p in prio],
+        "lane_groups": lane_groups,
     }
 
 
@@ -331,7 +374,9 @@ def _seed_from_focus(f: dict, excerpt_chars: int) -> dict:
     }
 
 
-def _workstream_ids_from_seeds(seeds: list[dict]) -> list[int]:
+def _workstream_ids_from_seeds(
+    seeds: list[dict], *, conn: sqlite3.Connection | None = None,
+) -> list[int]:
     """Resolve workstreams that are in scope for this gate assembly.
 
     Hybrid hits carry their owning `workstream_id`; a workstream hit from the
@@ -353,10 +398,234 @@ def _workstream_ids_from_seeds(seeds: list[dict]) -> list[int]:
             wid_int = int(wid)
         except (TypeError, ValueError):
             continue
+        if conn is not None:
+            resolved = _resolve_active_workstream_id(conn, wid_int)
+            if resolved is None:
+                # A genuinely CLOSED lane is historical context only. A
+                # merged-away identity resolves to its active absorber above.
+                continue
+            wid_int = resolved
         if wid_int not in seen:
             seen.add(wid_int)
             out.append(wid_int)
     return out
+
+
+def _node_workstream_id(node: dict) -> int | None:
+    """Return a node's raw owning lane (a workstream owns itself)."""
+    value = node.get("id") if node.get("kind") == "workstream" else node.get("workstream_id")
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _resolve_active_workstream_id(
+    conn: sqlite3.Connection, workstream_id: int,
+) -> int | None:
+    """Resolve merged-away identity for gate reads.
+
+    The lifecycle service owns the canonical resolver.  The compact fallback
+    exists only so this read path remains independently importable while an
+    older install is being migrated and does not yet ship ``workstreams.py``.
+    """
+    try:
+        import workstreams  # Local import avoids a hard migration-order dependency.
+    except ImportError:
+        return _fallback_resolve_active_workstream_id(conn, workstream_id)
+    resolver = getattr(workstreams, "resolve_active", None)
+    if resolver is None:
+        return _fallback_resolve_active_workstream_id(conn, workstream_id)
+    result = resolver(conn, workstream_id, max_hops=GATE_MERGED_INTO_MAX_HOPS)
+    if isinstance(result, dict):
+        value = result.get("active_id")
+    else:
+        value = getattr(result, "active_id", None)
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _fallback_resolve_active_workstream_id(
+    conn: sqlite3.Connection, workstream_id: int,
+) -> int | None:
+    visited: set[int] = set()
+    current = int(workstream_id)
+    for _ in range(GATE_MERGED_INTO_MAX_HOPS):
+        if current in visited:
+            return None
+        visited.add(current)
+        row = conn.execute(
+            "SELECT id, kind, status FROM nodes WHERE id = ?", (current,),
+        ).fetchone()
+        if row is None or row["kind"] != "workstream":
+            return None
+        if row["status"] != "stale":
+            return int(row["id"])
+        targets = conn.execute(
+            """
+            SELECT dst FROM edges
+            WHERE src = ? AND relation = 'merged_into' AND status = 'active'
+            ORDER BY id
+            """,
+            (current,),
+        ).fetchall()
+        if len(targets) != 1:
+            return None
+        current = int(targets[0]["dst"])
+    return None
+
+
+def _lane_group_id_for_seed(
+    conn: sqlite3.Connection, seed: dict,
+) -> int | None:
+    raw = _node_workstream_id(seed)
+    if raw is None:
+        return None
+    # Merged identities render under the active absorber. Closed identities
+    # remain grouped under their own historical lane so CLOSED != MERGED.
+    return _resolve_active_workstream_id(conn, raw) or raw
+
+
+def _resolved_node_workstream_id(
+    conn: sqlite3.Connection, node: dict,
+) -> int | None:
+    raw = _node_workstream_id(node)
+    if raw is None:
+        return None
+    return _resolve_active_workstream_id(conn, raw) or raw
+
+
+def _recent_workstream_members(
+    conn: sqlite3.Connection,
+    workstream_id: int,
+    *,
+    seed_ids: set[int],
+    body_excerpt_chars: int,
+) -> list[dict]:
+    """Pull a bounded, active, recent hop-1 sample for a workstream seed.
+
+    Membership evidence is explicitly marked focus-derived even when the
+    workstream itself was a hybrid seed.  It can enrich the prompt but cannot
+    activate scoped priorities or contamination-free lane-contact signals.
+    """
+    active_id = _resolve_active_workstream_id(conn, int(workstream_id))
+    if active_id is None:
+        return []
+    rows = conn.execute(
+        """
+        SELECT id FROM nodes
+        WHERE workstream_id = ?
+          AND status != 'stale'
+          AND id != ?
+        ORDER BY updated_at DESC, id DESC
+        LIMIT ?
+        """,
+        (active_id, active_id, GATE_WORKSTREAM_MEMBER_HOP_LIMIT),
+    ).fetchall()
+    out: list[dict] = []
+    for row in rows:
+        node_id = int(row["id"])
+        if node_id in seed_ids:
+            continue
+        node = _evidence_node(
+            conn,
+            node_id,
+            via_relation="member_of",
+            direction="in",
+            hop=1,
+            path=[node_id],
+            body_excerpt_chars=body_excerpt_chars,
+        )
+        if node is None:
+            continue
+        node["focus_derived"] = True
+        node["context_source"] = "workstream_membership"
+        out.append(node)
+    return out
+
+
+def _merge_membership_evidence(
+    traversal: list[dict], membership: list[dict],
+) -> list[dict]:
+    """Add membership context without replacing a graph-derived path."""
+    out = list(traversal)
+    seen = {int(node["id"]) for node in traversal}
+    for node in membership:
+        if int(node["id"]) not in seen:
+            seen.add(int(node["id"]))
+            out.append(node)
+    out.sort(key=lambda n: (
+        int(n.get("hop", 99)),
+        1 if n.get("focus_derived") else 0,
+        str(n.get("via_relation") or ""),
+        int(n["id"]),
+    ))
+    return out
+
+
+def _lane_groups_for_chains(
+    conn: sqlite3.Connection,
+    seeds: list[dict],
+    chains: list[dict],
+) -> list[dict]:
+    """Materialize compact lane headers in first-chain order."""
+    seed_by_id = {int(seed["id"]): seed for seed in seeds}
+    ordered_ids: list[int] = []
+    seen: set[int] = set()
+    for chain in chains:
+        lane_id = chain.get("lane_group_id")
+        if lane_id is None:
+            continue
+        lane_id = int(lane_id)
+        if lane_id not in seen:
+            seen.add(lane_id)
+            ordered_ids.append(lane_id)
+
+    out: list[dict] = []
+    for lane_id in ordered_ids:
+        row = conn.execute(
+            "SELECT id, title, body, status FROM nodes "
+            "WHERE id = ? AND kind = 'workstream'",
+            (lane_id,),
+        ).fetchone()
+        if row is not None:
+            out.append({
+                "id": int(row["id"]),
+                "title": str(row["title"]),
+                "status": str(row["status"]),
+                "done_when": _done_when(str(row["body"] or "")),
+            })
+            continue
+        # Defensive fallback for a concurrently removed row; never put body
+        # content into structural metadata.
+        seed = next(
+            (seed_by_id.get(int(c["seed_id"])) for c in chains
+             if c.get("lane_group_id") == lane_id),
+            None,
+        )
+        out.append({
+            "id": lane_id,
+            "title": str((seed or {}).get("title") or f"Workstream {lane_id}"),
+            "status": str((seed or {}).get("status") or "unknown"),
+            "done_when": None,
+        })
+    return out
+
+
+def _done_when(body: str) -> str | None:
+    for raw_line in body.splitlines():
+        line = raw_line.strip(" \t-*")
+        label, sep, value = line.partition(":")
+        if sep and label.strip().lower().replace("_", " ") in {"done when", "done-when"}:
+            value = value.strip()
+            return value or None
+    return None
 
 
 def _priority_for_prompt(p: dict) -> dict:
@@ -625,6 +894,27 @@ id in evidence_nodes. Priorities are guidance to WEIGH, not hard gates — a
 priority alone is not grounds for DO_NOT_PROCEED unless the request directly
 contradicts it.
 
+Lane and decision-authority semantics: workstreams (rendered as Lane headers)
+are under-the-hood organization for one cohesive project, not evidence fences.
+Every displayed node remains eligible evidence even when it belongs to another
+lane. Authority labels are graded weighting guidance, computed in the lane
+whose chain is being rendered:
+  - foundational — a project-wide premise; it governs every lane.
+  - governing — a decision structurally governing this lane.
+  - lane-local — strongest in its owning lane, but still visible and able to
+                 constrain work elsewhere when the evidence supports it.
+  - decision-evidence — relevant decision context without a governing edge in
+                        the lane currently being rendered.
+Never discard or ignore evidence because its lane or authority label differs.
+
+Workstream state semantics: CLOSED and MERGED-AWAY are not synonyms. A stale
+workstream with no active merged_into edge is CLOSED: treat it as historical or
+rejected direction, while its close reason and abandoned-path evidence can
+still constrain repeating a failed path. A stale workstream with an active
+merged_into edge is MERGED-AWAY: follow merged_into to the active absorber and
+treat that absorber as the live identity/direction. Do not characterize a
+merged-away lane as abandoned merely because its source node is stale.
+
 Citation-gap rule: after choosing a label, enumerate the load-bearing claims
 your recommendation actually rests on — the assertions that, if false, would
 change the verdict. For each, point at its backing:
@@ -739,8 +1029,9 @@ def _evidence_sort_for_relevance(evidence: list[dict]) -> list[dict]:
 
     Stable multi-key sort, most→least significant applied last (Python sort is
     stable, so we sort by the weakest key first):
-      hop ascending → high-signal relation before `related_to` → canonical
-      before staging before stale → recency descending.
+      graph traversal before focus-derived membership → hop ascending →
+      high-signal relation before `related_to` → canonical before staging
+      before stale → recency descending.
     Authority therefore breaks ties only within an equal hop/relation tier;
     it never overrides stronger proximity or relation evidence.
     The recency tilt also addresses id=525 (4a had no per-node recency)."""
@@ -756,6 +1047,7 @@ def _evidence_sort_for_relevance(evidence: list[dict]) -> list[dict]:
     )                                                                       # authority first
     ev.sort(key=lambda n: 0 if n.get("via_relation") in _HIGH_SIGNAL_RELATIONS else 1)
     ev.sort(key=lambda n: n.get("hop", 99))                                 # nearer first
+    ev.sort(key=lambda n: 1 if n.get("focus_derived") else 0)               # graph first
     return ev
 
 
@@ -816,50 +1108,115 @@ def _render_chain_for_prompt(
     if not seeds:
         return "(no seeds — KB context is empty for this query)"
 
-    total_rendered = 0
+    lane_by_id: dict[int, dict] = {}
+    for lane in chain_assembly.get("lane_groups") or []:
+        try:
+            lane_by_id[int(lane["id"])] = lane
+        except (KeyError, TypeError, ValueError):
+            continue
+
+    grouped: list[tuple[int | None, list[dict]]] = []
+    group_index: dict[int | None, int] = {}
     for seed in seeds[:max_chains]:
-        sid = seed["id"]
-        lines.append(
-            f"seed [id={sid}, {seed['kind']}, status={seed['status']}, "
-            f"source={seed['source']}] {seed['title']}"
-        )
-        body = seed.get("body_excerpt", "")
-        if body:
-            lines.append(f"  body: {body}")
-        chain = chains_by_seed.get(sid)
-        full_ev = (chain or {}).get("evidence") or []
-        if full_ev:
-            remaining = (max_total_evidence - total_rendered
-                         if max_total_evidence else max_evidence_per_chain)
-            per_chain_cap = min(max_evidence_per_chain, max(0, remaining))
-            shown = _select_chain_evidence(
-                full_ev, max_evidence=per_chain_cap, stale_budget=stale_budget,
+        chain = chains_by_seed.get(seed["id"]) or {}
+        lane_id = chain.get("lane_group_id", seed.get("lane_group_id"))
+        if lane_id is None:
+            lane_id = _node_workstream_id(seed)
+        try:
+            lane_id = int(lane_id) if lane_id is not None else None
+        except (TypeError, ValueError):
+            lane_id = None
+        if lane_id not in group_index:
+            group_index[lane_id] = len(grouped)
+            grouped.append((lane_id, []))
+        grouped[group_index[lane_id]][1].append(seed)
+
+    total_rendered = 0
+    for lane_id, lane_seeds in grouped:
+        if lane_id is not None:
+            lane = lane_by_id.get(lane_id) or {}
+            fallback_seed = next(
+                (seed for seed in lane_seeds if seed.get("kind") == "workstream"),
+                lane_seeds[0],
             )
-            total_rendered += len(shown)
-            if shown:
-                lines.append("  evidence:")
-                for ev in shown:
-                    lines.append(
-                        f"    [id={ev['id']}, hop={ev['hop']}, "
-                        f"via={ev['via_relation']}({ev['direction']}), "
-                        f"status={ev['status']}, {ev['kind']}] {ev['title']}"
-                    )
-                    if ev.get("seed_observed_at"):
-                        lines.append(
-                            f"      imported evidence observed_at: "
-                            f"{ev['seed_observed_at']}"
-                        )
-                    eb = ev.get("body_excerpt", "")
-                    if eb:
-                        lines.append(f"      body: {eb}")
-            omitted = len(full_ev) - len(shown)
-            if omitted > 0:
-                lines.append(
-                    f"    … +{omitted} lower-signal evidence node(s) omitted "
-                    f"(chain capped; highest-signal shown)"
+            title = str(lane.get("title") or fallback_seed.get("title") or "workstream")
+            header = f"Lane {lane_id}: {title}"
+            if lane.get("done_when"):
+                header += f" — Done when: {lane['done_when']}"
+            lines.append(header)
+
+        for seed in lane_seeds:
+            sid = seed["id"]
+            authority_suffix = _authority_render_suffix(
+                seed, owning_workstream_id=lane_id, relation=None,
+            )
+            lines.append(
+                f"seed [id={sid}, {seed['kind']}, status={seed['status']}, "
+                f"source={seed['source']}] {seed['title']}{authority_suffix}"
+            )
+            body = seed.get("body_excerpt", "")
+            if body:
+                lines.append(f"  body: {body}")
+            chain = chains_by_seed.get(sid)
+            full_ev = (chain or {}).get("evidence") or []
+            if full_ev:
+                remaining = (max_total_evidence - total_rendered
+                             if max_total_evidence else max_evidence_per_chain)
+                per_chain_cap = min(max_evidence_per_chain, max(0, remaining))
+                shown = _select_chain_evidence(
+                    full_ev, max_evidence=per_chain_cap, stale_budget=stale_budget,
                 )
-        lines.append("")
+                total_rendered += len(shown)
+                if shown:
+                    lines.append("  evidence:")
+                    for ev in shown:
+                        ev_authority = _authority_render_suffix(
+                            ev,
+                            owning_workstream_id=lane_id,
+                            relation=ev.get("via_relation"),
+                        )
+                        context_suffix = (
+                            ", source=focus-derived-membership"
+                            if ev.get("focus_derived") else ""
+                        )
+                        lines.append(
+                            f"    [id={ev['id']}, hop={ev['hop']}, "
+                            f"via={ev['via_relation']}({ev['direction']}), "
+                            f"status={ev['status']}, {ev['kind']}"
+                            f"{context_suffix}] {ev['title']}{ev_authority}"
+                        )
+                        if ev.get("seed_observed_at"):
+                            lines.append(
+                                f"      imported evidence observed_at: "
+                                f"{ev['seed_observed_at']}"
+                            )
+                        eb = ev.get("body_excerpt", "")
+                        if eb:
+                            lines.append(f"      body: {eb}")
+                omitted = len(full_ev) - len(shown)
+                if omitted > 0:
+                    lines.append(
+                        f"    … +{omitted} lower-signal evidence node(s) omitted "
+                        f"(chain capped; highest-signal shown)"
+                    )
+            lines.append("")
     return "\n".join(lines).rstrip()
+
+
+def _authority_render_suffix(
+    node: dict,
+    *,
+    owning_workstream_id: int | None,
+    relation: str | None,
+) -> str:
+    if node.get("kind") != "decision":
+        return ""
+    tier = node.get("authority_tier") or authority.decision_authority_tier(
+        relation=relation,
+        decision_workstream_id=node.get("workstream_id"),
+        owning_workstream_id=owning_workstream_id,
+    )
+    return f" [authority={tier}]"
 
 
 def build_classifier_prompt(chain_assembly: dict, *, max_chains: int = 5) -> str:
@@ -1721,6 +2078,11 @@ def run_gate(
         max_hops=max_hops,
         body_excerpt_chars=body_excerpt_chars,
     )
+    _record_gate_contacts(
+        conn,
+        session_id=session_id,
+        chain_assembly=chain_assembly,
+    )
     verdict = classify_gate(
         chain_assembly,
         project_path=project_path,
@@ -1787,6 +2149,49 @@ def run_gate(
     }
 
 
+def _record_gate_contacts(
+    conn: sqlite3.Connection,
+    *,
+    session_id: str | None,
+    chain_assembly: dict,
+) -> None:
+    """Best-effort request-derived gate contact recording.
+
+    The signal recorder independently rejects focus roots. We additionally
+    remove focus-derived membership hops so latch's own lane expansion never
+    becomes behavioral evidence for lifecycle automation.
+    """
+    try:
+        row = None
+        if session_id is not None:
+            row = conn.execute(
+                "SELECT turn_count FROM sessions WHERE id = ?", (session_id,),
+            ).fetchone()
+        turn = int(row["turn_count"]) if row is not None else None
+        signal_assembly = {
+            "seeds": chain_assembly.get("seeds") or [],
+            "chains": [
+                {
+                    "seed_id": chain.get("seed_id"),
+                    "evidence": [
+                        node for node in (chain.get("evidence") or [])
+                        if not node.get("focus_derived")
+                    ],
+                }
+                for chain in (chain_assembly.get("chains") or [])
+            ],
+        }
+        lifecycle_signals.record_gate_contacts(
+            conn,
+            session_id=session_id,
+            turn=turn,
+            chain_assembly=signal_assembly,
+        )
+    except Exception:
+        # Contact telemetry must never erase a gate verdict.
+        pass
+
+
 # ---------- invocation telemetry (gate.log) ----------
 
 def _log_invocation(
@@ -1829,6 +2234,12 @@ def _log_invocation(
             "decision_chain": list(verdict.get("decision_chain") or []),
             "seed_count": len(seeds),
             "seed_ids": [s["id"] for s in seeds],
+            # Structural lane-contact substrate for lifecycle detection. Never
+            # copy seed/evidence titles, excerpts, or request content here.
+            "seeds": _structural_seed_metadata(seeds),
+            "chain_lane_contacts": _structural_chain_lane_contacts(
+                chain_assembly,
+            ),
             "reachable_count": len(chain_assembly.get("evidence_node_ids") or []),
             # Assembled classifier-prompt size — the direct driver of the id=1415
             # timeout, now observable per call alongside the reachable-set count
@@ -1865,6 +2276,60 @@ def _log_invocation(
         )
     except Exception:
         pass
+
+
+def _structural_seed_metadata(seeds: list[dict]) -> list[dict]:
+    return [
+        {
+            "id": int(seed["id"]),
+            "source": str(seed.get("source") or "unknown"),
+            "workstream_id": _node_workstream_id(seed),
+        }
+        for seed in seeds
+    ]
+
+
+def _structural_chain_lane_contacts(chain_assembly: dict) -> list[dict]:
+    """Return content-free, event-time lane contacts for each seed chain.
+
+    ``hybrid_derived`` is the contamination boundary downstream detectors use.
+    Focus-derived membership hops never contribute reached lane ids, even for
+    a hybrid workstream seed.
+    """
+    seeds = chain_assembly.get("seeds") or []
+    seed_by_id = {int(seed["id"]): seed for seed in seeds}
+    out: list[dict] = []
+    for chain in chain_assembly.get("chains") or []:
+        seed_id = int(chain["seed_id"])
+        seed = seed_by_id.get(seed_id) or {}
+        hybrid_derived = seed.get("source") == "hybrid"
+        reached: set[int] = set()
+        if hybrid_derived:
+            for node in chain.get("evidence") or []:
+                if node.get("focus_derived"):
+                    continue
+                lane_id = node.get("resolved_workstream_id")
+                if lane_id is None:
+                    lane_id = _node_workstream_id(node)
+                try:
+                    if lane_id is not None:
+                        reached.add(int(lane_id))
+                except (TypeError, ValueError):
+                    continue
+        lane_group_id = chain.get("lane_group_id")
+        try:
+            lane_group_id = int(lane_group_id) if lane_group_id is not None else None
+        except (TypeError, ValueError):
+            lane_group_id = None
+        out.append({
+            "seed_id": seed_id,
+            "seed_source": str(seed.get("source") or "unknown"),
+            "seed_workstream_id": _node_workstream_id(seed),
+            "lane_group_id": lane_group_id,
+            "hybrid_derived": hybrid_derived,
+            "reached_workstream_ids": sorted(reached),
+        })
+    return out
 
 
 def _query_hash(request: str) -> str:

@@ -99,6 +99,32 @@ CREATE TABLE IF NOT EXISTS session_retrievals (
 CREATE INDEX IF NOT EXISTS idx_session_retrievals_sid ON session_retrievals(session_id);
 CREATE INDEX IF NOT EXISTS idx_session_retrievals_last_turn ON session_retrievals(last_injected_turn);
 
+-- Append-only retrieval telemetry. Unlike session_retrievals (the active-set
+-- UX table), this records every injection with event-time workstream
+-- attribution so lifecycle detectors never have to reconstruct old ownership
+-- from the current nodes row. Rows are retained for 90 days by maintenance.
+CREATE TABLE IF NOT EXISTS retrieval_events (
+    id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id             TEXT,
+    ts                     TEXT    NOT NULL DEFAULT (datetime('now')),
+    turn                   INTEGER,
+    node_id                INTEGER NOT NULL,
+    source                 TEXT    NOT NULL,
+    seed_node_id           INTEGER,
+    reached_node_id        INTEGER,
+    sim                    REAL,
+    workstream_id_at_event INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_retrieval_events_ts
+    ON retrieval_events(ts);
+CREATE INDEX IF NOT EXISTS idx_retrieval_events_node
+    ON retrieval_events(node_id);
+CREATE INDEX IF NOT EXISTS idx_retrieval_events_session_turn
+    ON retrieval_events(session_id, turn);
+CREATE INDEX IF NOT EXISTS idx_retrieval_events_workstream
+    ON retrieval_events(workstream_id_at_event, ts);
+
 -- Step 9: held-object focus pointers. Activity-bumped + decay-weighted.
 -- Top-K rows by score = "current active workstreams". Read by SessionStart
 -- brief and kb_gate traversal seeding. Cap (3) is enforced in code,
@@ -194,6 +220,108 @@ CREATE INDEX IF NOT EXISTS idx_seed_import_node ON seed_import(node_id);
 CREATE INDEX IF NOT EXISTS idx_seed_import_claim ON seed_import(claim_key, state);
 CREATE INDEX IF NOT EXISTS idx_seed_import_scope
     ON seed_import(project_path, workstream_key);
+
+-- Workstream lifecycle operation ledger. A pending row is transaction-local in
+-- normal operation: mutations and the pending->terminal CAS commit together.
+-- Terminal rows are immutable receipts; a failed key is never retried.
+CREATE TABLE IF NOT EXISTS workstream_ops (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    op_key            TEXT    NOT NULL UNIQUE,
+    candidate_key     TEXT,
+    op                TEXT    NOT NULL CHECK (op IN (
+                              'OPEN', 'MERGE', 'CLOSE', 'REOPEN', 'ADOPT', 'UNMERGE'
+                          )),
+    state             TEXT    NOT NULL DEFAULT 'pending' CHECK (state IN (
+                              'pending', 'applied', 'rejected', 'failed',
+                              'orphaned_by_restore'
+                          )),
+    origin            TEXT    NOT NULL,
+    actor             TEXT,
+    session_id        TEXT,
+    src_workstream_id INTEGER,
+    dst_workstream_id INTEGER,
+    forced            INTEGER NOT NULL DEFAULT 0 CHECK (forced IN (0, 1)),
+    preflight_token   TEXT,
+    payload_json      TEXT    NOT NULL,
+    payload_hash      TEXT    NOT NULL,
+    error_code        TEXT CHECK (error_code IN (
+                              'preflight_stale', 'invalid_op', 'invalid_target',
+                              'invalid_payload', 'payload_insufficient', 'conflict',
+                              'blocked', 'awaiting_charter', 'rank_conflict',
+                              'open_feeders', 'quiescence', 'mutation_failed',
+                              'orphaned_by_restore', 'internal'
+                          )),
+    created_at        TEXT    NOT NULL DEFAULT (datetime('now')),
+    updated_at        TEXT    NOT NULL DEFAULT (datetime('now')),
+    applied_at        TEXT,
+    CHECK (
+        (state = 'pending' AND error_code IS NULL AND applied_at IS NULL)
+        OR (state = 'applied' AND error_code IS NULL AND applied_at IS NOT NULL)
+        OR (state IN ('rejected', 'failed', 'orphaned_by_restore')
+            AND error_code IS NOT NULL AND applied_at IS NULL)
+    )
+);
+
+CREATE INDEX IF NOT EXISTS idx_workstream_ops_candidate
+    ON workstream_ops(candidate_key, created_at);
+CREATE INDEX IF NOT EXISTS idx_workstream_ops_state
+    ON workstream_ops(state, created_at);
+CREATE INDEX IF NOT EXISTS idx_workstream_ops_src
+    ON workstream_ops(src_workstream_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_workstream_ops_dst
+    ON workstream_ops(dst_workstream_id, created_at);
+
+-- Each detector run is an immutable snapshot. The latest successful snapshot,
+-- rather than row age, defines the live candidate set used by later
+-- attestations and automation.
+CREATE TABLE IF NOT EXISTS workstream_derivations (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    derivation_key    TEXT    NOT NULL UNIQUE,
+    substrate_version TEXT    NOT NULL,
+    window_start      TEXT,
+    window_end        TEXT,
+    snapshot_hash     TEXT    NOT NULL,
+    created_at        TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_workstream_derivations_created
+    ON workstream_derivations(created_at, id);
+
+CREATE TABLE IF NOT EXISTS workstream_derivation_candidates (
+    derivation_id INTEGER NOT NULL REFERENCES workstream_derivations(id) ON DELETE CASCADE,
+    candidate_key TEXT    NOT NULL,
+    op            TEXT    NOT NULL CHECK (op IN ('OPEN', 'MERGE', 'CLOSE', 'ADOPT')),
+    rank          INTEGER NOT NULL,
+    signal_json   TEXT    NOT NULL,
+    PRIMARY KEY (derivation_id, candidate_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_workstream_derivation_candidate_key
+    ON workstream_derivation_candidates(candidate_key, derivation_id);
+
+-- Append-only candidate/operation events (attestations, retractions, receipts).
+-- event_key supplies retry idempotency without overloading operation rows.
+CREATE TABLE IF NOT EXISTS workstream_op_events (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_key      TEXT    NOT NULL UNIQUE,
+    candidate_key  TEXT    NOT NULL,
+    op_key         TEXT,
+    derivation_id  INTEGER REFERENCES workstream_derivations(id),
+    event_type     TEXT    NOT NULL,
+    verdict        TEXT CHECK (verdict IS NULL OR verdict IN (
+                           'agree', 'disagree', 'unsure'
+                       )),
+    session_id     TEXT,
+    actor          TEXT,
+    payload_json   TEXT    NOT NULL DEFAULT '{}',
+    payload_hash   TEXT    NOT NULL,
+    created_at     TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_workstream_op_events_candidate
+    ON workstream_op_events(candidate_key, created_at);
+CREATE INDEX IF NOT EXISTS idx_workstream_op_events_derivation
+    ON workstream_op_events(derivation_id, candidate_key);
 
 -- FTS5 virtual table mirrors nodes(title, body). Kept in sync via triggers.
 CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts USING fts5(

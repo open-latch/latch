@@ -42,7 +42,7 @@ def test_legacy_db_backs_up_once_before_stamp(tmp_path, monkeypatch):
 
     conn = db.connect(str(tmp_path))
     conn.close()
-    backups = list(tmp_path.glob("kb.db.bak.schema-0-to-1.*"))
+    backups = list(tmp_path.glob("kb.db.bak.schema-0-to-2.*"))
     assert len(backups) == 1
     copied = sqlite3.connect(backups[0])
     try:
@@ -52,7 +52,7 @@ def test_legacy_db_backs_up_once_before_stamp(tmp_path, monkeypatch):
 
     conn = db.connect(str(tmp_path))
     conn.close()
-    assert list(tmp_path.glob("kb.db.bak.schema-0-to-1.*")) == backups
+    assert list(tmp_path.glob("kb.db.bak.schema-0-to-2.*")) == backups
 
 
 def test_newer_schema_refuses_before_migration_or_backup(tmp_path, monkeypatch):

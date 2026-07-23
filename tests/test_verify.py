@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import sqlite3
 import sys
 import tempfile
 from pathlib import Path
@@ -401,6 +402,48 @@ def test_correct_apply_drops_bad_node_and_missing_from_reconcile_ids():
         _assert(res["reconcile_ids_applied"] == [carrier],
                 f"only the real carrier should get an edge: {res}")
         print("PASS correct_apply_drops_bad_node_and_missing_from_reconcile_ids")
+    finally:
+        _wipe_project_dir(tmp)
+        _cleanup(tmp, conn)
+
+
+def test_correct_apply_rolls_back_every_write_when_a_late_link_fails():
+    tmp, conn = _fresh_db()
+    try:
+        bad = db.insert_node(
+            conn, kind="fact", title="bad", body="wrong", status="canonical",
+        )
+        before_nodes = conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0]
+
+        try:
+            verify.correct_apply(
+                conn,
+                bad,
+                mode="supersede",
+                title="rolled back correction",
+                body="must not survive",
+                kind="fact",
+                links=[{"dst": 999999, "relation": "related_to"}],
+                project_path=tmp,
+            )
+        except sqlite3.IntegrityError:
+            pass
+        else:
+            raise AssertionError("invalid late link should fail the transaction")
+
+        _assert(conn.in_transaction is False, "failed correction must roll back")
+        _assert(
+            conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0] == before_nodes,
+            "corrected node leaked from rolled-back correction",
+        )
+        _assert(db.get_node(conn, bad)["status"] == "canonical", "bad node was staled")
+        _assert(
+            conn.execute(
+                "SELECT COUNT(*) FROM edges WHERE src=? OR dst=?", (bad, bad),
+            ).fetchone()[0] == 0,
+            "primary correction edge leaked from rolled-back correction",
+        )
+        print("PASS correct_apply_rolls_back_every_write_when_a_late_link_fails")
     finally:
         _wipe_project_dir(tmp)
         _cleanup(tmp, conn)

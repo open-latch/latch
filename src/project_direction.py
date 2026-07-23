@@ -18,8 +18,10 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).parent))
 
 import artifacts as artifact_store  # noqa: E402
+import authority  # noqa: E402
 import db  # noqa: E402
 import feeders  # noqa: E402
+import lifecycle_receipts  # noqa: E402
 
 
 DECISION_KINDS = {"decision"}
@@ -41,14 +43,9 @@ UNANCHORED_SKIP_RE = re.compile(
     r"\b(session start|no substantive work|no work yet|context only)\b",
     re.IGNORECASE,
 )
-AUTHORITY_RELATIONS = {
-    "constrains",
-    "depends_on",
-    "motivates",
-    "replaces",
-    "supersedes",
-    "reconciled_by",
-}
+# Backwards-compatible module alias; the computation itself lives in the
+# shared helper used by both project_direction and the gate renderer.
+AUTHORITY_RELATIONS = authority.AUTHORITY_RELATIONS
 OBJECTIVE_RE = re.compile(r"^\s*(?:objective|goal)\s*:\s*(.+)$", re.IGNORECASE | re.MULTILINE)
 NEXT_ACTION_RE = re.compile(
     r"^\s*(?:next action|next step)\s*:\s*(.+)$",
@@ -118,6 +115,17 @@ def assemble_project_direction(
     decision_total = sum(len(row.governing_decisions) for row in rows)
     artifact_total = sum(len(row.artifacts) for row in rows)
     unanchored = _unanchored_candidates(conn, rows, limit=unanchored_limit)
+    # This report is strictly read-only.  SessionStart owns the one-way
+    # receipt-surfaced claim; direction reports may show the recent durable
+    # receipt history, but must not race that delivery channel or commit.
+    try:
+        receipts = (
+            lifecycle_receipts.recent_receipts(conn, limit=10)
+            if lifecycle_receipts.RECEIPTS_CHANNEL_LIVE
+            else []
+        )
+    except Exception:
+        receipts = []
     summary = (
         f"Latch assembled {len(rows)} workstream(s), {decision_total} governing "
         f"decision(s), {backlog_total} backlog/open item(s), and "
@@ -144,9 +152,11 @@ def assemble_project_direction(
             "backlog_items": backlog_total,
             "artifacts": artifact_total,
             "unanchored_items": len(unanchored),
+            "lifecycle_receipts": len(receipts),
         },
         "workstreams": [asdict(row) for row in rows],
         "unanchored_evidence": [asdict(row) for row in unanchored],
+        "lifecycle_receipts": receipts,
     }
 
 
@@ -235,7 +245,7 @@ def _governing_decisions(
                 kind=str(node["kind"]),
                 title=str(node["title"]),
                 status=str(node["status"]),
-                authority_tier="local_implementation_decision",
+                authority_tier=authority.LANE_LOCAL,
             )
     for node in connected:
         if node.get("kind") not in DECISION_KINDS:
@@ -244,13 +254,15 @@ def _governing_decisions(
         if rel not in AUTHORITY_RELATIONS and _int_or_none(node.get("workstream_id")) != workstream_id:
             continue
         nid = int(node["id"])
-        tier = _authority_tier(
+        tier = authority.decision_authority_tier(
             relation=rel,
             decision_workstream_id=_int_or_none(node.get("workstream_id")),
-            workstream_id=workstream_id,
+            owning_workstream_id=workstream_id,
         )
         previous = out.get(nid)
-        if previous and previous.authority_tier != "local_implementation_decision":
+        if (previous
+                and authority.authority_sort_key(previous.authority_tier)
+                <= authority.authority_sort_key(tier)):
             continue
         out[nid] = DirectionNode(
             id=nid,
@@ -260,7 +272,10 @@ def _governing_decisions(
             authority_tier=tier,
             relation=rel,
         )
-    return sorted(out.values(), key=lambda n: (n.authority_tier or "", n.id))
+    return sorted(
+        out.values(),
+        key=lambda n: (*authority.authority_sort_key(n.authority_tier), n.id),
+    )
 
 
 def _authority_tier(
@@ -269,13 +284,12 @@ def _authority_tier(
     decision_workstream_id: int | None,
     workstream_id: int,
 ) -> str:
-    if relation in {"constrains", "depends_on", "motivates"} and decision_workstream_id is None:
-        return "foundational_project_decision"
-    if relation in AUTHORITY_RELATIONS:
-        return "governing_workstream_decision"
-    if decision_workstream_id == workstream_id:
-        return "local_implementation_decision"
-    return "decision_evidence"
+    """Compatibility wrapper around the shared authority computation."""
+    return authority.decision_authority_tier(
+        relation=relation,
+        decision_workstream_id=decision_workstream_id,
+        owning_workstream_id=workstream_id,
+    )
 
 
 def _nodes_for_kinds(nodes: list[dict], kinds: set[str]) -> list[DirectionNode]:
@@ -522,6 +536,10 @@ def format_text(report: dict[str, Any]) -> str:
                 f"- id={item['id']} [{item['kind']}/{item['status']}] "
                 f"{item['title']}{suggestion}; {item['reason']}"
             )
+    receipts = report.get("lifecycle_receipts") or []
+    if receipts:
+        lines.extend(["", "## Workstream Lifecycle Receipts"])
+        lines.extend(f"- {item['receipt']}" for item in receipts)
     return "\n".join(lines) + "\n"
 
 

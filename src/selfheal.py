@@ -42,6 +42,7 @@ import paths  # noqa: E402
 BACKUP_INTERVAL_H = 12     # local kb.db.bak rotation
 HEAL_INTERVAL_H = 48       # was every-2-days day-of-year parity (~48h)
 WEEKLY_INTERVAL_H = 168    # decay + tree, weekly
+WORKSTREAM_SHADOW_INTERVAL_H = 24
 
 STATE_FILENAME = "maintenance_state.json"
 SPAWN_LOG_FILENAME = "selfheal_spawn.log"
@@ -113,6 +114,12 @@ def _any_due(state: dict, now: datetime) -> bool:
         _due(state, "last_backup_at", BACKUP_INTERVAL_H, now)
         or _due(state, "last_heal_at", HEAL_INTERVAL_H, now)
         or _due(state, "last_weekly_at", WEEKLY_INTERVAL_H, now)
+        or _due(
+            state,
+            "last_workstream_shadow_at",
+            WORKSTREAM_SHADOW_INTERVAL_H,
+            now,
+        )
     )
 
 
@@ -192,6 +199,8 @@ def run_selfheal(project_path: str | None) -> dict:
     if paths.is_disabled():
         return {"ok": False, "reason": "disabled"}
 
+    run_governed_after_unlock = False
+    automation_result: dict | None = None
     with lockfile.compactor_lock(project_path) as acquired:
         if not acquired:
             # A compaction or another selfheal pass already holds the lock.
@@ -205,10 +214,16 @@ def run_selfheal(project_path: str | None) -> dict:
         backup_due = _due(state, "last_backup_at", BACKUP_INTERVAL_H, now)
         heal_due = _due(state, "last_heal_at", HEAL_INTERVAL_H, now)
         weekly_due = _due(state, "last_weekly_at", WEEKLY_INTERVAL_H, now)
+        workstream_shadow_due = _due(
+            state,
+            "last_workstream_shadow_at",
+            WORKSTREAM_SHADOW_INTERVAL_H,
+            now,
+        )
 
         # Snapshot before any mutating op, even if the backup cadence alone
         # wasn't due (matches the old wrapper's "backup before any op").
-        if backup_due or heal_due or weekly_due:
+        if backup_due or heal_due or weekly_due or workstream_shadow_due:
             if _backup_db(project_path):
                 _prune_backups(project_path)
                 state["last_backup_at"] = now.isoformat()
@@ -216,7 +231,9 @@ def run_selfheal(project_path: str | None) -> dict:
 
         if heal_due:
             try:
-                maintenance.run_nightly_heal(project_path)  # budget-gated internally
+                maintenance.run_nightly_heal(
+                    project_path, already_locked=True,
+                )  # budget-gated internally
                 state["last_heal_at"] = now.isoformat()
                 ran.append("heal")
             except Exception as e:
@@ -231,6 +248,23 @@ def run_selfheal(project_path: str | None) -> dict:
             except Exception as e:
                 _log(f"weekly/tree failed for {project_path}: {e}")
 
+        # Independent cadence: lifecycle detection must still run on days when
+        # the contradiction healer is not due (or fails). It derives candidates
+        # only; governed mutation is a separate trust-ladder stage.
+        if workstream_shadow_due:
+            try:
+                maintenance.run_workstream_shadow(
+                    project_path, already_locked=True,
+                )
+                state["last_workstream_shadow_at"] = now.isoformat()
+                ran.append("workstream_shadow")
+                # Lifecycle operations take this same lock via writer_lock.
+                # Defer governed execution until the outer maintenance lock is
+                # released instead of self-deadlocking here.
+                run_governed_after_unlock = True
+            except Exception as e:
+                _log(f"workstream shadow failed for {project_path}: {e}")
+
         _prune_legacy_logs(project_path)
 
         if ran and os.environ.get("CLAUDE_KB_GIT_SNAPSHOT") == "1":
@@ -238,8 +272,25 @@ def run_selfheal(project_path: str | None) -> dict:
 
         _save_state(project_path, state)
 
+    if run_governed_after_unlock:
+        try:
+            automation_result = maintenance.run_workstream_governed(project_path)
+            ran.append("workstream_automation")
+        except Exception as e:
+            _log(f"workstream automation failed for {project_path}: {e}")
+
     _log(f"pass complete for {project_path}: ran={ran}")
-    return {"ok": True, "ran": ran}
+    result = {"ok": True, "ran": ran}
+    if automation_result is not None:
+        result["workstream_automation"] = {
+            "ok": bool(automation_result.get("ok")),
+            "applied_count": len(automation_result.get("applied") or []),
+            "failed_count": len(automation_result.get("failed") or []),
+            "suggestion_count": int(
+                automation_result.get("suggestion_count") or 0
+            ),
+        }
+    return result
 
 
 def _backup_db(project_path: str | None) -> bool:

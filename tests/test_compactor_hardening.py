@@ -205,6 +205,81 @@ def test_empty_summary_does_not_clobber_prior_summary():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_compactor_hard_allowlist_and_lifecycle_relation_boundary():
+    tmp = tempfile.mkdtemp(prefix="kb_compactor_boundary_test_")
+    try:
+        conn = db.connect(tmp)
+        destination = db.insert_node(
+            conn, kind="decision", title="Existing target", body="target",
+        )
+        allowed_kinds = [
+            "fact", "decision", "progress", "entity", "preference",
+            "open_question", "idea",
+        ]
+        extracted = [
+            {"kind": kind, "title": f"Allowed {kind}", "body": f"body {kind}"}
+            for kind in allowed_kinds
+        ] + [
+            {"kind": kind, "title": f"Rejected {kind}", "body": "must not persist"}
+            for kind in ("workstream", "priority", "summary", "unsupported")
+        ] + [
+            {"title": "Rejected missing kind", "body": "must not persist"},
+            {"kind": [], "title": "Rejected nonstring kind", "body": "must not persist"},
+        ]
+        links = [
+            {
+                "src_title": "Allowed fact",
+                "dst_id": destination,
+                "relation": relation,
+            }
+            for relation in (
+                "related_to", "merged_into", "closed_in_favor_of", "branched_from",
+            )
+        ]
+
+        result = c._apply_compaction(
+            conn,
+            "boundary-session",
+            {
+                "session_summary": {"title": "No summary", "body": ""},
+                "extracted_nodes": extracted,
+                "links": links,
+            },
+            final=False,
+            prior_summary_id=None,
+        )
+
+        _assert(result["inserted_nodes"] == len(allowed_kinds), result)
+        _assert(result["linked_edges"] == 1, result)
+        stored = conn.execute(
+            "SELECT kind,title FROM nodes WHERE title LIKE 'Allowed %' ORDER BY kind"
+        ).fetchall()
+        _assert({row["kind"] for row in stored} == set(allowed_kinds), stored)
+        rejected = conn.execute(
+            "SELECT COUNT(*) FROM nodes WHERE title LIKE 'Rejected %'"
+        ).fetchone()[0]
+        _assert(rejected == 0, f"unsupported extracted nodes persisted: {rejected}")
+        relations = {
+            row["relation"] for row in conn.execute(
+                "SELECT relation FROM edges WHERE src=(SELECT id FROM nodes "
+                "WHERE title='Allowed fact')"
+            ).fetchall()
+        }
+        _assert(relations == {"related_to"}, relations)
+        _assert(
+            not c._has_compaction_content({
+                "session_summary": {"body": ""},
+                "extracted_nodes": [{
+                    "kind": "workstream", "title": "bad", "body": "bad",
+                }],
+            }),
+            "unsupported extracted kind must not qualify as compaction content",
+        )
+        conn.close()
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 if __name__ == "__main__":
     test_envelope_clean()
     test_raw_no_envelope()
@@ -219,4 +294,5 @@ if __name__ == "__main__":
     test_failed_compact_subprocess_none()
     test_empty_compaction_result_does_not_mark_session_compacted()
     test_empty_summary_does_not_clobber_prior_summary()
+    test_compactor_hard_allowlist_and_lifecycle_relation_boundary()
     print("\nAll compactor hardening tests pass.")
