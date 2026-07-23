@@ -24,7 +24,8 @@
 </p>
 
 <p align="center">
-  <sub><b>Case 1 — no decision captured:</b> the agent rebuilds the change the project had ruled out.&nbsp;&nbsp;<b>Case 2 — same prompt, decision in latch:</b> the gate cites the ruling and stops to let you decide, before a single file changes.</sub>
+  <sub><b>Case 1 — no decision captured:</b> the agent rebuilds the change the project had ruled out.</sub>
+  <sub><b>Case 2 — same prompt, decision in latch:</b> the gate cites the ruling and stops to let you decide, before a single file changes.</sub>
 </p>
 
 <p align="center">
