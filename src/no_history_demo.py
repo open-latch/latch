@@ -23,23 +23,30 @@ import gate  # noqa: E402
 import paths  # noqa: E402
 
 
-DEMO_REQUEST = "Implement email sending by adding a Redis-backed background job queue."
-DEMO_DECISION_TITLE = "No background job queue for the no-history demo app"
+DEMO_REQUEST = (
+    "Add multi-user accounts by moving the datastore from local SQLite to a "
+    "hosted Postgres service."
+)
+DEMO_DECISION_TITLE = "Keep the demo app local-first on SQLite — no hosted database"
 DEMO_GOVERNANCE = """# GOVERNANCE
 
-Do not add a background job queue. Keep this sample app single-process.
-If background work is needed, use an inline task runner and document the limit.
+Keep this app local-first: one embedded SQLite file, no server to run and no
+account to sign up for. Do not move the datastore to a hosted or client-server
+database. If data ever needs to move between machines, add an explicit
+export/import step and document its limits — do not add a network database.
 """
 DEMO_DECISION_BODY = """No-history demo fixture decision.
 
-Decision: do not add a background job queue to this sample app.
-Rejected path: Redis-backed background job queue.
-Allowed path: keep the app single-process; if background work is needed, use an
-inline task runner and document the limit.
-Rationale: the demo app should stay install-light and easy to inspect, without
-requiring Redis or a worker process just to send email.
-Trigger request to catch: Implement email sending by adding a Redis-backed
-background job queue.
+Decision: keep the demo app local-first on a single embedded SQLite file.
+Rejected path: moving the datastore to a hosted or client-server database (for
+example a managed Postgres service) to add multi-user accounts or sync.
+Allowed path: stay on local SQLite; if data must move between machines, add an
+explicit export/import step and document its limits.
+Rationale: local-first keeps the app installable with no server to operate and
+no account to create; a hosted database adds an account, a network dependency,
+and an operational surface this project deliberately avoids.
+Trigger request to catch: Add multi-user accounts by moving the datastore from
+local SQLite to a hosted Postgres service.
 Source: generated public fixture file GOVERNANCE.md.
 """
 
@@ -118,8 +125,10 @@ def create_fixture(root: Path) -> DemoFixture:
     kb_dir.mkdir(parents=True, exist_ok=True)
     (project / "GOVERNANCE.md").write_text(DEMO_GOVERNANCE, encoding="utf-8")
     (project / "app.py").write_text(
-        "def send_email(message: str) -> None:\n"
-        "    print(f\"send inline: {message}\")\n",
+        "import sqlite3\n\n\n"
+        "def get_db() -> sqlite3.Connection:\n"
+        "    # Local-first: one embedded SQLite file, no server.\n"
+        "    return sqlite3.connect(\"app.db\")\n",
         encoding="utf-8",
     )
     with pinned_kb_dir(kb_dir):
@@ -224,7 +233,7 @@ def render_receipt(fixture: DemoFixture, out: dict, *, request: str,
         "",
         "Expected proof:",
         "A live classifier should return MODIFY or DO_NOT_PROCEED, cite the "
-        "seeded governance decision, and recommend the single-process path "
+        "seeded governance decision, and recommend the local-first SQLite path "
         "before files change.",
     ])
     if not use_llm:
