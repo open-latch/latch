@@ -136,6 +136,30 @@ def _validate_workstream_scope(
     return None
 
 
+def _resolve_workstream_scope(
+    conn: sqlite3.Connection, workstream_id: int | None,
+) -> tuple[int | None, dict | None, dict | None]:
+    """Return ``(active_id, redirect_receipt, error)`` for priority writes."""
+    if workstream_id is None:
+        return None, None, None
+    try:
+        requested = int(workstream_id)
+    except (TypeError, ValueError):
+        return None, None, {
+            "error": f"workstream_id must be an integer, got {workstream_id!r}",
+        }
+    try:
+        import workstreams
+        resolution = workstreams.resolve_membership_target(conn, requested)
+    except (ImportError, AttributeError):
+        error = _validate_workstream_scope(conn, requested)
+        return (requested, None, None) if error is None else (None, None, error)
+    if not resolution["ok"]:
+        return None, None, {"error": resolution["error"], "workstream_resolution": resolution}
+    active_id = int(resolution["resolved_workstream_id"])
+    return active_id, (resolution if resolution.get("redirected") else None), None
+
+
 def _locked_at(
     conn: sqlite3.Connection,
     rank: int,
@@ -258,70 +282,85 @@ def add_priority(
     text = (text or "").strip()
     if not text:
         return {"error": "empty priority text"}
-    scope_error = _validate_workstream_scope(conn, workstream_id)
-    if scope_error:
-        return scope_error
-    if workstream_id is not None:
-        workstream_id = int(workstream_id)
-    active = list_priorities(conn, workstream_id=workstream_id)
-    if len(active) >= MAX_ACTIVE:
-        return {
-            "error": (
-                f"active priority cap ({MAX_ACTIVE}) reached for "
-                f"{_scope_label(workstream_id)}"
-            ),
-            "scope": "overall" if workstream_id is None else "workstream",
-            "workstream_id": workstream_id,
-            "active": [{"id": p["id"], "text": p["title"]} for p in active],
-            "hint": "retire one in this scope first: latch_priority_retire(node_id)",
-        }
-
-    locked_rank = None
-    if rank is not None:
-        # New total after this insert = len(active) + 1.
-        locked_rank = _clamp_rank(rank, len(active) + 1)
-        clash = _locked_at(conn, locked_rank, workstream_id=workstream_id)
-        if clash is not None:
+    # The public MCP boundary holds the shared project writer lock.  Claim the
+    # SQLite write slot before evaluating cap/rank predicates so those reads and
+    # the node + side-table insert form one atomic check-and-write operation.
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        workstream_id, scope_resolution, scope_error = _resolve_workstream_scope(
+            conn, workstream_id,
+        )
+        if scope_error:
+            conn.rollback()
+            return scope_error
+        active = list_priorities(conn, workstream_id=workstream_id)
+        if len(active) >= MAX_ACTIVE:
+            conn.rollback()
             return {
-                "conflict": "rank_locked",
-                "requested_rank": locked_rank,
-                "held_by": clash,
+                "error": (
+                    f"active priority cap ({MAX_ACTIVE}) reached for "
+                    f"{_scope_label(workstream_id)}"
+                ),
                 "scope": "overall" if workstream_id is None else "workstream",
                 "workstream_id": workstream_id,
-                "active": _active_summary(conn, workstream_id=workstream_id),
-                "hint": (
-                    f"rank {locked_rank} is locked by id={clash}; pick another "
-                    "rank, move/unlock it first via latch_priority_reorder, or "
-                    "retire it — ask the user which."
-                ),
+                "active": [{"id": p["id"], "text": p["title"]} for p in active],
+                "hint": "retire one in this scope first: latch_priority_retire(node_id)",
             }
 
-    title = text if len(text) <= _TITLE_CHARS else text[: _TITLE_CHARS - 1] + "…"
-    body = text if not note else f"{text}\n\n{note.strip()}"
-    nid = db.insert_node(
-        conn,
-        kind=PRIORITY_KIND,
-        title=title,
-        body=body,
-        status=ACTIVE_STATUS,
-        session_id=session_id,
-        embedding=None,  # surface-only: never embedded
-        workstream_id=workstream_id,
-    )
-    conn.execute(
-        "INSERT INTO priority_order (node_id, rank, retired_at) VALUES (?, ?, NULL)",
-        (nid, locked_rank),
-    )
-    conn.commit()
-    return {
-        "id": nid,
-        "ok": True,
-        "active_count": len(active) + 1,
-        "rank": locked_rank,
-        "locked": locked_rank is not None,
-        "scope": "overall" if workstream_id is None else "workstream",
-        "workstream_id": workstream_id,
-    }
+        locked_rank = None
+        if rank is not None:
+            # New total after this insert = len(active) + 1.
+            locked_rank = _clamp_rank(rank, len(active) + 1)
+            clash = _locked_at(conn, locked_rank, workstream_id=workstream_id)
+            if clash is not None:
+                active_summary = _active_summary(conn, workstream_id=workstream_id)
+                conn.rollback()
+                return {
+                    "conflict": "rank_locked",
+                    "requested_rank": locked_rank,
+                    "held_by": clash,
+                    "scope": "overall" if workstream_id is None else "workstream",
+                    "workstream_id": workstream_id,
+                    "active": active_summary,
+                    "hint": (
+                        f"rank {locked_rank} is locked by id={clash}; pick another "
+                        "rank, move/unlock it first via latch_priority_reorder, or "
+                        "retire it — ask the user which."
+                    ),
+                }
+
+        title = text if len(text) <= _TITLE_CHARS else text[: _TITLE_CHARS - 1] + "…"
+        body = text if not note else f"{text}\n\n{note.strip()}"
+        nid = db.insert_node_nc(
+            conn,
+            kind=PRIORITY_KIND,
+            title=title,
+            body=body,
+            status=ACTIVE_STATUS,
+            session_id=session_id,
+            embedding=None,  # surface-only: never embedded
+            workstream_id=workstream_id,
+        )
+        conn.execute(
+            "INSERT INTO priority_order (node_id, rank, retired_at) VALUES (?, ?, NULL)",
+            (nid, locked_rank),
+        )
+        conn.commit()
+        result = {
+            "id": nid,
+            "ok": True,
+            "active_count": len(active) + 1,
+            "rank": locked_rank,
+            "locked": locked_rank is not None,
+            "scope": "overall" if workstream_id is None else "workstream",
+            "workstream_id": workstream_id,
+        }
+        if scope_resolution is not None:
+            result["workstream_resolution"] = scope_resolution
+        return result
+    except Exception:
+        conn.rollback()
+        raise
 
 
 def list_priorities(
@@ -417,72 +456,82 @@ def reorder_priority(
     Locking onto a slot held by a *floating* priority is fine (floating reflows
     around it). Locking onto a slot held by another *locked* priority returns a
     `conflict` (no write) — the agent surfaces it and asks the user."""
-    node = db.get_node(conn, node_id)
-    if node is None:
-        return {"error": f"node {node_id} not found"}
-    if node["kind"] != PRIORITY_KIND:
-        return {"error": f"node {node_id} is kind={node['kind']!r}, not a priority"}
-    if node["status"] != ACTIVE_STATUS:
-        return {"error": f"priority {node_id} is not active (status={node['status']!r})"}
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        node = db.get_node(conn, node_id)
+        if node is None:
+            conn.rollback()
+            return {"error": f"node {node_id} not found"}
+        if node["kind"] != PRIORITY_KIND:
+            conn.rollback()
+            return {"error": f"node {node_id} is kind={node['kind']!r}, not a priority"}
+        if node["status"] != ACTIVE_STATUS:
+            conn.rollback()
+            return {"error": f"priority {node_id} is not active (status={node['status']!r})"}
 
-    workstream_id = node["workstream_id"]
+        workstream_id = node["workstream_id"]
 
-    if _order_row(conn, node_id) is None:
+        if _order_row(conn, node_id) is None:
+            conn.execute(
+                "INSERT INTO priority_order (node_id, rank, retired_at) "
+                "VALUES (?, NULL, NULL)",
+                (node_id,),
+            )
+
+        if new_rank is None:
+            conn.execute(
+                "UPDATE priority_order SET rank = NULL WHERE node_id = ?", (node_id,),
+            )
+            conn.commit()
+            return {
+                "id": node_id,
+                "ok": True,
+                "rank": None,
+                "locked": False,
+                "scope": "overall" if workstream_id is None else "workstream",
+                "workstream_id": workstream_id,
+            }
+
+        n = len(_effective_order(conn, workstream_id=workstream_id))
+        r = _clamp_rank(new_rank, n)
+        clash = _locked_at(conn, r, workstream_id=workstream_id, exclude=node_id)
+        if clash is not None:
+            active_summary = _active_summary(conn, workstream_id=workstream_id)
+            conn.rollback()
+            return {
+                "conflict": "rank_locked",
+                "requested_rank": r,
+                "held_by": clash,
+                "scope": "overall" if workstream_id is None else "workstream",
+                "workstream_id": workstream_id,
+                "active": active_summary,
+                "hint": (
+                    f"rank {r} is locked by id={clash}; unlock/move it first via "
+                    "latch_priority_reorder, or pick another rank — ask the user which."
+                ),
+            }
         conn.execute(
-            "INSERT INTO priority_order (node_id, rank, retired_at) "
-            "VALUES (?, NULL, NULL)",
-            (node_id,),
-        )
-
-    if new_rank is None:
-        conn.execute(
-            "UPDATE priority_order SET rank = NULL WHERE node_id = ?", (node_id,),
+            "UPDATE priority_order SET rank = ? WHERE node_id = ?", (r, node_id),
         )
         conn.commit()
         return {
             "id": node_id,
             "ok": True,
-            "rank": None,
-            "locked": False,
+            "rank": r,
+            "locked": True,
             "scope": "overall" if workstream_id is None else "workstream",
             "workstream_id": workstream_id,
         }
-
-    n = len(_effective_order(conn, workstream_id=workstream_id))
-    r = _clamp_rank(new_rank, n)
-    clash = _locked_at(conn, r, workstream_id=workstream_id, exclude=node_id)
-    if clash is not None:
-        return {
-            "conflict": "rank_locked",
-            "requested_rank": r,
-            "held_by": clash,
-            "scope": "overall" if workstream_id is None else "workstream",
-            "workstream_id": workstream_id,
-            "active": _active_summary(conn, workstream_id=workstream_id),
-            "hint": (
-                f"rank {r} is locked by id={clash}; unlock/move it first via "
-                "latch_priority_reorder, or pick another rank — ask the user which."
-            ),
-        }
-    conn.execute(
-        "UPDATE priority_order SET rank = ? WHERE node_id = ?", (r, node_id),
-    )
-    conn.commit()
-    return {
-        "id": node_id,
-        "ok": True,
-        "rank": r,
-        "locked": True,
-        "scope": "overall" if workstream_id is None else "workstream",
-        "workstream_id": workstream_id,
-    }
+    except Exception:
+        conn.rollback()
+        raise
 
 
-def retire_priority(conn: sqlite3.Connection, node_id: int) -> dict:
+def retire_priority_nc(conn: sqlite3.Connection, node_id: int) -> dict:
     """Retire a priority — soft-delete to 'stale' and move it to the graveyard,
     stamping the date it was retired. Reversible (the row and its audit trail
-    persist); never hard-deletes. Clears the rank so the remaining active
-    priorities renumber to close the gap."""
+    persist); never hard-deletes.  Does not commit, so lifecycle CLOSE can keep
+    the priority transition in its single atomic transaction."""
     node = db.get_node(conn, node_id)
     if node is None:
         return {"error": f"node {node_id} not found"}
@@ -494,7 +543,7 @@ def retire_priority(conn: sqlite3.Connection, node_id: int) -> dict:
             "id": node_id, "retired": True, "already": True,
             "retired_at": existing["retired_at"] if existing else None,
         }
-    db.update_node(conn, node_id, status=RETIRED_STATUS)
+    db.update_node_nc(conn, node_id, status=RETIRED_STATUS)
     now = db._now()
     if _order_row(conn, node_id) is None:
         conn.execute(
@@ -508,8 +557,22 @@ def retire_priority(conn: sqlite3.Connection, node_id: int) -> dict:
             "WHERE node_id = ?",
             (now, node_id),
         )
-    conn.commit()
     return {"id": node_id, "retired": True, "retired_at": now}
+
+
+def retire_priority(conn: sqlite3.Connection, node_id: int) -> dict:
+    """Committed wrapper around :func:`retire_priority_nc`."""
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        result = retire_priority_nc(conn, node_id)
+        if "error" in result:
+            conn.rollback()
+            return result
+        conn.commit()
+        return result
+    except Exception:
+        conn.rollback()
+        raise
 
 
 def render_for_gate(priorities: list[dict]) -> str:

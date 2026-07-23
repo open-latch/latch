@@ -92,6 +92,16 @@ def test_prompt_anti_hedge_rule_present():
     print("PASS prompt_anti_hedge_rule_present")
 
 
+def test_prompt_teaches_graded_authority_and_closed_vs_merged():
+    p = gate.build_classifier_prompt({"query": "x", "seeds": [], "chains": []})
+    for marker in (
+        "foundational", "governing", "lane-local", "not evidence fences",
+        "CLOSED", "MERGED-AWAY", "merged_into",
+    ):
+        _assert(marker in p, f"classifier guidance missing {marker!r}")
+    print("PASS prompt_teaches_graded_authority_and_closed_vs_merged")
+
+
 def test_prompt_echoes_request():
     chain = {"query": "extend the Redis cache to the admin API", "seeds": [], "chains": []}
     p = gate.build_classifier_prompt(chain)
@@ -417,7 +427,7 @@ def test_run_gate_appends_jsonl_log_line():
             "ts", "project", "query_hash", "query_chars",
             "recommendation", "skipped", "evidence_ids", "decision_chain",
             "seed_count", "seed_ids", "reachable_count", "elapsed_ms",
-            "budget_count", "intensity",
+            "budget_count", "intensity", "seeds", "chain_lane_contacts",
         ):
             _assert(k in entry, f"required field {k!r} missing: {entry}")
         _assert(entry["intensity"] == "quiet", entry)
@@ -431,6 +441,13 @@ def test_run_gate_appends_jsonl_log_line():
                 f"query_hash should be 12 chars: {entry}")
         _assert(seed in entry["seed_ids"],
                 f"seed should appear in seed_ids: {entry}")
+        seed_meta = next(item for item in entry["seeds"] if item["id"] == seed)
+        _assert(set(seed_meta) == {"id", "source", "workstream_id"}, seed_meta)
+        _assert(seed_meta["source"] == "hybrid", seed_meta)
+        contact = next(item for item in entry["chain_lane_contacts"]
+                       if item["seed_id"] == seed)
+        _assert(contact["seed_source"] == "hybrid"
+                and contact["hybrid_derived"] is True, contact)
         _assert(isinstance(entry["elapsed_ms"], (int, float))
                 and entry["elapsed_ms"] >= 0,
                 f"elapsed_ms numeric and non-negative: {entry}")
@@ -764,6 +781,7 @@ if __name__ == "__main__":
     test_prompt_includes_all_four_labels()
     test_prompt_includes_few_shot_section()
     test_prompt_anti_hedge_rule_present()
+    test_prompt_teaches_graded_authority_and_closed_vs_merged()
     test_prompt_echoes_request()
     test_prompt_renders_seeds_and_evidence()
     test_prompt_handles_empty_chain()

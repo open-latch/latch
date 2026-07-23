@@ -241,6 +241,44 @@ def test_compactor_lock_does_not_steal_unparseable_lock():
         shutil.rmtree(proj, ignore_errors=True)
 
 
+def test_writer_lock_is_reentrant_for_same_thread_and_project():
+    proj = _fresh_project()
+    try:
+        lock_path = lockfile._lock_path(proj)
+        with lockfile.writer_lock(proj, timeout_s=0.2, poll_interval_s=0.01):
+            _assert(lock_path.exists(), "outer writer lock was not acquired")
+            before = lock_path.read_text(encoding="utf-8")
+            with lockfile.writer_lock(proj, timeout_s=0.0, poll_interval_s=0.01):
+                _assert(lock_path.exists(), "nested writer lock released the outer lock")
+                _assert(
+                    lock_path.read_text(encoding="utf-8") == before,
+                    "nested writer lock replaced the outer lock file",
+                )
+            _assert(lock_path.exists(), "nested exit released the outer writer lock")
+        _assert(not lock_path.exists(), "outer exit did not release the writer lock")
+    finally:
+        shutil.rmtree(proj, ignore_errors=True)
+
+
+def test_writer_lock_reenters_same_thread_compactor_ownership():
+    proj = _fresh_project()
+    try:
+        lock_path = lockfile._lock_path(proj)
+        with lockfile.compactor_lock(proj) as acquired:
+            _assert(acquired, "outer compactor lock was not acquired")
+            before = lock_path.read_text(encoding="utf-8")
+            with lockfile.writer_lock(proj, timeout_s=0.0, poll_interval_s=0.01):
+                _assert(lock_path.exists(), "nested writer released compactor lock")
+                _assert(
+                    lock_path.read_text(encoding="utf-8") == before,
+                    "nested writer replaced the compactor lock file",
+                )
+            _assert(lock_path.exists(), "nested writer exit released compactor lock")
+        _assert(not lock_path.exists(), "compactor exit did not release shared lock")
+    finally:
+        shutil.rmtree(proj, ignore_errors=True)
+
+
 def test_pid_alive_for_self_and_dead_pid():
     _assert(lockfile._pid_alive(os.getpid()) is True,
             "own pid should be alive")
@@ -302,6 +340,8 @@ if __name__ == "__main__":
     test_compactor_lock_evicts_legacy_stale_lock()
     test_compactor_lock_does_not_steal_live_lock()
     test_compactor_lock_does_not_steal_unparseable_lock()
+    test_writer_lock_is_reentrant_for_same_thread_and_project()
+    test_writer_lock_reenters_same_thread_compactor_ownership()
     test_pid_alive_for_self_and_dead_pid()
     test_wait_releases_when_lock_disappears_mid_poll()
     print("\nAll lockfile tests pass.")

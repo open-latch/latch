@@ -35,6 +35,7 @@ from __future__ import annotations
 import contextlib
 import os
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -48,6 +49,27 @@ LOCK_FILENAME = "compactor.lock"
 # pathological compaction can't stall the session arbitrarily.
 WRITE_LOCK_TIMEOUT_S = 60.0
 POLL_INTERVAL_S = 0.1
+
+# Same-thread lifecycle helpers may compose code that already owns the project
+# writer lock.  Track ownership by the actual normalized lock path (and PID so
+# forked children never inherit authority) while preserving exclusion across
+# threads and processes.
+_WRITER_LOCK_STATE = threading.local()
+
+
+def _ownership_key(project_path: str) -> tuple[int, str]:
+    return (
+        os.getpid(),
+        os.path.normcase(str(_lock_path(project_path).resolve())),
+    )
+
+
+def _owned_depths() -> dict[tuple[int, str], int]:
+    held = getattr(_WRITER_LOCK_STATE, "depths", None)
+    if held is None:
+        held = {}
+        _WRITER_LOCK_STATE.depths = held
+    return held
 
 
 class CompactionInProgressError(RuntimeError):
@@ -130,6 +152,7 @@ def compactor_lock(project_path: str):
     a live PID or an unparseable body yields False. The compactor uses this;
     writers use `wait_for_compaction` instead."""
     lock_file = _lock_path(project_path)
+    lock_key = _ownership_key(project_path)
     lock_file.parent.mkdir(parents=True, exist_ok=True)
     try:
         fd = os.open(str(lock_file), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
@@ -153,9 +176,12 @@ def compactor_lock(project_path: str):
         os.write(fd, payload.encode("utf-8"))
     finally:
         os.close(fd)
+    held = _owned_depths()
+    held[lock_key] = 1
     try:
         yield True
     finally:
+        held.pop(lock_key, None)
         try:
             lock_file.unlink()
         except OSError:
@@ -213,6 +239,8 @@ def writer_lock(
     keeps it until the caller exits the context, so a compactor cannot start
     between individual commits in the batch.  Live holders are never stolen;
     dead-PID locks are evicted by ``compactor_lock`` and retried immediately.
+    Nested acquisition of the same normalized project by the owning thread is
+    reentrant; other threads and processes still contend on the sentinel.
 
     Raises ``CompactionInProgressError`` when no acquisition succeeds before
     ``timeout_s``.  The lock is released even when the batch raises.
@@ -221,11 +249,30 @@ def writer_lock(
         raise ValueError("timeout_s must be non-negative")
     if poll_interval_s <= 0:
         raise ValueError("poll_interval_s must be positive")
+    lock_key = _ownership_key(project_path)
+    held = _owned_depths()
+    depth = int(held.get(lock_key, 0))
+    if depth:
+        held[lock_key] = depth + 1
+        try:
+            yield
+        finally:
+            remaining = int(held.get(lock_key, 1)) - 1
+            if remaining:
+                held[lock_key] = remaining
+            else:
+                held.pop(lock_key, None)
+        return
+
     deadline = time.monotonic() + timeout_s
     while True:
         with compactor_lock(project_path) as acquired:
             if acquired:
-                yield
+                held[lock_key] = 1
+                try:
+                    yield
+                finally:
+                    held.pop(lock_key, None)
                 return
         remaining = deadline - time.monotonic()
         if remaining <= 0:

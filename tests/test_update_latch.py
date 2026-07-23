@@ -45,7 +45,7 @@ def test_clean_release_checkout_updates_to_exact_tag(tmp_path, monkeypatch):
     _git(work, "config", "user.email", "test@example.com")
     _git(work, "config", "user.name", "Test")
     (work / "VERSION").write_text("0.1.0\n", encoding="utf-8")
-    (work / "KB_SCHEMA_VERSION").write_text("1\n", encoding="utf-8")
+    (work / "KB_SCHEMA_VERSION").write_text("2\n", encoding="utf-8")
     (work / "requirements.txt").write_text("", encoding="utf-8")
     _git(work, "add", ".")
     _git(work, "commit", "-m", "v0.1.0")
@@ -120,7 +120,7 @@ def test_update_refuses_kb_newer_than_target_before_backup_or_source_change(tmp_
     kb = tmp_path / "kb.db"
     conn = sqlite3.connect(kb)
     conn.execute("CREATE TABLE latch_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
-    conn.execute("INSERT INTO latch_meta VALUES('kb_schema_version', '2')")
+    conn.execute("INSERT INTO latch_meta VALUES('kb_schema_version', '3')")
     conn.commit()
     conn.close()
     before = kb.read_bytes()
@@ -136,7 +136,7 @@ def test_update_refuses_kb_newer_than_target_before_backup_or_source_change(tmp_
         if args[:2] == ("show", "v0.1.0:VERSION"):
             return "0.1.0"
         if args[:2] == ("show", "v0.1.0:KB_SCHEMA_VERSION"):
-            return "1"
+            return "2"
         return ""
 
     monkeypatch.setattr(update_latch, "_git", fake_git)
@@ -148,7 +148,7 @@ def test_update_refuses_kb_newer_than_target_before_backup_or_source_change(tmp_
         lambda *_args, **_kwargs: pytest.fail("backup must not run after incompatible preflight"),
     )
 
-    with pytest.raises(update_latch.UpdateError, match="already uses newer schema 2"):
+    with pytest.raises(update_latch.UpdateError, match="already uses newer schema 3"):
         update_latch.apply_update("v0.1.0", dry_run=False)
     assert not any(call and call[0] == "switch" for call in git_calls)
     assert kb.read_bytes() == before

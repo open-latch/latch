@@ -110,6 +110,31 @@ def test_merge_feeder_rows_appends_focus_feeders(tmp_path):
     conn.close()
 
 
+def test_compactor_context_explicitly_offers_focus_workstream_charter(tmp_path):
+    _, conn = _mk_kb(tmp_path)
+    ws = db.insert_node(
+        conn,
+        kind="workstream",
+        title="Lifecycle automation",
+        body=(
+            "Objective: automate the lifecycle.\n"
+            "Done when: merge and close are reversible.\n"
+            "Next step: ship the substrate."
+        ),
+    )
+    db.set_focus(conn, ws)
+
+    rows = compactor._merge_focus_workstreams(
+        conn, [{"id": 123456, "kind": "fact", "title": "search hit"}],
+    )
+    lane = next(row for row in rows if row["id"] == ws)
+    assert lane["kind"] == "workstream"
+    assert lane["role"] == "focus_workstream"
+    assert "Objective: automate" in lane["charter_excerpt"]
+    assert lane["done_when"] == "Done when: merge and close are reversible."
+    conn.close()
+
+
 def test_compact_prompt_carries_lifecycle_contract():
     for marker in (
         "Temporal stance",

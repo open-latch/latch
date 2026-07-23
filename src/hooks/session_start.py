@@ -19,6 +19,7 @@ from _common import log, project_cwd, read_hook_input, session_id, transcript_pa
 import budget
 import db
 import feeders
+import lifecycle_receipts
 import priorities
 from paths import (
     KB_ROOT,
@@ -34,6 +35,7 @@ MAX_WORKSTREAMS = 5
 MAX_OPEN_QUESTIONS = 3
 MAX_BRIEFING_IDEAS = 5
 MAX_FEEDERS_PER_WORKSTREAM = 3
+LIFECYCLE_RECEIPT_LIMITS = {"quiet": 1, "standard": 3, "full": 8}
 
 
 @dataclass(frozen=True)
@@ -414,6 +416,30 @@ def _build_briefing(
             # New-user detection: cheap COUNT(*), same connection. Drives the
             # getting-started block below.
             show_getting_started = db.node_count(conn) < NEW_USER_NODE_THRESHOLD
+            receipt_items = []
+            lifecycle_suggestions = []
+            if lifecycle_receipts.RECEIPTS_CHANNEL_LIVE:
+                try:
+                    receipt_items = lifecycle_receipts.surface_pending_items(
+                        conn,
+                        limit=LIFECYCLE_RECEIPT_LIMITS[resolved_intensity],
+                    )
+                except Exception as e:
+                    log(f"lifecycle receipt surfacing failed: {e}")
+                suggestion_budget = max(
+                    0,
+                    LIFECYCLE_RECEIPT_LIMITS[resolved_intensity] - len(receipt_items),
+                )
+                try:
+                    lifecycle_suggestions = (
+                        lifecycle_receipts.surface_pending_suggestions(
+                            conn,
+                            limit=suggestion_budget,
+                        )
+                        if suggestion_budget else []
+                    )
+                except Exception as e:
+                    log(f"lifecycle suggestion surfacing failed: {e}")
         finally:
             conn.close()
     except Exception as e:
@@ -446,7 +472,8 @@ def _build_briefing(
     if (not workstreams and not open_qs and not ideas and not latest_progress
             and not prio and not orphan_count and not budget_line and not n_drift
             and not show_getting_started and not claude_md_synced
-            and not wiring_notice):
+            and not wiring_notice and not receipt_items
+            and not lifecycle_suggestions):
         # Intensity bounds real startup pointers; it does not manufacture a
         # tier-advertisement banner when an established KB has nothing in the
         # brief's workstream/question/idea/progress surfaces.
@@ -482,6 +509,17 @@ def _build_briefing(
         )
     if budget_line:
         parts.append(f"_{budget_line}_\n")
+    if receipt_items or lifecycle_suggestions:
+        parts.append("## Workstream lifecycle\n")
+        for item in receipt_items:
+            annotation = (
+                " _(automatically opened; first surfacing)_"
+                if item.get("op") == "OPEN" and item.get("origin") == "auto"
+                else ""
+            )
+            parts.append(f"- {item['receipt']}{annotation}")
+        for suggestion in lifecycle_suggestions:
+            parts.append(f"- {suggestion}")
     if n_drift:
         parts.append(
             f"_⚠ {n_drift} body-edge/state drift item(s) flagged by the last "

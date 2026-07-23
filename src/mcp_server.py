@@ -15,7 +15,7 @@ import socket
 import sys
 import threading
 import atexit
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -63,6 +63,7 @@ import db  # noqa: E402
 import embeddings  # noqa: E402
 import gate_report  # noqa: E402
 import heal  # noqa: E402
+import lifecycle_receipts  # noqa: E402
 import lockfile  # noqa: E402
 import mcp_broker  # noqa: E402
 import mcp_runtime  # noqa: E402
@@ -74,6 +75,7 @@ import gate  # noqa: E402
 import search  # noqa: E402
 import selfheal  # noqa: E402
 import verify  # noqa: E402
+import workstreams  # noqa: E402
 
 mcp = FastMCP("latch")
 PROJECT_CWD = os.getcwd()
@@ -85,6 +87,11 @@ SESSION_ID_ENV_VARS = (
     "CLAUDE_CODE_SESSION_ID",
     "CODEX_THREAD_ID",
 )
+_LIFECYCLE_OWNED_EDGE_RELATIONS = frozenset({
+    "merged_into",
+    "closed_in_favor_of",
+    "branched_from",
+})
 
 
 def _is_codex_adapter_env(env: Mapping[str, str]) -> bool:
@@ -310,6 +317,67 @@ def _conn():
     return db.connect(_project_cwd())
 
 
+def _resolve_membership_for_mcp(
+    conn, workstream_id: int | None,
+) -> tuple[int | None, dict | None, dict | None]:
+    """Return ``(active_id, redirect, error_response)`` for MCP writes."""
+    if workstream_id is None:
+        return None, None, None
+    resolution = workstreams.resolve_membership_target(conn, workstream_id)
+    if not resolution["ok"]:
+        return None, None, {
+            "ok": False,
+            "error": resolution["error"],
+            "workstream_resolution": resolution,
+        }
+    return (
+        int(resolution["resolved_workstream_id"]),
+        resolution if resolution.get("redirected") else None,
+        None,
+    )
+
+
+def _record_tool_retrievals(conn, rows: list[dict]) -> None:
+    """Best-effort event telemetry for MCP read tools.
+
+    Cursor's shared MCP process may not carry a session id; those contacts are
+    still useful for project-level lane activity and are intentionally stored
+    with a NULL session.  Read results must never fail because telemetry did.
+    """
+    items = [
+        (int(row["id"]), float(row["score"]) if row.get("score") is not None else None)
+        for row in rows
+        if row.get("id") is not None
+    ]
+    if not items:
+        return
+    try:
+        db.record_retrieval_events(
+            conn,
+            source="tool",
+            items=items,
+            session_id=_project_session_id(),
+        )
+    except Exception:
+        # The DB helper makes SQLite append failures observable via its
+        # persistent counter.  This outer rail protects reads from unexpected
+        # compatibility/runtime faults too.
+        pass
+
+
+def _record_write_events(conn, node_ids: list[int]) -> None:
+    """Best-effort lifecycle contacts for node writes in this MCP session."""
+    try:
+        db.record_retrieval_events(
+            conn,
+            source="write",
+            items=[(int(node_id), None) for node_id in node_ids],
+            session_id=_project_session_id(),
+        )
+    except Exception:
+        pass
+
+
 def _unlatched_response(tool: str) -> dict:
     return {
         "ok": False,
@@ -319,32 +387,107 @@ def _unlatched_response(tool: str) -> dict:
     }
 
 
-def _wait_for_compaction_or_busy() -> dict | None:
-    """Block MCP write tools while an in-flight compaction holds the project
-    lock. Returns None on success (proceed with the write). Returns a
-    structured `{"ok": False, "reason": "compaction_in_progress", ...}` dict
-    on timeout so the caller can surface a retry hint instead of corrupting
-    the compactor's read-extract-write window.
+def _writer_lock_busy_response() -> dict:
+    """Stable MCP response for a live compactor or lifecycle writer."""
+    return {
+        "ok": False,
+        "reason": "compaction_in_progress",
+        "retry_after_s": 10,
+        "message": (
+            f"A compaction or another live writer has held the project "
+            f"lock for >{lockfile.WRITE_LOCK_TIMEOUT_S:.0f}s. This is "
+            f"normally a healthy concurrent process, not a fault — don't "
+            f"investigate why. Retry this write once; if it is still "
+            f"locked, stop and ask the user whether to retry again or "
+            f"investigate the lock."
+        ),
+    }
 
-    Stale locks left by crashed compactors are detected and unlinked here —
-    see `lockfile.wait_for_compaction` for the PID-liveness rules."""
+
+def _run_public_kb_mutation(
+    operation: Callable[[Any], Any],
+) -> Any:
+    """Serialize a public KB write with lifecycle operations.
+
+    Acquire the shared project writer lock before opening the SQLite
+    connection, then keep it through membership/identity resolution and every
+    commit performed by ``operation``.  Acquiring in this order closes the
+    check/use race left by ``wait_for_compaction``: a lifecycle writer cannot
+    change a lane after a generic tool resolves it but before that tool commits.
+
+    The lock is same-thread reentrant.  Low-level helpers therefore remain
+    usable from lifecycle transactions that already own it without changing
+    the single public lock order (writer lock, then SQLite connection).
+    """
+    project_path = _project_cwd()
     try:
-        lockfile.wait_for_compaction(_project_cwd())
+        with lockfile.writer_lock(project_path):
+            with _conn() as conn:
+                return operation(conn)
     except lockfile.CompactionInProgressError:
-        return {
-            "ok": False,
-            "reason": "compaction_in_progress",
-            "retry_after_s": 10,
-            "message": (
-                f"A compaction or another live writer has held the project "
-                f"lock for >{lockfile.WRITE_LOCK_TIMEOUT_S:.0f}s. This is "
-                f"normally a healthy concurrent process, not a fault — don't "
-                f"investigate why. Retry this write once; if it is still "
-                f"locked, stop and ask the user whether to retry again or "
-                f"investigate the lock."
-            ),
-        }
-    return None
+        return _writer_lock_busy_response()
+
+
+def _run_public_priority_mutation(
+    operation: Callable[[Any], dict],
+) -> dict:
+    """Compatibility wrapper for the priority-specific public boundary."""
+    return _run_public_kb_mutation(operation)
+
+
+def _priority_edge_error(conn, node_ids) -> dict | None:
+    """Reject public graph edges that would make priorities traversable."""
+    normalized: set[int] = set()
+    for value in node_ids:
+        if value is None:
+            continue
+        if isinstance(value, bool):
+            return {
+                "ok": False,
+                "error": "graph edge node ids must be positive integers",
+            }
+        if isinstance(value, int):
+            parsed = value
+        elif isinstance(value, str) and value.isdigit() and not value.startswith("0"):
+            parsed = int(value)
+        else:
+            return {
+                "ok": False,
+                "error": "graph edge node ids must be positive integers",
+            }
+        if parsed <= 0:
+            return {
+                "ok": False,
+                "error": "graph edge node ids must be positive integers",
+            }
+        normalized.add(parsed)
+    if not normalized:
+        return None
+    placeholders = ",".join("?" for _ in normalized)
+    rows = conn.execute(
+        f"SELECT id FROM nodes WHERE kind='priority' "
+        f"AND id IN ({placeholders}) ORDER BY id",
+        sorted(normalized),
+    ).fetchall()
+    priority_ids = [int(row["id"]) for row in rows]
+    if not priority_ids:
+        return None
+    return {
+        "ok": False,
+        "error": (
+            "priorities are surface-only and machine-owned; generic graph "
+            "edges cannot touch a priority; use the priority service"
+        ),
+        "priority_node_ids": priority_ids,
+    }
+
+
+def _link_destination_ids(links: list[dict] | None) -> list[Any]:
+    return [
+        link.get("dst")
+        for link in (links or [])
+        if isinstance(link, Mapping)
+    ]
 
 
 def _start_embed_listener(project_cwd: str) -> None:
@@ -517,6 +660,7 @@ def kb_search(
         )
         if results:
             db.bump_focus_for_nodes(conn, [r["id"] for r in results])
+            _record_tool_retrievals(conn, results)
     activity = _kb_activity(
         action="read",
         tool="latch_search",
@@ -544,7 +688,11 @@ def kb_search(
 
 @mcp.tool(name="latch_get")
 @mcp.tool(name="kb_get")
-def kb_get(node_id: int, include_neighbors: bool = True) -> dict:
+def kb_get(
+    node_id: int,
+    include_neighbors: bool = True,
+    resolve_workstream: bool = True,
+) -> dict:
     """Fetch a single node, optionally with its 1-hop neighbors. Bumps ref_count.
 
     Also returns `reconciliation_banner`: a list of `{linked_id, kind, title,
@@ -565,16 +713,51 @@ def kb_get(node_id: int, include_neighbors: bool = True) -> dict:
         node = db.get_node(conn, node_id)
         if not node:
             return {"error": f"node {node_id} not found"}
+        workstream_resolution = None
+        resolved_node_id = int(node_id)
+        if resolve_workstream and node["kind"] == "workstream":
+            resolution = workstreams.resolve_active(conn, node_id)
+            if resolution["state"] == "merged" and resolution["active_id"] is not None:
+                resolved_node_id = int(resolution["active_id"])
+                redirected = db.get_node(conn, resolved_node_id)
+                if redirected is None:  # fail closed on a corrupted identity chain
+                    return {"error": f"merged workstream {node_id} has no active target"}
+                node = redirected
+                merge_evidence = workstreams.merge_receipts_for_path(
+                    conn, resolution["path"],
+                )
+                durable_receipt = next(
+                    (
+                        item["receipt"] for item in merge_evidence
+                        if item.get("receipt")
+                    ),
+                    None,
+                )
+                workstream_resolution = {
+                    "requested_workstream_id": int(node_id),
+                    "resolved_workstream_id": resolved_node_id,
+                    "state": "merged",
+                    "path": resolution["path"],
+                    "receipt": (
+                        durable_receipt
+                        or f"latch redirected merged workstream {int(node_id)} to "
+                           f"active workstream {resolved_node_id}."
+                    ),
+                    "merge_evidence": merge_evidence,
+                }
         node.pop("embedding", None)
         if include_neighbors:
-            node["neighbors"] = db.neighbors(conn, node_id)
-        node["reconciliation_banner"] = db.reconciliation_banner(conn, node_id)
-        db.bump_ref_count(conn, [node_id])
-        db.bump_focus_for_nodes(conn, [node_id])
+            node["neighbors"] = db.neighbors(conn, resolved_node_id)
+        node["reconciliation_banner"] = db.reconciliation_banner(conn, resolved_node_id)
+        if workstream_resolution is not None:
+            node["workstream_resolution"] = workstream_resolution
+        db.bump_ref_count(conn, [resolved_node_id])
+        db.bump_focus_for_nodes(conn, [resolved_node_id])
+        _record_tool_retrievals(conn, [node])
         node["kb_activity"] = _kb_activity(
             action="read",
             tool="latch_get",
-            summary=f"Read KB {node['kind']} node id={node_id}: {node['title']}.",
+            summary=f"Read KB {node['kind']} node id={resolved_node_id}: {node['title']}.",
             nodes=[_activity_node(node)],
             hints=_activity_hints(node),
         )
@@ -610,6 +793,7 @@ def kb_recent(
             conn, session_id=session_id, kind=kind, status=status,
             created_by=created_by, limit=limit,
         )
+        _record_tool_retrievals(conn, rows)
     activity = _kb_activity(
         action="read",
         tool="latch_recent",
@@ -820,15 +1004,39 @@ def kb_insert(
     """
     if paths.is_unlatched_mode():
         return _unlatched_response("latch_insert")
-    busy = _wait_for_compaction_or_busy()
-    if busy is not None:
-        return busy
-    with _conn() as conn:
+    if kind == "workstream":
+        return {
+            "ok": False,
+            "error": (
+                "workstream lifecycle is machine-owned; use the internal "
+                "workstream OPEN operation"
+            ),
+        }
+    if kind == "priority":
+        return {
+            "ok": False,
+            "error": (
+                "priority ordering and lifecycle are machine-owned; use "
+                "latch_priority_add"
+            ),
+        }
+
+    def _insert(conn) -> dict:
+        priority_error = _priority_edge_error(
+            conn, _link_destination_ids(links),
+        )
+        if priority_error is not None:
+            return priority_error
+        resolved_workstream_id, workstream_resolution, scope_error = (
+            _resolve_membership_for_mcp(conn, workstream_id)
+        )
+        if scope_error is not None:
+            return scope_error
         result = heal.insert_with_heal(
             conn, kind=kind, title=title, body=body, status=status,
             session_id=session_id or _project_session_id(),
             links=links, use_llm=True,
-            workstream_id=workstream_id, project_path=_project_cwd(),
+            workstream_id=resolved_workstream_id, project_path=_project_cwd(),
             # Evidence contract: pass intended artifacts so on-insert heal sees the
             # new node's repo scope BEFORE arbitration (provenance is attached just
             # below, after this returns). Evidence only — never blocks the insert.
@@ -837,6 +1045,7 @@ def kb_insert(
         new_id = result.get("id")
         if new_id is not None:
             db.bump_focus_for_nodes(conn, [new_id])
+            _record_write_events(conn, [new_id])
             captured = artifact_store.capture_for_node(
                 conn, new_id, artifacts=artifacts, project_cwd=_project_cwd(),
             )
@@ -851,7 +1060,11 @@ def kb_insert(
                 })],
                 hints=_activity_hints(result),
             )
+        if workstream_resolution is not None:
+            result["workstream_resolution"] = workstream_resolution
         return result
+
+    return _run_public_kb_mutation(_insert)
 
 
 @mcp.tool(name="latch_update")
@@ -861,6 +1074,7 @@ def kb_update(
     title: str | None = None,
     body: str | None = None,
     status: str | None = None,
+    workstream_id: int | None = None,
 ) -> dict:
     """Update fields on an existing node. Re-embeds if title or body changes.
 
@@ -881,13 +1095,43 @@ def kb_update(
     """
     if paths.is_unlatched_mode():
         return _unlatched_response("latch_update")
-    busy = _wait_for_compaction_or_busy()
-    if busy is not None:
-        return busy
-    with _conn() as conn:
+
+    def _update(conn) -> dict:
         node = db.get_node(conn, node_id)
         if not node:
             return {"error": f"node {node_id} not found"}
+        if node["kind"] == "workstream":
+            return {
+                "ok": False,
+                "error": (
+                    "workstream title, body, status, and membership are "
+                    "machine-owned; use latch_append for rolling state or the "
+                    "internal lifecycle service"
+                ),
+            }
+        if node["kind"] == "priority":
+            return {
+                "ok": False,
+                "error": (
+                    "priority membership and state are owned by the priority "
+                    "service; use latch_priority_add, latch_priority_reorder, "
+                    "or latch_priority_retire"
+                ),
+            }
+        # Membership resolution is a write-boundary for an explicitly requested
+        # move, not a prerequisite for editing the node's other fields.  In
+        # particular, historical knowledge remains editable after its lane is
+        # CLOSED, and a plain correction must not silently reparent a member of
+        # a merged-away lane.  This mirrors latch_append: resolve only the
+        # identity that the caller actually asked the operation to target.
+        resolved_workstream_id = None
+        workstream_resolution = None
+        if workstream_id is not None:
+            resolved_workstream_id, workstream_resolution, scope_error = (
+                _resolve_membership_for_mcp(conn, workstream_id)
+            )
+            if scope_error is not None:
+                return scope_error
         new_vec = None  # raw vector — kept for the claim-change guard
         new_blob = None
         if title is not None or body is not None:
@@ -901,6 +1145,8 @@ def kb_update(
         old_kind = node["kind"]
         old_status = node["status"]
         old_embedding = node["embedding"]
+        if workstream_id is not None:
+            db.set_node_workstream_nc(conn, [node_id], resolved_workstream_id)
         db.update_node(conn, node_id, title=title, body=body, status=status, embedding=new_blob)
         db.bump_focus_for_nodes(conn, [node_id])
         effective_body = body if body is not None else old_body
@@ -924,26 +1170,35 @@ def kb_update(
                 new_body=body, new_vec=new_vec,
                 project_path=_project_cwd(), session_id=_project_session_id(),
             )
-    return {
-        "id": node_id, "ok": True,
-        "orphan_hint": orphan_hint,
-        "claim_change_hint": claim_change_hint,
-        "kb_activity": _kb_activity(
-            action="write",
-            tool="latch_update",
-            summary=f"Updated KB {old_kind} node id={node_id}: {title or node['title']}.",
-            nodes=[_activity_node({
-                "id": node_id,
-                "kind": old_kind,
-                "title": title or node["title"],
-                "status": status or old_status,
-            })],
-            hints=_activity_hints({
-                "orphan_hint": orphan_hint,
-                "claim_change_hint": claim_change_hint,
-            }),
-        ),
-    }
+        _record_write_events(conn, [node_id])
+        result = {
+            "id": node_id, "ok": True,
+            "orphan_hint": orphan_hint,
+            "claim_change_hint": claim_change_hint,
+            "kb_activity": _kb_activity(
+                action="write",
+                tool="latch_update",
+                summary=(
+                    f"Updated KB {old_kind} node id={node_id}: "
+                    f"{title or node['title']}."
+                ),
+                nodes=[_activity_node({
+                    "id": node_id,
+                    "kind": old_kind,
+                    "title": title or node["title"],
+                    "status": status or old_status,
+                })],
+                hints=_activity_hints({
+                    "orphan_hint": orphan_hint,
+                    "claim_change_hint": claim_change_hint,
+                }),
+            ),
+        }
+        if workstream_resolution is not None:
+            result["workstream_resolution"] = workstream_resolution
+        return result
+
+    return _run_public_kb_mutation(_update)
 
 
 _APPENDABLE_KINDS = {"workstream", "progress"}
@@ -975,6 +1230,7 @@ def _kb_append_impl(conn, node_id: int, text: str, *, reembed: bool, date: str) 
         new_blob = embeddings.to_blob(embeddings.embed(f"{node['title']}\n\n{new_body}"))
     db.update_node(conn, node_id, body=new_body, embedding=new_blob)
     db.bump_focus_for_nodes(conn, [node_id])
+    _record_write_events(conn, [node_id])
     orphan_hint = heal.compute_orphan_hint(conn, node_id, new_body, node["kind"])
     return {
         "id": node_id,
@@ -1020,12 +1276,29 @@ def kb_append(node_id: int, text: str, reembed: bool = False) -> dict:
     """
     if paths.is_unlatched_mode():
         return _unlatched_response("latch_append")
-    busy = _wait_for_compaction_or_busy()
-    if busy is not None:
-        return busy
     date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    with _conn() as conn:
-        return _kb_append_impl(conn, node_id, text, reembed=reembed, date=date)
+
+    def _append(conn) -> dict:
+        requested = db.get_node(conn, node_id)
+        if requested is None:
+            return {"ok": False, "error": f"node {node_id} not found"}
+        workstream_resolution = None
+        append_id = int(node_id)
+        if requested["kind"] == "workstream":
+            append_id, workstream_resolution, scope_error = (
+                _resolve_membership_for_mcp(conn, node_id)
+            )
+            if scope_error is not None:
+                return scope_error
+            assert append_id is not None  # guaranteed by successful resolution
+        result = _kb_append_impl(
+            conn, append_id, text, reembed=reembed, date=date,
+        )
+        if workstream_resolution is not None:
+            result["workstream_resolution"] = workstream_resolution
+        return result
+
+    return _run_public_kb_mutation(_append)
 
 
 @mcp.tool(name="latch_link")
@@ -1043,10 +1316,20 @@ def kb_link(src: int, dst: int, relation: str) -> dict:
     """
     if paths.is_unlatched_mode():
         return _unlatched_response("latch_link")
-    busy = _wait_for_compaction_or_busy()
-    if busy is not None:
-        return busy
-    with _conn() as conn:
+    canonical_relation = db.canonicalize_relation(str(relation))
+    if canonical_relation in _LIFECYCLE_OWNED_EDGE_RELATIONS:
+        return {
+            "ok": False,
+            "error": (
+                f"relation '{canonical_relation}' is machine-owned by the "
+                "workstream lifecycle service"
+            ),
+        }
+
+    def _link(conn) -> dict:
+        priority_error = _priority_edge_error(conn, [src, dst])
+        if priority_error is not None:
+            return priority_error
         db.add_edge(
             conn, src=src, dst=dst, relation=relation,
             project_path=_project_cwd(), session_id=_project_session_id(),
@@ -1056,7 +1339,9 @@ def kb_link(src: int, dst: int, relation: str) -> dict:
             heal.compute_ship_edge_hint(conn, src, src_node["kind"])
             if src_node else []
         )
-    return {"ok": True, "ship_edge_hint": ship_edge_hint}
+        return {"ok": True, "ship_edge_hint": ship_edge_hint}
+
+    return _run_public_kb_mutation(_link)
 
 
 @mcp.tool(name="latch_unlink")
@@ -1080,12 +1365,21 @@ def kb_unlink(src: int, dst: int, relation: str) -> dict:
     """
     if paths.is_unlatched_mode():
         return _unlatched_response("latch_unlink")
-    busy = _wait_for_compaction_or_busy()
-    if busy is not None:
-        return busy
-    with _conn() as conn:
+    canonical_relation = db.canonicalize_relation(str(relation))
+    if canonical_relation in _LIFECYCLE_OWNED_EDGE_RELATIONS:
+        return {
+            "ok": False,
+            "error": (
+                f"relation '{canonical_relation}' is machine-owned by the "
+                "workstream lifecycle service"
+            ),
+        }
+
+    def _unlink(conn) -> dict:
         n = db.tombstone_edge(conn, src=src, dst=dst, relation=relation)
-    return {"ok": True, "tombstoned": n}
+        return {"ok": True, "tombstoned": n}
+
+    return _run_public_kb_mutation(_unlink)
 
 
 def _gate_status(verdict: dict) -> str:
@@ -1303,10 +1597,6 @@ def kb_capture_decision(
         return {"ok": False,
                 "error": f"provenance must be one of {capture_streams.DECISION_PROVENANCES}"}
 
-    busy = _wait_for_compaction_or_busy()
-    if busy is not None:
-        return busy
-
     # Cited gate-evidence nodes become `related_to` edges from the decision, so
     # the node carries the KB context it was made against. Extra links append.
     edges: list[dict] = [
@@ -1316,15 +1606,36 @@ def kb_capture_decision(
         edges.extend(links)
 
     sid = session_id or _project_session_id()
-    with _conn() as conn:
+
+    def _capture(conn) -> tuple[dict, dict | None] | dict:
+        priority_error = _priority_edge_error(
+            conn, _link_destination_ids(edges),
+        )
+        if priority_error is not None:
+            return priority_error
+        resolved_workstream_id, workstream_resolution, scope_error = (
+            _resolve_membership_for_mcp(conn, workstream_id)
+        )
+        if scope_error is not None:
+            return scope_error
         result = heal.insert_with_heal(
             conn, kind="decision", title=title, body=body, status=status,
             session_id=sid, links=edges or None, use_llm=True,
-            workstream_id=workstream_id, project_path=_project_cwd(),
+            workstream_id=resolved_workstream_id, project_path=_project_cwd(),
         )
         new_id = result.get("id")
         if new_id is not None:
             db.bump_focus_for_nodes(conn, [new_id])
+            _record_write_events(conn, [new_id])
+        return result, workstream_resolution
+
+    locked_result = _run_public_kb_mutation(_capture)
+    if isinstance(locked_result, dict):
+        # Either membership resolution failed or the shared writer lock timed
+        # out.  Both fail before the post-commit decision event is emitted.
+        return locked_result
+    result, workstream_resolution = locked_result
+    new_id = result.get("id")
 
     # Emit the structural RL row AFTER the node exists (point-in-time, id=1108).
     # decision.log is a file write, not a DB write — do it outside the conn.
@@ -1346,6 +1657,8 @@ def kb_capture_decision(
 
     result["decision_logged"] = decision_logged
     result["human_action"] = human_action
+    if workstream_resolution is not None:
+        result["workstream_resolution"] = workstream_resolution
     if new_id is not None:
         result["kb_activity"] = _kb_activity(
             action="write",
@@ -1456,22 +1769,30 @@ def kb_correct_apply(
     """
     if paths.is_unlatched_mode():
         return _unlatched_response("latch_correct_apply")
-    busy = _wait_for_compaction_or_busy()
-    if busy is not None:
-        return busy
-    with _conn() as conn:
+
+    def _correct(conn) -> dict:
+        resolved_workstream_id, workstream_resolution, scope_error = (
+            _resolve_membership_for_mcp(conn, workstream_id)
+        )
+        if scope_error is not None:
+            return scope_error
         result = verify.correct_apply(
             conn, bad_node_id,
             mode=mode, title=title, body=body, kind=kind,
             corrected_status=corrected_status, reconcile_ids=reconcile_ids,
-            workstream_id=workstream_id, links=links,
+            workstream_id=resolved_workstream_id, links=links,
             trigger=trigger, prompt_hash=prompt_hash,
             session_id=_project_session_id(), project_path=_project_cwd(),
         )
         cid = result.get("corrected_node_id")
         if cid is not None:
             db.bump_focus_for_nodes(conn, [cid])
+            _record_write_events(conn, [cid])
+        if workstream_resolution is not None:
+            result["workstream_resolution"] = workstream_resolution
         return result
+
+    return _run_public_kb_mutation(_correct)
 
 
 @mcp.tool(name="latch_priority_add")
@@ -1512,10 +1833,11 @@ def kb_priority_add(
     """
     if paths.is_unlatched_mode():
         return _unlatched_response("latch_priority_add")
-    with _conn() as conn:
-        return priorities.add_priority(
+    return _run_public_priority_mutation(
+        lambda conn: priorities.add_priority(
             conn, text, note=note, rank=rank, workstream_id=workstream_id,
-        )
+        ),
+    )
 
 
 @mcp.tool(name="latch_priority_list")
@@ -1570,8 +1892,9 @@ def kb_priority_reorder(node_id: int, new_rank: int | None = None) -> dict:
     user which one should move."""
     if paths.is_unlatched_mode():
         return _unlatched_response("latch_priority_reorder")
-    with _conn() as conn:
-        return priorities.reorder_priority(conn, node_id, new_rank)
+    return _run_public_priority_mutation(
+        lambda conn: priorities.reorder_priority(conn, node_id, new_rank),
+    )
 
 
 @mcp.tool(name="latch_priority_retire")
@@ -1583,8 +1906,9 @@ def kb_priority_retire(node_id: int) -> dict:
     hard-deleted. Remaining active priorities renumber to close the gap."""
     if paths.is_unlatched_mode():
         return _unlatched_response("latch_priority_retire")
-    with _conn() as conn:
-        return priorities.retire_priority(conn, node_id)
+    return _run_public_priority_mutation(
+        lambda conn: priorities.retire_priority(conn, node_id),
+    )
 
 
 # The verification-profile engine (src/profiles.py — per-user gate presets
@@ -1640,6 +1964,17 @@ def kb_runtime_status() -> dict:
     )
     other_owner_inventory = list(lease_state.get("other_live_owner") or [])
     observed_inventory = list(lease_state.get("observed_live") or [])
+    dropped_retrieval_events = None
+    stale_tree_signals = None
+    try:
+        with _conn() as conn:
+            dropped_retrieval_events = db.retrieval_events_dropped(conn)
+            row = conn.execute(
+                "SELECT value FROM latch_meta WHERE key = 'stale_tree_signal'"
+            ).fetchone()
+            stale_tree_signals = int(row["value"]) if row is not None else 0
+    except Exception:
+        pass
     return {
         "mode": "shared_daemon" if daemon is not None else "legacy_stdio",
         "process_pid": os.getpid(),
@@ -1680,6 +2015,14 @@ def kb_runtime_status() -> dict:
         "lifecycle": mcp_broker.lifecycle_summary(
             hours=24, lease_state=lease_state, policy=policy
         ),
+        "retrieval_events": {
+            "dropped": dropped_retrieval_events,
+            "retention_days": 90,
+        },
+        "workstream_lifecycle": {
+            "stale_tree_signal": stale_tree_signals,
+            "receipts_live": lifecycle_receipts.RECEIPTS_CHANNEL_LIVE,
+        },
         "recovery": (
             "Idle owners are reclaimed; the stdio proxy reconnects and replays MCP initialization. "
             "In-flight calls are never automatically replayed."

@@ -162,6 +162,61 @@ def test_build_tree_tiny_kb_no_summaries():
         _cleanup(tmp, conn)
 
 
+def test_subthreshold_orphans_do_not_emit_lifecycle_signals(monkeypatch):
+    """Singleton/undersized clusters are not detector evidence."""
+    tmp, conn = _fresh_db()
+    events = []
+    try:
+        _mk(conn, title="orphan singleton", body="unrelated isolated evidence")
+        monkeypatch.setattr(
+            tree.log_utils,
+            "emit_event",
+            lambda channel, payload, **kwargs: events.append((channel, payload)),
+        )
+        tree.build_tree(conn, project_path=tmp, use_llm=False, min_cluster_size=3)
+        _assert(
+            not [event for event in events if event[0] == "lifecycle"],
+            f"subthreshold cluster emitted lifecycle signal: {events}",
+        )
+    finally:
+        _cleanup(tmp, conn)
+
+
+def test_qualifying_tree_signals_stamp_substrate_version(monkeypatch):
+    tmp, conn = _fresh_db()
+    events = []
+    try:
+        for index in range(3):
+            _mk(
+                conn,
+                title=f"orphan deployment evidence {index}",
+                body="same recurring deployment evidence for clustering",
+            )
+        monkeypatch.setattr(
+            tree,
+            "_cluster_average_linkage",
+            lambda _vecs, **_kwargs: [[0, 1, 2]],
+        )
+        monkeypatch.setattr(
+            tree.log_utils,
+            "emit_event",
+            lambda channel, payload, **kwargs: events.append((channel, payload)),
+        )
+        tree.build_tree(conn, project_path=tmp, use_llm=False, min_cluster_size=3)
+        lifecycle = [payload for channel, payload in events if channel == "lifecycle"]
+        _assert(lifecycle, f"expected a qualifying orphan signal: {events}")
+        _assert(
+            all(
+                row.get("substrate_version")
+                == tree.lifecycle_signals.SUBSTRATE_VERSION
+                for row in lifecycle
+            ),
+            lifecycle,
+        )
+    finally:
+        _cleanup(tmp, conn)
+
+
 def test_build_tree_use_llm_false_generates_no_summary():
     """Even with a qualifying cluster, use_llm=False should skip summary gen."""
     tmp, conn = _fresh_db()

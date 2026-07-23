@@ -4,6 +4,7 @@ import json
 import os
 import sqlite3
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -457,14 +458,35 @@ def test_writer_lock_holds_shared_lock_for_entire_batch(tmp_path):
 
 def test_writer_lock_times_out_on_live_holder_and_releases_after_error(tmp_path):
     project = str(tmp_path / "writer-timeout")
-    with lockfile.compactor_lock(project) as acquired:
-        assert acquired is True
+    ready = threading.Event()
+    release = threading.Event()
+    holder_errors: list[BaseException] = []
+
+    def hold_from_other_thread() -> None:
+        try:
+            with lockfile.compactor_lock(project) as acquired:
+                assert acquired is True
+                ready.set()
+                assert release.wait(2.0)
+        except BaseException as exc:  # pragma: no cover - asserted below
+            holder_errors.append(exc)
+            ready.set()
+
+    holder = threading.Thread(target=hold_from_other_thread, daemon=True)
+    holder.start()
+    assert ready.wait(1.0)
+    try:
         with pytest.raises(lockfile.CompactionInProgressError):
             with lockfile.writer_lock(
                 project, timeout_s=0.05, poll_interval_s=0.01
             ):
                 pytest.fail("live lock must not be stolen")
         assert lockfile._lock_path(project).exists()
+    finally:
+        release.set()
+        holder.join(timeout=2.0)
+    assert not holder.is_alive()
+    assert holder_errors == []
 
     with pytest.raises(RuntimeError, match="batch failed"):
         with lockfile.writer_lock(project, timeout_s=0.2):

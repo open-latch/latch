@@ -2673,34 +2673,46 @@ def project_scope_fingerprint(project_path: str) -> str:
     return hashlib.sha256(resolved.encode("utf-8")).hexdigest()
 
 
-def existing_workstream_preflight(
+def resolve_existing_workstream_target(
     project_path: str, workstream_id: int,
-) -> str | None:
-    """Validate a target without creating or migrating a preview-time vault."""
+) -> tuple[int | None, str | None]:
+    """Resolve a seed parent without creating/migrating a preview-time vault."""
     try:
         db_file = paths.db_path(project_path)
     except Exception:
-        return "the project KB location could not be resolved"
+        return None, "the project KB location could not be resolved"
     if not db_file.is_file():
-        return "the project KB does not exist"
+        return None, "the project KB does not exist"
     conn: sqlite3.Connection | None = None
     try:
         conn = sqlite3.connect(db_file.resolve().as_uri() + "?mode=ro", uri=True)
-        row = conn.execute(
-            "SELECT kind, status FROM nodes WHERE id = ?", (int(workstream_id),)
-        ).fetchone()
+        conn.row_factory = sqlite3.Row
+        import workstreams  # noqa: WPS433
+        resolution = workstreams.resolve_active(conn, int(workstream_id))
     except sqlite3.Error:
-        return "the project KB could not be read"
+        return None, "the project KB could not be read"
     finally:
         if conn is not None:
             conn.close()
-    if row is None:
-        return "the requested node does not exist"
-    if row[0] != "workstream":
-        return "the requested node is not a workstream"
-    if row[1] == "stale":
-        return "the requested workstream is stale"
-    return None
+    active_id = resolution.get("active_id")
+    if active_id is not None:
+        return int(active_id), None
+    state = resolution.get("state")
+    if state == "not_found":
+        return None, "the requested node does not exist"
+    if state == "not_workstream":
+        return None, "the requested node is not a workstream"
+    if state == "closed":
+        return None, "the requested workstream is closed"
+    return None, f"the requested workstream identity is {state}"
+
+
+def existing_workstream_preflight(
+    project_path: str, workstream_id: int,
+) -> str | None:
+    """Backward-compatible error-only wrapper for preview validation."""
+    _, error = resolve_existing_workstream_target(project_path, workstream_id)
+    return error
 
 
 def seed_source_import_key(
@@ -3026,6 +3038,7 @@ def apply_candidates(
     import db  # noqa: WPS433
     import artifacts as artifact_store  # noqa: WPS433
     import lockfile  # noqa: WPS433
+    import workstreams  # noqa: WPS433
 
     if paths.is_unlatched_mode():
         raise SeedWriteBlocked(
@@ -3068,13 +3081,27 @@ def apply_candidates(
             conn = db.connect(project_path)
             try:
                 if existing_workstream_id is not None:
-                    row = db.get_node(conn, int(existing_workstream_id))
-                    if row is None or row.get("kind") != "workstream" \
-                            or row.get("status") == "stale":
+                    requested_existing_id = int(existing_workstream_id)
+                    resolution = workstreams.resolve_membership_target(
+                        conn, requested_existing_id,
+                    )
+                    if not resolution["ok"]:
                         raise SeedWriteBlocked(
                             "invalid_workstream",
-                            "The requested existing workstream is missing, stale, or not a workstream.",
+                            "The requested existing workstream is closed, missing, "
+                            "or not a resolvable workstream.",
                         )
+                    existing_workstream_id = int(
+                        resolution["resolved_workstream_id"]
+                    )
+                    if existing_workstream_id != requested_existing_id:
+                        old_key = f"existing:{requested_existing_id}"
+                        new_key = f"existing:{existing_workstream_id}"
+                        for candidate in candidates:
+                            if candidate.workstream_key == old_key:
+                                candidate.workstream_key = new_key
+                        if workstream_scope == old_key:
+                            workstream_scope = new_key
 
                 for source in sources or []:
                     source_key = seed_source_import_key(
@@ -3477,7 +3504,7 @@ def main(argv: list[str] | None = None) -> int:
         print("--workstream-id must be a positive node id.", file=sys.stderr)
         return 2
     if args.workstream_id is not None:
-        workstream_error = existing_workstream_preflight(
+        resolved_workstream_id, workstream_error = resolve_existing_workstream_target(
             args.project, args.workstream_id,
         )
         if workstream_error:
@@ -3487,6 +3514,7 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return 2
+        args.workstream_id = resolved_workstream_id
     if args.new_workstream is not None:
         safe_workstream, _ = redact_seed_text(args.new_workstream.strip())
         if not safe_workstream:

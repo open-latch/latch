@@ -251,6 +251,16 @@ def test_graph_path_surfaces_neighbors():
                 f"no neighbors surfaced: {ids}")
         _assert(log.get("graph_pivot") == nid_pivot,
                 f"log pivot wrong: {log.get('graph_pivot')}")
+        events = conn.execute(
+            "SELECT node_id, seed_node_id, reached_node_id, source "
+            "FROM retrieval_events WHERE session_id = ? AND turn = ? "
+            "AND source = 'graph' ORDER BY node_id",
+            (sid, 5),
+        ).fetchall()
+        _assert(events, "graph injection should append retrieval events")
+        for event in events:
+            _assert(event["seed_node_id"] == nid_pivot, dict(event))
+            _assert(event["reached_node_id"] == event["node_id"], dict(event))
         conn.close()
         print("PASS graph_path_surfaces_neighbors")
     finally:

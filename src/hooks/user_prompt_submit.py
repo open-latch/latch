@@ -540,7 +540,7 @@ def _graph_path(
 
     neighbor_rows = conn.execute(
         """
-        SELECT DISTINCT n.id, n.kind, n.title, n.body, n.status
+        SELECT DISTINCT n.id, n.kind, n.title, n.body, n.status, n.workstream_id
         FROM edges e
         JOIN nodes n ON n.id = CASE WHEN e.src = ? THEN e.dst ELSE e.src END
         WHERE (e.src = ? OR e.dst = ?)
@@ -582,6 +582,14 @@ def _graph_path(
         conn, session_id=sid, turn=turn,
         items=[(n["id"], n["score"]) for n in chosen],
         source="graph",
+        event_details={
+            n["id"]: {
+                "seed_node_id": pivot_id,
+                "reached_node_id": n["id"],
+                "workstream_id_at_event": n.get("workstream_id"),
+            }
+            for n in chosen
+        },
     )
     return chosen
 

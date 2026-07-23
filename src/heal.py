@@ -36,6 +36,7 @@ import budget  # noqa: E402
 import correlator  # noqa: E402
 import db  # noqa: E402
 import embeddings  # noqa: E402
+import lifecycle_signals  # noqa: E402
 import log_utils  # noqa: E402
 import model_backends  # noqa: E402
 import paths  # noqa: E402
@@ -165,6 +166,11 @@ def find_near_duplicates(
             continue
         if c["status"] == "stale":
             continue
+        # Workstream lifecycle is machine-owned.  Heal may observe lanes for
+        # structural signals, but it must never feed them into generic
+        # supersede arbitration where a near-duplicate can stale the lane.
+        if c["kind"] == "workstream":
+            continue
         if kind is not None and c["kind"] != kind:
             continue
         if c["similarity"] < threshold:
@@ -185,7 +191,8 @@ def _vec_candidates(conn, vec: np.ndarray, top_k: int) -> list[dict]:
     ids = [r["rowid"] for r in rows]
     placeholders = ",".join("?" for _ in ids)
     node_rows = conn.execute(
-        f"SELECT id, kind, title, body, status, session_id, created_at, updated_at "
+        f"SELECT id, kind, title, body, status, session_id, created_at, updated_at, "
+        f"workstream_id "
         f"FROM nodes WHERE id IN ({placeholders})",
         ids,
     ).fetchall()
@@ -203,7 +210,8 @@ def _vec_candidates(conn, vec: np.ndarray, top_k: int) -> list[dict]:
 
 def _brute_candidates(conn, vec: np.ndarray, top_k: int) -> list[dict]:
     rows = conn.execute(
-        "SELECT id, kind, title, body, status, session_id, created_at, updated_at, embedding "
+        "SELECT id, kind, title, body, status, session_id, created_at, updated_at, "
+        "workstream_id, embedding "
         "FROM nodes WHERE embedding IS NOT NULL"
     ).fetchall()
     if not rows:
@@ -1031,6 +1039,22 @@ def insert_with_heal(
     matched_kind = top["kind"]
     matched_id = top["id"]
 
+    if top.get("workstream_id") != workstream_id:
+        log_utils.emit_event(
+            "lifecycle",
+            {
+                "event": "cross_lane_duplicate",
+                "substrate_version": lifecycle_signals.SUBSTRATE_VERSION,
+                "node_a": new_id,
+                "node_b": matched_id,
+                "ws_a": workstream_id,
+                "ws_b": top.get("workstream_id"),
+                "similarity": round(float(top_sim), 6),
+            },
+            project_path=project_path,
+            session_id=session_id,
+        )
+
     def _emit(decision: str) -> None:
         log_utils.emit_event(
             "heal",
@@ -1221,6 +1245,7 @@ def nightly_heal(
         # Evidence contract: high-tier pairs whose disjoint artifact scopes caused
         # the deterministic recency/ref_count supersede to be deferred to the LLM.
         "cross_scope_deferred": 0,
+        "cross_lane_signals": 0,
     }
 
     if integrity:
@@ -1234,7 +1259,7 @@ def nightly_heal(
         "SELECT id, kind, title, body, status, ref_count, created_at, updated_at, "
         "       last_referenced_at, embedding "
         "FROM nodes WHERE status != 'stale' AND embedding IS NOT NULL "
-        "  AND kind != 'summary' "
+        "  AND kind NOT IN ('summary', 'workstream') "
         "ORDER BY id"
     ).fetchall()
     _debug(f"contradiction sweep: {len(candidates)} candidates, "
@@ -1276,6 +1301,23 @@ def nightly_heal(
                        f"SKIP: edge already exists")
                 continue
 
+            if a.get("workstream_id") != b.get("workstream_id"):
+                log_utils.emit_event(
+                    "lifecycle",
+                    {
+                        "event": "cross_lane_contradiction",
+                        "substrate_version": lifecycle_signals.SUBSTRATE_VERSION,
+                        "node_a": a_id,
+                        "node_b": b_id,
+                        "ws_a": a.get("workstream_id"),
+                        "ws_b": b.get("workstream_id"),
+                        "similarity": round(float(cand["similarity"]), 6),
+                    },
+                    project_path=project_path,
+                    session_id=None,
+                )
+                summary["cross_lane_signals"] += 1
+
             sim = cand["similarity"]
             tier = "high" if sim >= high_threshold else "low"
             summary["by_tier"][tier] += 1
@@ -1309,7 +1351,7 @@ def nightly_heal(
         # older source node. Summaries are tree-managed, never contradiction
         # candidates. The seed query excludes summaries as `a`; this catches a
         # summary returned as `b` by find_near_duplicates(kind=None).
-        if a["kind"] == "summary" or b["kind"] == "summary":
+        if a["kind"] in {"summary", "workstream"} or b["kind"] in {"summary", "workstream"}:
             summary["skipped_summary"] += 1
             _debug(f"  pair ({a_id},{b_id}) sim={sim:.3f} tier={tier} "
                    f"SKIP: summary node not eligible for contradiction arbitration")

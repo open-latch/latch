@@ -250,6 +250,12 @@ def test_kb_get_returns_activity_hint():
         _assert(activity["action"] == "read", activity)
         _assert(activity["tool"] == "latch_get", activity)
         _assert(activity["nodes"][0]["id"] == nid, activity)
+        event = conn.execute(
+            "SELECT node_id, source FROM retrieval_events "
+            "WHERE node_id = ? AND source = 'tool' ORDER BY id DESC LIMIT 1",
+            (nid,),
+        ).fetchone()
+        _assert(event is not None, "kb_get should append tool retrieval telemetry")
         print("PASS kb_get_returns_activity_hint")
     finally:
         _cleanup(tmp, conn)
