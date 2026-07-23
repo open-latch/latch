@@ -29,9 +29,10 @@ import sys
 import tempfile
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
-from filelock import FileLock
+if TYPE_CHECKING:
+    from filelock import FileLock
 
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -72,6 +73,13 @@ def _state_path(project_path: str | None) -> Path:
 
 
 def _state_lock(project_path: str | None) -> FileLock:
+    # Import filelock lazily so `import budget` stays stdlib-only: the Cursor
+    # SessionStart hook imports this module (for brief_line) under a bare
+    # stdlib interpreter with no third-party deps, and only the mutation paths
+    # that actually acquire the lock run under the managed venv where filelock
+    # is installed. (cursor-hook-contract enforces the stdlib-only boundary.)
+    from filelock import FileLock
+
     state_path = _state_path(project_path)
     state_path.parent.mkdir(parents=True, exist_ok=True)
     return FileLock(
