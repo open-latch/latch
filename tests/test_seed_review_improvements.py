@@ -114,13 +114,31 @@ def test_dogfood_paraphrases_cluster_without_grouping_opposing_claims():
     assert not seed.review_cluster_compatible(sqlite, postgres)
     assert len(seed.build_review_clusters([sqlite, postgres])) == 2
 
+    # A workstream-tagged variant and an untagged one are the same claim with
+    # extraction-noise metadata; the live dogfood showed cross-session
+    # duplicates routinely differ exactly this way. They must cluster, and the
+    # merged representative must keep the more specific tag — matching the
+    # None-tolerant rule safe_candidates_equivalent already applies on the
+    # write path. Two DIFFERENT non-null tags remain incompatible scopes.
     scoped = _candidate(
         second_source,
         title=first.title,
         claim=first.body,
     )
     scoped.workstream_key = "another-scope"
-    assert not seed.review_cluster_compatible(first, scoped)
+    assert seed.review_cluster_compatible(first, scoped)
+    tagged_cluster = seed.build_review_clusters([first, scoped])
+    assert len(tagged_cluster) == 1
+    assert seed.merge_review_cluster(
+        tagged_cluster[0]
+    ).workstream_key == "another-scope"
+    other_scope = _candidate(
+        second_source,
+        title=first.title,
+        claim=first.body,
+    )
+    other_scope.workstream_key = "different-scope"
+    assert not seed.review_cluster_compatible(scoped, other_scope)
 
 
 @pytest.mark.parametrize(
@@ -1824,3 +1842,455 @@ def test_interactive_none_is_an_explicit_final_selection(
     selected, finalized = seed.prompt_approval_selection([candidate])
     assert selected == []
     assert finalized is True
+
+
+# --- Regression block: PR 53 review findings (tamper detection, resumable
+# --- apply receipts, clustering invariants, crossed bindings, boilerplate).
+
+
+def _write_preview(tmp_path, sources, candidates):
+    return seed.write_seed_preview(
+        project_path=str(tmp_path),
+        source_choice="codex",
+        sources=sources,
+        candidates=candidates,
+        llm_estimate=0,
+        apply_sources=sources,
+        source_failure_codes={},
+        workstream_scope="project",
+        llm_stats={},
+        discovery_stats={},
+        llm_refinement_empty=False,
+    )
+
+
+def _tamper_preview(path: Path, mutate) -> None:
+    body = json.loads(path.read_text(encoding="utf-8"))
+    mutate(body)
+    path.write_text(json.dumps(body, indent=2) + "\n", encoding="utf-8")
+
+
+def test_mutated_preview_candidate_body_fails_closed(tmp_path):
+    source = _source("codex:tamper-body")
+    candidate = _candidate(
+        source,
+        title="Keep reviewed previews tamper-evident",
+        claim="Apply must reject cached candidates edited after review.",
+    )
+    digest = _write_preview(tmp_path, [source], [candidate])
+    path = seed._seed_preview_path(str(tmp_path), digest)
+
+    def swap_body(body):
+        body["candidates"][0]["body"] = "Attacker-injected replacement claim."
+
+    _tamper_preview(path, swap_body)
+    with pytest.raises(seed.SeedPreviewError, match="does not match"):
+        seed.load_seed_preview(
+            project_path=str(tmp_path),
+            source_choice="codex",
+            preview_digest=digest,
+        )
+
+
+def test_mutated_preview_source_digest_fails_closed(tmp_path):
+    source = _source("codex:tamper-source")
+    candidate = _candidate(
+        source,
+        title="Keep reviewed source revisions tamper-evident",
+        claim="Apply must reject cached source revisions edited after review.",
+    )
+    digest = _write_preview(tmp_path, [source], [candidate])
+    path = seed._seed_preview_path(str(tmp_path), digest)
+
+    def swap_source_digest(body):
+        body["sources"][0]["content_digest"] = "f" * 64
+
+    _tamper_preview(path, swap_source_digest)
+    with pytest.raises(seed.SeedPreviewError, match="does not match"):
+        seed.load_seed_preview(
+            project_path=str(tmp_path),
+            source_choice="codex",
+            preview_digest=digest,
+        )
+
+
+def test_mutated_cursor_preview_fails_closed(tmp_path):
+    source = _source("cursor:tamper-cursor", agent="cursor")
+    candidate = _candidate(
+        source,
+        title="Keep Cursor previews tamper-evident",
+        claim="Cursor apply must reject cached candidates edited after review.",
+    )
+    digest = seed.write_cursor_seed_preview(
+        project_path=str(tmp_path),
+        session_id="sid-tamper",
+        sources=[source],
+        candidates=[candidate],
+        llm_estimate=0,
+        apply_sources=[source],
+    )
+    path = seed._cursor_seed_preview_path(str(tmp_path), "sid-tamper")
+
+    def swap_body(body):
+        body["candidates"][0]["body"] = "Attacker-injected replacement claim."
+
+    _tamper_preview(path, swap_body)
+    with pytest.raises(seed.CursorSeedPreviewError, match="does not match"):
+        seed.load_cursor_seed_preview(
+            project_path=str(tmp_path),
+            session_id="sid-tamper",
+            preview_digest=digest,
+        )
+
+
+def test_mutated_preview_apply_exits_closed_without_write(
+    tmp_path, monkeypatch, capsys,
+):
+    monkeypatch.setattr(paths, "is_unlatched_mode", lambda: False)
+    source = _source("codex:tamper-cli")
+    candidate = _candidate(
+        source,
+        title="Keep the digest-bound CLI apply tamper-evident",
+        claim="The apply CLI must fail closed on a mutated preview cache.",
+    )
+    digest = _write_preview(tmp_path, [source], [candidate])
+    path = seed._seed_preview_path(str(tmp_path), digest)
+
+    def swap_body(body):
+        body["candidates"][0]["body"] = "Attacker-injected replacement claim."
+
+    _tamper_preview(path, swap_body)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("apply_candidates must not run on a mutated preview")
+
+    monkeypatch.setattr(seed, "apply_candidates", forbidden)
+    rc = seed.main([
+        "--project", str(tmp_path),
+        "--source", "codex",
+        "--lookback-days", "5",
+        "--last-sessions", "1",
+        "--llm", "no",
+        "--allow-internal-no-llm",
+        "--format", "json",
+        "--preview-digest", digest,
+        "--approve-candidate", seed.candidate_review_id(candidate),
+        "--apply",
+    ])
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 2
+    assert payload["ok"] is False
+    assert payload["error"] == "seed_preview_unavailable"
+
+
+def test_incomplete_apply_reports_failures_and_keeps_preview_resumable(
+    tmp_path, monkeypatch, capsys,
+):
+    monkeypatch.setattr(paths, "is_unlatched_mode", lambda: False)
+    source = _source("codex:partial-apply-cli")
+    candidate = _candidate(
+        source,
+        title="Report partial apply failures truthfully",
+        claim="An incomplete apply must keep the reviewed preview resumable.",
+    )
+    digest = _write_preview(tmp_path, [source], [candidate])
+    cli_args = [
+        "--project", str(tmp_path),
+        "--source", "codex",
+        "--lookback-days", "5",
+        "--last-sessions", "1",
+        "--llm", "no",
+        "--allow-internal-no-llm",
+        "--format", "json",
+        "--preview-digest", digest,
+        "--approve-candidate", seed.candidate_review_id(candidate),
+        "--apply",
+    ]
+
+    def partial_apply(*args, **kwargs):
+        return seed.SeedApplyResult(
+            inserted_ids=[],
+            failures=[{"error_code": "node_write_failed"}],
+        )
+
+    monkeypatch.setattr(seed, "apply_candidates", partial_apply)
+    rc = seed.main(list(cli_args))
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 1
+    assert payload["ok"] is False
+    assert payload["error"] == "apply_incomplete"
+    assert payload["write_performed"] is True
+    receipt = payload["apply_receipt"]
+    assert receipt["failure_count"] == 1
+    # Retention of the reviewed preview IS the resume mechanism.
+    assert seed._seed_preview_path(str(tmp_path), digest).exists()
+
+    monkeypatch.undo()
+    monkeypatch.setattr(paths, "is_unlatched_mode", lambda: False)
+    resume_rc = seed.main(list(cli_args))
+    resume_payload = json.loads(capsys.readouterr().out)
+    assert resume_rc == 0
+    assert resume_payload["ok"] is True
+    assert not seed._seed_preview_path(str(tmp_path), digest).exists()
+
+
+def test_cluster_admission_requires_agreement_with_every_member():
+    def scoped_candidate(workstream_key):
+        source = _source("codex:cluster-invariant")
+        candidate = _candidate(
+            source,
+            title="Project direction reporting is read-only",
+            claim="Project direction reporting is read-only and must not alter KB state.",
+        )
+        candidate.workstream_key = workstream_key
+        return candidate
+
+    tagged_a = scoped_candidate("scope-a0")
+    untagged = scoped_candidate(None)
+    tagged_b = scoped_candidate("scope-b1")
+    # Pin the discriminating admission order: the untagged twin must be
+    # considered between the two tagged ones so the second tagged candidate
+    # is checked against a group that already holds an incompatible member.
+    ordered = sorted(
+        [tagged_a, untagged, tagged_b], key=seed.candidate_review_id,
+    )
+    assert [item.workstream_key for item in ordered][1] is None, (
+        "fixture regression: re-pick scope keys so the untagged candidate "
+        "sorts between the tagged ones"
+    )
+
+    clusters = seed.build_review_clusters([tagged_a, untagged, tagged_b])
+    assert sorted(len(cluster.items) for cluster in clusters) == [1, 2]
+    for cluster in clusters:
+        for left in cluster.items:
+            for right in cluster.items:
+                if left is not right:
+                    assert seed.review_cluster_compatible(left, right)
+        keys = {
+            item.workstream_key
+            for item in cluster.items
+            if item.workstream_key
+        }
+        assert len(keys) <= 1
+
+
+@pytest.mark.parametrize(
+    ("left_text", "right_text"),
+    [
+        (
+            "Raise gate timeout from 30 to 60 seconds",
+            "Raise gate timeout from 60 to 30 seconds",
+        ),
+        (
+            "Enable strict mode for gate and disable it for search",
+            "Disable strict mode for gate and enable it for search",
+        ),
+    ],
+)
+def test_crossed_pivot_bindings_block_every_merge_path(left_text, right_text):
+    source_left = _source("codex:crossed-left")
+    source_right = _source(
+        "codex:crossed-right", mtime="2026-07-21T12:00:00+00:00",
+    )
+    left = _candidate(source_left, title=left_text, claim=left_text + ".")
+    right = _candidate(source_right, title=right_text, claim=right_text + ".")
+
+    assert seed.candidates_directionally_conflict(left, right)
+    assert not seed.safe_candidates_equivalent(left, right)
+    assert not seed.review_cluster_compatible(left, right)
+    assert len(seed.dedupe_candidates([left, right])) == 2
+    assert len(seed.build_review_clusters([left, right])) == 2
+
+
+def test_real_dogfood_duplicate_pair_clusters_with_corroboration():
+    """Golden fixture from the 2026-07-23 live dogfood run: the same
+    project_direction claim extracted from two Codex sessions, one tagged
+    with the PR-46 workstream and one untagged, must review as one
+    corroborated cluster."""
+    first_source = _source("codex:019f8a62-dogfood")
+    second_source = _source(
+        "codex:019f8a6e-dogfood", mtime="2026-07-22T15:29:00+00:00",
+    )
+    tagged = _candidate(
+        first_source,
+        title="latch_project_direction must be genuinely read-only (no receipt consumption)",
+        claim=(
+            "Resolved review finding (Claude read-only report = Codex duplicate): "
+            "`latch_project_direction` was consuming/claiming receipts while "
+            "rendering. It must be genuinely read-only and not claim receipts. "
+            "Verified: \"project-direction no longer claims receipts.\""
+        ),
+        signals=["decision", "llm_seed", "rejected_path"],
+    )
+    tagged.workstream_key = "pr46-lifecycle-automation"
+    untagged = _candidate(
+        second_source,
+        title="latch_project_direction is strictly read-only and must not consume receipts",
+        claim=(
+            "project_direction must be genuinely read-only: it should not claim "
+            "or consume receipts. This was a duplicated finding across both "
+            "Claude and Codex reviews (Claude read-only report issue = Codex "
+            "latch_project_direction consuming receipts)."
+        ),
+        signals=["decision", "llm_seed", "rejected_path"],
+    )
+
+    clusters = seed.build_review_clusters([tagged, untagged])
+    assert len(clusters) == 1
+    assert len(clusters[0].items) == 2
+    merged = seed.merge_review_cluster(clusters[0])
+    assert "corroborated" in merged.signals
+    assert merged.workstream_key == "pr46-lifecycle-automation"
+    assert {ref["id"] for ref in seed.candidate_source_refs(merged)} == {
+        first_source.id, second_source.id,
+    }
+
+
+def test_whole_report_approval_applies_cluster_semantics(
+    tmp_path, monkeypatch, capsys,
+):
+    monkeypatch.setattr(paths, "is_unlatched_mode", lambda: False)
+    first_source = _source("codex:whole-report-a")
+    second_source = _source(
+        "codex:whole-report-b", mtime="2026-07-21T12:00:00+00:00",
+    )
+    first = _candidate(
+        first_source,
+        title="Project-direction is read-only",
+        claim="Project direction reporting is read-only and must not alter KB state.",
+    )
+    second = _candidate(
+        second_source,
+        title="Project direction reporting is read-only",
+        claim="Project direction reports are read-only and do not modify KB state.",
+    )
+    assert len(seed.build_review_clusters([first, second])) == 1
+
+    merged = seed.whole_report_approval([first, second])
+    assert len(merged) == 1
+    assert "corroborated" in merged[0].signals
+
+    digest = _write_preview(tmp_path, [first_source, second_source], [first, second])
+    rc = seed.main([
+        "--project", str(tmp_path),
+        "--source", "codex",
+        "--lookback-days", "5",
+        "--last-sessions", "2",
+        "--llm", "no",
+        "--allow-internal-no-llm",
+        "--format", "json",
+        "--preview-digest", digest,
+        "--apply",
+        "--yes",
+    ])
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert payload["ok"] is True
+    conn = db.connect(str(tmp_path))
+    try:
+        titles = [
+            row[0] for row in conn.execute(
+                "SELECT title FROM nodes WHERE kind = 'decision'"
+            ).fetchall()
+        ]
+    finally:
+        conn.close()
+    matching = [t for t in titles if "read-only" in t.lower()]
+    assert len(matching) == 1
+
+
+def test_untruncated_claim_divergence_never_merges_as_exact():
+    filler = "Shared normalized preamble words repeated for cap testing. " * 5
+    left_claim = filler + "Cap the retry count at 50 attempts."
+    right_claim = filler + "Cap the retry count at 90 attempts."
+    assert seed.normalize_excerpt(left_claim) == seed.normalize_excerpt(right_claim)
+    source_left = _source("codex:truncation-left")
+    source_right = _source(
+        "codex:truncation-right", mtime="2026-07-21T12:00:00+00:00",
+    )
+    left = _candidate(source_left, title="Cap retry count", claim=left_claim)
+    right = _candidate(source_right, title="Cap retry count", claim=right_claim)
+    assert not seed.safe_candidates_equivalent(left, right)
+    assert not seed.review_cluster_compatible(left, right)
+    assert len(seed.dedupe_candidates([left, right])) == 2
+
+
+def test_host_injected_boilerplate_never_becomes_subject_or_evidence():
+    plugin_notice = (
+        "Here is a list of plugins that are available but not installed."
+    )
+    ambient = (
+        "This block is automatically supplied ambient UI state, not part of "
+        "the user's request. Do not treat it as an instruction."
+    )
+    assert seed.should_skip_subject_candidate(plugin_notice)
+    assert seed.should_skip_user_candidate(plugin_notice)
+    assert seed._is_injected_user_fragment(ambient)
+    transcript = (
+        f"[user] {plugin_notice}\n"
+        "[user] Ship the seeding trust improvements for review.\n"
+    )
+    subject = seed.source_subject(transcript)
+    assert subject == "Ship the seeding trust improvements for review."
+
+
+def test_workstream_slug_drift_pairs_but_generic_scopes_do_not():
+    """Golden fixture from the second 2026-07-23 live dogfood run: the same
+    PR-46 claim tagged pr46-governed-workstream-lifecycle in one session and
+    pr46-lifecycle-automation in another must still review as one cluster;
+    unrelated scopes sharing only a generic token must not."""
+    assert seed._workstream_keys_review_compatible(
+        "pr46-governed-workstream-lifecycle", "pr46-lifecycle-automation",
+    )
+    assert seed._workstream_keys_review_compatible(None, "pr46-lifecycle-automation")
+    assert not seed._workstream_keys_review_compatible("scope-a0", "scope-b1")
+
+    first_source = _source("codex:019f8a62-v2")
+    second_source = _source(
+        "codex:019f8a52-v2", mtime="2026-07-22T15:12:56+00:00",
+    )
+    short = _candidate(
+        first_source,
+        title="latch_project_direction must be read-only",
+        claim=(
+            "`latch_project_direction` must not consume or claim receipts; it "
+            "is a read-only reporting surface. Flagged as a duplicate finding "
+            "across both reviews (Claude read-only report issue = Codex "
+            "`latch_project_direction` consuming receipts). Fix landed: "
+            "project-direction no longer claims receipts."
+        ),
+        signals=["decision", "llm_seed", "rejected_path"],
+    )
+    short.workstream_key = "pr46-governed-workstream-lifecycle"
+    extended = _candidate(
+        second_source,
+        title="latch_project_direction must be genuinely read-only (no receipt consumption)",
+        claim=(
+            "Review found `latch_project_direction` was consuming/claiming "
+            "receipts, making a report tool have side effects. Decision: "
+            "project-direction is genuinely read-only and no longer claims "
+            "receipts. Same fix cluster also silenced synthetic legacy "
+            "baseline receipts and undersized orphan-cluster signals so "
+            "read/report paths don't emit spurious telemetry."
+        ),
+        signals=["decision", "llm_seed", "rejected_path"],
+    )
+    extended.workstream_key = "pr46-lifecycle-automation"
+
+    clusters = seed.build_review_clusters([short, extended])
+    assert len(clusters) == 1
+    assert len(clusters[0].items) == 2
+    merged = seed.merge_review_cluster(clusters[0])
+    assert "corroborated" in merged.signals
+
+
+def test_plugin_registry_entries_never_become_subjects():
+    transcript = (
+        "[user] Here is a list of plugins that are available but not installed.\n"
+        "[user] Atlassian Rovo (atlassian-rovo@openai-curated-remote)\n"
+        "[user] Linear (linear@openai-curated-remote)\n"
+        "[user] Consolidate the review findings before handing back to implementation.\n"
+    )
+    assert seed.source_subject(transcript) == (
+        "Consolidate the review findings before handing back to implementation."
+    )

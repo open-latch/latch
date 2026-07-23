@@ -465,3 +465,51 @@ if __name__ == "__main__":
     test_brief_line_at_cap_heal_only_shows_approve_hint()
     test_brief_line_surfaces_approved_state()
     print("\nAll budget tests pass.")
+
+
+def test_unreadable_budget_state_degrades_gate_without_spend(tmp_path, monkeypatch):
+    """A corrupt budget store must route the gate to its designed no-spend
+    degrade path (skipped verdict), not crash the tool surface."""
+    import gate
+    import paths
+
+    monkeypatch.setattr(paths, "is_unlatched_mode", lambda: False)
+    monkeypatch.setattr(paths, "is_disabled", lambda: False)
+    monkeypatch.setattr(paths, "is_in_compact", lambda: False)
+
+    def broken(*args, **kwargs):
+        raise budget.BudgetStateError("budget state at /tmp/x is unreadable")
+
+    monkeypatch.setattr(budget, "check_and_record", broken)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("classifier must not spend on unreadable budget state")
+
+    monkeypatch.setattr(gate, "_invoke_classifier_backend_once", forbidden)
+    verdict = gate.classify_gate(
+        {"chains": []}, project_path=str(tmp_path), backend="claude",
+    )
+    assert verdict.get("skipped") is True
+    assert "budget state unavailable" in (verdict.get("error") or "")
+
+
+def test_unreadable_budget_state_degrades_compaction_without_spend(
+    tmp_path, monkeypatch,
+):
+    import compactor
+    import paths
+
+    monkeypatch.setattr(paths, "is_unlatched_mode", lambda: False)
+    monkeypatch.setattr(paths, "is_disabled", lambda: False)
+    monkeypatch.setattr(paths, "is_in_compact", lambda: False)
+
+    def broken(*args, **kwargs):
+        raise budget.BudgetStateError("budget state at /tmp/x is unreadable")
+
+    monkeypatch.setattr(budget, "check_and_record", broken)
+    result = compactor.run_compaction("sid", str(tmp_path), None)
+    assert result == {
+        "ok": False,
+        "reason": "budget_state_error",
+        "session_id": "sid",
+    }

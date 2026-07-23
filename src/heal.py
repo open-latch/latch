@@ -1085,7 +1085,17 @@ def insert_with_heal(
     # bucket — kb_insert is user-driven and shouldn't compete with the nightly
     # heal fan-out cap. project_path=None skips the gate (tests, back-compat).
     if project_path is not None:
-        allowed, _ = budget.check_and_record(project_path, category="nonheal")
+        try:
+            allowed, _ = budget.check_and_record(project_path, category="nonheal")
+        except OSError as exc:
+            # Unreadable budget state means no arbitrator spend; fall back to
+            # the same safe keep_both deferral as a cap hit.
+            apply_keep_both(conn, new_id, matched_id)
+            _emit("keep_both")
+            return {"id": new_id, "heal": "keep_both", "matched_id": matched_id,
+                    "similarity": top_sim,
+                    "arbitrator": f"budget state unavailable ({exc}); deferred to nightly",
+                    "plan_freshness_hint": plan_hint, "orphan_hint": orphan_hint, "ship_edge_hint": ship_edge_hint}
         if not allowed:
             apply_keep_both(conn, new_id, matched_id)
             _emit("keep_both")
@@ -1404,9 +1414,13 @@ def nightly_heal(
             _apply_verdict(conn, summary, verdict, a_id, b_id, project_path=project_path)
             continue
 
-        allowed, budget_state = budget.check_and_record(
-            project_path, category="heal",
-        )
+        try:
+            allowed, budget_state = budget.check_and_record(
+                project_path, category="heal",
+            )
+        except OSError as exc:
+            allowed = False
+            budget_state = {"error": str(exc)}
         if not allowed:
             summary["budget_blocked"] += 1
             summary["budget_blocked_by_tier"][tier] += 1

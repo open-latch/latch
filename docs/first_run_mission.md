@@ -25,7 +25,8 @@ the current hook-provided transcript or an explicit `--cursor-transcript`; it
 never scans private Cursor history. `--apply` still prints the structured
 report first and writes only if you approve the prompt. Enter `none` to dismiss the whole
 report and finalize those exact source revisions without creating nodes. For a
-cached review, use `--preview-digest DIGEST --apply --dismiss-all`. Omit
+cached review, repeat the preview's exact `--source` (and workstream flags)
+alongside `--preview-digest DIGEST --apply --dismiss-all`. Omit
 `--apply` for a preview-only run.
 
 Review the structured report. Pick one strongest example where the report found

@@ -1253,7 +1253,18 @@ def _is_injected_user_fragment(text: str) -> bool:
         "workstream guidance:",
         "relation vocabulary:",
         "guidelines:",
+        # Host-injected session boilerplate observed in real transcripts: the
+        # Codex plugin notice and ambient-context preambles read as prose, so
+        # prefix matching is the only reliable filter.
+        "here is a list of plugins",
+        "this block is automatically supplied",
+        "<system-reminder",
+        "</system-reminder",
     )):
+        return True
+    # Plugin-registry entries ("Atlassian Rovo (atlassian-rovo@openai-curated-
+    # remote)") trail the plugin notice inside the same injected block.
+    if re.search(r"\([a-z0-9._-]+@[a-z0-9._-]+\)", normalized):
         return True
     if any(marker in normalized for marker in (
         "related_kb_nodes",
@@ -1265,6 +1276,9 @@ def _is_injected_user_fragment(text: str) -> bool:
         "kb_gate",
         "latch_gate",
         "injected context",
+        "not part of the user's request",
+        "ambient ui state",
+        "system-reminder",
     )):
         return True
     if lower in {"<instructions>", "</instructions>", "```", "```json"}:
@@ -1315,6 +1329,13 @@ def classify_excerpt(excerpt: str) -> tuple[str, str, float] | None:
 def normalize_excerpt(excerpt: str) -> str:
     lowered = WHITESPACE_RE.sub(" ", excerpt.lower()).strip()
     return re.sub(r"[^a-z0-9 ]+", "", lowered)[:220]
+
+
+def _normalized_claim_text(candidate: "SeedCandidate") -> str:
+    """Full untruncated normalization of title + claim for exact comparison."""
+    combined = candidate.title + " " + candidate_core_text(candidate)
+    lowered = WHITESPACE_RE.sub(" ", combined.lower()).strip()
+    return re.sub(r"[^a-z0-9 ]+", "", lowered)
 
 
 def candidate_title(signal: str, excerpt: str) -> str:
@@ -2312,7 +2333,63 @@ def _has_opposing_lexical_stance(a: SeedCandidate, b: SeedCandidate) -> bool:
     )
 
 
+CLAIM_PIVOT_TERMS = {
+    "allow": "allow", "allowed": "allow", "allows": "allow",
+    "always": "always",
+    "block": "block", "blocked": "block", "blocks": "block",
+    "deny": "deny", "denied": "deny", "denies": "deny",
+    "disable": "disable", "disabled": "disable", "disables": "disable",
+    "disabling": "disable",
+    "enable": "enable", "enabled": "enable", "enables": "enable",
+    "enabling": "enable",
+    "never": "never",
+    "off": "off",
+    "on": "on",
+    "read": "read",
+    "write": "write",
+}
+
+
+def _claim_pivot_sequence(text: str) -> tuple[str, ...]:
+    """Ordered claim pivots (numbers and polarity verbs) for binding checks."""
+    raw_tokens = _semantic_raw_tokens(text)
+    pivots: list[str] = []
+    for index, token in enumerate(raw_tokens):
+        previous = raw_tokens[index - 1] if index else ""
+        if re.fullmatch(r"v?\d+(?:[./]\d+)*", token):
+            pivots.append(token)
+            continue
+        if token == "on" and previous in {
+            "based", "depend", "depends", "relies", "rely",
+        }:
+            continue
+        canonical = CLAIM_PIVOT_TERMS.get(token)
+        if canonical is not None:
+            pivots.append(canonical)
+    return tuple(pivots)
+
+
+def _has_crossed_pivot_bindings(a: SeedCandidate, b: SeedCandidate) -> bool:
+    """Same pivot multiset in a different order reads as a crossed binding.
+
+    Catches order-blind false equivalence such as "raise timeout from 30 to
+    60" vs "from 60 to 30" or scoped enable/disable inversions, which share
+    an identical token set and defeat unordered comparisons.
+    """
+    for left_text, right_text in (
+        (a.title, b.title),
+        (candidate_core_text(a), candidate_core_text(b)),
+    ):
+        left = _claim_pivot_sequence(left_text)
+        right = _claim_pivot_sequence(right_text)
+        if left and right and left != right and sorted(left) == sorted(right):
+            return True
+    return False
+
+
 def candidates_directionally_conflict(a: SeedCandidate, b: SeedCandidate) -> bool:
+    if _has_crossed_pivot_bindings(a, b):
+        return True
     left = candidate_term_polarities(a)
     right = candidate_term_polarities(b)
     if any(
@@ -2354,8 +2431,10 @@ def safe_candidates_equivalent(a: SeedCandidate, b: SeedCandidate) -> bool:
     a_signals, b_signals = durable_signal_set(a), durable_signal_set(b)
     if a_signals and b_signals and not (a_signals & b_signals):
         return False
-    exact_a = normalize_excerpt(a.title + " " + candidate_core_text(a))
-    exact_b = normalize_excerpt(b.title + " " + candidate_core_text(b))
+    # Compare the full normalized claim, not the 220-char excerpt key: claims
+    # that diverge only past the truncation point must not merge as exact.
+    exact_a = _normalized_claim_text(a)
+    exact_b = _normalized_claim_text(b)
     if exact_a == exact_b:
         return True
     anchor_a = candidate_semantic_anchor_terms(a)
@@ -2747,11 +2826,112 @@ def _term_overlap(left: set[str], right: set[str]) -> float:
     return len(left & right) / min(len(left), len(right))
 
 
+NUMERIC_ANCHOR_RE = re.compile(r"v?\d+(?:[./]\d+)*")
+
+
+def _numeric_anchor_terms(anchors: set[str]) -> set[str]:
+    return {term for term in anchors if NUMERIC_ANCHOR_RE.fullmatch(term)}
+
+
+def _relation_anchor_sets(anchors: set[str]) -> dict[str, set[str]]:
+    relations: dict[str, set[str]] = {}
+    for anchor in anchors:
+        prefix, _, payload = anchor.partition(":")
+        if prefix in {"order", "dependency", "assignment"} and ">" in payload:
+            relations.setdefault(prefix, set()).add(payload)
+    return relations
+
+
+def _candidate_pivot_set(candidate: SeedCandidate) -> set[str]:
+    return set(_claim_pivot_sequence(candidate.title)) | set(
+        _claim_pivot_sequence(candidate_core_text(candidate))
+    )
+
+
+def _substantive_substitution(a: SeedCandidate, b: SeedCandidate) -> bool:
+    """Near-identical texts differing by one or two content words oppose.
+
+    "encrypted transport" vs "plaintext transport" style swaps share almost
+    all vocabulary; a genuine cross-session paraphrase differs much more
+    broadly. Morphological variants (raise/raised, report/reporting) pair off
+    by shared stem and do not count as substitutions.
+    """
+    def substantive(term: str, others: set[str]) -> bool:
+        if term in SEMANTIC_ANCHOR_FRAMING:
+            return False
+        return not any(term[:4] == other[:4] for other in others)
+
+    def canonical_terms(text: str) -> set[str]:
+        return {
+            SEMANTIC_ANCHOR_CANONICAL.get(term, term)
+            for term in _review_terms(text)
+        }
+
+    # Judge the claim text only: titles are short generated summaries where
+    # benign adverb variation (genuinely/strictly) is routine, while the claim
+    # is what a merge would actually write.
+    left = canonical_terms(candidate_core_text(a))
+    right = canonical_terms(candidate_core_text(b))
+    only_left = {t for t in left - right if substantive(t, right)}
+    only_right = {t for t in right - left if substantive(t, left)}
+    return 0 < len(only_left) <= 2 and 0 < len(only_right) <= 2
+
+
+def _semantic_anchors_conflict(a: SeedCandidate, b: SeedCandidate) -> bool:
+    """Block review grouping when claim-bearing specifics disagree.
+
+    Cross-session paraphrases never share identical vocabulary, so demanding
+    full anchor-set equality made the paraphrase path unreachable in practice.
+    Instead, refuse grouping exactly when the anchors that carry claim
+    substance disagree: differing numbers/versions, differing polarity pivots
+    (on/off, enable/disable), ordering/dependency/assignment relations that
+    do not line up, or a small substantive word substitution in otherwise
+    matching text.
+    """
+    anchors_a = candidate_semantic_anchor_terms(a)
+    anchors_b = candidate_semantic_anchor_terms(b)
+    if _numeric_anchor_terms(anchors_a) != _numeric_anchor_terms(anchors_b):
+        return True
+    if _candidate_pivot_set(a) != _candidate_pivot_set(b):
+        return True
+    left_relations = _relation_anchor_sets(anchors_a)
+    right_relations = _relation_anchor_sets(anchors_b)
+    if any(
+        left_relations[prefix] != right_relations[prefix]
+        for prefix in left_relations.keys() & right_relations.keys()
+    ):
+        return True
+    return _substantive_substitution(a, b)
+
+
+def _workstream_keys_review_compatible(
+    left: str | None, right: str | None,
+) -> bool:
+    """Tolerate LLM slug drift for the same workstream in review grouping.
+
+    Keys are model-authored strings, so the same lane routinely gets
+    different slugs across sessions (observed live:
+    pr46-governed-workstream-lifecycle vs pr46-lifecycle-automation).
+    Review-only: the write-path dedupe keeps exact-key strictness.
+    """
+    if not left or not right or left == right:
+        return True
+    left_tokens = {t for t in re.split(r"[^a-z0-9]+", left.lower()) if t}
+    right_tokens = {t for t in re.split(r"[^a-z0-9]+", right.lower()) if t}
+    if not left_tokens or not right_tokens:
+        return False
+    shared = left_tokens & right_tokens
+    overlap = len(shared) / min(len(left_tokens), len(right_tokens))
+    return len(shared) >= 2 and overlap > 0.5
+
+
 def review_cluster_compatible(a: SeedCandidate, b: SeedCandidate) -> bool:
     """Looser review-only paraphrase grouping with the write safety rails."""
     if a.kind != b.kind or report_section_key(a) != report_section_key(b):
         return False
-    if a.workstream_key != b.workstream_key:
+    if not _workstream_keys_review_compatible(
+        a.workstream_key, b.workstream_key,
+    ):
         return False
     if candidate_negation_signature(a) != candidate_negation_signature(b):
         return False
@@ -2762,9 +2942,7 @@ def review_cluster_compatible(a: SeedCandidate, b: SeedCandidate) -> bool:
         return False
     if safe_candidates_equivalent(a, b):
         return True
-    anchor_left = candidate_semantic_anchor_terms(a)
-    anchor_right = candidate_semantic_anchor_terms(b)
-    if not anchor_left or anchor_left != anchor_right:
+    if _semantic_anchors_conflict(a, b):
         return False
 
     title_left = _review_terms(a.title)
@@ -2783,6 +2961,14 @@ def review_cluster_compatible(a: SeedCandidate, b: SeedCandidate) -> bool:
         and claim_overlap >= 0.45
     ) or (
         exact_title
+        and claim_shared >= 2
+        and claim_overlap >= 0.35
+    ) or (
+        # Near-superset titles (one title extends the other) earn the same
+        # looser claim bar as exact titles: the opposition guards above, not
+        # these similarity floors, are the never-merge defense.
+        title_shared >= 4
+        and title_overlap >= 0.80
         and claim_shared >= 2
         and claim_overlap >= 0.35
     )
@@ -2847,6 +3033,19 @@ def merge_review_cluster(cluster: SeedReviewCluster) -> SeedCandidate:
             continue
         merge_candidate_provenance(representative, candidate)
     return representative
+
+
+def whole_report_approval(candidates: list[SeedCandidate]) -> list[SeedCandidate]:
+    """Approve every item with the same cluster semantics the report shows.
+
+    The report promises that approving a duplicate cluster writes one stable
+    representative with combined provenance; whole-report approval must not
+    silently downgrade that into one staging node per variant.
+    """
+    return [
+        merge_review_cluster(cluster)
+        for cluster in build_review_clusters(candidates)
+    ]
 
 
 def candidate_observation_window(
@@ -3020,7 +3219,7 @@ def prompt_approval_selection(
         if not raw:
             return [], False
         if raw.lower() in {"all", "y", "yes"}:
-            return list(candidates), True
+            return whole_report_approval(candidates), True
         if raw.lower() == "none":
             return [], True
         tokens = [token for token in re.split(r"[\s,]+", raw) if token]
@@ -3950,13 +4149,7 @@ def write_cursor_seed_preview(
         project_path,
         keep=SEED_PREVIEW_CACHE_MAX_FILES - 1,
     )
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(body, indent=2) + "\n", encoding="utf-8")
-    try:
-        tmp.chmod(0o600)
-    except OSError:
-        pass
-    os.replace(tmp, path)
+    _write_private_preview_file(path, body)
     return digest
 
 
@@ -4059,6 +4252,21 @@ def _seed_preview_path(project_path: str, preview_digest: str) -> Path:
     )
 
 
+def _write_private_preview_file(path: Path, body: dict[str, Any]) -> None:
+    """Atomically write a preview cache file that is 0600 from creation.
+
+    Creating at umask-default and chmodding afterwards leaves a window where
+    the full redacted review payload is world-readable; open the temp file
+    with restrictive permissions instead.
+    """
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.unlink(missing_ok=True)
+    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(json.dumps(body, indent=2) + "\n")
+    os.replace(tmp, path)
+
+
 def write_seed_preview(
     *,
     project_path: str,
@@ -4118,13 +4326,7 @@ def write_seed_preview(
         project_path,
         keep=SEED_PREVIEW_CACHE_MAX_FILES - 1,
     )
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(body, indent=2) + "\n", encoding="utf-8")
-    try:
-        tmp.chmod(0o600)
-    except OSError:
-        pass
-    os.replace(tmp, path)
+    _write_private_preview_file(path, body)
     return digest
 
 
@@ -5646,7 +5848,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
-    approved_candidates = list(candidates)
+    approved_candidates = whole_report_approval(candidates)
     selection_confirmed = bool(args.yes) or not candidates
     if args.dismiss_all:
         approved_candidates = []
