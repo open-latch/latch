@@ -143,13 +143,15 @@ The canonical, always-current list is the code:
   `agent mcp list-tools latch`.
 - **Command prompts** — markdown in `commands/`, installed into
   `~/.claude/commands/` by the engine installer. Run **`/help`** in a session
-  for the current set; `/kb-compact` is the one to know (summarizes the current
-  Claude Code session into the KB on demand). Cursor gets a curated project
-  subset under `.cursor/commands/` for latch workflows that are safe today;
-  `latch-compact.md` is intentionally not installed there because native Cursor
-  compaction is not part of this adapter slice. Codex slash commands are not
-  part of the current preview slice; Codex manual compaction uses
-  `bin/run_codex_compact_now.sh` or `bin/run_codex_compact_now.ps1`.
+  for the current set; `/latch-compact` is the one to know (summarizes the
+  current Claude Code session into the KB on demand; `/kb-compact` remains a
+  legacy alias). Cursor gets a curated project subset under `.cursor/commands/`
+  for latch workflows that are safe today, including a current-session
+  `/latch-compact` that summarizes only the exact conversation recorded by the
+  opt-in SessionStart hook — latch does not scan Cursor's private history
+  folders. Codex slash commands are not part of the current preview slice;
+  Codex compaction uses the installed `latch-compact` skill or
+  `bin/run_codex_compact_now.sh` / `bin/run_codex_compact_now.ps1`.
 
 ## Install internals
 
