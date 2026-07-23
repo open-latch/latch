@@ -605,6 +605,14 @@ class ProxyBridge:
                 except (OSError, ValueError):
                     readable = [self._wake_read]
 
+                # Drain owner state before accepting another host request.  On
+                # Windows, terminating the owner surfaces as WSAECONNRESET
+                # rather than a clean EOF.  If stdin and the owner socket are
+                # ready together, processing stdin first can make a request
+                # look in-flight even though the reset was already pending.
+                if sock is not None and sock in readable and sock is self._sock:
+                    self._read_daemon()
+
                 if self._wake_read in readable:
                     try:
                         while self._wake_read.recv(4096):
@@ -621,9 +629,6 @@ class ProxyBridge:
                             self._close_socket()
                             break
                         self._handle_host_line(item)
-
-                if sock is not None and sock in readable and sock is self._sock:
-                    self._read_daemon()
 
                 if self._lease.heartbeat_due():
                     self._lease.heartbeat()

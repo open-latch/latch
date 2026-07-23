@@ -756,14 +756,26 @@ def _assert_historical_proxy_requires_fresh_task(commit: str) -> None:
         _wait_for_pid_exit(old_pid)
 
         started = time.monotonic()
-        try:
-            client.status()
-        except AssertionError as exc:
-            message = str(exc).lower()
-            _assert("start a fresh task" in message, message)
-            _assert("request was not executed" in message, message)
+        for attempt in range(2):
+            try:
+                client.status()
+            except AssertionError as exc:
+                message = str(exc).lower()
+                if "start a fresh task" in message:
+                    _assert("request was not executed" in message, message)
+                    break
+                # Historical Windows proxies predate owner-socket priority.
+                # A killed owner can therefore surface one reset as an
+                # unknown-outcome error.  The proxy must not replay that
+                # request; an explicit new read must reach the bounded
+                # capability rejection from the replacement owner.
+                if attempt == 0 and "outcome is unknown" in message:
+                    continue
+                raise
+            else:
+                raise AssertionError("historical proxy joined the current runtime")
         else:
-            raise AssertionError("historical proxy joined the current runtime")
+            raise AssertionError("historical proxy did not reject the current runtime")
         _assert(time.monotonic() - started < 10.0, "fresh-task rejection was not bounded")
         _assert(client.process.poll() is None, "historical proxy exited before surfacing error")
         owner_pids = {
