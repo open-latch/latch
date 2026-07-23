@@ -36,7 +36,6 @@ def _env(tmp_path: Path) -> dict:
     env["LATCH_ADAPTER"] = "cursor"
     env["LATCH_PYTHON"] = sys.executable
     env["LATCH_KB_DIR"] = str(tmp_path / "kb")
-    env["LATCH_MCP_DAEMON_IDLE_TTL_SEC"] = "30"
     env["LATCH_MCP_LAUNCHER_LOG"] = str(tmp_path / "launcher.log")
     return env
 

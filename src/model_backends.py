@@ -1,8 +1,8 @@
 """Small model-subprocess backend helpers used by maintenance paths.
 
-The engine default remains Claude for existing Claude Code installs. Adapter
-surfaces can opt into another backend by setting an explicit environment value
-in their MCP process environment.
+The engine default remains Claude for existing Claude Code installs. Shared
+connections carry validated backend/private child settings through
+``mcp_runtime``; standalone and legacy callers retain process-env behavior.
 """
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Iterable
 
 import cursor_backend
+import mcp_runtime
 
 
 SUPPORTED_BACKENDS = {"claude", "codex", "cursor"}
@@ -48,7 +49,7 @@ class ModelCallResult:
 
 def first_env_value(names: Iterable[str]) -> str | None:
     for name in names:
-        value = os.environ.get(name)
+        value = mcp_runtime.connection_env_value(name)
         if value:
             return value
     return None
@@ -60,7 +61,13 @@ def resolve_backend(
     env_names: Iterable[str] = (),
     default: str = "claude",
 ) -> str:
-    raw = name or first_env_value(env_names) or default
+    connection = mcp_runtime.current_connection()
+    raw = (
+        name
+        or (connection.maintenance_backend if connection is not None else None)
+        or first_env_value(env_names)
+        or default
+    )
     backend = str(raw).strip().lower()
     if backend not in SUPPORTED_BACKENDS:
         supported = ", ".join(sorted(SUPPORTED_BACKENDS))
@@ -119,10 +126,12 @@ def _invoke_claude(
     purpose: str,
     claude_bin: str | None = None,
 ) -> ModelCallResult:
-    bin_path = claude_bin or CLAUDE_BIN
-    env = os.environ.copy()
+    env = mcp_runtime.connection_subprocess_environment("claude")
     env["CLAUDE_KB_IN_COMPACT"] = "1"
     try:
+        bin_path = claude_bin or mcp_runtime.connection_binary(
+            "CLAUDE_BIN", process_default=CLAUDE_BIN
+        )
         proc = subprocess.run(
             [bin_path, "-p", "--no-session-persistence", "--output-format", "json"],
             input=prompt,
@@ -139,9 +148,16 @@ def _invoke_claude(
         return ModelCallResult(None, f"subprocess failed: {type(e).__name__}: {e}", False, "claude")
 
     if proc.returncode != 0:
-        detail = (proc.stderr or proc.stdout or "").strip()
+        detail = mcp_runtime.redact_subprocess_output(
+            (proc.stderr or proc.stdout or "").strip()
+        )
         return ModelCallResult(None, f"claude backend exit {proc.returncode}: {detail[:1000]}", False, "claude")
-    return ModelCallResult(proc.stdout, None, False, "claude")
+    return ModelCallResult(
+        mcp_runtime.redact_subprocess_output(proc.stdout),
+        None,
+        False,
+        "claude",
+    )
 
 
 def _invoke_codex(
@@ -152,10 +168,12 @@ def _invoke_codex(
     codex_bin: str | None = None,
     model: str | None = None,
 ) -> ModelCallResult:
-    bin_path = codex_bin or CODEX_BIN
-    env = os.environ.copy()
+    env = mcp_runtime.connection_subprocess_environment("codex")
     env["CLAUDE_KB_IN_COMPACT"] = "1"
     try:
+        bin_path = codex_bin or mcp_runtime.connection_binary(
+            "CODEX_BIN", process_default=CODEX_BIN
+        )
         with tempfile.TemporaryDirectory(prefix="latch-codex-model-") as tmp:
             out_path = Path(tmp) / "last_message.txt"
             args = [
@@ -187,13 +205,16 @@ def _invoke_codex(
                 final_text = out_path.read_text(encoding="utf-8", errors="replace")
             if not final_text.strip():
                 final_text = proc.stdout
+            final_text = mcp_runtime.redact_subprocess_output(final_text)
     except subprocess.TimeoutExpired:
         return ModelCallResult(None, f"{purpose} timed out after {timeout_s}s", True, "codex")
     except FileNotFoundError as e:
         return ModelCallResult(None, f"subprocess failed: {type(e).__name__}: {e}", False, "codex")
 
     if proc.returncode != 0:
-        detail = (proc.stderr or proc.stdout or "").strip()
+        detail = mcp_runtime.redact_subprocess_output(
+            (proc.stderr or proc.stdout or "").strip()
+        )
         return ModelCallResult(None, f"codex backend exit {proc.returncode}: {detail[-1000:]}", False, "codex")
     if not final_text.strip():
         return ModelCallResult(None, "codex backend returned empty final message", False, "codex")

@@ -8,9 +8,9 @@ latch to Windows + git-bash and broke on Mac / managed machines / laptops
 This module makes maintenance self-triggering off the Claude Code session
 lifecycle instead:
 
-  * `maybe_trigger(project_path)` is called once from the MCP server startup
-    path (mcp_server.py __main__). It is cheap and never raises: a cadence
-    check + a detached background spawn if anything is due.
+  * `maybe_trigger(project_path)` is called once from legacy MCP startup, or
+    by the first eligible authenticated shared-daemon connection. It is cheap
+    and never raises: a cadence check + detached spawn if anything is due.
   * the detached child runs `run_selfheal(project_path)`, which holds the
     shared compactor lock for the whole pass (single-flight + write-gating)
     and runs each op only when its elapsed-time cadence is due.
@@ -28,6 +28,7 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -36,6 +37,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 import budget  # noqa: E402  (imported for symmetry / future use; heal gates internally)
 import lockfile  # noqa: E402
 import maintenance  # noqa: E402
+import mcp_runtime  # noqa: E402
 import paths  # noqa: E402
 
 # ---- cadence (hours). Defaults preserve the old schtask cadence. ----
@@ -60,6 +62,9 @@ IN_MAINTENANCE_ENV = "CLAUDE_KB_IN_MAINTENANCE"
 # child it launches (git.exe, the claude.cmd shim inside heal/tree) would
 # otherwise allocate its own console window. 0 on POSIX (no-op).
 CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
+_TRIGGER_LOCK = threading.Lock()
+_TRIGGER_CHECKED = False
+_TRIGGER_FAILURE_SIGNATURE: tuple[str, int | None, int | None] | None = None
 
 
 # ---------------- state ----------------
@@ -125,22 +130,63 @@ def _any_due(state: dict, now: datetime) -> bool:
 
 # ---------------- trigger (runs on the MCP startup path) ----------------
 
+def _trigger_blocked() -> bool:
+    connection = mcp_runtime.current_connection()
+    return bool(
+        paths.is_unlatched_mode()
+        or paths.is_disabled()
+        or paths.is_in_compact()
+        or os.environ.get(IN_MAINTENANCE_ENV)
+        or (connection is not None and connection.in_maintenance)
+    )
+
+
+def _runner_policy_signature(
+    project_path: str | None,
+) -> tuple[str, int | None, int | None]:
+    path = (
+        paths.project_dir(project_path)
+        / paths.VAULT_RUNTIME_SETTINGS_FILENAME
+    )
+    try:
+        stat = path.stat()
+        return str(path), stat.st_mtime_ns, stat.st_size
+    except OSError:
+        return str(path), None, None
+
+
 def maybe_trigger(project_path: str | None) -> None:
     """Cheap, never-raises. Spawn a detached maintenance pass iff something is
-    due. Called once from mcp_server.py __main__ before mcp.run()."""
+    due. In shared mode, the first eligible authenticated connection performs
+    the check; guarded connections do not consume the process-wide attempt."""
+    global _TRIGGER_CHECKED, _TRIGGER_FAILURE_SIGNATURE
     try:
-        if paths.is_unlatched_mode():
+        signature = _runner_policy_signature(project_path)
+        if (
+            _TRIGGER_CHECKED
+            or _TRIGGER_FAILURE_SIGNATURE == signature
+            or _trigger_blocked()
+        ):
             return
-        if paths.is_disabled():
-            return
-        # Reentrancy: do not trigger from inside a maintenance/compaction child
-        # (its own claude -p arbitration must not recurse into more maintenance).
-        if os.environ.get(IN_MAINTENANCE_ENV) or paths.is_in_compact():
-            return
-        state = _load_state(project_path)
-        if not _any_due(state, datetime.now(timezone.utc)):
-            return
-        spawn_detached(project_path)
+        with _TRIGGER_LOCK:
+            signature = _runner_policy_signature(project_path)
+            if (
+                _TRIGGER_CHECKED
+                or _TRIGGER_FAILURE_SIGNATURE == signature
+                or _trigger_blocked()
+            ):
+                return
+            state = _load_state(project_path)
+            if _any_due(state, datetime.now(timezone.utc)):
+                try:
+                    spawn_detached(project_path)
+                except Exception:
+                    # Suppress repeat noise for unchanged broken policy while
+                    # allowing quickstart/config repair to retry in-place.
+                    _TRIGGER_FAILURE_SIGNATURE = signature
+                    raise
+            _TRIGGER_FAILURE_SIGNATURE = None
+            _TRIGGER_CHECKED = True
     except Exception as e:
         # Never let a maintenance trigger break MCP startup.
         sys.stderr.write(f"[latch] selfheal.maybe_trigger error: {e}\n")
@@ -153,7 +199,31 @@ def spawn_detached(project_path: str | None) -> None:
     log_path = proj_dir / SPAWN_LOG_FILENAME
     _rotate_spawn_log(log_path)
 
-    env = os.environ.copy()
+    connection = mcp_runtime.current_connection()
+    env = mcp_runtime.autonomous_subprocess_environment()
+    if connection is not None:
+        backend, executable, maintenance_home, maintenance_path = (
+            paths.configured_maintenance_runner(project_path=project_path)
+        )
+        env["LATCH_MAINTENANCE_BACKEND"] = backend
+        env[paths.MAINTENANCE_EXECUTABLE_ENV[backend]] = executable
+        env["HOME"] = maintenance_home
+        env["PATH"] = maintenance_path
+        if sys.platform == "win32":
+            env["USERPROFILE"] = maintenance_home
+        else:
+            env.pop("USERPROFILE", None)
+        env.pop("HOMEDRIVE", None)
+        env.pop("HOMEPATH", None)
+    if connection is not None and sys.platform == "win32":
+        raw_site_packages = os.environ.get(
+            mcp_runtime.WINDOWS_VENV_SITE_PACKAGES_ENV
+        )
+        if raw_site_packages:
+            site_packages = Path(raw_site_packages)
+            if not site_packages.is_absolute() or not site_packages.is_dir():
+                raise ValueError("invalid broker-owned Windows site-packages path")
+            env["PYTHONPATH"] = str(site_packages)
     env[IN_MAINTENANCE_ENV] = "1"
 
     args = [sys.executable, str(Path(__file__).resolve()), str(project_path or os.getcwd())]

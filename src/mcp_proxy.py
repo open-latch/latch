@@ -27,12 +27,41 @@ from typing import Any
 
 import codex_session
 import mcp_broker
+import mcp_runtime
 
 
 SESSION_ENV_VARS = (
     "LATCH_SESSION_ID",
     "CLAUDE_CODE_SESSION_ID",
     "CODEX_THREAD_ID",
+)
+COMPACT_ENV_VARS = ("LATCH_IN_COMPACT", "CLAUDE_KB_IN_COMPACT")
+UNLATCHED_ENV_VARS = ("LATCH_UNLATCHED",)
+DISABLED_ENV_VARS = ("LATCH_DISABLE", "CLAUDE_KB_DISABLE")
+WRITE_DISABLED_ENV_VARS = (
+    "LATCH_DISABLE_WRITE",
+    "CLAUDE_KB_DISABLE_WRITE",
+)
+IN_MAINTENANCE_ENV_VARS = ("CLAUDE_KB_IN_MAINTENANCE",)
+GATE_CLASSIFIER_TIMEOUT_ENV_VARS = (
+    "LATCH_GATE_CLASSIFIER_TIMEOUT_S",
+    "CLAUDE_KB_GATE_CLASSIFIER_TIMEOUT_S",
+)
+GATE_ADVERSARY_TIMEOUT_ENV_VARS = (
+    "LATCH_GATE_ADVERSARY_TIMEOUT_S",
+    "CLAUDE_KB_GATE_ADVERSARY_TIMEOUT_S",
+)
+GATE_BACKEND_ENV_VARS = (
+    "LATCH_GATE_BACKEND",
+    "CLAUDE_KB_GATE_BACKEND",
+    "LATCH_MODEL_BACKEND",
+)
+MAINTENANCE_BACKEND_ENV_VARS = (
+    "LATCH_MAINTENANCE_BACKEND",
+    "CLAUDE_KB_MAINTENANCE_BACKEND",
+    "LATCH_MODEL_BACKEND",
+    "LATCH_GATE_BACKEND",
+    "CLAUDE_KB_GATE_BACKEND",
 )
 
 
@@ -87,9 +116,114 @@ def _resolve_session(project_cwd: str) -> tuple[str | None, str]:
     return session_id.strip(), "codex_session_start_marker"
 
 
+def _env_flag(names: tuple[str, ...]) -> bool:
+    return any(bool(os.environ.get(name)) for name in names)
+
+
+def _connection_backend(names: tuple[str, ...], *, purpose: str) -> str:
+    for name in names:
+        value = os.environ.get(name)
+        if not value:
+            continue
+        backend = value.strip().lower()
+        if backend not in mcp_runtime.SUPPORTED_MODEL_BACKENDS:
+            supported = ", ".join(sorted(mcp_runtime.SUPPORTED_MODEL_BACKENDS))
+            raise ValueError(
+                f"unsupported {purpose} backend {value!r} from {name}; "
+                f"expected one of: {supported}"
+            )
+        return backend
+    return "claude"
+
+
+def _connection_positive_int(names: tuple[str, ...], *, default: int) -> int:
+    for name in names:
+        raw = os.environ.get(name)
+        if raw is None or raw == "":
+            continue
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if value >= 1:
+            return value
+    return default
+
+
+def _source_env_value(source: Mapping[str, str], name: str) -> str | None:
+    if os.name != "nt":
+        return source.get(name)
+    folded = {str(key).upper(): value for key, value in source.items()}
+    value = folded.get(name.upper())
+    return value if isinstance(value, str) else None
+
+
+def _which_on_explicit_path(command: str, path: str | None) -> str | None:
+    """Resolve a command without Python 3.11/Windows cwd preemption."""
+    return mcp_runtime.resolve_executable_on_path(command, path)
+
+
+def _child_process_environment(
+    source: Mapping[str, str] | None = None,
+    *,
+    backends: frozenset[str] = mcp_runtime.SUPPORTED_MODEL_BACKENDS,
+) -> dict[str, str]:
+    """Capture the exact private environment model children may receive."""
+    values = os.environ if source is None else source
+    unsupported = backends - mcp_runtime.SUPPORTED_MODEL_BACKENDS
+    if unsupported:
+        raise ValueError(
+            f"unsupported child-process backend {sorted(unsupported)[0]!r}"
+        )
+    allowed_names = list(mcp_runtime.CONNECTION_CHILD_COMMON_ENV_VARS)
+    for backend in sorted(backends):
+        allowed_names.extend(
+            mcp_runtime.CONNECTION_CHILD_BACKEND_ENV_VARS[backend]
+        )
+    child: dict[str, str] = {}
+    seen_names: set[str] = set()
+    for name in allowed_names:
+        identity = name.upper() if os.name == "nt" else name
+        if identity in seen_names:
+            continue
+        seen_names.add(identity)
+        value = _source_env_value(values, name)
+        if value is not None:
+            child[name] = value
+    path = _source_env_value(values, "PATH")
+    binary_specs = {
+        "claude": ("CLAUDE_BIN", ("claude",)),
+        "codex": ("CODEX_BIN", ("codex",)),
+        "cursor": ("CURSOR_AGENT_BIN", ("agent", "cursor-agent")),
+    }
+    for name, _candidates in binary_specs.values():
+        child.pop(name, None)
+    for backend in sorted(backends):
+        name, candidates = binary_specs[backend]
+        configured = _source_env_value(values, name)
+        if configured:
+            resolved = _which_on_explicit_path(configured, path)
+            if resolved is None:
+                raise ValueError(f"{name} does not resolve to an executable")
+            child[name] = resolved
+            continue
+        child.pop(name, None)
+        for candidate in candidates:
+            resolved = _which_on_explicit_path(candidate, path)
+            if resolved is not None:
+                child[name] = resolved
+                break
+    private = mcp_runtime.validate_child_environment(child)
+    return dict(private.values)
+
+
 def connection_metadata(project_cwd: str | None = None) -> dict[str, Any]:
     cwd = os.path.abspath(project_cwd or os.getcwd())
     session_id, source = _resolve_session(cwd)
+    gate_backend = _connection_backend(GATE_BACKEND_ENV_VARS, purpose="gate")
+    maintenance_backend = _connection_backend(
+        MAINTENANCE_BACKEND_ENV_VARS, purpose="maintenance"
+    )
     return {
         "connection_id": uuid.uuid4().hex,
         "project_cwd": cwd,
@@ -99,6 +233,28 @@ def connection_metadata(project_cwd: str | None = None) -> dict[str, Any]:
         "proxy_started_at": _utc_now(),
         "runtime_key": mcp_broker.RUNTIME_KEY,
         "proxy_capability_epoch": mcp_broker.PROXY_CAPABILITY_EPOCH,
+        "in_compact": _env_flag(COMPACT_ENV_VARS),
+        "unlatched": _env_flag(UNLATCHED_ENV_VARS),
+        "disabled": _env_flag(DISABLED_ENV_VARS),
+        "write_disabled": _env_flag(WRITE_DISABLED_ENV_VARS),
+        "in_maintenance": _env_flag(IN_MAINTENANCE_ENV_VARS),
+        "gate_backend": gate_backend,
+        "maintenance_backend": maintenance_backend,
+        "gate_classifier_timeout_s": _connection_positive_int(
+            GATE_CLASSIFIER_TIMEOUT_ENV_VARS,
+            default=mcp_runtime.DEFAULT_GATE_CLASSIFIER_TIMEOUT_S,
+        ),
+        "gate_adversary_timeout_s": _connection_positive_int(
+            GATE_ADVERSARY_TIMEOUT_ENV_VARS,
+            default=mcp_runtime.DEFAULT_GATE_ADVERSARY_TIMEOUT_S,
+        ),
+        "gate_adversary_enabled": (
+            os.environ.get("CLAUDE_KB_ADVERSARY", "1") != "0"
+        ),
+        "proxy_policy": mcp_broker.proxy_policy(),
+        "child_process_env": _child_process_environment(
+            backends=frozenset({gate_backend, maintenance_backend})
+        ),
     }
 
 
@@ -188,6 +344,7 @@ class ProxyBridge:
         self._wake_read.setblocking(False)
         self._wake_write.setblocking(False)
         self._sock: socket.socket | None = None
+        self._owner_pid: int | None = None
         self._socket_buffer = bytearray()
         self._stdin_eof = False
         self._init_line: bytes | None = None
@@ -238,6 +395,7 @@ class ProxyBridge:
             sock.close()
             raise
         self._sock = sock
+        self._owner_pid = int(payload["pid"])
         self._socket_buffer.clear()
         if replay and self._init_line is not None:
             sock.sendall(self._init_line)
@@ -246,6 +404,7 @@ class ProxyBridge:
 
     def _close_socket(self) -> None:
         sock, self._sock = self._sock, None
+        self._owner_pid = None
         if sock is not None:
             try:
                 sock.close()
@@ -337,6 +496,20 @@ class ProxyBridge:
             # replay an older initialize message first.
             self._replaying = False
             self._deferred.clear()
+
+        # The shared daemon is a local child/peer whose PID came from the
+        # authenticated discovery payload used for this socket.  Windows may
+        # defer surfacing a dead peer's TCP reset until the next send, so check
+        # that exact owner before a new request can become in-flight.  A death
+        # after this check remains an unknown outcome and is never replayed.
+        if (
+            self._sock is not None
+            and self._owner_pid is not None
+            and not self._pending
+            and not self._replaying
+            and not mcp_broker._pid_alive(self._owner_pid)
+        ):
+            self._daemon_lost(f"owner process {self._owner_pid} exited")
 
         if self._sock is None:
             try:
@@ -449,6 +622,14 @@ class ProxyBridge:
                 except (OSError, ValueError):
                     readable = [self._wake_read]
 
+                # Drain owner state before accepting another host request.  On
+                # Windows, terminating the owner surfaces as WSAECONNRESET
+                # rather than a clean EOF.  If stdin and the owner socket are
+                # ready together, processing stdin first can make a request
+                # look in-flight even though the reset was already pending.
+                if sock is not None and sock in readable and sock is self._sock:
+                    self._read_daemon()
+
                 if self._wake_read in readable:
                     try:
                         while self._wake_read.recv(4096):
@@ -465,9 +646,6 @@ class ProxyBridge:
                             self._close_socket()
                             break
                         self._handle_host_line(item)
-
-                if sock is not None and sock in readable and sock is self._sock:
-                    self._read_daemon()
 
                 if self._lease.heartbeat_due():
                     self._lease.heartbeat()
@@ -639,10 +817,15 @@ def _exec_legacy_server() -> None:
 
 
 def main() -> int:
-    metadata = connection_metadata()
     if os.environ.get("LATCH_MCP_FORCE_LEGACY"):
         mcp_broker.emit_lifecycle("legacy_fallback", reason="forced_by_env")
         _exec_legacy_server()
+        return 0
+    try:
+        metadata = connection_metadata()
+    except ValueError as exc:
+        sys.stderr.write(f"[latch] invalid MCP connection configuration: {exc}\n")
+        return 2
     try:
         # Establish readiness before consuming stdin.  If startup fails, the
         # compatibility fallback can exec without losing the host's initialize

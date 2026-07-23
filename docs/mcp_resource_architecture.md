@@ -132,10 +132,11 @@ sections.
   runtime key. Broker death or a slow-start timeout can launch a contender, but
   the contender exits before model loading; only the fenced owner may warm or
   publish normal discovery.
-- Capability epoch 2 includes registry-wide lease participation. Epoch 1 proved
-  transport and migration compatibility but did not observe idle, unaliased
-  historical keys, so it is rejected with the same bounded fresh-task path
-  rather than grandfathered under a capacity contract it cannot enforce.
+- Capability epoch 3 includes the connection-owned environment contract.
+  Epoch 2 proved registry-wide lease participation but did not carry the typed
+  compact/disable state, backend policy, or private model-child environment
+  required by a shared owner, so it is rejected with the same bounded
+  fresh-task path rather than joining with first-spawner semantics.
 - Discovery and election locks live in a runtime-keyed registry beneath the
   pinned vault. Files are atomically replaced and mode 0600. The daemon binds
   only `127.0.0.1`; connections authenticate with a 256-bit random token.
@@ -162,14 +163,53 @@ sections.
   long-lived proxies. On Windows, the broker bypasses the venv executable
   redirector and starts the base console interpreter with `CREATE_NO_WINDOW`,
   `CREATE_NEW_PROCESS_GROUP`, and hidden startup info. The venv's
-  `Lib/site-packages` remains available through `PYTHONPATH`.
+  `Lib/site-packages` path is computed by the original proxy, passed explicitly
+  to the prompt-hook helper, revalidated there, and installed as the exact
+  `PYTHONPATH` for the final daemon. Arbitrary inherited `PYTHONPATH` values are
+  never appended across either launch hop.
 
 ### Connection isolation
 
 Each proxy sends an authenticated prelude containing cwd, session identity and
-source, proxy PID, connection ID, and runtime key. The daemon binds these values
-to `contextvars`; concurrent FastMCP sessions therefore use their own cwd and
-session attribution even though tool code runs in one process.
+source, proxy PID, connection ID, runtime key, compact/disable booleans, and
+validated gate and maintenance backend selectors. Gate timeout/adversary
+policy and the proxy's own cap/heartbeat policy travel in the same typed
+contract. The daemon revalidates and binds these values to `contextvars`;
+concurrent FastMCP sessions therefore use their own cwd, session attribution,
+guards, backend routing, and truthful proxy diagnostics even though tool code
+runs in one process.
+
+The daemon launch environment is built from an exact OS-plumbing allowlist plus
+broker-owned vault identity. The owner idle TTL is fixed by product default or
+the canonical vault's `runtime_settings.json`; it is never donated by the
+proxy that wins election. The prompt-hook start timeout remains helper-local.
+Neither launch path inherits
+wildcard `LATCH_*`, `CLAUDE_*`, `CODEX_*`, or `CURSOR_*` families,
+session/adapter state, backend selectors, Python loader variables, or arbitrary
+credentials.
+
+Model subprocesses instead receive a private, authenticated connection
+channel. It is exact-key and size bounded: client `PATH`/home/temp plumbing,
+known config roots, proxy/CA settings, supported credential names, executable
+overrides, and model selectors only. The proxy resolves configured model
+executables before connecting; the daemon revalidates the nested map and keeps
+it outside the public connection snapshot. Each Claude, Codex, or Cursor child
+receives only its common variables and that backend's private variables.
+Credential-bearing values are redacted from subprocess output before an error
+or result can be surfaced. Contextless hooks and the legacy stdio fallback
+continue to use their own process environment.
+
+Startup maintenance separates triggering from ownership. The shared daemon
+warms first without triggering self-heal; compact, disabled, unlatched, and
+maintenance connections cannot consume the one-shot check. The first eligible
+authenticated connection may trigger the cadence check, but detached work uses
+the vault's explicit backend, absolute executable, stable home, and
+cwd-independent absolute-entry `PATH` from `runtime_settings.json`. This also
+keeps script interpreters and helper commands used by CLI shims independent of
+the proxy that spawned the owner. Detached work never receives that
+connection's credentials, backend choice, config roots, or model selectors.
+Missing or stale autonomous configuration fails maintenance closed without
+taking down MCP. Legacy stdio retains its contextless startup check.
 
 Codex SessionStart markers are now keyed by canonical workspace beneath the
 pinned vault. This fixes the prior failure where a single pinned marker could
@@ -186,7 +226,8 @@ visible rather than silently misattributed.
 
 ### Recovery and reclamation
 
-- The daemon defaults to a 60-minute global idle TTL. It does not reclaim while
+- The daemon defaults to a 60-minute global idle TTL; any override is
+  vault-owned in `runtime_settings.json`. It does not reclaim while
   any request is in flight, and prompt-hook embed traffic refreshes activity so
   a task that is still being used is not mistaken for an idle owner.
 - Proxies remain alive after daemon reclamation. On the next host message, they
@@ -357,7 +398,14 @@ window.
 The production-representative tests cover:
 
 - concurrent clients sharing exactly one model owner;
-- connection-local session attribution;
+- connection-local session attribution, guards, gate policy, proxy policy, and
+  model backend execution;
+- a compact Claude first client followed by a Codex client whose CLI and
+  credentials exist only on the second client's `PATH`;
+- exact child-environment validation, backend-specific credential filtering,
+  output redaction, and absence from runtime status/lifecycle/lease files;
+- guarded connections not consuming startup maintenance, followed by exactly
+  one eligible backend-owned maintenance trigger;
 - identical embeddings across clients;
 - owner crash and re-election;
 - idle owner reclamation and lazy recreation;
@@ -372,9 +420,9 @@ The production-representative tests cover:
   reconnect, plus unassociated capable leases joining the enforceable cap while
   other live blue/green owners remain separate;
 - bounded fresh-task rejection through real `7bcb86d` and pre-registry
-  `fa162bd` proxy snapshots when those objects are available, plus keyed
-  pre-capability, rejected epoch-1, and `fa162bd` root-discovery wire contracts
-  on all three CI operating systems;
+  `fa162bd` proxy snapshots when those objects are available, the retained
+  epoch-2 proxy at `5c9f39c`, plus keyed pre-capability, rejected epoch-1/2,
+  and `fa162bd` root-discovery wire contracts on all three CI operating systems;
 - no current or alias discovery publication before runtime initialization;
 - incompatible-protocol rejection before ownership fencing/heavy imports;
 - configured-cap-derived 75% doctor warnings and sustained pressure duration;

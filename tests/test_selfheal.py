@@ -25,6 +25,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import lockfile  # noqa: E402
+import mcp_runtime  # noqa: E402
 import paths  # noqa: E402
 import selfheal  # noqa: E402
 
@@ -40,6 +41,11 @@ def _fresh_project() -> str:
 
 def _iso(dt: datetime) -> str:
     return dt.isoformat()
+
+
+def _reset_trigger() -> None:
+    selfheal._TRIGGER_CHECKED = False
+    selfheal._TRIGGER_FAILURE_SIGNATURE = None
 
 
 # ---------------- cadence math ----------------
@@ -125,7 +131,8 @@ def test_maybe_trigger_kill_switch():
     orig_spawn = selfheal.spawn_detached
     orig_disabled = paths.is_disabled
     try:
-        selfheal.spawn_detached = lambda p: calls.append(p)
+        _reset_trigger()
+        selfheal.spawn_detached = lambda p, **_kwargs: calls.append(p)
         paths.is_disabled = lambda: True
         selfheal.maybe_trigger(proj)
         _assert(calls == [], "kill switch must prevent spawn")
@@ -141,7 +148,8 @@ def test_maybe_trigger_reentrancy_guard():
     calls = []
     orig_spawn = selfheal.spawn_detached
     try:
-        selfheal.spawn_detached = lambda p: calls.append(p)
+        _reset_trigger()
+        selfheal.spawn_detached = lambda p, **_kwargs: calls.append(p)
         os.environ[selfheal.IN_MAINTENANCE_ENV] = "1"
         selfheal.maybe_trigger(proj)
         _assert(calls == [], "must not trigger from inside a maintenance child")
@@ -157,6 +165,7 @@ def test_maybe_trigger_not_due_no_spawn():
     calls = []
     orig_spawn = selfheal.spawn_detached
     try:
+        _reset_trigger()
         now = datetime.now(timezone.utc)
         selfheal._save_state(proj, {
             "last_backup_at": _iso(now),
@@ -164,7 +173,7 @@ def test_maybe_trigger_not_due_no_spawn():
             "last_weekly_at": _iso(now),
             "last_workstream_shadow_at": _iso(now),
         })
-        selfheal.spawn_detached = lambda p: calls.append(p)
+        selfheal.spawn_detached = lambda p, **_kwargs: calls.append(p)
         selfheal.maybe_trigger(proj)
         _assert(calls == [], "nothing due => no spawn")
         print("PASS maybe_trigger_not_due_no_spawn")
@@ -178,13 +187,92 @@ def test_maybe_trigger_due_spawns():
     calls = []
     orig_spawn = selfheal.spawn_detached
     try:
+        _reset_trigger()
         # No state file => all due.
-        selfheal.spawn_detached = lambda p: calls.append(p)
+        selfheal.spawn_detached = lambda p, **_kwargs: calls.append(p)
         selfheal.maybe_trigger(proj)
         _assert(calls == [proj], f"due => exactly one spawn, got {calls}")
         print("PASS maybe_trigger_due_spawns")
     finally:
         selfheal.spawn_detached = orig_spawn
+        shutil.rmtree(proj, ignore_errors=True)
+
+
+def test_maybe_trigger_retries_only_after_vault_policy_changes(
+    monkeypatch,
+):
+    proj = _fresh_project()
+    calls: list[str] = []
+    policy = (
+        paths.project_dir(proj)
+        / paths.VAULT_RUNTIME_SETTINGS_FILENAME
+    )
+
+    def fail_then_succeed(project_path):
+        calls.append(project_path)
+        if len(calls) == 1:
+            raise ValueError("missing vault runner")
+
+    try:
+        _reset_trigger()
+        monkeypatch.setattr(selfheal, "spawn_detached", fail_then_succeed)
+        selfheal.maybe_trigger(proj)
+        selfheal.maybe_trigger(proj)
+        _assert(calls == [proj], f"unchanged broken policy retried: {calls}")
+
+        policy.parent.mkdir(parents=True, exist_ok=True)
+        policy.write_text("{}\n", encoding="utf-8")
+        selfheal.maybe_trigger(proj)
+        _assert(calls == [proj, proj], f"repaired policy did not retry: {calls}")
+        _assert(selfheal._TRIGGER_CHECKED is True, "successful retry not consumed")
+    finally:
+        _reset_trigger()
+        shutil.rmtree(proj, ignore_errors=True)
+
+
+def test_ineligible_connections_do_not_consume_trigger_check():
+    proj = _fresh_project()
+    calls = []
+    orig_spawn = selfheal.spawn_detached
+    base = {
+        "connection_id": "guarded",
+        "project_cwd": proj,
+        "session_id": None,
+        "session_source": "test",
+        "proxy_pid": 123,
+        "proxy_started_at": "now",
+        "runtime_key": "test",
+        "gate_backend": "codex",
+        "maintenance_backend": "codex",
+    }
+    try:
+        _reset_trigger()
+        selfheal.spawn_detached = lambda p, **kwargs: calls.append((p, kwargs))
+        for guarded in (
+            {"in_compact": True},
+            {"disabled": True},
+            {"unlatched": True},
+            {"in_maintenance": True},
+        ):
+            context = mcp_runtime.ConnectionContext(**base, **guarded)
+            with mcp_runtime.bind_connection(context):
+                selfheal.maybe_trigger(proj)
+            _assert(
+                selfheal._TRIGGER_CHECKED is False,
+                f"{guarded} consumed the maintenance trigger",
+            )
+
+        eligible = mcp_runtime.ConnectionContext(**base)
+        with mcp_runtime.bind_connection(eligible):
+            selfheal.maybe_trigger(proj)
+            selfheal.maybe_trigger(proj)
+        _assert(
+            calls == [(proj, {})],
+            f"eligible connection should trigger exactly once: {calls}",
+        )
+    finally:
+        selfheal.spawn_detached = orig_spawn
+        _reset_trigger()
         shutil.rmtree(proj, ignore_errors=True)
 
 
@@ -344,6 +432,7 @@ def test_spawn_builds_correct_command():
     proj = _fresh_project()
     captured = {}
     orig_popen = selfheal.subprocess.Popen
+    orig_runner = selfheal.paths.configured_maintenance_runner
 
     class _FakePopen:
         def __init__(self, args, **kwargs):
@@ -352,7 +441,32 @@ def test_spawn_builds_correct_command():
 
     try:
         selfheal.subprocess.Popen = _FakePopen
-        selfheal.spawn_detached(proj)
+        selfheal.paths.configured_maintenance_runner = lambda **_kwargs: (
+            "codex",
+            sys.executable,
+            str(Path(proj).parent),
+            os.pathsep.join(("/vault/bin", "/usr/bin")),
+        )
+        context = mcp_runtime.ConnectionContext(
+            connection_id="codex-maintenance",
+            project_cwd=proj,
+            session_id=None,
+            session_source="test",
+            proxy_pid=123,
+            proxy_started_at="now",
+            runtime_key="test",
+            gate_backend="codex",
+            maintenance_backend="codex",
+        )
+        private = mcp_runtime.validate_child_environment({
+            "PATH": os.environ.get("PATH", ""),
+            "OPENAI_API_KEY": "codex-secret",
+            "ANTHROPIC_API_KEY": "claude-secret",
+        })
+        with mcp_runtime.bind_connection(
+            context, child_environment=private
+        ):
+            selfheal.spawn_detached(proj)
         args = captured["args"]
         kw = captured["kwargs"]
         _assert(args[0] == sys.executable, f"argv[0] should be python: {args}")
@@ -360,6 +474,19 @@ def test_spawn_builds_correct_command():
         _assert(args[2] == proj, f"argv[2] should be project path: {args}")
         _assert(kw["env"].get(selfheal.IN_MAINTENANCE_ENV) == "1",
                 "child env must carry the reentrancy guard")
+        _assert(kw["env"].get("LATCH_MAINTENANCE_BACKEND") == "codex",
+                "child env must carry the vault maintenance backend")
+        _assert(kw["env"].get("CODEX_BIN") == sys.executable,
+                "child env must carry the vault maintenance executable")
+        _assert(
+            kw["env"].get("PATH")
+            == os.pathsep.join(("/vault/bin", "/usr/bin")),
+            "child env inherited the daemon owner's PATH",
+        )
+        _assert("OPENAI_API_KEY" not in kw["env"],
+                "connection credential crossed the autonomous boundary")
+        _assert("ANTHROPIC_API_KEY" not in kw["env"],
+                "connection credential crossed the autonomous boundary")
         if sys.platform == "win32":
             _assert("creationflags" in kw and kw["creationflags"] == (0x8 | 0x200),
                     f"win detach flags wrong: {kw.get('creationflags')}")
@@ -368,6 +495,70 @@ def test_spawn_builds_correct_command():
         print("PASS spawn_builds_correct_command")
     finally:
         selfheal.subprocess.Popen = orig_popen
+        selfheal.paths.configured_maintenance_runner = orig_runner
+        shutil.rmtree(proj, ignore_errors=True)
+
+
+def test_windows_shared_spawn_preserves_broker_owned_site_packages(
+    monkeypatch, tmp_path
+):
+    proj = _fresh_project()
+    site_packages = tmp_path / "venv" / "Lib" / "site-packages"
+    site_packages.mkdir(parents=True)
+    captured = {}
+
+    class _FakePopen:
+        def __init__(self, _args, **kwargs):
+            captured.update(kwargs)
+
+    context = mcp_runtime.ConnectionContext(
+        connection_id="windows-maintenance",
+        project_cwd=proj,
+        session_id=None,
+        session_source="test",
+        proxy_pid=123,
+        proxy_started_at="now",
+        runtime_key="test",
+        gate_backend="codex",
+        maintenance_backend="codex",
+    )
+    private = mcp_runtime.validate_child_environment({
+        "PATH": r"C:\client\bin",
+        "OPENAI_API_KEY": "codex-secret",
+    })
+    try:
+        monkeypatch.setattr(selfheal.sys, "platform", "win32")
+        monkeypatch.setattr(selfheal.subprocess, "Popen", _FakePopen)
+        monkeypatch.setattr(
+            selfheal.paths,
+            "configured_maintenance_runner",
+            lambda **_kwargs: (
+                "codex",
+                sys.executable,
+                str(tmp_path),
+                os.pathsep.join(("/vault/bin", "/usr/bin")),
+            ),
+        )
+        monkeypatch.setenv("PATH", "/first-spawner/poison")
+        monkeypatch.setenv("PYTHONPATH", "/caller/poison")
+        monkeypatch.setenv(
+            mcp_runtime.WINDOWS_VENV_SITE_PACKAGES_ENV,
+            str(site_packages),
+        )
+        with mcp_runtime.bind_connection(
+            context, child_environment=private
+        ):
+            selfheal.spawn_detached(proj)
+        _assert(captured["env"]["PYTHONPATH"] == str(site_packages), captured)
+        _assert("/caller/poison" not in captured["env"]["PYTHONPATH"], captured)
+        _assert(captured["env"]["USERPROFILE"] == str(tmp_path), captured)
+        _assert(
+            captured["env"]["PATH"]
+            == os.pathsep.join(("/vault/bin", "/usr/bin")),
+            captured,
+        )
+        _assert("OPENAI_API_KEY" not in captured["env"], captured)
+    finally:
         shutil.rmtree(proj, ignore_errors=True)
 
 
@@ -382,6 +573,7 @@ if __name__ == "__main__":
     test_maybe_trigger_reentrancy_guard()
     test_maybe_trigger_not_due_no_spawn()
     test_maybe_trigger_due_spawns()
+    test_ineligible_connections_do_not_consume_trigger_check()
     test_run_selfheal_skips_when_locked()
     test_only_run_ops_advance_stamps()
     test_raising_op_does_not_advance_its_stamp()

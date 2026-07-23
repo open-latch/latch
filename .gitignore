@@ -10,6 +10,7 @@ DISABLE_WRITE
 # path, written by install_engine.py. Never committed; each install pins its own.
 kb_location.json
 latch_settings.json
+**/runtime_settings.json
 
 # logs
 *.log

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import secrets
 import socket
@@ -20,11 +21,12 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, BinaryIO
 
+import mcp_runtime
 import paths
 
 
 PROTOCOL_VERSION = 1
-PROXY_CAPABILITY_EPOCH = 2
+PROXY_CAPABILITY_EPOCH = 3
 DISCOVERY_FILE = "mcp-daemon.json"
 START_LOCK_FILE = "mcp-daemon.start.lock"
 OWNER_FENCE_FILE = "mcp-daemon.owner.lock"
@@ -35,10 +37,10 @@ RUNTIME_REGISTRY_DIR = "mcp-runtimes"
 LIFECYCLE_STREAM = "mcp_lifecycle"
 DEFAULT_START_TIMEOUT_S = 30.0
 DEFAULT_CONNECT_TIMEOUT_S = 2.0
-DEFAULT_PROXY_CAP = 32
-DEFAULT_PROXY_RETIRE_IDLE_S = 5 * 60.0
-DEFAULT_PROXY_HEARTBEAT_S = 30.0
-DEFAULT_PROXY_STALE_S = 5 * 60.0
+DEFAULT_PROXY_CAP = mcp_runtime.DEFAULT_PROXY_CAP
+DEFAULT_PROXY_RETIRE_IDLE_S = mcp_runtime.DEFAULT_PROXY_RETIRE_IDLE_S
+DEFAULT_PROXY_HEARTBEAT_S = mcp_runtime.DEFAULT_PROXY_HEARTBEAT_S
+DEFAULT_PROXY_STALE_S = mcp_runtime.DEFAULT_PROXY_STALE_S
 START_FAILURE_MAX_AGE_S = 60.0
 START_REASONS = frozenset({
     "proxy_start",
@@ -49,6 +51,11 @@ START_REASONS = frozenset({
 })
 WINDOWS_CREATE_NO_WINDOW = 0x08000000
 WINDOWS_CREATE_NEW_PROCESS_GROUP = 0x00000200
+DAEMON_OS_ENV_VARS = mcp_runtime.PROCESS_OS_ENV_VARS
+DAEMON_OWNER_ENV_VARS: tuple[str, ...] = ()
+DAEMON_HELPER_ENV_VARS = (
+    "LATCH_MCP_DAEMON_START_TIMEOUT_SEC",
+)
 
 
 class BrokerError(RuntimeError):
@@ -176,9 +183,10 @@ def _env_int(name: str, default: int, *, minimum: int = 0) -> int:
 
 def _env_float(name: str, default: float, *, minimum: float = 0.1) -> float:
     try:
-        return max(minimum, float(os.environ.get(name, str(default))))
+        value = float(os.environ.get(name, str(default)))
     except ValueError:
         return default
+    return max(minimum, value) if math.isfinite(value) else default
 
 
 def proxy_policy() -> dict[str, int | float]:
@@ -811,7 +819,28 @@ def _windows_hidden_startupinfo() -> Any:
     return startup
 
 
-def _windows_base_command(env: dict[str, str]) -> str:
+def _windows_venv_site_packages(explicit: str | None = None) -> str | None:
+    """Resolve the one broker-owned Python import path used on Windows."""
+    if explicit is None:
+        if sys.prefix == sys.base_prefix:
+            return None
+        candidate = Path(sys.prefix) / "Lib" / "site-packages"
+    else:
+        candidate = Path(explicit)
+        if not candidate.is_absolute():
+            raise BrokerError("invalid Windows venv site-packages handoff")
+    if not candidate.is_dir():
+        if explicit is not None:
+            raise BrokerError("invalid Windows venv site-packages handoff")
+        return None
+    return str(candidate)
+
+
+def _windows_base_command(
+    env: dict[str, str],
+    *,
+    site_packages: str | None = None,
+) -> str:
     """Bypass a venv redirector that can drop no-window creation flags."""
     candidates = (
         getattr(sys, "_base_executable", None),
@@ -821,20 +850,59 @@ def _windows_base_command(env: dict[str, str]) -> str:
         (str(Path(value)) for value in candidates if value and Path(value).is_file()),
         sys.executable,
     )
-    site_packages = Path(sys.prefix) / "Lib" / "site-packages"
-    if executable != sys.executable and site_packages.is_dir():
-        existing = env.get("PYTHONPATH", "")
-        env["PYTHONPATH"] = str(site_packages) + (
-            os.pathsep + existing if existing else ""
-        )
+    # Never append an inherited loader path. The only permitted Python path is
+    # the exact venv site-packages directory computed by the original proxy.
+    env.pop("PYTHONPATH", None)
+    env.pop(mcp_runtime.WINDOWS_VENV_SITE_PACKAGES_ENV, None)
+    resolved_site_packages = _windows_venv_site_packages(site_packages)
+    if resolved_site_packages is not None:
+        env["PYTHONPATH"] = resolved_site_packages
+        env[mcp_runtime.WINDOWS_VENV_SITE_PACKAGES_ENV] = resolved_site_packages
     return executable
 
 
-def _spawn_daemon(project_cwd: str, *, start_reason: str) -> int:
-    daemon_py = Path(__file__).resolve().parent / "mcp_daemon.py"
-    env = os.environ.copy()
+def _daemon_environment(
+    source: dict[str, str] | os._Environ[str] | None = None,
+    *,
+    for_helper: bool = False,
+) -> dict[str, str]:
+    """Build the long-lived owner environment from an exact contract.
+
+    The first proxy to win daemon election must not donate arbitrary host,
+    session, adapter, backend, or Python-loader state to every other client.
+    Only OS process plumbing and explicitly owner-scoped lifecycle settings
+    survive; broker-owned vault identity is written from canonical paths.
+    """
+    values = os.environ if source is None else source
+    names = DAEMON_OS_ENV_VARS + DAEMON_OWNER_ENV_VARS
+    if for_helper:
+        names += DAEMON_HELPER_ENV_VARS
+    if os.name == "nt":
+        folded = {str(key).upper(): value for key, value in values.items()}
+        env = {
+            name: folded[name.upper()]
+            for name in names
+            if isinstance(folded.get(name.upper()), str)
+        }
+    else:
+        env = {
+            name: values[name]
+            for name in names
+            if isinstance(values.get(name), str)
+        }
+    env["LATCH_HOME"] = str(paths.KB_ROOT)
     env["LATCH_KB_DIR"] = str(runtime_dir())
-    env["LATCH_MCP_DAEMON_PROCESS"] = "1"
+    return env
+
+
+def _spawn_daemon(
+    project_cwd: str,
+    *,
+    start_reason: str,
+    windows_site_packages: str | None = None,
+) -> int:
+    daemon_py = Path(__file__).resolve().parent / "mcp_daemon.py"
+    env = _daemon_environment()
     env["LATCH_MCP_RUNTIME_KEY"] = RUNTIME_KEY
     env["LATCH_MCP_PROTOCOL_VERSION"] = str(PROTOCOL_VERSION)
     env["LATCH_MCP_PROXY_CAPABILITY_EPOCH"] = str(PROXY_CAPABILITY_EPOCH)
@@ -851,7 +919,9 @@ def _spawn_daemon(project_cwd: str, *, start_reason: str) -> int:
     }
     executable = sys.executable
     if os.name == "nt":
-        executable = _windows_base_command(env)
+        executable = _windows_base_command(
+            env, site_packages=windows_site_packages
+        )
         kwargs["creationflags"] = _windows_creation_flags()
         kwargs["startupinfo"] = _windows_hidden_startupinfo()
     else:
@@ -881,7 +951,10 @@ def _spawn_daemon(project_cwd: str, *, start_reason: str) -> int:
 
 
 def ensure_daemon(
-    project_cwd: str, *, start_reason: str = "proxy_connect"
+    project_cwd: str,
+    *,
+    start_reason: str = "proxy_connect",
+    windows_site_packages: str | None = None,
 ) -> dict[str, Any]:
     payload = _checked_discovery()
     if payload is not None and probe_discovery(payload):
@@ -893,7 +966,11 @@ def ensure_daemon(
         try:
             payload = _checked_discovery()
             if payload is None or not probe_discovery(payload):
-                _spawn_daemon(project_cwd, start_reason=start_reason)
+                _spawn_daemon(
+                    project_cwd,
+                    start_reason=start_reason,
+                    windows_site_packages=windows_site_packages,
+                )
             while time.monotonic() < deadline:
                 payload = _checked_discovery()
                 if payload is not None and probe_discovery(payload):
@@ -918,8 +995,7 @@ def request_daemon_start(project_cwd: str) -> bool:
     payload = read_discovery()
     if payload is not None and probe_discovery(payload, timeout=0.02):
         return False
-    env = os.environ.copy()
-    env["LATCH_KB_DIR"] = str(runtime_dir())
+    env = _daemon_environment(for_helper=True)
     kwargs: dict[str, Any] = {
         "stdin": subprocess.DEVNULL,
         "stdout": subprocess.DEVNULL,
@@ -929,35 +1005,31 @@ def request_daemon_start(project_cwd: str) -> bool:
         "close_fds": True,
     }
     executable = sys.executable
+    argv = [
+        executable,
+        str(Path(__file__).resolve()),
+        "--ensure-daemon",
+        project_cwd,
+        "prompt_hook",
+    ]
     if os.name == "nt":
-        executable = _windows_base_command(env)
+        site_packages = _windows_venv_site_packages()
+        executable = _windows_base_command(env, site_packages=site_packages)
+        argv[0] = executable
+        if site_packages is not None:
+            argv.extend(["--windows-site-packages", site_packages])
         kwargs["creationflags"] = _windows_creation_flags()
         kwargs["startupinfo"] = _windows_hidden_startupinfo()
     else:
         kwargs["start_new_session"] = True
     try:
-        process = subprocess.Popen(
-            [
-                executable,
-                str(Path(__file__).resolve()),
-                "--ensure-daemon",
-                project_cwd,
-                "prompt_hook",
-            ],
-            **kwargs,
-        )
+        process = subprocess.Popen(argv, **kwargs)
         emit_lifecycle(
             "daemon_wake_requested",
             bootstrap_pid=process.pid,
             parent_pid=os.getpid(),
             executable=executable,
-            argv=[
-                executable,
-                str(Path(__file__).resolve()),
-                "--ensure-daemon",
-                project_cwd,
-                "prompt_hook",
-            ],
+            argv=argv,
             creationflags=int(kwargs.get("creationflags", 0)),
         )
         return True
@@ -1166,9 +1238,18 @@ def publish_embed_alias(
 
 
 def _main() -> int:
-    if len(sys.argv) == 4 and sys.argv[1] == "--ensure-daemon":
+    if len(sys.argv) in (4, 6) and sys.argv[1] == "--ensure-daemon":
         try:
-            ensure_daemon(sys.argv[2], start_reason=_start_reason(sys.argv[3]))
+            windows_site_packages = None
+            if len(sys.argv) == 6:
+                if sys.argv[4] != "--windows-site-packages":
+                    return 2
+                windows_site_packages = _windows_venv_site_packages(sys.argv[5])
+            ensure_daemon(
+                sys.argv[2],
+                start_reason=_start_reason(sys.argv[3]),
+                windows_site_packages=windows_site_packages,
+            )
             return 0
         except Exception as exc:
             emit_lifecycle("daemon_start_failed", reason=str(exc))

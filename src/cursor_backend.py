@@ -13,6 +13,8 @@ import shutil
 import subprocess
 import tempfile
 
+import mcp_runtime
+
 
 CURSOR_AGENT_BIN = (
     os.environ.get("CURSOR_AGENT_BIN")
@@ -32,11 +34,17 @@ def invoke_prompt(
     model: str | None = None,
 ) -> tuple[str | None, str | None, bool]:
     """Return ``(final_text, error, timed_out)`` from Cursor headless mode."""
-    resolved = agent_bin or CURSOR_AGENT_BIN
-    model = model or os.environ.get("LATCH_CURSOR_MODEL") or os.environ.get("CURSOR_MODEL")
-    env = os.environ.copy()
+    model = (
+        model
+        or mcp_runtime.connection_env_value("LATCH_CURSOR_MODEL")
+        or mcp_runtime.connection_env_value("CURSOR_MODEL")
+    )
+    env = mcp_runtime.connection_subprocess_environment("cursor")
     env["CLAUDE_KB_IN_COMPACT"] = "1"
     try:
+        resolved = agent_bin or mcp_runtime.connection_binary(
+            "CURSOR_AGENT_BIN", process_default=CURSOR_AGENT_BIN
+        )
         with tempfile.TemporaryDirectory(prefix="latch-cursor-model-") as tmp:
             args = [
                 resolved,
@@ -64,12 +72,17 @@ def invoke_prompt(
         return None, f"subprocess failed: {type(e).__name__}: {e}", False
 
     if proc.returncode != 0:
-        detail = (proc.stderr or proc.stdout or "").strip()
+        detail = mcp_runtime.redact_subprocess_output(
+            (proc.stderr or proc.stdout or "").strip()
+        )
         return None, f"cursor backend exit {proc.returncode}: {detail[-1000:]}", False
+    output = mcp_runtime.redact_subprocess_output((proc.stdout or "").strip())
     try:
-        payload = json.loads((proc.stdout or "").strip())
+        payload = json.loads(output)
     except json.JSONDecodeError as e:
-        excerpt = (proc.stdout or proc.stderr or "").strip()[:500]
+        excerpt = mcp_runtime.redact_subprocess_output(
+            (proc.stdout or proc.stderr or "").strip()
+        )[:500]
         return None, f"cursor backend returned invalid JSON ({e}): {excerpt}", False
     if not isinstance(payload, dict):
         return None, "cursor backend JSON result was not an object", False

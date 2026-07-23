@@ -9,12 +9,15 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
 import mcp_broker  # noqa: E402
 import mcp_daemon  # noqa: E402
 import mcp_proxy  # noqa: E402
+import mcp_runtime  # noqa: E402
 
 
 def test_windows_daemon_creation_flags_suppress_console_without_detaching():
@@ -42,9 +45,266 @@ def test_windows_base_command_bypasses_venv_redirector(monkeypatch, tmp_path):
     monkeypatch.setattr(mcp_broker.sys, "prefix", str(venv_dir))
     monkeypatch.setattr(mcp_broker.sys, "executable", str(venv_python))
 
-    env = {}
+    env = {"PYTHONPATH": "/poison"}
     assert mcp_broker._windows_base_command(env) == str(base_python)
     assert env["PYTHONPATH"] == str(site_packages)
+
+
+def test_windows_base_helper_reinjects_explicit_venv_site_packages(
+    monkeypatch, tmp_path
+):
+    base_dir = tmp_path / "base"
+    base_dir.mkdir()
+    base_python = base_dir / "python.exe"
+    base_python.write_bytes(b"")
+    site_packages = tmp_path / "venv" / "Lib" / "site-packages"
+    site_packages.mkdir(parents=True)
+
+    monkeypatch.setattr(
+        mcp_broker.sys, "_base_executable", str(base_python), raising=False
+    )
+    monkeypatch.setattr(mcp_broker.sys, "base_prefix", str(base_dir))
+    monkeypatch.setattr(mcp_broker.sys, "prefix", str(base_dir))
+    monkeypatch.setattr(mcp_broker.sys, "executable", str(base_python))
+
+    env = {"PYTHONPATH": "/helper/poison"}
+    assert mcp_broker._windows_base_command(
+        env, site_packages=str(site_packages)
+    ) == str(base_python)
+    assert env["PYTHONPATH"] == str(site_packages)
+
+    with pytest.raises(mcp_broker.BrokerError):
+        mcp_broker._windows_base_command(
+            {}, site_packages=str(tmp_path / "missing")
+        )
+
+
+def test_windows_site_packages_cli_handoff_reaches_ensure_daemon(
+    monkeypatch, tmp_path
+):
+    site_packages = tmp_path / "venv" / "Lib" / "site-packages"
+    site_packages.mkdir(parents=True)
+    captured = []
+    monkeypatch.setattr(
+        mcp_broker,
+        "ensure_daemon",
+        lambda project, **kwargs: captured.append((project, kwargs)),
+    )
+    monkeypatch.setattr(
+        mcp_broker.sys,
+        "argv",
+        [
+            "mcp_broker.py",
+            "--ensure-daemon",
+            str(ROOT),
+            "prompt_hook",
+            "--windows-site-packages",
+            str(site_packages),
+        ],
+    )
+    assert mcp_broker._main() == 0
+    assert captured == [(
+        str(ROOT),
+        {
+            "start_reason": "prompt_hook",
+            "windows_site_packages": str(site_packages),
+        },
+    )]
+
+
+def test_daemon_environment_is_closed_and_shared_by_both_start_paths(
+    monkeypatch, tmp_path
+):
+    source = {
+        "PATH": "/safe/bin",
+        "HOME": "/safe/home",
+        "TEMP": "/safe/tmp",
+        "LATCH_MCP_DAEMON_IDLE_TTL_SEC": "41",
+        "LATCH_MCP_DAEMON_START_TIMEOUT_SEC": "7",
+        "LATCH_IN_COMPACT": "1",
+        "CLAUDE_KB_IN_COMPACT": "1",
+        "LATCH_GATE_BACKEND": "codex",
+        "LATCH_SESSION_ID": "session-poison",
+        "LATCH_ADAPTER": "cursor",
+        "LATCH_ARBITRARY_POISON": "poison",
+        "PYTHONPATH": "/poison/python",
+        "PYTHONHOME": "/poison/home",
+        "OPENAI_API_KEY": "must-not-cross-the-boundary",
+    }
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    install = tmp_path / "install"
+    built = None
+    monkeypatch.setattr(mcp_broker, "runtime_dir", lambda: vault)
+    monkeypatch.setattr(mcp_broker.paths, "KB_ROOT", install)
+    monkeypatch.setattr(mcp_broker, "read_discovery", lambda: None)
+    monkeypatch.setattr(mcp_broker, "emit_lifecycle", lambda *_args, **_kwargs: None)
+
+    with monkeypatch.context() as environment:
+        for name in tuple(os.environ):
+            environment.delenv(name, raising=False)
+        for name, value in source.items():
+            environment.setenv(name, value)
+        built = mcp_broker._daemon_environment()
+
+        captured = []
+
+        class FakeProcess:
+            pid = 12345
+
+            def wait(self, timeout=None):
+                return 0
+
+        def fake_popen(*args, **kwargs):
+            captured.append((args, dict(kwargs["env"])))
+            return FakeProcess()
+
+        environment.setattr(mcp_broker.subprocess, "Popen", fake_popen)
+        mcp_broker._spawn_daemon(str(ROOT), start_reason="proxy_connect")
+        assert mcp_broker.request_daemon_start(str(ROOT)) is True
+
+    assert built == {
+        "PATH": "/safe/bin",
+        "HOME": "/safe/home",
+        "TEMP": "/safe/tmp",
+        "LATCH_HOME": str(install),
+        "LATCH_KB_DIR": str(vault),
+    }
+    assert len(captured) == 2
+    direct_env = captured[0][1]
+    helper_env = captured[1][1]
+    assert "LATCH_MCP_DAEMON_START_TIMEOUT_SEC" not in direct_env
+    assert helper_env["LATCH_MCP_DAEMON_START_TIMEOUT_SEC"] == "7"
+    forbidden = (
+        set(source)
+        - set(mcp_broker.DAEMON_OS_ENV_VARS)
+        - set(mcp_broker.DAEMON_OWNER_ENV_VARS)
+        - set(mcp_broker.DAEMON_HELPER_ENV_VARS)
+    )
+    for _args, env in captured:
+        assert not (forbidden - {"PYTHONPATH"}).intersection(env), env
+        assert env.get("PYTHONPATH") != source["PYTHONPATH"]
+        if "PYTHONPATH" in env:
+            assert env["PYTHONPATH"] == mcp_broker._windows_venv_site_packages()
+            assert (
+                env[mcp_runtime.WINDOWS_VENV_SITE_PACKAGES_ENV]
+                == env["PYTHONPATH"]
+            )
+        assert env["LATCH_HOME"] == str(install)
+        assert env["LATCH_KB_DIR"] == str(vault)
+        assert "LATCH_MCP_DAEMON_PROCESS" not in env
+
+
+def test_daemon_context_revalidates_typed_connection_settings():
+    metadata = {
+        "project_cwd": str(ROOT),
+        "proxy_pid": 123,
+        "in_compact": True,
+        "unlatched": False,
+        "disabled": False,
+        "write_disabled": True,
+        "in_maintenance": False,
+        "gate_backend": "codex",
+        "maintenance_backend": "cursor",
+        "gate_classifier_timeout_s": 44,
+        "gate_adversary_timeout_s": 22,
+        "gate_adversary_enabled": False,
+        "proxy_policy": {
+            "cap": 7,
+            "retire_idle_s": 11.0,
+            "heartbeat_s": 3.0,
+            "stale_s": 19.0,
+        },
+        "OPENAI_API_KEY": "ignored-secret",
+        "LATCH_ARBITRARY_POISON": "ignored",
+    }
+    context = mcp_daemon._context_from(metadata, "typed")
+    assert context.in_compact is True
+    assert context.write_disabled is True
+    assert context.gate_backend == "codex"
+    assert context.maintenance_backend == "cursor"
+    assert context.gate_classifier_timeout_s == 44
+    assert context.gate_adversary_timeout_s == 22
+    assert context.gate_adversary_enabled is False
+    assert context.proxy_cap == 7
+    assert context.proxy_stale_s == 19.0
+    assert "OPENAI_API_KEY" not in context.__dict__
+    assert "LATCH_ARBITRARY_POISON" not in context.__dict__
+
+    invalid_values = (
+        ("project_cwd", ""),
+        ("project_cwd", "relative/path"),
+        ("in_compact", "true"),
+        ("disabled", 1),
+        ("in_maintenance", "false"),
+        ("gate_backend", "CODEX"),
+        ("maintenance_backend", "unknown"),
+        ("gate_classifier_timeout_s", 0),
+        ("gate_adversary_timeout_s", True),
+        ("gate_adversary_enabled", 1),
+        ("proxy_policy", {"cap": -1}),
+        ("proxy_policy", {
+            "cap": 7,
+            "retire_idle_s": float("inf"),
+            "heartbeat_s": 3.0,
+            "stale_s": 19.0,
+        }),
+    )
+    for name, value in invalid_values:
+        invalid = {**metadata, name: value}
+        try:
+            mcp_daemon._context_from(invalid, f"invalid-{name}")
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"{name}={value!r} bypassed daemon validation")
+
+
+def test_private_child_environment_is_validated_and_never_in_runtime_snapshot():
+    metadata = {
+        "child_process_env": {
+            "PATH": "/client/bin",
+            "OPENAI_API_KEY": "sentinel-openai-secret",
+        }
+    }
+    private = mcp_daemon._child_environment_from(
+        metadata,
+        allowed_backends=frozenset({"codex"}),
+    )
+    assert "child_process_env" not in metadata
+    context = mcp_runtime.ConnectionContext(
+        connection_id="private-env",
+        project_cwd=str(ROOT),
+        session_id=None,
+        session_source="test",
+        proxy_pid=123,
+        proxy_started_at="now",
+        runtime_key="test",
+        gate_backend="codex",
+        maintenance_backend="codex",
+    )
+    with mcp_runtime.bind_connection(context, child_environment=private):
+        snapshot = mcp_runtime.connection_snapshot()
+        assert "child_environment" not in snapshot
+        assert "sentinel-openai-secret" not in json.dumps(snapshot)
+        child = mcp_runtime.connection_subprocess_environment("codex")
+        assert child["OPENAI_API_KEY"] == "sentinel-openai-secret"
+        assert "ANTHROPIC_API_KEY" not in child
+
+    with pytest.raises(ValueError, match="unsupported child_environment"):
+        mcp_runtime.validate_child_environment({"LATCH_POISON": "sentinel"})
+    with pytest.raises(ValueError, match="OPENAI_API_KEY"):
+        mcp_runtime.validate_child_environment({"OPENAI_API_KEY": "bad\0value"})
+    with pytest.raises(ValueError, match="unsupported child_environment"):
+        mcp_runtime.validate_child_environment(
+            {"ANTHROPIC_API_KEY": "wrong-backend-secret"},
+            allowed_backends=frozenset({"codex"}),
+        )
+    with pytest.raises(ValueError, match="must be absolute"):
+        mcp_runtime.validate_child_environment(
+            {"CODEX_BIN": "codex"},
+            allowed_backends=frozenset({"codex"}),
+        )
 
 
 def test_blue_green_registry_is_keyed_for_v1_v2_v1(monkeypatch, tmp_path):
@@ -800,6 +1060,57 @@ def test_reconnect_failure_emits_lifecycle_signal(monkeypatch):
     assert any(event == "daemon_reconnect_failed" for event, _fields in events)
 
 
+def test_dead_local_owner_is_reconnected_before_new_request_is_sent(monkeypatch):
+    metadata = {
+        "connection_id": "dead-owner-preflight",
+        "proxy_pid": os.getpid(),
+        "runtime_key": mcp_broker.RUNTIME_KEY,
+        "project_cwd": str(ROOT),
+    }
+
+    class Socket:
+        def __init__(self):
+            self.sent: list[bytes] = []
+            self.closed = False
+
+        def sendall(self, line):
+            self.sent.append(line)
+
+        def close(self):
+            self.closed = True
+
+    stale = Socket()
+    replacement = Socket()
+    bridge = mcp_proxy.ProxyBridge(metadata)
+    bridge._sock = stale
+    bridge._owner_pid = 12345
+    bridge._init_line = b'{"jsonrpc":"2.0","id":1,"method":"initialize"}\n'
+    bridge._init_id = 1
+    reconnects: list[bool] = []
+
+    def reconnect(*, replay):
+        reconnects.append(replay)
+        bridge._sock = replacement
+        bridge._owner_pid = 67890
+        bridge._replaying = replay
+        bridge._replay_id = bridge._init_id if replay else None
+
+    monkeypatch.setattr(mcp_broker, "_pid_alive", lambda pid: pid != 12345)
+    monkeypatch.setattr(bridge, "_connect", reconnect)
+    request = b'{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}\n'
+    try:
+        bridge._handle_host_line(request)
+    finally:
+        bridge._wake_read.close()
+        bridge._wake_write.close()
+
+    assert stale.closed is True
+    assert stale.sent == []
+    assert reconnects == [True]
+    assert bridge._deferred == [request]
+    assert replacement.sent == []
+
+
 def test_shared_start_failure_is_visible_and_legacy_is_opt_in(monkeypatch, capsys):
     events: list[str] = []
     monkeypatch.setattr(
@@ -824,6 +1135,33 @@ def test_shared_start_failure_is_visible_and_legacy_is_opt_in(monkeypatch, capsy
     assert "shared MCP daemon unavailable" in stderr
     assert "LATCH_MCP_ALLOW_LEGACY_FALLBACK=1" in stderr
     assert "daemon_start_failed" in events
+
+
+def test_forced_legacy_precedes_shared_connection_validation(monkeypatch):
+    events: list[str] = []
+    legacy_called = []
+    monkeypatch.setenv("LATCH_MCP_FORCE_LEGACY", "1")
+    monkeypatch.setenv("LATCH_GATE_BACKEND", "future-backend")
+    monkeypatch.setattr(
+        mcp_broker,
+        "emit_lifecycle",
+        lambda event, **_kwargs: events.append(event),
+    )
+    monkeypatch.setattr(
+        mcp_broker,
+        "ensure_daemon",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("forced legacy must not inspect shared runtime")
+        ),
+    )
+    monkeypatch.setattr(
+        mcp_proxy,
+        "_exec_legacy_server",
+        lambda: legacy_called.append(True),
+    )
+    assert mcp_proxy.main() == 0
+    assert legacy_called == [True]
+    assert events == ["legacy_fallback"]
 
 
 def test_explicit_legacy_fallback_emits_lifecycle_signal(monkeypatch):

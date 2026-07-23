@@ -1955,7 +1955,17 @@ def kb_runtime_status() -> dict:
             }
     except (OSError, ValueError):
         pass
-    policy = mcp_broker.proxy_policy()
+    context_state = mcp_runtime.current_connection()
+    policy = (
+        {
+            "cap": context_state.proxy_cap,
+            "retire_idle_s": context_state.proxy_retire_idle_s,
+            "heartbeat_s": context_state.proxy_heartbeat_s,
+            "stale_s": context_state.proxy_stale_s,
+        }
+        if context_state is not None
+        else mcp_broker.proxy_policy()
+    )
     lease_state = mcp_broker.proxy_lease_state(policy=policy)
     proxy_inventory = list(lease_state["live"])
     legacy_inventory = list(lease_state.get("legacy_incompatible") or [])
@@ -2023,6 +2033,7 @@ def kb_runtime_status() -> dict:
             "stale_tree_signal": stale_tree_signals,
             "receipts_live": lifecycle_receipts.RECEIPTS_CHANNEL_LIVE,
         },
+        "maintenance": paths.maintenance_runner_status(_project_cwd()),
         "recovery": (
             "Idle owners are reclaimed; the stdio proxy reconnects and replays MCP initialization. "
             "In-flight calls are never automatically replayed."
@@ -2050,7 +2061,6 @@ def initialize_runtime(project_cwd: str, *, start_embed_listener: bool) -> None:
             embeddings.embed("latch embed pre-warm")
         except Exception as e:
             sys.stderr.write(f"[latch] embed pre-warm failed: {e}\n")
-        selfheal.maybe_trigger(project_cwd)
         _RUNTIME_INITIALIZED = True
 
 
@@ -2079,6 +2089,7 @@ def prune_hidden_surface_tools(server: FastMCP) -> list[str]:
 
 if __name__ == "__main__":
     initialize_runtime(PROJECT_CWD, start_embed_listener=True)
+    selfheal.maybe_trigger(PROJECT_CWD)
     from mcp_proxy import trimmed_tool_surface
 
     if trimmed_tool_surface():
