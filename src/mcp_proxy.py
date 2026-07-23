@@ -344,6 +344,7 @@ class ProxyBridge:
         self._wake_read.setblocking(False)
         self._wake_write.setblocking(False)
         self._sock: socket.socket | None = None
+        self._owner_pid: int | None = None
         self._socket_buffer = bytearray()
         self._stdin_eof = False
         self._init_line: bytes | None = None
@@ -394,6 +395,7 @@ class ProxyBridge:
             sock.close()
             raise
         self._sock = sock
+        self._owner_pid = int(payload["pid"])
         self._socket_buffer.clear()
         if replay and self._init_line is not None:
             sock.sendall(self._init_line)
@@ -402,6 +404,7 @@ class ProxyBridge:
 
     def _close_socket(self) -> None:
         sock, self._sock = self._sock, None
+        self._owner_pid = None
         if sock is not None:
             try:
                 sock.close()
@@ -493,6 +496,20 @@ class ProxyBridge:
             # replay an older initialize message first.
             self._replaying = False
             self._deferred.clear()
+
+        # The shared daemon is a local child/peer whose PID came from the
+        # authenticated discovery payload used for this socket.  Windows may
+        # defer surfacing a dead peer's TCP reset until the next send, so check
+        # that exact owner before a new request can become in-flight.  A death
+        # after this check remains an unknown outcome and is never replayed.
+        if (
+            self._sock is not None
+            and self._owner_pid is not None
+            and not self._pending
+            and not self._replaying
+            and not mcp_broker._pid_alive(self._owner_pid)
+        ):
+            self._daemon_lost(f"owner process {self._owner_pid} exited")
 
         if self._sock is None:
             try:

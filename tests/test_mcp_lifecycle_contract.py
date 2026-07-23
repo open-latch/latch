@@ -1060,6 +1060,57 @@ def test_reconnect_failure_emits_lifecycle_signal(monkeypatch):
     assert any(event == "daemon_reconnect_failed" for event, _fields in events)
 
 
+def test_dead_local_owner_is_reconnected_before_new_request_is_sent(monkeypatch):
+    metadata = {
+        "connection_id": "dead-owner-preflight",
+        "proxy_pid": os.getpid(),
+        "runtime_key": mcp_broker.RUNTIME_KEY,
+        "project_cwd": str(ROOT),
+    }
+
+    class Socket:
+        def __init__(self):
+            self.sent: list[bytes] = []
+            self.closed = False
+
+        def sendall(self, line):
+            self.sent.append(line)
+
+        def close(self):
+            self.closed = True
+
+    stale = Socket()
+    replacement = Socket()
+    bridge = mcp_proxy.ProxyBridge(metadata)
+    bridge._sock = stale
+    bridge._owner_pid = 12345
+    bridge._init_line = b'{"jsonrpc":"2.0","id":1,"method":"initialize"}\n'
+    bridge._init_id = 1
+    reconnects: list[bool] = []
+
+    def reconnect(*, replay):
+        reconnects.append(replay)
+        bridge._sock = replacement
+        bridge._owner_pid = 67890
+        bridge._replaying = replay
+        bridge._replay_id = bridge._init_id if replay else None
+
+    monkeypatch.setattr(mcp_broker, "_pid_alive", lambda pid: pid != 12345)
+    monkeypatch.setattr(bridge, "_connect", reconnect)
+    request = b'{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}\n'
+    try:
+        bridge._handle_host_line(request)
+    finally:
+        bridge._wake_read.close()
+        bridge._wake_write.close()
+
+    assert stale.closed is True
+    assert stale.sent == []
+    assert reconnects == [True]
+    assert bridge._deferred == [request]
+    assert replacement.sent == []
+
+
 def test_shared_start_failure_is_visible_and_legacy_is_opt_in(monkeypatch, capsys):
     events: list[str] = []
     monkeypatch.setattr(
