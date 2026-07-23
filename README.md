@@ -16,7 +16,15 @@
 </p>
 
 <p align="center">
+  <em>Same coding agent, same request, run twice — the only difference is whether the project's earlier decision was captured in latch.</em>
+</p>
+
+<p align="center">
   <img src="./docs/assets/latch-hero.gif" alt="latch catching a coding agent before it revives a rejected project decision" width="900">
+</p>
+
+<p align="center">
+  <sub><b>Case 1 — no decision captured:</b> the agent rebuilds the change the project had ruled out.&nbsp;&nbsp;<b>Case 2 — same prompt, decision in latch:</b> the gate cites the ruling and stops to let you decide, before a single file changes.</sub>
 </p>
 
 <p align="center">
