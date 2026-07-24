@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
-"""Codex SessionStart hook: AGENTS.md re-sync + brief, no auto-compaction.
+"""Codex SessionStart hook: silent attribution and AGENTS.md sync.
 
 Codex support intentionally does not mirror Claude Code's Stop/SessionEnd
-automatic compaction right now. This hook re-syncs an already-wired AGENTS.md
-managed region, builds the start-of-session KB brief, and records retrievals
-for dedupe when a session id is available.
+automatic compaction. Healthy startup emits no model context.
 """
 from __future__ import annotations
 
@@ -20,17 +18,15 @@ sys.path.insert(0, str(SRC / "hooks"))
 
 from _common import hook_field, log, read_hook_input, transcript_path  # noqa: E402
 
-import budget  # noqa: E402
 import codex_session  # noqa: E402
-import db  # noqa: E402
 from paths import is_disabled, is_in_compact, is_unlatched_mode  # noqa: E402
 from session_start import (  # noqa: E402
-    _build_briefing,
-    _build_unlatched_brief,
+    _SESSION_SETUP_NOTICE,
+    _build_unlatched_notice,
     _build_unlatched_system_message,
     _emit_session_start_context,
+    _join_startup_notices,
     _managed_doc_wiring_notice,
-    _with_startup_write_status,
 )
 
 
@@ -57,7 +53,7 @@ def main() -> int:
         return 0
     if is_unlatched_mode():
         _emit_session_start_context(
-            _build_unlatched_brief(),
+            _build_unlatched_notice(),
             system_message=_build_unlatched_system_message(),
         )
         return 0
@@ -69,9 +65,7 @@ def main() -> int:
     sid = codex_session_id(payload)
     tpath = transcript_path(payload)
 
-    surfaced_ids: list[int] = []
-    read_only_startup = False
-    startup_write_warning = False
+    setup_degraded = not bool(sid)
     if sid:
         # Session attribution is independent of KB setup.  In particular, a
         # readable external vault may be outside this hook's writable sandbox;
@@ -81,42 +75,16 @@ def main() -> int:
                 cwd, sid, transcript_path=tpath,
             )
         except Exception as e:
-            startup_write_warning = True
+            setup_degraded = True
             log(f"codex_session_start marker write failed: {e}")
-
-    try:
-        conn = db.connect(cwd)
+    else:
+        # A missing current id must invalidate any prior workspace marker;
+        # otherwise an MCP process without CODEX_THREAD_ID can inherit the
+        # previous task's attribution.
         try:
-            if sid:
-                try:
-                    db.upsert_session(conn, sid, cwd, tpath)
-                except Exception as e:
-                    if db.is_readonly_error(e):
-                        read_only_startup = True
-                    else:
-                        startup_write_warning = True
-                    log(f"codex_session_start session upsert failed: {e}")
-            orphan_count = len(db.orphaned_sessions(conn, cwd))
-        finally:
-            conn.close()
-    except Exception as e:
-        log(f"codex_session_start db error: {e}")
-        orphan_count = 0
-        try:
-            conn = db.connect_readonly(cwd)
-            try:
-                orphan_count = len(db.orphaned_sessions(conn, cwd))
-                read_only_startup = True
-            finally:
-                conn.close()
-        except Exception as read_error:
-            log(f"codex_session_start read-only fallback failed: {read_error}")
-
-    try:
-        budget_line = budget.brief_line(cwd)
-    except Exception as e:
-        log(f"codex_session_start budget brief_line failed: {e}")
-        budget_line = None
+            codex_session.invalidate_marker(cwd)
+        except Exception as e:
+            log(f"codex_session_start marker invalidation failed: {e}")
 
     agents_md_action = _auto_sync_agents_md(cwd)
     wiring_notice = _managed_doc_wiring_notice(
@@ -125,48 +93,12 @@ def main() -> int:
         manual_command=f"{SRC.parent}/bin/install_agents_md.sh --yes",
     )
 
-    briefing = _build_briefing(
-        cwd,
-        orphan_count=orphan_count,
-        budget_line=budget_line,
-        surfaced_ids=surfaced_ids,
-        claude_md_synced=(agents_md_action == "synced"),
-        synced_doc_name="AGENTS.md",
-        wiring_notice=wiring_notice,
-        read_only=read_only_startup,
-        startup_write_warning=startup_write_warning,
+    notice = _join_startup_notices(
+        _SESSION_SETUP_NOTICE if setup_degraded else None,
+        wiring_notice,
     )
-
-    if sid and surfaced_ids and not read_only_startup:
-        try:
-            conn = db.connect(cwd)
-            try:
-                db.record_retrievals(
-                    conn,
-                    session_id=sid,
-                    turn=0,
-                    items=[(nid, None) for nid in surfaced_ids],
-                    source="codex_session_start",
-                )
-            finally:
-                conn.close()
-        except Exception as e:
-            log(f"codex_session_start record_retrievals failed: {e}")
-            if db.is_readonly_error(e):
-                # Existing-session upserts can be read-only no-ops.  The first
-                # denied retrieval write is therefore the DB-specific fallback
-                # signal.
-                read_only_startup = True
-            else:
-                startup_write_warning = True
-            briefing = _with_startup_write_status(
-                briefing,
-                read_only=read_only_startup,
-                startup_write_warning=startup_write_warning,
-            )
-
-    if briefing:
-        _emit_session_start_context(briefing)
+    if notice:
+        _emit_session_start_context(notice)
 
     return 0
 

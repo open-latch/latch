@@ -242,6 +242,26 @@ def write_marker(
         "updated_at": datetime.now(timezone.utc).isoformat(),
         "source": "codex_session_start",
     }
+    return _persist_marker(project_path, payload)
+
+
+def invalidate_marker(
+    project_path: str | os.PathLike | None,
+) -> Path:
+    """Write a newer tombstone so an old task marker cannot be inherited."""
+    payload = {
+        "project_path": _canonical_project(project_path),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "source": "codex_session_start",
+        "invalidated": True,
+    }
+    return _persist_marker(project_path, payload)
+
+
+def _persist_marker(
+    project_path: str | os.PathLike | None,
+    payload: dict,
+) -> Path:
     text = json.dumps(payload, indent=2, sort_keys=True) + "\n"
     primary = marker_path(project_path)
     try:
@@ -276,16 +296,21 @@ def read_marker(project_path: str | os.PathLike | None = None) -> dict | None:
             continue
         if _canonical_project(marker_project) != expected_project:
             continue
-        marker_session = payload.get("session_id")
-        if not isinstance(marker_session, str) or not marker_session.strip():
-            continue
         updated_at = _marker_updated_at(payload)
         if updated_at is None:
             continue
         candidate = (updated_at, -path_priority, payload)
         if newest is None or candidate[:2] > newest[:2]:
             newest = candidate
-    return newest[2] if newest is not None else None
+    if newest is None:
+        return None
+    payload = newest[2]
+    if payload.get("invalidated") is True:
+        return None
+    marker_session = payload.get("session_id")
+    if not isinstance(marker_session, str) or not marker_session.strip():
+        return None
+    return payload
 
 
 def read_session_id(project_path: str | os.PathLike | None = None) -> str | None:

@@ -3,7 +3,8 @@
 
 This module manages only latch-owned Codex hooks. It preserves unrelated hooks,
 removes older latch-owned Codex Stop/SessionStart entries, and installs the
-current SessionStart brief hook. It does not write Claude Code settings.
+current silent SessionStart bookkeeping hook. It does not write Claude Code
+settings.
 """
 from __future__ import annotations
 
@@ -100,7 +101,7 @@ def merge_hooks(existing: str, python_path: str, hook_py: str) -> tuple[str, lis
     hooks[BEGINNER_HOOK_EVENT].insert(0, desired)
     if removed:
         changes.append(f"removed {removed} stale latch-owned Codex hook(s)")
-    changes.append("installed latch Codex SessionStart brief hook")
+    changes.append("installed latch Codex SessionStart hook")
 
     new = json.dumps(obj, indent=2, sort_keys=False) + "\n"
     if new == existing:

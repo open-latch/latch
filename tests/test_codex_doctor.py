@@ -87,7 +87,7 @@ def test_check_mcp_launch_target():
     print("PASS check_mcp_launch_target")
 
 
-def test_check_kb_access_readable_warns_without_writes():
+def test_check_kb_access_readable_fails_without_writes():
     d = _tmp()
     db_file = d / "kb.db"
     db_file.write_bytes(b"fixture")
@@ -105,16 +105,15 @@ def test_check_kb_access_readable_warns_without_writes():
         cd.db.connect_readonly = lambda _cwd=None: FakeConnection()
 
         cd.os.access = lambda path, mode: Path(path) == db_file.parent
-        warned = cd.check_kb_access("/repo")
-        _assert(warned.level == cd.WARN, warned)
-        _assert("database file is not writable" in warned.detail, warned)
-        _assert("startup brief remains available read-only" in warned.detail, warned)
-        _assert("metadata writes may be skipped" in warned.detail, warned)
+        failed = cd.check_kb_access("/repo")
+        _assert(failed.level == cd.FAIL, failed)
+        _assert("database file is not writable" in failed.detail, failed)
+        _assert("ordinary retrieval, gate, capture, and lifecycle" in failed.detail, failed)
 
         cd.os.access = lambda path, mode: Path(path) == db_file
-        parent_warned = cd.check_kb_access("/repo")
-        _assert(parent_warned.level == cd.WARN, parent_warned)
-        _assert("parent directory is not writable" in parent_warned.detail, parent_warned)
+        parent_failed = cd.check_kb_access("/repo")
+        _assert(parent_failed.level == cd.FAIL, parent_failed)
+        _assert("parent directory is not writable" in parent_failed.detail, parent_failed)
 
         cd.os.access = lambda _path, _mode: True
         ok = cd.check_kb_access("/repo")
@@ -134,7 +133,6 @@ def test_check_kb_access_missing_db_preserves_quickstart_seed_order():
     original_db_path = cd.paths.db_path
     original_connect = cd.db.connect_readonly
     original_access = cd.os.access
-    original_intensity = cd.check_latch_intensity
     original_config = cd.check_codex_config
     original_launch = cd.check_mcp_launch_target
     connect_calls: list[bool] = []
@@ -152,13 +150,11 @@ def test_check_kb_access_missing_db_preserves_quickstart_seed_order():
         _assert(warned.level == cd.WARN, warned)
         _assert("not initialized yet" in warned.detail, warned)
         _assert("quickstart may continue to the seed step" in warned.detail, warned)
-        _assert("startup brief is unavailable until the first DB creation" in warned.detail,
-                warned)
+        _assert("seed step" in warned.detail, warned)
         _assert(not connect_calls, connect_calls)
 
         # Quickstart runs doctor before offering seed. WARN must leave run_all
         # free of failures so that ordering remains install -> doctor -> seed.
-        cd.check_latch_intensity = lambda: cd.Check("Latch intensity", cd.OK, "ok")
         cd.check_codex_config = lambda *_args: cd.Check("Codex config", cd.OK, "ok")
         cd.check_mcp_launch_target = lambda *_args: cd.Check("MCP launch", cd.OK, "ok")
         checks = cd.run_all(
@@ -188,7 +184,6 @@ def test_check_kb_access_missing_db_preserves_quickstart_seed_order():
         cd.paths.db_path = original_db_path
         cd.db.connect_readonly = original_connect
         cd.os.access = original_access
-        cd.check_latch_intensity = original_intensity
         cd.check_codex_config = original_config
         cd.check_mcp_launch_target = original_launch
         shutil.rmtree(d, ignore_errors=True)
@@ -440,7 +435,7 @@ if __name__ == "__main__":
     test_check_codex_config_ok_and_missing()
     test_check_agents_md_status()
     test_check_mcp_launch_target()
-    test_check_kb_access_readable_warns_without_writes()
+    test_check_kb_access_readable_fails_without_writes()
     test_check_kb_access_missing_db_preserves_quickstart_seed_order()
     test_check_kb_access_missing_parent_uses_nearest_existing_ancestor()
     test_check_kb_access_dangling_db_symlink_fails_closed()

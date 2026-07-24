@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import sqlite3
 import sys
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -72,9 +71,9 @@ def sweep(conn: sqlite3.Connection, project_path: str | None) -> dict:
     Returns counts: ``nodes_scanned``, ``orphan_mention``, ``stale_prereq``,
     ``rows_emitted``.
     """
-    # Lazy import: heal pulls numpy/embeddings; keep this module (and the
-    # SessionStart brief + CLI that import it) light until a sweep actually
-    # runs. Reuse heal's exact code-span stripping + mention regex so the
+    # Lazy import: heal pulls numpy/embeddings; keep this module and its CLI
+    # light until a sweep actually runs. Reuse heal's exact code-span stripping
+    # + mention regex so the
     # exclusion mirrors orphan_hint precisely (kb_gate risk note, id=1149).
     from heal import _strip_code_spans, _ID_MENTION_RE
 
@@ -142,30 +141,3 @@ def sweep(conn: sqlite3.Connection, project_path: str | None) -> dict:
             counts["rows_emitted"] += 1
 
     return counts
-
-
-def latest_pending(
-    project_path: str | None, lookback_days: int = 7,
-) -> tuple[int, str | None]:
-    """Distinct node_ids flagged by the MOST RECENT drift sweep within the
-    last ``lookback_days``. Returns ``(count, date_str | None)``.
-
-    Lightweight — reads only drift.log files (no DB, no heal import), so the
-    SessionStart brief can call it on every session start without pulling the
-    heavy heal/numpy import chain. The count is self-clearing: once the agent
-    fixes the flagged nodes, the next nightly sweep stops emitting their rows
-    and the count drops.
-    """
-    today = datetime.now(timezone.utc).date()
-    start = today - timedelta(days=lookback_days)
-    by_date: dict[str, set[int]] = {}
-    for R in log_utils.read_log_range("drift", start, today, project_path):
-        nid = R.get("node_id")
-        ds = (R.get("ts") or "")[:10]
-        if nid is None or len(ds) != 10:
-            continue
-        by_date.setdefault(ds, set()).add(nid)
-    if not by_date:
-        return 0, None
-    latest = max(by_date)
-    return len(by_date[latest]), latest

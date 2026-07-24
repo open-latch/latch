@@ -28,46 +28,32 @@ and lifecycle mechanics follow each host's supported surface.
 
 | Host | Always-loaded contract | Additional supported surfaces |
 | --- | --- | --- |
-| Claude Code | Managed `CLAUDE.md` region | Session hooks and Claude commands |
-| Codex | Managed `AGENTS.md` region | SessionStart shim and Codex skills |
-| Cursor | Managed `AGENTS.md` plus `.cursor/rules/latch.mdc` | Project commands, skills, MCP wiring, and optional hooks |
+| Claude Code | Managed `CLAUDE.md` region | Prompt/activity hooks and Claude commands |
+| Codex | Managed `AGENTS.md` region | Codex skills |
+| Cursor | Managed `AGENTS.md` plus `.cursor/rules/latch.mdc` | Project commands, skills, MCP wiring, and optional gate/activity hooks |
 
 Cursor's always-applied rule should contain Cursor-only gate and operation
 receipt behavior. Shared read, authority, capture, write-hint, and compaction
 rules belong in `AGENTS.md` so the two surfaces do not repeat a full contract.
 
-## Intensity and host boundary
+## On-demand context and host boundary
 
-Quiet, Standard, and Full change automatic surfacing, not the managed
-read/reconcile/gate/resolve/capture/report contract. The saved choice is
-install-wide and is resolved without process caching from
-`latch_settings.json`, with `LATCH_INTENSITY` as a process-scoped environment
-override during ordinary runtime. Quickstart and the installers default a
-genuinely fresh install to Standard and persist the selection. During
-quickstart only, existing KB evidence identifies a settings-less install as
-legacy and preserves Full. A manually wired runtime with no settings file does
-not inspect KB evidence and resolves to legacy Full.
+Latch injects no startup knowledge payload. The always-loaded managed contract
+establishes the read/reconcile/gate/resolve/capture/report behavior, and live
+tools fetch current evidence only when the prompt needs it. This keeps ordinary
+turns free of repeated startup context while preserving a deliberate catch-up
+path across Claude Code, Codex, and Cursor.
 
-If a valid `LATCH_INTENSITY` is present while quickstart runs, quickstart treats
-it as an explicit installation choice and persists that value install-wide on
-apply; unset a temporary override before quickstart. A malformed saved setting,
-a missing `intensity` key, or an invalid saved value falls back to Quiet with a
-specific warning. An invalid environment override uses a valid saved setting
-when one exists and otherwise falls back to Quiet. Quickstart rejects invalid
-explicit input, while status/doctor surface resolver warnings.
+For "where did we leave off?", "catch me up", "resume", or "what's next", use
+`latch_project_direction(compact=true)`. Compact mode clamps workstream/member
+limits and repeated sections for a bounded synthesized view. The direction
+tool is strictly read-only: it may report durable lifecycle history but never
+claims a pending receipt or suggestion. Add
+`latch_recent(kind="progress", limit=3)` for a small raw chronology, then use
+`latch_get` on the direction report's `foregrounded_item.id`.
 
-Claude Code can vary both its SessionStart brief and similarity-based
-UserPromptSubmit surfacing. Codex can vary its SessionStart brief but has no
-similarity prompt hook. Cursor with hooks can vary its SessionStart brief while
-keeping its pre-edit gate; Cursor without hooks currently has no
-intensity-controlled runtime surface. The managed contract remains static at
-all tiers, including its live Latch read before each response. Intensity
-controls hook-added briefs and prompt context, not contract-driven tool use.
-
-When invoked, every tier uses the same gate check and configuration. Do not
-upgrade that into a claim of identical evidence, catches, or outcomes: prior
-automatic reads, evolving KB state, and model behavior can differ. Tier
-telemetry is observational and must not enter chain assembly or classification.
+`latch_recent` remains raw update chronology. It is supporting evidence, not a
+replacement summary or proof of current authority by itself.
 
 ## Codex skills
 
@@ -84,13 +70,13 @@ Some hosts defer MCP tool schemas until first use. Batch-load the primary tools
 with:
 
 ```text
-ToolSearch(query="mcp__latch latch_search latch_get latch_recent latch_gate")
+ToolSearch(query="mcp__latch latch_search latch_get latch_recent latch_project_direction latch_gate")
 ```
 
 Older installs may expose legacy names:
 
 ```text
-ToolSearch(query="mcp__claude-kb kb_search kb_get kb_recent kb_gate")
+ToolSearch(query="mcp__claude-kb kb_search kb_get kb_recent kb_project_direction kb_gate")
 ```
 
 A zero-result exact lookup is not proof that Latch is unavailable. Retry broad
@@ -112,12 +98,12 @@ canonical framing constrains it. Fetch every `linked_id` before acting.
 current truth. `latch_verify` can distinguish `OK`, `RECONCILED`, `STALE`, and
 `NOT_FOUND` without a model call.
 
-Standing priorities are short user directives surfaced by SessionStart and the
-gate. Overall priorities apply everywhere; workstream priorities apply when the
-request resolves to that workstream. They are guidance unless a user decision
-or gate verdict makes them blocking. When a user states a sweeping directive
-such as "always" or "from now on," offer to capture it with
-`latch_priority_add`; write it only with the user's approval.
+Standing priorities are short user directives available through
+`latch_priority_list` and the gate. Overall priorities apply everywhere;
+workstream priorities apply when the request resolves to that workstream. They
+are guidance unless a user decision or gate verdict makes them blocking. When a
+user states a sweeping directive such as "always" or "from now on," offer to
+capture it with `latch_priority_add`; write it only with the user's approval.
 
 ## Gate receipts and degraded states
 
@@ -152,6 +138,15 @@ assumption.
 KB tools may return `kb_activity.must_display_to_user=true`. Surface the
 returned `summary` and `why_it_matters` when present. Name material reads and
 the important nodes. For successful writes, report node id, kind, and title.
+
+Successful `latch_search`, `latch_get`, and `latch_recent` results can also
+carry one rare `kb_activity.lifecycle_notice`. The read result is built and
+checked for JSON serialization before the exact receipt or suggestion is
+claimed on a separate writer connection. Empty results, error results, failed
+claims, and `latch_project_direction` do not consume notices. This is
+claim-after-attach rather than a client-display acknowledgement: a transport
+failure after the tool returns remains an unavoidable narrow replay gap until
+the MCP protocol exposes an acknowledgement boundary.
 
 Tool payload correctness does not prove that the human-facing response was
 compliant. Foreground receipt tests must inspect the response surface too.

@@ -25,7 +25,7 @@ conversation. Historical transcript discovery is outside this proof.
   **Latch gate** block before file edits.
 - A mutation attempted before that receipt is denied; the same mutation can
   reach Cursor's normal permission flow after an exact-request gate receipt.
-- `/latch-compact` resolves the exact current SessionStart conversation and
+- `/latch-compact` resolves the exact current SessionStart marker and
   transcript, writes a rolling summary, and reports `current_session_only`.
 
 ## Install in the target project
@@ -54,9 +54,10 @@ compatibility backend instead of native Cursor.
 
 A one-time latch wiring repair after an engine upgrade may legitimately update
 `.cursor/mcp.json`. Cursor can revoke the workspace toggle when that file
-changes. When the SessionStart brief reports a repair, re-enable **latch** in
-**Cursor Settings > Tools & MCP**, reconfirm it reports **tools enabled**, and start a
-fresh Agent chat. A second task must not rewrite current wiring.
+changes. When the installer, doctor, or Latch activity reports a repair,
+re-enable **latch** in **Cursor Settings > Tools & MCP**, reconfirm it reports
+**tools enabled**, and start a fresh Agent chat. A second task must not rewrite
+current wiring.
 
 Expected files in the target project:
 
@@ -96,10 +97,10 @@ host-appropriate shell wrappers.
 ## Seed a proof target
 
 From the hooked Cursor conversation, run `/latch-seed`. It must preview the
-exact current transcript before any write. Copy the exact session id surfaced
-in the current prompt context by `beforeSubmitPrompt` (the same id originally
-recorded by SessionStart). Confirm that the preview tool completed successfully and
-returned JSON; a preToolUse authorization alone must not arm apply. After
+exact current transcript before any write. Copy the exact session id shown in
+the current prompt context by `beforeSubmitPrompt` (the same id recorded
+silently by SessionStart). Confirm that the preview tool completed successfully
+and returned JSON; a preToolUse authorization alone must not arm apply. After
 approving the preview, reply exactly `/latch-seed apply` before the generated
 command reruns with `--apply --yes`. The equivalent preview is:
 
@@ -197,7 +198,7 @@ operations use an exclusive narrow receipt lane.
 ## Prove current-session compaction
 
 From the same Cursor conversation, run `/latch-compact`. The command delegates
-to the host-appropriate wrapper with the exact SessionStart-surfaced session id
+to the host-appropriate wrapper with the exact prompt-context session id
 and must return JSON containing:
 
 ```json

@@ -274,7 +274,11 @@ def test_run_all_static_and_cli_checks():
         )
         _assert(
             [c.level for c in checks]
-            == [cd.OK, cd.OK, cd.OK, cd.OK, cd.OK, cd.OK, cd.OK, cd.OK, cd.OK, cd.OK, cd.WARN, cd.WARN],
+            == [
+                cd.OK, cd.OK, cd.OK, cd.OK, cd.OK,
+                cd.OK, cd.OK, cd.OK, cd.OK,
+                cd.WARN, cd.WARN,
+            ],
             checks,
         )
     finally:

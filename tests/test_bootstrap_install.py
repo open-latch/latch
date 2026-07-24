@@ -405,11 +405,11 @@ def test_posix_bootstrap_dry_run_has_no_install_side_effect(tmp_path: Path):
         tmp_path=tmp_path,
         origin=origin,
         fake_uv=fake_uv,
-        extra=("--dry-run", "--agents", "codex", "--latch-intensity", "full"),
+        extra=("--dry-run", "--agents", "codex"),
     )
     assert result.returncode == 0, result.stderr
     assert "no writes" in result.stdout
-    assert "quickstart : --agents codex --latch-intensity full" in result.stdout
+    assert "quickstart : --agents codex" in result.stdout
     assert not app.exists()
     assert not Path(env["FAKE_UV_LOG"]).exists()
     assert not Path(env["FAKE_QUICKSTART_LOG"]).exists()
@@ -536,9 +536,6 @@ def test_bootstrap_script_contracts_and_syntax():
     assert "UV_UNMANAGED_INSTALL" in powershell
     assert "LOCALAPPDATA" in shell
     assert "LOCALAPPDATA" in powershell
-    assert "-LatchIntensity cannot be combined" in powershell
-    assert "$LatchIntensity.ToLowerInvariant()" in powershell
-    assert "choose quiet, standard, or full" in powershell
     workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
     assert "one-command-bootstrap-windows:" in workflow
     assert "runs-on: windows-latest" in workflow
@@ -646,29 +643,6 @@ exit /b 43
     def ps_quote(value: str | Path) -> str:
         return "'" + str(value).replace("'", "''") + "'"
 
-    invalid_command = (
-        f"$source = Get-Content -LiteralPath {ps_quote(INSTALL_PS1)} -Raw; "
-        "try { & ([scriptblock]::Create($source)) -LatchIntensity '' -DryRun "
-        "} catch { Write-Host ('CAUGHT=' + $_.Exception.Message) }; "
-        "exit 0"
-    )
-    invalid = run(
-        shell,
-        "-NoProfile",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-Command",
-        invalid_command,
-        cwd=project,
-        env=env,
-    )
-    assert invalid.returncode == 0, invalid.stdout + invalid.stderr
-    assert (
-        "CAUGHT=latch install: unsupported -LatchIntensity ''; "
-        "choose quiet, standard, or full"
-    ) in invalid.stdout
-    assert not Path(env["LOCALAPPDATA"]).exists()
-
     def invoke_powershell(
         *,
         ref: str = "main",
@@ -679,7 +653,6 @@ exit /b 43
         command = (
             f"try {{ & {ps_quote(INSTALL_PS1)} -InstallDir {ps_quote(app)} "
             f"-Project {ps_quote(project_path)} -Ref {ps_quote(ref)} "
-            "-LatchIntensity quiet"
             f"{dry_run_arg} "
             "-QuickstartArgs @('--agents','codex','--no-seed') } "
             "catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }"
@@ -721,8 +694,7 @@ exit /b 43
     assert git(app, "config", "--local", "--get", "latch.installRef") == "main"
     calls = read_json_lines(Path(env["FAKE_QUICKSTART_LOG"]))
     assert calls[0]["argv"] == [
-        "--project", str(project), "--latch-intensity", "quiet",
-        "--agents", "codex", "--no-seed",
+        "--project", str(project), "--agents", "codex", "--no-seed",
     ]
 
     second = invoke_powershell()

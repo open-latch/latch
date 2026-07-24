@@ -28,8 +28,8 @@ def test_cursor_session_fields_and_output_shape(monkeypatch):
     assert css.cursor_session_id({"conversation_id": "conversation"}) == "conversation"
     out = io.StringIO()
     with redirect_stdout(out):
-        css.emit_cursor_context("brief")
-    assert json.loads(out.getvalue()) == {"additional_context": "brief"}
+        css.emit_cursor_context("startup notice")
+    assert json.loads(out.getvalue()) == {"additional_context": "startup notice"}
 
 
 def test_before_submit_reinjects_exact_current_session_id(monkeypatch):

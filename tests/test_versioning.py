@@ -12,7 +12,7 @@ import versioning  # noqa: E402
 def test_three_version_concepts_are_separate_and_valid():
     assert versioning.LATCH_VERSION == "1.0.0"
     assert versioning.KB_SCHEMA_VERSION == 2
-    assert versioning.WIRING_VERSION == 3
+    assert versioning.WIRING_VERSION == 4
     assert versioning.check_tag("v1.0.0")[0]
     assert not versioning.check_tag("v1.0.1")[0]
 
@@ -28,5 +28,5 @@ def test_version_payload_has_support_coordinates():
     data = versioning.payload()
     assert data["latch_version"] == "1.0.0"
     assert data["kb_schema_version"] == 2
-    assert data["wiring_version"] == 3
+    assert data["wiring_version"] == 4
     assert data["install_root"] == str(ROOT)

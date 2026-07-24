@@ -138,8 +138,8 @@ Windows PowerShell:
 irm https://raw.githubusercontent.com/open-latch/latch/main/install.ps1 | iex
 ```
 
-That's the install. The quickstart wires your agent, asks how proactive latch should be, and then
-prompts you to seed. **Restart the agent** afterward so its tools and hooks load.
+That's the install. The quickstart wires your agent and then prompts you to
+seed. **Restart the agent** afterward so its tools and hooks load.
 
 **Then seed — this is the real first step, not an optional demo.** An empty KB catches nothing;
 seeding is what lets latch gate the decisions already in *your* history. Point it at your recent
@@ -156,7 +156,7 @@ those exact source revisions without creating KB nodes. For a cached
 digest-bound review, repeat the preview's exact `--source` (and workstream
 flags) alongside `--preview-digest DIGEST --apply --dismiss-all`.
 The full walkthrough and source options are in [See it catch](#see-it-catch-seed-then-gate); to read
-the installer first, pin a release, pick an intensity tier, or install to a custom directory, see
+the installer first, pin a release, or install to a custom directory, see
 [Install details](#install-details).
 
 ## Using latch in more than one repo
@@ -224,7 +224,7 @@ The guided quickstart wires whichever you choose.
 | Agent | What latch installs | Boundary |
 | --- | --- | --- |
 | Claude Code | MCP tools, hooks, slash commands, `/latch-compact`, managed `CLAUDE.md` contract | Restart after install so tools and hooks load |
-| Codex | Shared MCP tools + KB, user skills, `AGENTS.md`, SessionStart hook, Codex backend defaults | Start a new task after install; compaction is manual |
+| Codex | Shared MCP tools + KB, user skills, `AGENTS.md`, silent startup hook, Codex backend defaults | Start a new task after install; compaction is manual |
 | Cursor | Project MCP, Rule, commands, skills, `AGENTS.md`; optional session/gate/activity hooks | Current-session seed/compact only; no historical transcript discovery |
 | Multiple agents | One shared local latch KB | A decision captured through one agent can gate the others |
 
@@ -257,12 +257,14 @@ never uploads your KB. Data leaves your machine only when you run a model-backed
 compaction, or the nightly heal pass — which may send selected prompts, snippets, and evidence to the
 Claude, Codex, or Cursor backend *you* configured.
 
-**Overhead.** The per-prompt retrieval hook runs locally against the KB — roughly 120–150 ms on an
-Apple Silicon reference machine, inside a 250 ms budget — and injects a bounded, tier-controlled slice
-of context (0 / 1,712 / 3,056 characters for Quiet / Standard / Full in the frozen `intensity_v1`
-fixture). Freshening a plan uses a surgical append (~34 tokens) rather than a full-body rewrite
-(~9,900 tokens). The gate itself is a model call, so it runs only on write-shaped changes, not on
-every prompt. Reproduce with `tests/measure_hook_latency.py` and `tests/measure_write_path.py`.
+**Overhead.** The per-prompt retrieval hook runs locally against the KB —
+roughly 120–150 ms on an Apple Silicon reference machine, inside a 250 ms
+budget — and injects at most five compact KB pointers. A healthy session start
+injects no standing project brief. Freshening a plan uses a surgical append
+(~34 tokens) rather than a full-body rewrite (~9,900 tokens). The gate itself
+is a model call, so it runs only on write-shaped changes, not on every prompt.
+Reproduce with `tests/measure_hook_latency.py` and
+`tests/measure_write_path.py`.
 
 **What it costs.** latch has no account or API key of its own — model-backed steps run through the
 Claude, Codex, or Cursor CLI you already use, drawing on your existing subscription rather than a
@@ -335,7 +337,7 @@ with two small deterministic fixture suites:
 | Evidence | Result | Meaning |
 | --- | ---: | --- |
 | Live pre-edit gate | `DO_NOT_PROCEED` | Cited a canonical rejected path; worktree unchanged |
-| Decision-evidence fixture | `latch_full` 8/8; `memory_like` 4/8 | Small internal ablation, not a third-party benchmark |
+| Decision-evidence fixture | `latch_evidence` 8/8; `memory_like` 4/8 | Small internal ablation, not a third-party benchmark |
 | Seed-report fixture | 16/16 | Deterministic capture/filtering checks; zero model calls |
 
 Regenerate them:
@@ -347,21 +349,22 @@ bash bin/latch_proof_packet.sh --check
 ```
 
 Read the `memory_like` row as an internal active-search-only ablation, not a benchmark of any
-third-party product. The `latch_full` row is a gate-retrieval mode, **not** the Full intensity tier —
-don't read it as a Quiet/Standard/Full comparison or a rebuild-savings claim. Details in
-[benchmarks/README.md](./benchmarks/README.md).
+third-party product. The `latch_evidence` label is a gate-evidence benchmark capability, not a
+user-facing setting; don't read it as a retrieval-policy comparison or a rebuild-savings claim.
+Details in [benchmarks/README.md](./benchmarks/README.md).
 
 ## Install details
 
 **What the installer does.** The bootstrap preserves your project path and installs a private,
 isolated [`uv`](https://docs.astral.sh/uv/) + Python 3.11 runtime — it does not touch your shell
-profile or require a system Python. It asks which agent surfaces to wire, asks how proactively latch
-should surface judgment, runs their doctor checks, and offers a bounded initial-KB review: selected
-transcripts are listed and redacted before any model call, and nothing is written until you approve
-it. Rerunning the command repairs and reconciles the existing install while keeping its current
-Latch source revision; it never silently switches to a newer release or commit. One installation
-serves many repos; `--install-dir PATH` (PowerShell `-InstallDir PATH`) picks an
-alternate location. Install internals and per-surface manual setup live in
+profile or require a system Python. It asks which agent surfaces to wire, runs
+their doctor checks, and offers a bounded initial-KB review: selected transcripts
+are listed and redacted before any model call, and nothing is written until you
+approve it. Rerunning the command repairs and reconciles the existing install
+while keeping its current Latch source revision; it never silently switches to
+a newer release or commit. One installation serves many repos; `--install-dir
+PATH` (PowerShell `-InstallDir PATH`) picks an alternate location. Install
+internals and per-surface manual setup live in
 [ARCHITECTURE.md](./ARCHITECTURE.md).
 
 To stay current, periodically check for a newer tagged release using the explicit update commands in
@@ -385,86 +388,22 @@ curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/open-lat
 & ([scriptblock]::Create((irm https://raw.githubusercontent.com/open-latch/latch/vX.Y.Z/install.ps1))) -Ref vX.Y.Z
 ```
 
-### Choose Latch intensity
+### Automatic retrieval and catch-up
 
-Quickstart also asks, **“How proactively should Latch surface project
-judgment?”** The choice is install-wide: it applies to every project and host
-using that Latch installation.
+Latch uses one automatic retrieval policy. On hosts with a prompt hook, each
+eligible prompt gets bounded local similarity retrieval, including same-topic
+follow-ups, with visible hit, no-hit, and degraded-runtime receipts. Those
+pointers are teasers; the managed agent contract still requires the agent to
+fetch authoritative nodes before relying on them.
 
-| Level | Automatic surfacing | Honest tradeoff |
-| --- | --- | --- |
-| Quiet | Up to 1 workstream and 1 open question at startup; no hook-added similarity hits | Lowest ambient context; contract-driven Latch reads and the gate still surface prior judgment |
-| Standard | Lightweight local topic-similarity check on each eligible prompt; injects up to 3 KB hits only on the first prompt or a topic change; startup brief up to 3 workstreams, 2 questions, and 2 ideas | Fresh-install default; gives up same-topic injection, 2 hit slots, Full no-hit receipts, Full guideline nudges, and the broader brief |
-| **Full — best protection** | Up to 5 KB hits on every eligible prompt, including same-topic follow-ups; startup brief up to 5 workstreams, 3 questions, and 5 ideas; explicit no-hit receipts and standing-guideline capture nudges | Uses the most prompt context; recommended for long-lived, multi-agent, handoff-heavy, or costly-to-rebuild projects |
-
-Every tier keeps the static managed project contract, including its live Latch
-read before each response, plus correction reminders where a prompt hook
-supports them. Intensity controls hook-added briefs and prompt context—not
-whether the agent can or should query Latch. The same gate check and
-configuration run when invoked. That does **not** promise identical evidence,
-catches, or outcomes: automatic context and project state can differ between
-runs.
-
-Host capabilities bound what intensity can change:
-
-| Host | Intensity-controlled runtime surface |
-| --- | --- |
-| Claude Code | Startup brief and similarity-based prompt surfacing |
-| Codex | Startup brief; Codex has no similarity-based prompt hook |
-| Cursor with hooks | Startup brief; the mechanical pre-edit gate remains enabled |
-| Cursor without hooks | No current intensity-controlled runtime surface; managed guidance remains unchanged |
-
-Quickstart and the installers default a genuinely fresh install to Standard and
-save that choice in `latch_settings.json`. During quickstart, a settings-less
-install with existing KB evidence is treated as an older install and its
-previously shipped Full behavior is saved. A manually wired, settings-less
-runtime does not inspect KB evidence; it resolves to legacy Full.
-
-At ordinary runtime, `LATCH_INTENSITY` is a process-scoped override and does not
-edit the saved choice. If a valid `LATCH_INTENSITY` is present while quickstart
-runs, however, quickstart treats it as an explicit installation choice and
-persists it install-wide on apply. Unset it before quickstart if the override
-was only a temporary experiment. You can choose Full non-interactively:
-
-```bash
-bash install.sh --agents both --latch-intensity full
-```
-
-```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/open-latch/latch/main/install.ps1))) -LatchIntensity full
-```
-
-Retier the whole installation later without reinstalling:
-
-```bash
-/path/to/latch/bin/latch_intensity.sh full
-# Windows: & C:\path\to\latch\bin\latch_intensity.ps1 full
-```
-
-Latch does not yet claim a universal percentage, time, or dollar reduction in
-rebuild work. In the frozen `intensity_v1` policy fixture, the expected
-guardrail reference is present in ambient hook context for `0/5` Quiet, `2/5`
-Standard, and `5/5` Full constructed opportunities. Hook-emitted context across
-the seven synthetic prompt events is `0`, `1,712`, and `3,056` characters. That
-count excludes startup briefs, the static contract, explicit tool-call context,
-correction/profile nudges, latency, and actual reconstruction work. Authored
-scores and relative risk weights make the result true by construction: it is a
-policy regression contract, not a retrieval-quality benchmark, observed
-developer savings, or proof that the agent noticed or used the reference.
-Read the checked-in
-[`intensity_v1` receipt](./benchmarks/results/intensity_v1_receipt.json) or
-regenerate that exact portable artifact atomically with:
-
-```bash
-bash bin/latch_intensity_eval.sh --write-receipt
-# Windows: .\bin\latch_intensity_eval.ps1 --write-receipt
-```
-
-The existing decision-evidence benchmark separately tests whether gate
-retrieval finds the right rejected paths and rationale. Intensity is recorded
-in local structural prompt, gate, correction, reconciliation, and gate-outcome
-events so future multi-turn evals can replace proxy weights with observed,
-scenario-bounded rebuild outcomes.
+Healthy session starts inject no standing project brief. When the user asks
+“where were we?”, “catch me up”, or “what should I pick up next?”, the agent
+combines the bounded project-direction report with three recent progress rows,
+then drills into the foreground node.
+Codex and Cursor do not currently expose the similarity prompt hook, so their
+automatic contract-driven reads and gates remain the active retrieval surface.
+Use the advanced disable or unlatch controls when you genuinely need to turn
+Latch off.
 
 ## Versions and platform
 

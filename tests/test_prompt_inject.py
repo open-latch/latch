@@ -118,7 +118,7 @@ def test_active_set_dedupe():
                     body="another note about alpha")
         sid = "sess-dedup"
         _set_turn(conn, sid, 0)
-        # Pretend node_a was already injected at session start.
+        # Preserve de-duplication for a legacy session_start retrieval row.
         db.record_retrievals(
             conn, session_id=sid, turn=0,
             items=[(nid_a, None)], source="session_start",

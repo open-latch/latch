@@ -19,6 +19,8 @@ import json
 import shutil
 import sys
 import tempfile
+import threading
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
@@ -261,6 +263,242 @@ def test_kb_get_returns_activity_hint():
         _cleanup(tmp, conn)
 
 
+def _seed_pending_lifecycle_receipt(conn, *, op_key: str, receipt: str) -> None:
+    db.begin_workstream_op_nc(
+        conn,
+        op_key=op_key,
+        candidate_key=f"candidate:{op_key}",
+        op="OPEN",
+        origin="manual",
+        payload={
+            "assigned_member_ids": [],
+            "watch_pair": None,
+            "probation": {},
+            "receipt": receipt,
+        },
+    )
+    db.finish_workstream_op_nc(conn, op_key, state="applied")
+    conn.commit()
+
+
+def test_successful_kb_read_attaches_then_claims_lifecycle_notice():
+    tmp, conn = _fresh_db()
+    try:
+        node_id = db.insert_node(
+            conn,
+            kind="decision",
+            title="Foreground lifecycle carrier",
+            body="Carry one rare notice.",
+        )
+        receipt = 'latch opened workstream "Foreground lifecycle lane".'
+        _seed_pending_lifecycle_receipt(
+            conn,
+            op_key="open:foreground-lifecycle",
+            receipt=receipt,
+        )
+        original_cwd = mcp_server.PROJECT_CWD
+        original_conn = mcp_server._conn
+        mcp_server.PROJECT_CWD = tmp
+        mcp_server._conn = lambda: db.connect(tmp)
+        try:
+            result = mcp_server.kb_get(node_id, include_neighbors=False)
+            repeated = mcp_server.kb_get(node_id, include_neighbors=False)
+        finally:
+            mcp_server._conn = original_conn
+            mcp_server.PROJECT_CWD = original_cwd
+
+        activity = result["kb_activity"]
+        _assert(activity["lifecycle_notice"]["surface_kind"] == "receipt", activity)
+        _assert(activity["lifecycle_notice"]["text"] == receipt, activity)
+        _assert(receipt in activity["summary"], activity)
+        _assert(
+            "lifecycle_notice" not in repeated["kb_activity"],
+            repeated["kb_activity"],
+        )
+        surfaced = conn.execute(
+            "SELECT COUNT(*) FROM workstream_op_events "
+            "WHERE op_key='open:foreground-lifecycle' "
+            "AND event_type='receipt_surfaced'"
+        ).fetchone()[0]
+        _assert(surfaced == 1, f"expected one exact claim, got {surfaced}")
+        print("PASS successful_kb_read_attaches_then_claims_lifecycle_notice")
+    finally:
+        _cleanup(tmp, conn)
+
+
+def test_oversized_lifecycle_receipt_is_bounded_before_claim():
+    tmp, conn = _fresh_db()
+    try:
+        node_id = db.insert_node(
+            conn,
+            kind="decision",
+            title="Bounded lifecycle carrier",
+            body="Carry a bounded notice.",
+        )
+        _seed_pending_lifecycle_receipt(
+            conn,
+            op_key="open:oversized-lifecycle",
+            receipt="r" * (mcp_server.SAFETY_NET_BYTES + 10_000),
+        )
+        original_cwd = mcp_server.PROJECT_CWD
+        original_conn = mcp_server._conn
+        mcp_server.PROJECT_CWD = tmp
+        mcp_server._conn = lambda: db.connect(tmp)
+        try:
+            result = mcp_server.kb_get(node_id, include_neighbors=False)
+        finally:
+            mcp_server._conn = original_conn
+            mcp_server.PROJECT_CWD = original_cwd
+
+        notice = result["kb_activity"]["lifecycle_notice"]
+        _assert(
+            len(notice["text"]) <= mcp_server.LIFECYCLE_NOTICE_TEXT_CHARS,
+            notice,
+        )
+        _assert(
+            len(json.dumps(result, default=str).encode("utf-8"))
+            <= mcp_server.SAFETY_NET_BYTES,
+            "bounded lifecycle notice exceeded the compact response ceiling",
+        )
+        surfaced = conn.execute(
+            "SELECT COUNT(*) FROM workstream_op_events "
+            "WHERE op_key='open:oversized-lifecycle' "
+            "AND event_type='receipt_surfaced'"
+        ).fetchone()[0]
+        _assert(surfaced == 1, "deliverable bounded notice was not claimed")
+    finally:
+        _cleanup(tmp, conn)
+
+
+def test_oversized_base_read_does_not_claim_lifecycle_notice():
+    tmp, conn = _fresh_db()
+    try:
+        node_id = db.insert_node(
+            conn,
+            kind="decision",
+            title="Oversized authority node",
+            body="b" * (mcp_server.SAFETY_NET_BYTES + 10_000),
+        )
+        _seed_pending_lifecycle_receipt(
+            conn,
+            op_key="open:pending-after-oversized-read",
+            receipt='latch opened workstream "Still pending after large read".',
+        )
+        original_cwd = mcp_server.PROJECT_CWD
+        original_conn = mcp_server._conn
+        mcp_server.PROJECT_CWD = tmp
+        mcp_server._conn = lambda: db.connect(tmp)
+        try:
+            result = mcp_server.kb_get(node_id, include_neighbors=False)
+        finally:
+            mcp_server._conn = original_conn
+            mcp_server.PROJECT_CWD = original_cwd
+
+        _assert(
+            "lifecycle_notice" not in result["kb_activity"],
+            result["kb_activity"],
+        )
+        surfaced = conn.execute(
+            "SELECT COUNT(*) FROM workstream_op_events "
+            "WHERE op_key='open:pending-after-oversized-read' "
+            "AND event_type='receipt_surfaced'"
+        ).fetchone()[0]
+        _assert(surfaced == 0, "undeliverable notice was claimed")
+    finally:
+        _cleanup(tmp, conn)
+
+
+def test_error_and_project_direction_reads_do_not_claim_lifecycle_notice():
+    tmp, conn = _fresh_db()
+    try:
+        receipt = 'latch opened workstream "Still pending lane".'
+        _seed_pending_lifecycle_receipt(
+            conn,
+            op_key="open:still-pending",
+            receipt=receipt,
+        )
+        original_cwd = mcp_server.PROJECT_CWD
+        original_conn = mcp_server._conn
+        mcp_server.PROJECT_CWD = tmp
+        mcp_server._conn = lambda: db.connect(tmp)
+        try:
+            missing = mcp_server.kb_get(999_999, include_neighbors=False)
+            direction = mcp_server.kb_project_direction(compact=True)
+        finally:
+            mcp_server._conn = original_conn
+            mcp_server.PROJECT_CWD = original_cwd
+
+        _assert("error" in missing, missing)
+        _assert("lifecycle_notice" not in direction["kb_activity"], direction)
+        surfaced = conn.execute(
+            "SELECT COUNT(*) FROM workstream_op_events "
+            "WHERE op_key='open:still-pending' "
+            "AND event_type='receipt_surfaced'"
+        ).fetchone()[0]
+        _assert(surfaced == 0, "non-carrier read claimed a lifecycle notice")
+        print("PASS error_and_project_direction_reads_do_not_claim_lifecycle_notice")
+    finally:
+        _cleanup(tmp, conn)
+
+
+def test_contended_lifecycle_claim_keeps_read_fast_and_notice_pending():
+    tmp, conn = _fresh_db()
+    try:
+        node_id = db.insert_node(
+            conn,
+            kind="fact",
+            title="Claim failure carrier",
+            body="The ordinary read still succeeds.",
+        )
+        _seed_pending_lifecycle_receipt(
+            conn,
+            op_key="open:claim-failure",
+            receipt='latch opened workstream "Claim failure lane".',
+        )
+        original_cwd = mcp_server.PROJECT_CWD
+        original_conn = mcp_server._conn
+        mcp_server.PROJECT_CWD = tmp
+        mcp_server._conn = lambda: db.connect(tmp)
+        ready = threading.Event()
+        release = threading.Event()
+        holder_errors: list[Exception] = []
+
+        def hold_writer_lock():
+            try:
+                with mcp_server.lockfile.writer_lock(tmp, timeout_s=0.5):
+                    ready.set()
+                    release.wait(timeout=5)
+            except Exception as exc:
+                holder_errors.append(exc)
+                ready.set()
+
+        holder = threading.Thread(target=hold_writer_lock, daemon=True)
+        holder.start()
+        try:
+            _assert(ready.wait(timeout=2), "writer-lock holder did not start")
+            started = time.perf_counter()
+            result = mcp_server.kb_get(node_id, include_neighbors=False)
+            elapsed = time.perf_counter() - started
+        finally:
+            release.set()
+            holder.join(timeout=2)
+            mcp_server._conn = original_conn
+            mcp_server.PROJECT_CWD = original_cwd
+
+        _assert(not holder_errors, holder_errors)
+        _assert(elapsed < 1.0, f"ordinary read stalled for {elapsed:.3f}s")
+        _assert("lifecycle_notice" not in result["kb_activity"], result)
+        surfaced = conn.execute(
+            "SELECT COUNT(*) FROM workstream_op_events "
+            "WHERE op_key='open:claim-failure' "
+            "AND event_type='receipt_surfaced'"
+        ).fetchone()[0]
+        _assert(surfaced == 0, "contended claim was recorded as surfaced")
+        print("PASS contended_lifecycle_claim_keeps_read_fast_and_notice_pending")
+    finally:
+        _cleanup(tmp, conn)
+
+
 # ---------- mcp_server._apply_safety_net ----------
 
 def test_safety_net_does_not_trigger_under_threshold():
@@ -463,6 +701,11 @@ if __name__ == "__main__":
     # KB activity
     test_kb_activity_contract_is_foreground_safe()
     test_kb_get_returns_activity_hint()
+    test_successful_kb_read_attaches_then_claims_lifecycle_notice()
+    test_oversized_lifecycle_receipt_is_bounded_before_claim()
+    test_oversized_base_read_does_not_claim_lifecycle_notice()
+    test_error_and_project_direction_reads_do_not_claim_lifecycle_notice()
+    test_contended_lifecycle_claim_keeps_read_fast_and_notice_pending()
     # safety net
     test_safety_net_does_not_trigger_under_threshold()
     test_safety_net_triggers_above_threshold_and_truncates()

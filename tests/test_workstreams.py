@@ -1207,9 +1207,15 @@ def test_applied_receipts_surface_once(kb):
     result = _open(project, conn, op_key="open:receipt", title="Receipt lane")
     pending = lifecycle_receipts.pending_receipts(conn)
     assert any(item["op_key"] == "open:receipt" for item in pending)
-    surfaced = lifecycle_receipts.surface_pending(conn, session_id="surface")
-    assert result["receipt"] in surfaced
-    assert lifecycle_receipts.surface_pending(conn, session_id="surface") == []
+    item = lifecycle_receipts.pending_surface_items(conn, limit=1)[0]
+    claimed = lifecycle_receipts.claim_pending_surface_item(
+        conn,
+        item,
+        session_id="surface",
+    )
+    assert claimed["created"] is True
+    assert item["text"] == result["receipt"]
+    assert lifecycle_receipts.pending_surface_items(conn, limit=1) == []
 
 
 def _merge_fixture(project, conn):

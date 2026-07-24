@@ -405,10 +405,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                     help="Codex home directory for transcript discovery")
     ap.add_argument("--cursor-transcript", action="append", default=[], metavar="PATH",
                     help=("explicit Cursor transcript path (repeatable). Without this, "
-                          "--source cursor uses only the current SessionStart marker; "
+                          "--source cursor uses only the current-session marker; "
                           "latch never scans Cursor history storage"))
     ap.add_argument("--cursor-session-id",
-                    help=("exact current Cursor session id surfaced by SessionStart; "
+                    help=("exact current Cursor session id shown in prompt context; "
                           "required for marker-based --source cursor"))
     ap.add_argument("--preview-digest",
                     help=("exact digest returned by a seed preview; required for "

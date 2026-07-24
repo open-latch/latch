@@ -101,10 +101,8 @@ def backup_database(
 
 
 def stamp_current(conn: sqlite3.Connection, *, record_migration: bool) -> None:
-    # Reopening a current KB is a read operation.  In particular, SessionStart
-    # hooks may be allowed to read an externally pinned vault without being
-    # allowed to mutate it.  Avoid issuing even an idempotent UPSERT in the
-    # overwhelmingly common already-current case.
+    # Avoid an idempotent UPSERT in the overwhelmingly common already-current
+    # case, preserving genuinely read-only diagnostic connections.
     if not record_migration and read(conn) == KB_SCHEMA_VERSION:
         return
 

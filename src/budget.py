@@ -73,11 +73,8 @@ def _state_path(project_path: str | None) -> Path:
 
 
 def _state_lock(project_path: str | None) -> FileLock:
-    # Import filelock lazily so `import budget` stays stdlib-only: the Cursor
-    # SessionStart hook imports this module (for brief_line) under a bare
-    # stdlib interpreter with no third-party deps, and only the mutation paths
-    # that actually acquire the lock run under the managed venv where filelock
-    # is installed. (cursor-hook-contract enforces the stdlib-only boundary.)
+    # Read-only budget status does not need this dependency. Mutation paths
+    # acquire the lock under the managed runtime.
     from filelock import FileLock
 
     state_path = _state_path(project_path)
@@ -283,51 +280,6 @@ def status(
             "remaining": None if approved else max(0, cap - count),
         }
     return out
-
-
-def brief_line(
-    project_path: str | None,
-    *,
-    nonheal_cap: int = DEFAULT_NONHEAL_DAILY_CAP,
-    heal_cap: int = DEFAULT_HEAL_DAILY_CAP,
-) -> str | None:
-    """One-line session-brief summary. Quiet when both categories are comfortably
-    under cap. Surfaces whichever category(ies) are >=75% or at cap; if both
-    are loud, both are surfaced in one line."""
-    s = status(project_path, nonheal_cap=nonheal_cap, heal_cap=heal_cap)
-    if s["approved_today"]:
-        return (
-            f"Budget: manually approved for today "
-            f"(non-heal {s['nonheal']['count']}, heal {s['heal']['count']})."
-        )
-
-    def _is_at_cap(c: dict) -> bool:
-        return c["remaining"] == 0
-
-    def _is_near_cap(c: dict, cap: int) -> bool:
-        return c["count"] >= int(cap * 0.75)
-
-    nh_at = _is_at_cap(s["nonheal"])
-    h_at = _is_at_cap(s["heal"])
-    nh_near = _is_near_cap(s["nonheal"], nonheal_cap)
-    h_near = _is_near_cap(s["heal"], heal_cap)
-
-    if not (nh_near or h_near):
-        return None
-
-    parts: list[str] = []
-    if nh_near:
-        parts.append(f"{s['nonheal']['count']}/{nonheal_cap} non-heal")
-    if h_near:
-        parts.append(f"{s['heal']['count']}/{heal_cap} heal")
-    body = ", ".join(parts)
-
-    if nh_at or h_at:
-        return (
-            f"Budget: {body} used today — auto-compact is paused. "
-            f"Run `/latch-budget-approve` to unlock the rest of today."
-        )
-    return f"Budget: {body} used today."
 
 
 if __name__ == "__main__":

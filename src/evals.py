@@ -25,14 +25,14 @@ import search
 
 DEFAULT_FIXTURE = paths.KB_ROOT / "benchmarks" / "fixtures" / "wedge_v1.jsonl"
 DEFAULT_MODES = (
-    "latch_full",
+    "latch_evidence",
     "active_seed_graph",
     "stale_search",
     "memory_like",
 )
 MODE_DESCRIPTIONS = {
-    "latch_full": (
-        "full latch evidence assembly: stale-aware hybrid seeds plus graph "
+    "latch_evidence": (
+        "latch evidence assembly: stale-aware hybrid seeds plus graph "
         "traversal over decision relations"
     ),
     "active_seed_graph": (
@@ -218,7 +218,7 @@ def _run_mode(
     seed_top_k: int,
     max_hops: int,
 ) -> tuple[set[int], list[str], list[str]]:
-    if mode == "latch_full":
+    if mode == "latch_evidence":
         assembly = gate.assemble_gate(
             conn,
             query,
@@ -432,8 +432,8 @@ def _summarize(
     }
     comparisons = _mode_comparisons(case_results, modes)
     latch_wins = 0
-    if "latch_full" in modes and "memory_like" in modes:
-        latch_wins = comparisons["latch_full_vs_memory_like"]["primary_only_wins"]
+    if "latch_evidence" in modes and "memory_like" in modes:
+        latch_wins = comparisons["latch_evidence_vs_memory_like"]["primary_only_wins"]
     return {
         "ok": passed == total,
         "thesis": WEDGE_THESIS,
@@ -675,7 +675,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         choices=tuple(MODE_DESCRIPTIONS),
         default=None,
         help=(
-            "Evaluation mode to run. Defaults to latch_full plus memory_like. "
+            "Evaluation mode to run. Defaults to latch_evidence plus memory_like. "
             "May be passed more than once; the first mode is the pass/fail gate."
         ),
     )

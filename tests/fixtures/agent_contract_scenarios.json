@@ -10,6 +10,13 @@
       "expected": ["live search or recent call", "full node fetch before reliance", "visible activity summary"]
     },
     {
+      "id": "catch_up_direction",
+      "tier": "live_host",
+      "hosts": ["claude", "codex", "cursor"],
+      "stimulus": "Ask where the project left off or what should be picked up next.",
+      "expected": ["compact project direction is the initial live read", "small progress chronology remains raw evidence", "foregrounded item is fetched authoritatively with latch_get"]
+    },
+    {
       "id": "honest_no_evidence",
       "tier": "live_host",
       "hosts": ["claude", "codex", "cursor"],
@@ -90,7 +97,7 @@
       "id": "cursor_mcp_recovery",
       "tier": "live_host",
       "hosts": ["cursor"],
-      "stimulus": "Open a Cursor Agent task with a Latch session brief but no Latch tools in the IDE catalog.",
+      "stimulus": "Open a Cursor Agent task with the managed Latch contract but no Latch tools in the IDE catalog.",
       "expected": ["open workspace Tools & MCP", "enable latch", "confirm tools enabled without assuming an exact count", "start a fresh Agent chat"]
     },
     {

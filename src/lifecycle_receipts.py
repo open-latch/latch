@@ -1,8 +1,9 @@
 """Approved user-facing receipts for deterministic workstream lifecycle ops.
 
-The operation ledger is authoritative.  ``workstream_op_events`` records the
-one-way "surfaced" flip, which keeps an applied receipt visible on the next
-SessionStart even if the process died between commit and display.
+The operation ledger is authoritative. ``workstream_op_events`` records the
+one-way ``surfaced`` flip after a visible tool result has been prepared. The
+read and exact-claim helpers below let MCP read tools attach a bounded notice
+before consuming it.
 """
 from __future__ import annotations
 
@@ -19,7 +20,7 @@ import log_utils  # noqa: E402
 
 
 # The founder sign-off recorded with the chunk-2 unblock enables the approved
-# strings below on all SessionStart hosts, including Quiet (bounded to one).
+# strings below on visible foreground tool surfaces (bounded to one per read).
 RECEIPTS_CHANNEL_LIVE = True
 
 
@@ -203,71 +204,150 @@ def recent_receipts(conn: sqlite3.Connection, *, limit: int = 10) -> list[dict]:
     return out
 
 
-def surface_pending_suggestions(
+def pending_suggestions(
     conn: sqlite3.Connection,
     *,
-    session_id: str | None = None,
     limit: int = 1,
-) -> list[str]:
-    """Surface each stable live candidate at most once, including on Quiet.
+) -> list[dict]:
+    """Read qualified, unsurfaced suggestions without claiming them."""
+    latest = db.latest_workstream_derivation(conn)
+    if latest is None:
+        return []
+    rows = conn.execute(
+        "SELECT c.candidate_key, c.op, c.signal_json "
+        "FROM workstream_derivation_candidates c "
+        "WHERE c.derivation_id=? "
+        "AND NOT EXISTS ("
+        "  SELECT 1 FROM workstream_op_events e "
+        "  WHERE e.candidate_key=c.candidate_key "
+        "    AND e.event_type='suggestion_surfaced'"
+        ") "
+        "AND NOT EXISTS ("
+        "  SELECT 1 FROM workstream_ops o "
+        "  WHERE o.candidate_key=c.candidate_key AND o.state='applied'"
+        ") ORDER BY c.rank, c.candidate_key LIMIT ?",
+        (int(latest["id"]), max(20, int(limit) * 4)),
+    ).fetchall()
+    out: list[dict] = []
+    for row in rows:
+        try:
+            signal = json.loads(row["signal_json"])
+        except (TypeError, json.JSONDecodeError):
+            signal = {}
+        if not isinstance(signal, dict) or not bool(signal.get("qualified")):
+            continue
+        out.append({
+            "surface_kind": "suggestion",
+            "candidate_key": str(row["candidate_key"]),
+            "derivation_key": str(latest["derivation_key"]),
+            "op": str(row["op"]).upper(),
+            "text": _candidate_suggestion(conn, str(row["op"]), signal),
+        })
+        if len(out) >= max(1, int(limit)):
+            break
+    return out
 
-    Suggestions are statements, never approval prompts.  They do not create an
-    operation row or mutate any workstream; the event only proves that the
-    trust ladder has a viable user-facing channel.
+
+def pending_surface_items(
+    conn: sqlite3.Connection,
+    *,
+    limit: int = 1,
+) -> list[dict]:
+    """Read a bounded delivery queue without mutating its surfaced state.
+
+    Applied-operation receipts take precedence over trust-ladder suggestions.
+    Callers must not treat these rows as claimed; use
+    :func:`claim_pending_surface_item` only after the notice has been attached
+    to the result that will carry it.
     """
-    suggestions: list[tuple[str, str]] = []
+    bounded = max(1, int(limit))
+    receipts = [
+        {
+            **item,
+            "surface_kind": "receipt",
+            "text": item["receipt"],
+        }
+        for item in pending_receipts(conn, limit=bounded)
+    ]
+    if len(receipts) >= bounded:
+        return receipts[:bounded]
+    suggestions = pending_suggestions(conn, limit=bounded - len(receipts))
+    return [*receipts, *suggestions][:bounded]
+
+
+def claim_pending_surface_item(
+    conn: sqlite3.Connection,
+    item: dict,
+    *,
+    session_id: str | None = None,
+) -> dict:
+    """Atomically claim one exact item selected by ``pending_surface_items``.
+
+    A false or stale claim returns ``created=False`` (or raises on malformed
+    input), allowing the caller to remove the prepared notice before returning
+    its result. This is deliberately separate from selection so a read tool can
+    first build and serialize its visible ``kb_activity`` carrier.
+    """
+    surface_kind = str(item.get("surface_kind") or "")
     _begin_surface_claims(conn)
     try:
-        latest = db.latest_workstream_derivation(conn)
-        if latest is None:
-            conn.commit()
-            return []
-        rows = conn.execute(
-            "SELECT c.candidate_key, c.op, c.signal_json "
-            "FROM workstream_derivation_candidates c "
-            "WHERE c.derivation_id=? "
-            "AND NOT EXISTS ("
-            "  SELECT 1 FROM workstream_op_events e "
-            "  WHERE e.candidate_key=c.candidate_key "
-            "    AND e.event_type='suggestion_surfaced'"
-            ") "
-            "AND NOT EXISTS ("
-            "  SELECT 1 FROM workstream_ops o "
-            "  WHERE o.candidate_key=c.candidate_key AND o.state='applied'"
-            ") ORDER BY c.rank, c.candidate_key LIMIT ?",
-            (int(latest["id"]), max(20, int(limit) * 4)),
-        ).fetchall()
-        for row in rows:
-            try:
-                signal = json.loads(row["signal_json"])
-            except (TypeError, json.JSONDecodeError):
-                signal = {}
-            if not isinstance(signal, dict):
-                signal = {}
-            if not bool(signal.get("qualified")):
-                continue
-            candidate_key = str(row["candidate_key"])
-            suggestion = _candidate_suggestion(conn, str(row["op"]), signal)
-            claimed = db.append_workstream_op_event_nc(
+        if surface_kind == "receipt":
+            op_key = str(item.get("op_key") or "")
+            existing = conn.execute(
+                "SELECT candidate_key, op_key, event_type "
+                "FROM workstream_op_events WHERE event_key=?",
+                (f"receipt:{op_key}",),
+            ).fetchone()
+            if existing is not None:
+                if (
+                    existing["op_key"] != op_key
+                    or existing["event_type"] != "receipt_surfaced"
+                ):
+                    raise db.WorkstreamLedgerConflictError(
+                        "receipt surface event metadata mismatch"
+                    )
+                conn.commit()
+                return {"created": False, "surface_kind": surface_kind}
+            event = mark_surfaced_nc(conn, op_key, session_id=session_id)
+        elif surface_kind == "suggestion":
+            candidate_key = str(item.get("candidate_key") or "")
+            derivation_key = str(item.get("derivation_key") or "")
+            op = str(item.get("op") or "").upper()
+            existing = conn.execute(
+                "SELECT candidate_key, event_type "
+                "FROM workstream_op_events WHERE event_key=?",
+                (f"suggestion:{candidate_key}",),
+            ).fetchone()
+            if existing is not None:
+                if (
+                    existing["candidate_key"] != candidate_key
+                    or existing["event_type"] != "suggestion_surfaced"
+                ):
+                    raise db.WorkstreamLedgerConflictError(
+                        "suggestion surface event metadata mismatch"
+                    )
+                conn.commit()
+                return {"created": False, "surface_kind": surface_kind}
+            event = db.append_workstream_op_event_nc(
                 conn,
                 event_key=f"suggestion:{candidate_key}",
                 candidate_key=candidate_key,
                 event_type="suggestion_surfaced",
-                payload={"op": str(row["op"]).upper()},
-                derivation_key=str(latest["derivation_key"]),
+                payload={"op": op},
+                derivation_key=derivation_key,
                 session_id=session_id,
                 require_latest_candidate=True,
             )
-            if not claimed["created"]:
-                continue
-            suggestions.append((candidate_key, suggestion))
-            if len(suggestions) >= max(1, int(limit)):
-                break
+        else:
+            raise ValueError(f"unknown lifecycle surface kind {surface_kind!r}")
         conn.commit()
+        return {
+            "created": bool(event["created"]),
+            "surface_kind": surface_kind,
+        }
     except Exception:
         conn.rollback()
         raise
-    return [suggestion for _key, suggestion in suggestions]
 
 
 def reconcile_orphaned_restore_ops(
@@ -447,54 +527,6 @@ def mark_surfaced_nc(
         op_key=op_key,
         session_id=session_id,
     )
-
-
-def mark_surfaced(
-    conn: sqlite3.Connection,
-    op_key: str,
-    *,
-    session_id: str | None = None,
-) -> dict:
-    try:
-        result = mark_surfaced_nc(conn, op_key, session_id=session_id)
-        conn.commit()
-        return result
-    except Exception:
-        conn.rollback()
-        raise
-
-
-def surface_pending(
-    conn: sqlite3.Connection,
-    *,
-    session_id: str | None = None,
-    limit: int = 20,
-) -> list[str]:
-    """Atomically claim pending receipts and return their display strings."""
-    items = surface_pending_items(conn, session_id=session_id, limit=limit)
-    return [item["receipt"] for item in items]
-
-
-def surface_pending_items(
-    conn: sqlite3.Connection,
-    *,
-    session_id: str | None = None,
-    limit: int = 20,
-) -> list[dict]:
-    """Claim pending receipts while retaining operation metadata for UI policy."""
-    claimed: list[dict] = []
-    _begin_surface_claims(conn)
-    try:
-        items = pending_receipts(conn, limit=limit)
-        for item in items:
-            event = mark_surfaced_nc(conn, item["op_key"], session_id=session_id)
-            if event["created"]:
-                claimed.append(item)
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    return claimed
 
 
 def emit_applied(

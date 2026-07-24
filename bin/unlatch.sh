@@ -71,7 +71,7 @@ write_disable_receipt() {
 }
 
 print_unlatched_facts() {
-  echo "  disabled: session briefs, prompt KB injection, gate guidance,"
+  echo "  disabled: prompt KB injection, gate guidance,"
   echo "            Stop/SessionEnd compaction, self-heal, maintenance, and"
   echo "            automatic latch writes for this latch install."
   echo "  still true: KB files stay local and unchanged; latch remains installed;"

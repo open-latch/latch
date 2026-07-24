@@ -103,7 +103,9 @@ def test_connect_readonly_reads_current_schema_without_mutation(tmp_path, monkey
 
     readonly = db.connect_readonly(str(tmp_path))
     try:
-        assert db.node_count(readonly) == 1
+        assert readonly.execute(
+            "SELECT COUNT(*) FROM nodes WHERE status != 'stale'"
+        ).fetchone()[0] == 1
         with pytest.raises(sqlite3.OperationalError):
             db.upsert_session(readonly, "sid", str(tmp_path))
     finally:

@@ -1,8 +1,8 @@
 """Compaction: summarize a session transcript into KB nodes via a model backend.
 
-Called by hooks (Stop / SessionEnd / SessionStart-reconcile) and by the
-/latch-compact slash command. Produces one session_summary node per session
-(UPSERTed) plus extracted facts/decisions/entities (stacked).
+Called by Stop / SessionEnd hooks and by the /latch-compact slash command.
+Produces one session_summary node per session (UPSERTed) plus extracted
+facts/decisions/entities (stacked).
 """
 from __future__ import annotations
 

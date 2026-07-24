@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import json
 import sys
-from types import SimpleNamespace
 from pathlib import Path
+from types import SimpleNamespace
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -13,7 +13,7 @@ sys.path.insert(0, str(ROOT / "src" / "hooks"))
 import user_prompt_submit as ups  # noqa: E402
 
 
-def _stub_main(monkeypatch, tmp_path: Path, *, intensity: str, prompt: str) -> list[dict]:
+def _stub_main(monkeypatch, tmp_path: Path, *, prompt: str) -> list[dict]:
     logs: list[dict] = []
     monkeypatch.setattr(ups, "is_unlatched_mode", lambda: False)
     monkeypatch.setattr(ups, "is_disabled", lambda: False)
@@ -26,123 +26,58 @@ def _stub_main(monkeypatch, tmp_path: Path, *, intensity: str, prompt: str) -> l
         "hook_field",
         lambda _payload, *_keys, **_kwargs: prompt,
     )
-    monkeypatch.setattr(ups, "latch_intensity", lambda: intensity)
     monkeypatch.setattr(ups, "_mission_control_directive", lambda _cwd, _prompt: "")
     monkeypatch.setattr(ups, "_take_cite_nudge", lambda _cwd, _sid: 0)
     monkeypatch.setattr(ups, "_write_log", lambda _cwd, row: logs.append(dict(row)))
     return logs
 
 
-def test_tier_retrieval_policy() -> None:
-    assert ups._should_retrieve_for_intensity("quiet", None) is False
-    assert ups._should_retrieve_for_intensity("standard", None) is True
-    assert ups._should_retrieve_for_intensity("standard", 0.69) is True
-    assert ups._should_retrieve_for_intensity("standard", 0.70) is False
-    assert ups._should_retrieve_for_intensity("full", 0.99) is True
+def test_candidate_selection_uses_fixed_retrieval_bounds() -> None:
+    candidates = [
+        {"id": idx, "kind": "decision", "score": score}
+        for idx, score in enumerate((0.90, 0.80, 0.70, 0.60, 0.55, 0.54), 1)
+    ]
+    chosen = ups._select_candidates(
+        candidates,
+        set(),
+        sim_floor=ups.SIM_FLOOR,
+        max_inject=ups.MAX_INJECT,
+    )
+    assert [row["id"] for row in chosen] == [1, 2, 3, 4, 5]
 
 
-def test_quiet_never_wakes_retrieval_but_keeps_correction(
+def test_every_eligible_prompt_runs_retrieval_and_keeps_guideline_nudge(
     monkeypatch, tmp_path: Path, capsys
 ) -> None:
     logs = _stub_main(
         monkeypatch,
         tmp_path,
-        intensity="quiet",
-        prompt="that stored decision is wrong from now on",
-    )
-    monkeypatch.setattr(
-        ups.mcp_broker,
-        "read_discovery",
-        lambda: (_ for _ in ()).throw(AssertionError("Quiet touched broker")),
-    )
-    monkeypatch.setattr(
-        ups,
-        "_retrieve_and_inject",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("Quiet retrieved")
-        ),
-    )
-
-    assert ups.main() == 0
-    output = json.loads(capsys.readouterr().out)
-    context = output["hookSpecificOutput"]["additionalContext"]
-    assert "Possible KB correction signal" in context
-    assert "Standing-guideline signal" not in context
-    assert logs[-1]["intensity"] == "quiet"
-    assert logs[-1]["skip"] == "intensity_quiet"
-    assert logs[-1]["context_chars"] == len(context)
-
-
-def test_standard_same_topic_is_silent(monkeypatch, tmp_path: Path, capsys) -> None:
-    logs = _stub_main(
-        monkeypatch,
-        tmp_path,
-        intensity="standard",
-        prompt="continue reviewing the same implementation detail",
-    )
-    monkeypatch.setattr(ups.mcp_broker, "read_discovery", lambda: {"ready": True})
-
-    def retrieve(_cwd, _sid, _prompt, row, **_kwargs):
-        row["skip"] = "standard_same_topic"
-        row["topic_sim"] = 0.91
-        return []
-
-    monkeypatch.setattr(ups, "_retrieve_and_inject", retrieve)
-    assert ups.main() == 0
-    assert capsys.readouterr().out == ""
-    assert logs[-1]["context_chars"] == 0
-    assert logs[-1]["intensity"] == "standard"
-
-
-def test_standard_suppresses_guideline_nudge(
-    monkeypatch, tmp_path: Path, capsys
-) -> None:
-    logs = _stub_main(
-        monkeypatch,
-        tmp_path,
-        intensity="standard",
         prompt="always keep our database migrations backward compatible",
     )
     monkeypatch.setattr(ups.mcp_broker, "read_discovery", lambda: {"ready": True})
-    monkeypatch.setattr(ups, "_retrieve_and_inject", lambda *_args, **_kwargs: [])
+    calls: list[str] = []
 
-    assert ups.main() == 0
-    assert capsys.readouterr().out == ""
-    assert logs[-1]["guideline_signal"] is False
-    assert logs[-1]["context_chars"] == 0
+    def retrieve(cwd, _sid, _prompt, _row, **_kwargs):
+        calls.append(cwd)
+        return []
 
+    monkeypatch.setattr(ups, "_retrieve_and_inject", retrieve)
 
-def test_standard_degraded_notice_is_short_and_visible(
-    monkeypatch, tmp_path: Path, capsys
-) -> None:
-    logs = _stub_main(
-        monkeypatch,
-        tmp_path,
-        intensity="standard",
-        prompt="switch to a completely different deployment problem",
-    )
-    monkeypatch.setattr(ups.mcp_broker, "read_discovery", lambda: None)
-    monkeypatch.setattr(ups.mcp_broker, "request_daemon_start", lambda _cwd: True)
-    monkeypatch.setattr(ups.mcp_broker, "emit_lifecycle", lambda *_args, **_kwargs: None)
     assert ups.main() == 0
     output = json.loads(capsys.readouterr().out)
     context = output["hookSpecificOutput"]["additionalContext"]
-    assert context.startswith(
-        "Latch Standard could not run this prompt's topic-similarity check"
-    )
-    assert "could not determine whether this prompt qualified" in context
-    assert "## KB auto-retrieval" not in context
-    assert logs[-1]["skip"] == "embed_daemon_unavailable"
-    assert logs[-1]["context_chars"] == len(context)
+    assert calls == [str(tmp_path)]
+    assert "Standing-guideline signal" in context
+    assert "KB hits — no new hits injected" in context
+    assert "intensity" not in logs[-1]
 
 
-def test_standard_degraded_notice_repeats_while_prompts_remain_unscored(
+def test_degraded_notice_is_visible_and_repeats_while_unscored(
     monkeypatch, tmp_path: Path, capsys
 ) -> None:
     logs = _stub_main(
         monkeypatch,
         tmp_path,
-        intensity="standard",
         prompt="continue with another eligible deployment prompt",
     )
     monkeypatch.setattr(ups.mcp_broker, "read_discovery", lambda: None)
@@ -153,7 +88,8 @@ def test_standard_degraded_notice_repeats_while_prompts_remain_unscored(
         assert ups.main() == 0
         output = json.loads(capsys.readouterr().out)
         context = output["hookSpecificOutput"]["additionalContext"]
-        assert "could not run this prompt's topic-similarity check" in context
+        assert context.startswith("## KB auto-retrieval temporarily unavailable")
+        assert "not similarity-scored" in context
         assert len(logs) == expected_rows
         assert logs[-1]["skip"] == "embed_daemon_unavailable"
         assert logs[-1]["context_chars"] == len(context)
@@ -165,7 +101,6 @@ def test_degraded_path_keeps_profile_and_citation_nudges(
     logs = _stub_main(
         monkeypatch,
         tmp_path,
-        intensity="standard",
         prompt="switch to a completely different deployment problem",
     )
     monkeypatch.setattr(ups, "_mission_control_directive", lambda *_args: "MISSION")
@@ -184,20 +119,22 @@ def test_degraded_path_keeps_profile_and_citation_nudges(
     assert ups.main() == 0
     output = json.loads(capsys.readouterr().out)
     context = output["hookSpecificOutput"]["additionalContext"]
-    assert context.startswith("MISSION\n\nCITE-2\n\nLatch Standard")
+    assert context.startswith(
+        "MISSION\n\nCITE-2\n\n## KB auto-retrieval temporarily unavailable"
+    )
     assert logs[-1]["mission_control"] is True
     assert logs[-1]["cite_nudge"] == 2
 
 
-def test_full_retains_no_hits_receipt(monkeypatch, tmp_path: Path, capsys) -> None:
+def test_no_hits_receipt_remains_visible(monkeypatch, tmp_path: Path, capsys) -> None:
     logs = _stub_main(
         monkeypatch,
         tmp_path,
-        intensity="full",
         prompt="please review this implementation plan now",
     )
     monkeypatch.setattr(ups.mcp_broker, "read_discovery", lambda: {"ready": True})
     monkeypatch.setattr(ups, "_retrieve_and_inject", lambda *_args, **_kwargs: [])
+
     assert ups.main() == 0
     output = json.loads(capsys.readouterr().out)
     context = output["hookSpecificOutput"]["additionalContext"]
@@ -205,7 +142,6 @@ def test_full_retains_no_hits_receipt(monkeypatch, tmp_path: Path, capsys) -> No
     assert "already be active" in context
     assert "excluded from prompt surfacing" in context
     assert "below the similarity floor" in context
-    assert logs[-1]["intensity"] == "full"
     assert logs[-1]["context_chars"] == len(context)
 
 
@@ -215,7 +151,6 @@ def test_retrieval_error_keeps_independent_safety_context(
     logs = _stub_main(
         monkeypatch,
         tmp_path,
-        intensity="standard",
         prompt="that stored decision is wrong and needs correction",
     )
     monkeypatch.setattr(ups, "_mission_control_directive", lambda *_args: "MISSION")
@@ -228,6 +163,7 @@ def test_retrieval_error_keeps_independent_safety_context(
         ),
     )
     monkeypatch.setattr(ups.mcp_broker, "read_discovery", lambda: {"ready": True})
+    monkeypatch.setattr(ups.mcp_broker, "emit_lifecycle", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
         ups,
         "_retrieve_and_inject",
@@ -239,13 +175,51 @@ def test_retrieval_error_keeps_independent_safety_context(
     output = json.loads(capsys.readouterr().out)
     context = output["hookSpecificOutput"]["additionalContext"]
     assert context.startswith("MISSION\n\nCITE-2\n\n## ⚠ Possible KB correction signal")
+    assert "## KB auto-retrieval failed" in context
     assert logs[-1]["error"] == "RuntimeError: boom"
     assert logs[-1]["context_chars"] == len(context)
 
 
-def test_standard_first_prompt_copy_does_not_claim_topic_change() -> None:
-    context = ups._format_injection(
-        [{"id": 7, "kind": "decision", "title": "Use SQLite", "score": 0.8}],
-        intensity="standard",
+def test_retrieval_error_without_nudges_is_still_visible(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    logs = _stub_main(
+        monkeypatch,
+        tmp_path,
+        prompt="please review the selected database schema compatibility",
     )
-    assert "first prompt or the topic changed" in context
+    lifecycle_events: list[tuple[tuple, dict]] = []
+    monkeypatch.setattr(ups.mcp_broker, "read_discovery", lambda: {"ready": True})
+    monkeypatch.setattr(
+        ups.mcp_broker,
+        "emit_lifecycle",
+        lambda *args, **kwargs: lifecycle_events.append((args, kwargs)),
+    )
+    monkeypatch.setattr(
+        ups,
+        "_retrieve_and_inject",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("private schema detail")
+        ),
+    )
+    monkeypatch.setattr(ups, "log", lambda _message: None)
+
+    assert ups.main() == 0
+    output = json.loads(capsys.readouterr().out)
+    context = output["hookSpecificOutput"]["additionalContext"]
+    assert context.startswith("## KB auto-retrieval failed")
+    assert "degraded retrieval, not a no-hit result" in context
+    assert "private schema detail" not in context
+    assert logs[-1]["error"] == "RuntimeError: private schema detail"
+    assert lifecycle_events == [
+        (("prompt_retrieval_degraded",), {"reason": "retrieval_error"})
+    ]
+
+
+def test_hit_copy_points_to_on_demand_orientation() -> None:
+    context = ups._format_injection(
+        [{"id": 7, "kind": "decision", "title": "Use SQLite", "score": 0.8}]
+    )
+    assert "Actively query the KB" in context
+    assert "latch_project_direction" in context
+    assert "SessionStart brief" not in context

@@ -150,6 +150,71 @@ def _record_applied_op(
     conn.commit()
 
 
+def test_pending_surface_queue_reads_then_claims_exact_item(tmp_path, monkeypatch):
+    conn = _connect(tmp_path, monkeypatch)
+    receipt = 'latch opened workstream "Foreground lane".'
+    _record_applied_op(
+        conn,
+        op_key="open:foreground-lane",
+        op="OPEN",
+        payload={
+            "assigned_member_ids": [],
+            "watch_pair": None,
+            "probation": {},
+            "receipt": receipt,
+        },
+    )
+    db.record_workstream_derivation(
+        conn,
+        derivation_key="foreground-suggestion-derivation",
+        substrate_version="test-v1",
+        candidates=[{
+            "candidate_key": "candidate:foreground-open",
+            "op": "OPEN",
+            "signal": {
+                "qualified": True,
+                "member_ids": [1, 2, 3, 4],
+            },
+        }],
+    )
+
+    changes_before = conn.total_changes
+    first = lifecycle_receipts.pending_surface_items(conn, limit=1)
+    assert len(first) == 1
+    assert first[0]["surface_kind"] == "receipt"
+    assert first[0]["text"] == receipt
+    assert conn.total_changes == changes_before
+    assert conn.execute(
+        "SELECT COUNT(*) FROM workstream_op_events"
+    ).fetchone()[0] == 0
+
+    claimed_receipt = lifecycle_receipts.claim_pending_surface_item(
+        conn,
+        first[0],
+        session_id="foreground-read",
+    )
+    assert claimed_receipt == {
+        "created": True,
+        "surface_kind": "receipt",
+    }
+    second = lifecycle_receipts.pending_surface_items(conn, limit=1)
+    assert len(second) == 1
+    assert second[0]["surface_kind"] == "suggestion"
+    assert "may merit a new workstream" in second[0]["text"]
+
+    claimed_suggestion = lifecycle_receipts.claim_pending_surface_item(
+        conn,
+        second[0],
+        session_id="foreground-read",
+    )
+    assert claimed_suggestion == {
+        "created": True,
+        "surface_kind": "suggestion",
+    }
+    assert lifecycle_receipts.pending_surface_items(conn, limit=1) == []
+    conn.close()
+
+
 def test_legacy_baseline_not_suppressed_by_applied_adopt(tmp_path, monkeypatch):
     conn = _connect(tmp_path, monkeypatch)
     lane = db.insert_node(
@@ -404,6 +469,19 @@ def _claim_concurrently(project_path: str, claim):
         return [future.result(timeout=20) for future in futures]
 
 
+def _claim_one_pending_surface_item(connection, index: int) -> list[dict]:
+    pending = lifecycle_receipts.pending_surface_items(connection, limit=1)
+    if not pending:
+        return []
+    item = pending[0]
+    result = lifecycle_receipts.claim_pending_surface_item(
+        connection,
+        item,
+        session_id=f"surface-caller-{index}",
+    )
+    return [item] if result["created"] else []
+
+
 def test_concurrent_receipt_callers_return_only_successful_claim(
     tmp_path, monkeypatch,
 ):
@@ -424,10 +502,7 @@ def test_concurrent_receipt_callers_return_only_successful_claim(
 
     results = _claim_concurrently(
         str(tmp_path),
-        lambda connection, index: lifecycle_receipts.surface_pending_items(
-            connection,
-            session_id=f"receipt-caller-{index}",
-        ),
+        _claim_one_pending_surface_item,
     )
 
     claimed = [item for batch in results for item in batch]
@@ -457,13 +532,14 @@ def test_concurrent_suggestion_callers_return_only_successful_claim(
 
     results = _claim_concurrently(
         str(tmp_path),
-        lambda connection, index: lifecycle_receipts.surface_pending_suggestions(
-            connection,
-            session_id=f"suggestion-caller-{index}",
-        ),
+        _claim_one_pending_surface_item,
     )
 
-    suggestions = [suggestion for batch in results for suggestion in batch]
+    suggestions = [
+        item["text"]
+        for batch in results
+        for item in batch
+    ]
     assert len(suggestions) == 1
     assert "may merit a new workstream" in suggestions[0]
     assert sorted(len(batch) for batch in results) == [0, 1]

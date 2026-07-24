@@ -46,7 +46,7 @@ def main() -> int:
             db.upsert_session(conn, sid, cwd, tpath)
             sess = db.get_session(conn, sid)
             if sess and sess.get("ended_at"):
-                return 0  # already finalized (e.g. SessionStart reconciled it)
+                return 0  # already finalized by an earlier end/final compact
         finally:
             conn.close()
     except Exception as e:

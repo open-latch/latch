@@ -625,9 +625,9 @@ def test_generated_packet_matches_derived_eval_results():
     receipt = proof_packet.load_live_receipt()
     results = proof_packet.build_public_results(receipt)
     _assert(results["wedge_v1"]["ok"] is True, results["wedge_v1"])
-    _assert(results["wedge_v1"]["modes"]["latch_full"]["passed"] ==
+    _assert(results["wedge_v1"]["modes"]["latch_evidence"]["passed"] ==
             results["wedge_v1"]["cases"], results["wedge_v1"])
-    _assert(results["wedge_v1"]["modes"]["latch_full"]["passed"] >
+    _assert(results["wedge_v1"]["modes"]["latch_evidence"]["passed"] >
             results["wedge_v1"]["modes"]["memory_like"]["passed"],
             results["wedge_v1"])
     _assert(results["seed_report_eval"]["passed"] ==

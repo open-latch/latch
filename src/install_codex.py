@@ -709,7 +709,7 @@ def main(argv: list[str] | None = None) -> int:
                 for c in hook_changes:
                     print(f"          - {c}")
         else:
-            print("  [OK  ] Codex hooks already include the latch SessionStart brief")
+            print("  [OK  ] Codex hooks already include the latch SessionStart hook")
 
     if not args.skip_skills:
         skill_changes = sync_codex_skills(skills_dir, dry_run=args.dry_run)

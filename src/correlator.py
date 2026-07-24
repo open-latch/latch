@@ -386,10 +386,6 @@ def correlate(
             log_utils.emit_event(
                 "gate_outcome",
                 {
-                    # Preserve the tier at gate time. Historical rows without
-                    # the field stay explicitly unknown instead of being
-                    # mislabeled with today's setting.
-                    "intensity": R.get("intensity") or "unknown",
                     "gate_ts": R.get("ts"),
                     "gate_query_hash": R.get("query_hash"),
                     "verdict": R.get("recommendation"),

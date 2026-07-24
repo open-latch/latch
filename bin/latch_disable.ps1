@@ -14,8 +14,8 @@
 
 .PARAMETER WriteOnly
   Create DISABLE_WRITE instead of DISABLE — no-ops only the write-side hooks
-  (Stop / SessionEnd / compactor) while leaving the SessionStart brief +
-  per-prompt KB injection live.
+  (Stop / SessionEnd / compactor) while leaving automatic read-side retrieval
+  live.
 
 .EXAMPLE
   .\latch_disable.ps1

@@ -49,16 +49,6 @@ def check_codex_config(config_path: Path, python_path: str, server_py: str) -> C
     return Check("Codex config.toml MCP block", OK if ok else FAIL, detail)
 
 
-def check_latch_intensity() -> Check:
-    value, source, warning = paths.latch_intensity_state()
-    detail = f"{value} ({source}); {paths.latch_intensity_change_hint()}"
-    return Check(
-        "Latch intensity",
-        WARN if warning else OK,
-        f"{detail}; {warning}" if warning else detail,
-    )
-
-
 def check_agents_md(agents_path: Path) -> Check:
     status = agents_md_sync.evaluate(agents_path)
     if status == agents_md_sync.OK:
@@ -101,11 +91,10 @@ def _nearest_existing_ancestor(path: Path) -> Path:
 
 
 def check_kb_access(cwd: str | None = None) -> Check:
-    """Verify the selected KB is readable without mutating it.
+    """Verify the selected KB is schema-compatible and writable.
 
-    SessionStart can still render its brief through the read-only connection
-    when Codex's sandbox denies metadata writes.  Writability is therefore a
-    warning rather than a failed readiness check.
+    The probe itself is read-only. Ordinary retrieval, gate, capture, and
+    lifecycle paths need a writable KB, so a read-only vault is not healthy.
     """
     db_file = paths.db_path(cwd)
     if not db_file.exists():
@@ -114,7 +103,7 @@ def check_kb_access(cwd: str | None = None) -> Check:
                 "Latch KB access",
                 FAIL,
                 f"{db_file} exists but does not resolve to a usable KB file; "
-                "repair the dangling link before startup briefs or seed data",
+                "repair the dangling link before using Latch or seeding data",
             )
         creation_ancestor = _nearest_existing_ancestor(db_file.parent)
         ancestor_is_dir = creation_ancestor.is_dir()
@@ -135,8 +124,7 @@ def check_kb_access(cwd: str | None = None) -> Check:
                 "Latch KB access",
                 WARN,
                 f"{db_file} is not initialized yet; {creation_detail}, so "
-                "quickstart may continue to the seed step. The "
-                "startup brief is unavailable until the first DB creation",
+                "quickstart may continue to the seed step",
             )
         if not ancestor_is_dir:
             obstacle = f"its nearest existing ancestor {creation_ancestor} is not a directory"
@@ -150,7 +138,7 @@ def check_kb_access(cwd: str | None = None) -> Check:
             "Latch KB access",
             FAIL,
             f"{db_file} is not initialized and {obstacle}; the KB cannot be "
-            "created for startup briefs or seed data",
+            "created for retrieval, capture, or seed data",
         )
     try:
         conn = db.connect_readonly(cwd)
@@ -170,17 +158,16 @@ def check_kb_access(cwd: str | None = None) -> Check:
     if unwritable:
         return Check(
             "Latch KB access",
-            WARN,
+            FAIL,
             f"{db_file} is readable and schema compatible, but "
             f"{' and '.join(unwritable)} {'are' if len(unwritable) > 1 else 'is'} "
-            "not writable; the startup brief remains available read-only, but "
-            "SessionStart hook metadata writes may be skipped",
+            "not writable; ordinary retrieval, gate, capture, and lifecycle "
+            "operations cannot run reliably",
         )
     return Check(
         "Latch KB access",
         OK,
-        f"{db_file} is readable, schema compatible, and appears writable for "
-        "SessionStart hook metadata",
+        f"{db_file} is readable, schema compatible, and appears writable",
     )
 
 
@@ -311,7 +298,6 @@ def run_all(
     require_compact: bool = False,
 ) -> list[Check]:
     checks = [
-        check_latch_intensity(),
         check_codex_config(config_path, python_path, server_py),
         check_mcp_launch_target(python_path, server_py),
         check_kb_access(),

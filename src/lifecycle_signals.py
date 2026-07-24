@@ -268,9 +268,10 @@ def list_session_workstream_contacts(
 ) -> list[dict]:
     """Project contamination-free events into session/workstream contacts.
 
-    Brief/session-start events, focus-derived gate events, and project-only
-    events never qualify. Prompt/graph/tool/gate contacts require turn > 0;
-    explicit write contacts are eligible whenever they have a real session.
+    Legacy session-start injection events, focus-derived gate events, and
+    project-only events never qualify. Prompt/graph/tool/gate contacts require
+    turn > 0; explicit write contacts are eligible whenever they have a real
+    session.
     """
     where = [eligible_contact_sql(), "workstream_id_at_event IS NOT NULL"]
     params: list[Any] = []

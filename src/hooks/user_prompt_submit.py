@@ -37,7 +37,6 @@ from paths import (
     is_disabled,
     is_in_compact,
     is_unlatched_mode,
-    latch_intensity,
     db_path,
 )
 
@@ -47,12 +46,11 @@ _PROCESS_STARTED = time.perf_counter()
 TOP_K = 5
 MAX_INJECT = 5
 SIM_FLOOR = 0.55
-STANDARD_MAX_INJECT = 3
-STANDARD_SIM_FLOOR = 0.60
 MIN_PROMPT_WORDS = 3
-# 'priority' joins the surface-only kinds: priorities are injected via the
-# SessionStart brief + the kb_gate ACTIVE PROJECT PRIORITIES block, never as a
-# per-prompt similarity teaser (they carry no embedding anyway — defensive).
+# Priorities are injected through the gate's ACTIVE PROJECT PRIORITIES block,
+# never as per-prompt similarity teasers (they carry no embedding anyway).
+# Workstreams, ideas, and open questions remain available through on-demand
+# agent project-direction/recent reads rather than title-only similarity samples.
 EXCLUDED_KINDS = {"workstream", "idea", "open_question", "priority", "profile"}
 TOPIC_SAME_THRESHOLD = 0.70
 DEPTH_KEYWORDS = re.compile(
@@ -152,12 +150,9 @@ def main() -> int:
     sid = session_id(payload)
     cwd = project_cwd(payload)
     prompt = (hook_field(payload, "prompt", "user_prompt") or "").strip()
-    intensity = latch_intensity()
 
     correction_signal = bool(CORRECTION_SIGNAL.search(prompt))
     guideline_signal = (
-        intensity == "full"
-        and
         bool(GUIDELINE_SIGNAL.search(prompt))
         and "kb_priority" not in prompt.lower()
         and "latch_priority" not in prompt.lower()
@@ -180,12 +175,10 @@ def main() -> int:
         sid
         and prompt
         and len(prompt.split()) >= MIN_PROMPT_WORDS
-        and intensity != "quiet"
         and mcp_broker.read_discovery() is None
     ):
         log_entry = {
             "mission_control": bool(mc_directive),
-            "intensity": intensity,
             "ts": _now(),
             "sid": sid,
             "prompt_hash": _phash(prompt),
@@ -202,7 +195,7 @@ def main() -> int:
             reason="embed_daemon_unavailable",
             wake_requested=bool(log_entry["daemon_wake_requested"]),
         )
-        context = _format_runtime_unavailable(intensity)
+        context = _format_runtime_unavailable()
         nudge = _extra_nudges(
             correction_signal, guideline_signal, mc_directive, cite_directive,
         )
@@ -217,7 +210,6 @@ def main() -> int:
     # is about the PRIOR turn, so it fires even on short prompts like "ok thanks".
     log_entry: dict = {
         "mission_control": bool(mc_directive),
-        "intensity": intensity,
         "ts": _now(),
         "sid": sid,
         "prompt_hash": _phash(prompt),
@@ -242,21 +234,10 @@ def main() -> int:
         _emit_and_log(cwd, log_entry, nudge)
         return 0
 
-    # Quiet keeps the correction/profile/citation safety surfaces but performs
-    # no per-prompt retrieval and does not wake the embedding runtime.
-    if intensity == "quiet":
-        log_entry["skip"] = "intensity_quiet"
-        nudge = _extra_nudges(
-            correction_signal, guideline_signal, mc_directive, cite_directive,
-        )
-        _emit_and_log(cwd, log_entry, nudge)
-        return 0
-
     t0 = time.perf_counter()
     try:
         injected = _retrieve_and_inject(
             cwd, sid, prompt, log_entry,
-            intensity=intensity,
             deadline=_PROCESS_STARTED + (
                 HARD_BUDGET_MS - SUBPROCESS_BUDGET_RESERVE_MS
             ) / 1000.0,
@@ -264,11 +245,19 @@ def main() -> int:
     except Exception as e:
         log_entry["error"] = f"{type(e).__name__}: {e}"
         # Similarity is fail-open, but independent correction/profile/citation
-        # safety context must not disappear merely because retrieval failed.
+        # safety context and visible degraded-runtime feedback must not
+        # disappear merely because retrieval failed.
+        context = _format_retrieval_error()
         nudge = _extra_nudges(
             correction_signal, guideline_signal, mc_directive, cite_directive,
         )
-        _emit_and_log(cwd, log_entry, nudge)
+        if nudge:
+            context = nudge + "\n\n" + context
+        mcp_broker.emit_lifecycle(
+            "prompt_retrieval_degraded",
+            reason="retrieval_error",
+        )
+        _emit_and_log(cwd, log_entry, context)
         log(f"user_prompt_submit error: {e}")
         return 0
     elapsed_ms = (time.perf_counter() - t0) * 1000
@@ -281,13 +270,9 @@ def main() -> int:
         # to drop the result instead.
 
     if log_entry.get("skip") == "embed_daemon_unavailable":
-        context = _format_runtime_unavailable(intensity)
-    elif log_entry.get("skip") == "standard_same_topic":
-        context = ""
+        context = _format_runtime_unavailable()
     else:
-        context = _format_injection(injected, intensity=intensity) if injected else (
-            _format_no_hits() if intensity == "full" else ""
-        )
+        context = _format_injection(injected) if injected else _format_no_hits()
     # Include mc_directive + cite_directive on the main path too — previously
     # dropped here, so the mission-control standing contract only surfaced on the
     # short-prompt / no-session early-outs. Both are '' for non-mission-control.
@@ -316,15 +301,6 @@ def _emit_and_log(cwd: str, log_entry: dict, context: str) -> None:
         _print_context(context)
 
 
-def _should_retrieve_for_intensity(intensity: str, topic_sim: float | None) -> bool:
-    """Pure policy seam for table-driven tier tests."""
-    if intensity == "quiet":
-        return False
-    if intensity == "standard":
-        return topic_sim is None or topic_sim < TOPIC_SAME_THRESHOLD
-    return True
-
-
 def _select_candidates(
     candidates: list[dict],
     active_set: set[int],
@@ -334,9 +310,8 @@ def _select_candidates(
 ) -> list[dict]:
     """Apply the prompt hook's deterministic vector-selection policy.
 
-    Keep this pure: the frozen intensity eval calls the same seam as the live
-    vector path, so ranking, kind filtering, active-set dedupe, the similarity
-    floor, and the tier cap cannot quietly diverge between them. Equal scores
+    Keep this pure so ranking, kind filtering, active-set dedupe, the similarity
+    floor, and the injection cap remain independently testable. Equal scores
     preserve the candidate source's order.
     """
     eligible = [
@@ -355,7 +330,6 @@ def _retrieve_and_inject(
     prompt: str,
     log_entry: dict,
     *,
-    intensity: str = "full",
     deadline: float | None = None,
 ) -> list[dict]:
     _load_runtime()
@@ -402,15 +376,6 @@ def _retrieve_and_inject(
         log_entry["depth_match"] = depth_match
         log_entry["is_drill"] = is_drill
 
-        # Standard volunteers context only at the first prompt or a topic
-        # shift. Still store this prompt's embedding so the next comparison is
-        # against the immediately preceding turn.
-        if not _should_retrieve_for_intensity(intensity, topic_sim):
-            db.upsert_session(conn, sid, cwd, None)
-            db.update_last_prompt_embedding(conn, sid, qblob)
-            log_entry["skip"] = "standard_same_topic"
-            return []
-
         active_set = db.get_active_set(conn, session_id=sid, current_turn=turn)
         log_entry["active_set_size"] = len(active_set)
 
@@ -418,7 +383,7 @@ def _retrieve_and_inject(
         if is_drill:
             injected = _graph_path(
                 conn, sid, turn, active_set, qvec, log_entry,
-                max_inject=(STANDARD_MAX_INJECT if intensity == "standard" else MAX_INJECT),
+                max_inject=MAX_INJECT,
             )
 
         if not injected:
@@ -431,8 +396,8 @@ def _retrieve_and_inject(
                 qvec,
                 log_entry,
                 scope_repo=cwd,
-                max_inject=(STANDARD_MAX_INJECT if intensity == "standard" else MAX_INJECT),
-                sim_floor=(STANDARD_SIM_FLOOR if intensity == "standard" else SIM_FLOOR),
+                max_inject=MAX_INJECT,
+                sim_floor=SIM_FLOOR,
             )
 
         # Stash this prompt's embedding for next-turn topic-shift detection.
@@ -594,28 +559,22 @@ def _graph_path(
     return chosen
 
 
-def _format_injection(items: list[dict], *, intensity: str = "full") -> str:
+def _format_injection(items: list[dict]) -> str:
     lines = ["## KB hits (similarity sample — not a result)"]
     for r in items:
         sim = r.get("score", 0.0)
         title = r.get("title", "")
         kind = r.get("kind", "")
         lines.append(f"- ({kind}, id={r['id']}, sim={sim:.2f}) {title}")
-    if intensity == "standard":
-        lines.append(
-            "\n**These are teasers, not an answer.** Standard surfaced them because "
-            "this is the first prompt or the topic changed. Fetch the full node with `latch_search` / "
-            "`latch_get` / `latch_recent` before relying on it."
-        )
-    else:
-        lines.append(
-            "\n**These are teasers, not an answer.** Actively query the KB "
-            "(`latch_search` / `latch_get` / `latch_recent`) before responding — every "
-            "prompt, no exception. Auto-injection samples relevance; it doesn't "
-            "substitute for reading the node."
-        )
     lines.append(
-        "_Workstreams, ideas, open_questions are surfaced via the SessionStart brief._"
+        "\n**These are teasers, not an answer.** Actively query the KB "
+        "(`latch_search` / `latch_get` / `latch_recent`) before responding — every "
+        "prompt, no exception. Auto-injection samples relevance; it doesn't "
+        "substitute for reading the node."
+    )
+    lines.append(
+        "_Workstreams, ideas, and open questions are available through "
+        "`latch_project_direction` / `latch_recent`._"
     )
     return "\n".join(lines)
 
@@ -631,23 +590,24 @@ def _format_no_hits() -> str:
     )
 
 
-def _format_runtime_unavailable(intensity: str = "full") -> str:
-    if intensity == "standard":
-        # Standard opts into a smaller prompt surface, so keep this degraded
-        # receipt to one plain paragraph. Full retains the prominent heading
-        # because its contract favors explicit per-prompt retrieval receipts.
-        return (
-            "Latch Standard could not run this prompt's topic-similarity check "
-            "because the shared runtime is starting or unavailable, so it could "
-            "not determine whether this prompt qualified for injection. Query "
-            "`latch_search` / `latch_get` before relying on project history."
-        )
+def _format_runtime_unavailable() -> str:
     return (
         "## KB auto-retrieval temporarily unavailable\n\n"
         "The shared latch runtime was idle, starting, or unreachable, so this "
         "prompt was **not similarity-scored**. This is not a below-threshold "
         "result. Latch requested a background wake; actively query "
         "(`latch_search` / `latch_get` / `latch_recent`) before responding."
+    )
+
+
+def _format_retrieval_error() -> str:
+    return (
+        "## KB auto-retrieval failed\n\n"
+        "Latch could not read or similarity-score the selected KB for this "
+        "prompt. This is a degraded retrieval, not a no-hit result. Actively "
+        "query (`latch_search` / `latch_get` / `latch_recent`) before "
+        "responding; if those reads also fail, run the Latch doctor/setup "
+        "check."
     )
 
 

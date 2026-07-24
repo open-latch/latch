@@ -57,6 +57,26 @@ def test_write_and_read_session_marker():
     print("PASS write_and_read_session_marker")
 
 
+def test_invalidate_marker_prevents_stale_session_inheritance():
+    tmp = tempfile.mkdtemp(prefix="codex_session_marker_")
+    project_dir = paths.project_dir(tmp)
+    try:
+        codex_session.write_marker(tmp, "previous-task")
+        codex_session.invalidate_marker(tmp)
+        _assert(
+            codex_session.read_marker(tmp) is None,
+            "newer invalidation must hide the prior marker",
+        )
+        _assert(
+            codex_session.read_session_id(tmp) is None,
+            "new task without an id must not inherit prior attribution",
+        )
+    finally:
+        shutil.rmtree(project_dir, ignore_errors=True)
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("PASS invalidate_marker_prevents_stale_session_inheritance")
+
+
 def test_read_session_marker_missing_or_invalid_returns_none():
     tmp = tempfile.mkdtemp(prefix="codex_session_marker_")
     project_dir = paths.project_dir(tmp)
@@ -336,6 +356,7 @@ def test_fallback_fails_closed_without_provable_os_ownership():
 
 if __name__ == "__main__":
     test_write_and_read_session_marker()
+    test_invalidate_marker_prevents_stale_session_inheritance()
     test_read_session_marker_missing_or_invalid_returns_none()
     test_pinned_vault_keeps_workspace_markers_distinct()
     test_readonly_primary_uses_private_temp_fallback()

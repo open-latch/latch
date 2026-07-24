@@ -41,9 +41,8 @@ Project-wide by default — NOT user-filtered (unlike todos). The CEO's directiv
 applies to every dev. Workstream-scoped rows apply to every dev working inside
 that workstream. `created_by` is still stamped for audit.
 
-Injected at two existing surfaces (no per-prompt LLM cost):
-  * kb_gate classifier prompt — the primary surface (gate.py).
-  * SessionStart brief — a "Top of mind" section (hooks/session_start.py).
+Applied by the kb_gate classifier prompt (gate.py). Priority reads remain
+available through the MCP tool surface.
 
 Capture is offered via a deterministic regex nudge in the UserPromptSubmit
 hook (no LLM, no DB query) — see hooks/user_prompt_submit.py.
@@ -60,8 +59,8 @@ PRIORITY_KIND = "priority"
 ACTIVE_STATUS = "canonical"   # active priority
 RETIRED_STATUS = "stale"      # retired — out of default reads, kept for audit
 
-# Hard cap on active priorities. Forces curation and bounds the gate-prompt /
-# brief injection token cost. "Top of mind" loses meaning past a handful —
+# Hard cap on active priorities. Forces curation and bounds gate-prompt cost.
+# "Top of mind" loses meaning past a handful —
 # keep it low on purpose. Adding past the cap is refused (no silent eviction).
 # Configurable via CLAUDE_KB_PRIORITY_CAP (mirrors CLAUDE_KB_HEAL_CAP); default 5.
 try:
@@ -602,33 +601,3 @@ def render_for_gate(priorities: list[dict]) -> str:
         for i, p in enumerate(rows, start=1):
             lines.append(f"    P{i} [id={p['id']}] {p['title']}")
     return "\n".join(lines)
-
-
-def render_for_brief(priorities: list[dict]) -> list[str]:
-    """Lines for the SessionStart brief 'Top of mind' section. Empty list when
-    there are no active priorities. Locked priorities are annotated `(pinned)`,
-    mirroring the focus-table convention."""
-    if not priorities:
-        return []
-    out = ["## Top of mind (priorities)\n"]
-    for i, p in enumerate(priorities, start=1):
-        pin = " (pinned)" if p.get("locked") else ""
-        out.append(f"{i}.{pin} {p['title']}  (id={p['id']})")
-    out.append(
-        "\n_Overall standing directives — weighed in every `latch_gate`; "
-        "workstream priorities appear under active workstreams. "
-        "Manage with `latch_priority_add` / `latch_priority_reorder` / "
-        "`latch_priority_retire`._"
-    )
-    return out
-
-
-def render_workstream_for_brief(priorities: list[dict]) -> list[str]:
-    """Indented brief lines for priorities scoped to one active workstream."""
-    if not priorities:
-        return []
-    out = ["  Workstream priorities:"]
-    for i, p in enumerate(priorities, start=1):
-        pin = " (pinned)" if p.get("locked") else ""
-        out.append(f"  - {i}.{pin} {p['title']}  (id={p['id']})")
-    return out

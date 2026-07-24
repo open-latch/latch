@@ -25,17 +25,17 @@ def test_default_wedge_fixture_passes():
         result["summary"]["required_retrieval_rate"] == 1.0,
         result["summary"],
     )
-    _assert("latch_full" in result["modes"], result["modes"])
+    _assert("latch_evidence" in result["modes"], result["modes"])
     _assert("active_seed_graph" in result["modes"], result["modes"])
     _assert("stale_search" in result["modes"], result["modes"])
     _assert("memory_like" in result["modes"], result["modes"])
     _assert(
-        result["modes"]["latch_full"]["passed"]
+        result["modes"]["latch_evidence"]["passed"]
         > result["modes"]["memory_like"]["passed"],
         result["modes"],
     )
     _assert(result["summary"]["latch_only_wins"] >= 1, result["summary"])
-    comparison = result["summary"]["comparisons"]["latch_full_vs_memory_like"]
+    comparison = result["summary"]["comparisons"]["latch_evidence_vs_memory_like"]
     _assert(comparison["primary_only_wins"] >= 1, comparison)
     _assert(comparison["net_wins"] >= 1, comparison)
     print("PASS default_wedge_fixture_passes")
@@ -59,9 +59,9 @@ def test_markdown_report_names_memory_trap():
 
 def test_single_mode_runs_without_baseline():
     cases = evals.load_cases([evals.DEFAULT_FIXTURE])
-    result = evals.run_cases(cases, modes=["latch_full"])
+    result = evals.run_cases(cases, modes=["latch_evidence"])
     _assert(result["ok"] is True, result)
-    _assert(list(result["modes"].keys()) == ["latch_full"], result["modes"])
+    _assert(list(result["modes"].keys()) == ["latch_evidence"], result["modes"])
     _assert(result["summary"]["latch_only_wins"] == 0, result["summary"])
     print("PASS single_mode_runs_without_baseline")
 

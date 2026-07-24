@@ -18,7 +18,6 @@ param(
   [string]$InstallDir,
   [string]$Project = (Get-Location).Path,
   [string]$Ref = $(if ($env:LATCH_INSTALL_REF) { $env:LATCH_INSTALL_REF } else { "main" }),
-  [string]$LatchIntensity,
   [switch]$Upgrade,
   [switch]$DryRun,
   [Parameter(ValueFromRemainingArguments = $true)]
@@ -26,7 +25,6 @@ param(
 )
 
 $RefWasExplicit = $PSBoundParameters.ContainsKey("Ref")
-$LatchIntensityWasExplicit = $PSBoundParameters.ContainsKey("LatchIntensity")
 $ErrorActionPreference = "Stop"
 $DefaultRepository = "https://github.com/open-latch/latch.git"
 $Repository = if ($env:LATCH_INSTALL_REPOSITORY) {
@@ -194,30 +192,6 @@ function Checkout-Source([string]$Target) {
   Set-InstalledRef $Target $Ref
 }
 
-# Validate after helper definitions. A ValidateSet parameter attribute can fail
-# before this script runs when `irm ... | iex` reuses an empty caller-scope
-# variable named LatchIntensity.
-if ($LatchIntensityWasExplicit) {
-  if ([string]::IsNullOrWhiteSpace($LatchIntensity)) {
-    Fail("unsupported -LatchIntensity ''; choose quiet, standard, or full")
-  }
-  $LatchIntensity = $LatchIntensity.ToLowerInvariant()
-  if ($LatchIntensity -notin @("quiet", "standard", "full")) {
-    Fail("unsupported -LatchIntensity '$LatchIntensity'; choose quiet, standard, or full")
-  }
-}
-$forwardedIntensityArgs = @(
-  $QuickstartArgs | Where-Object {
-    $_ -eq "--latch-intensity" -or $_ -like "--latch-intensity=*"
-  }
-)
-if ($LatchIntensity -and $forwardedIntensityArgs.Count -gt 0) {
-  Fail("-LatchIntensity cannot be combined with --latch-intensity in -QuickstartArgs")
-}
-if ($forwardedIntensityArgs.Count -gt 1) {
-  Fail("pass --latch-intensity at most once in -QuickstartArgs")
-}
-
 if (-not $InstallDir) {
   $dataRoot = if ($env:LOCALAPPDATA) {
     Join-Path $env:LOCALAPPDATA "Latch"
@@ -254,7 +228,6 @@ if ($DryRun) {
   Write-Host "  runtime    : private uv + Python 3.11 virtual environment"
   Write-Host "  activation : guided quickstart, checks, then consented initial-KB review"
   $previewArgs = @()
-  if ($LatchIntensity) { $previewArgs += @("--latch-intensity", $LatchIntensity) }
   $previewArgs += $QuickstartArgs
   if ($previewArgs.Count -gt 0) {
     Write-Host "  quickstart : $($previewArgs -join ' ')"
@@ -343,9 +316,6 @@ try {
   $env:LATCH_HOME = $InstallDir
   $env:LATCH_PYTHON = $PythonPath
   $effectiveQuickstartArgs = @()
-  if ($LatchIntensity) {
-    $effectiveQuickstartArgs += @("--latch-intensity", $LatchIntensity)
-  }
   $effectiveQuickstartArgs += $QuickstartArgs
   & $PythonPath (Join-Path $InstallDir "src\quickstart.py") --project $Project @effectiveQuickstartArgs
   $quickstartRc = $LASTEXITCODE

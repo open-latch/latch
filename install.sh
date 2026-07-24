@@ -43,7 +43,6 @@ Bootstrap options:
 
 Other arguments are forwarded to latch_quickstart, for example:
   --agents claude|codex|cursor|both|all
-  --latch-intensity quiet|standard|full
   --seed-source claude|codex|cursor|both|all
   --no-seed
 

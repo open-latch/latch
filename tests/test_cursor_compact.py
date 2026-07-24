@@ -59,7 +59,7 @@ def test_resolve_current_fails_closed_without_exact_marker_pair():
 
         cursor_session.write_marker(str(root), "cursor-session", transcript_path=str(transcript))
         for kwargs, expected in [
-            ({"session_id": "other"}, "no SessionStart marker for requested"),
+            ({"session_id": "other"}, "no current-session marker for requested"),
             ({
                 "session_id": "cursor-session",
                 "transcript_path": str(root / "other.jsonl"),

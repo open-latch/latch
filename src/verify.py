@@ -54,7 +54,6 @@ import embeddings
 import gate
 import heal
 import log_utils
-from paths import latch_intensity
 
 
 VERIFY_OK = "OK"
@@ -503,10 +502,6 @@ def correct_apply(
     # only after the complete correction transaction commits.
     for captured, edge_started in reconciliation_events:
         captured["elapsed_ms"] = int((time.perf_counter() - edge_started) * 1000)
-        try:
-            captured["intensity"] = latch_intensity()
-        except Exception:
-            captured["intensity"] = None
         log_utils.emit_event(
             "reconciliation", captured,
             project_path=project_path,
@@ -516,16 +511,9 @@ def correct_apply(
     # (6) structural-only correction.log row (id=1091 / id=1108 — NO titles,
     # bodies, or raw prompt text; the trigger prompt is hashed by the caller).
     elapsed_ms = int((time.perf_counter() - t0) * 1000)
-    try:
-        intensity = latch_intensity()
-    except Exception:
-        # A telemetry-only resolver failure must not break an already-applied,
-        # human-confirmed correction.
-        intensity = None
     log_utils.emit_event(
         LOG_STREAM,
         {
-            "intensity": intensity,
             "bad_node_id": bad_node_id,
             "bad_node_kind": bad_kind,
             "bad_node_status_before": bad_status_before,

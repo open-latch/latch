@@ -164,11 +164,11 @@ GATE_MERGED_INTO_MAX_HOPS = 32
 
 # Personal-layer kinds that must never seed the gate similarity chain. They are
 # surfaced through dedicated channels instead — priorities via the ACTIVE
-# PROJECT PRIORITIES block (priorities.render_for_gate) + the SessionStart
-# brief. Priorities carry no embedding, but the FTS trigger still indexes them,
-# so without this filter an unembedded priority could surface as a keyword seed
-# and pollute the decision chain. Verification profiles (profiles.PROFILE_KIND)
-# are excluded for the same reason — surface-only per-user config, not evidence.
+# PROJECT PRIORITIES block (priorities.render_for_gate). Priorities carry no
+# embedding, but the FTS trigger still indexes them, so without this filter an
+# unembedded priority could surface as a keyword seed and pollute the decision
+# chain. Verification profiles (profiles.PROFILE_KIND) are excluded for the
+# same reason — surface-only per-user config, not evidence.
 EXCLUDED_SEED_KINDS: frozenset[str] = frozenset(
     {priorities.PRIORITY_KIND, profiles.PROFILE_KIND}
 )
@@ -2280,16 +2280,7 @@ def _log_invocation(
     """
     try:
         seeds = chain_assembly.get("seeds") or []
-        try:
-            intensity = paths.latch_intensity()
-        except Exception:
-            # Resolver trouble must not erase an otherwise useful gate row.
-            intensity = None
         entry = {
-            # Observation only: intensity never enters chain assembly or verdict
-            # classification. Recording it lets tier evals compare downstream
-            # outcomes without weakening the gate itself.
-            "intensity": intensity,
             "query_hash": _query_hash(request),
             "query_chars": len(request),
             "recommendation": verdict.get("recommendation"),

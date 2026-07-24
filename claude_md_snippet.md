@@ -1,52 +1,51 @@
 <!--
   latch managed agent contract for CLAUDE.md.
 
-  Source of truth: claude_md_snippet.md. This region is installed by
-  bin/install_claude_md.{sh,ps1}; do not hand-edit it in a project file.
-  Re-run the installer to sync it. Detailed procedures live in
-  {{KB_HOME}}/docs/agent-contract-reference.md.
+  Source of truth: claude_md_snippet.md. Installed by
+  bin/install_claude_md.{sh,ps1}; do not hand-edit. Re-run it to sync.
+  Details: {{KB_HOME}}/docs/agent-contract-reference.md.
 -->
 
 ## Latch Contract — Mandatory
 
-Latch is the project's decision-continuity layer. This file is soft bootstrap,
-not the enforcement engine: keep project facts and decisions in Latch, and rely
-on tool receipts, hooks, tests, and audits for stronger guarantees.
+Latch is the project's decision-continuity layer. Keep project facts and
+decisions in Latch; receipts and enforcement provide stronger guarantees.
 
 Use this checkpoint order: **read → reconcile → gate → resolve → capture →
 report**. No silent Latch bypass and no invented Latch evidence.
 
 ### 1. Read and establish authority
 
-Before responding to any prompt, query Latch with `latch_search`, `latch_get`,
-or `latch_recent` (legacy: `kb_search`, `kb_get`, `kb_recent`). Auto-injected
-`## KB hits` are teasers, not authority; fetch the full node before relying on
+Before responding to any prompt, make a live Latch read. Normally use
+`latch_search`, `latch_get`, or `latch_recent` (legacy: `kb_search`,
+`kb_get`, `kb_recent`). For "where did we leave off?", "catch me up", "resume",
+or "what's next", use `latch_project_direction(compact=true)` as the initial
+read, add `latch_recent(kind="progress", limit=3)` for raw chronology, then
+use `latch_get` on the report's `foregrounded_item.id`.
+Auto-injected `## KB hits` are teasers; fetch the full node before relying on
 it. If no useful row was found, say so instead of inventing ids or history.
 
-On the first KB call in a session, batch-load schemas:
-`ToolSearch(query="mcp__latch latch_search latch_get latch_recent latch_gate")`.
+On the first KB call, batch-load schemas:
+`ToolSearch(query="mcp__latch latch_search latch_get latch_recent latch_project_direction latch_gate")`.
 If absent, try legacy discovery:
-`ToolSearch(query="mcp__claude-kb kb_search kb_get kb_recent kb_gate")`.
+`ToolSearch(query="mcp__claude-kb kb_search kb_get kb_recent kb_project_direction kb_gate")`.
 Treat an exact zero-result lookup as non-definitive; verify with a live search
-or recent call. If Latch or the SessionStart brief is missing, follow
-`{{KB_HOME}}/README.md` setup.
+or recent call. If tools are missing, follow `{{KB_HOME}}/README.md` setup.
 
-Every `latch_get` / `kb_get` result has `reconciliation_banner`. When non-empty,
-fetch every `linked_id` and read both nodes before acting. `reconciled_by` keeps
-both nodes true in scope; `supersedes` makes the older node stale. Weigh
-priorities from SessionStart or the gate. For sweeping directives, offer
-`latch_priority_add`; capture only with user approval.
+Every `latch_get` / `kb_get` has `reconciliation_banner`. When non-empty,
+fetch every `linked_id` and read both nodes. `reconciled_by` keeps both true in scope;
+`supersedes` makes the older node stale. Weigh
+priorities from `latch_priority_list` or the gate.
+For sweeping directives, offer `latch_priority_add`; capture only with user approval.
 
 ### 2. Gate and resolve implementation work
 
-Before committing to an implementation plan for write/change/add/refactor/fix
-work, call `latch_gate` with the user's request verbatim (legacy: `kb_gate`).
-Skip it for pure explanation, status, search, or exploratory discussion.
+Before planning write/change/add/refactor/fix work, call `latch_gate` with the user's request verbatim
+(legacy: `kb_gate`). Skip pure explanation, status, search, or exploration.
 
-For every non-skipped result, show a concise **Latch gate** block before normal
-implementation narration: say Latch ran the gate; show the recommendation,
-rationale, cited node ids/titles/status, receipt/source basis, risks or better
-next action, and uncovered claims.
+For every non-skipped result, show a concise **Latch gate** block first:
+recommendation, rationale, cited node ids/titles/status, receipt/source basis,
+risks or better action, and uncovered claims.
 
 Stop and show `MODIFY`, `DO_NOT_PROCEED`, or `NEEDS_HUMAN_JUDGMENT`; continue
 only after the user resolves or explicitly overrides it. On `PROCEED`, still
@@ -58,17 +57,18 @@ and never treat it as approval. Follow any host enforcement that blocks mutation
 
 ### 3. Report and capture judgment
 
-When a tool returns `kb_activity.must_display_to_user=true`, show its `summary`
-and `why_it_matters` when present. Name material reads and important node ids;
-report successful writes with node id/kind/title.
+When `kb_activity.must_display_to_user=true`, show its `summary` and
+`why_it_matters` when present. Name material reads and important node ids;
+report successful writes with node id/kind/title. Show any
+`kb_activity.lifecycle_notice` text too.
 
 Capture durable decisions, findings, rejected paths, postmortems, and actual
 user overrides or refusals in the same turn with `latch_insert` or
 `latch_capture_decision` when appropriate. Do not capture routine chatter.
 
-Facts, decisions, framing, history, parameters, rejected alternatives, results,
-and gate criteria belong in Latch—not in the managed host file. Static project instructions
-may hold paths, file rules, agent behavior, and environment setup.
+Project facts and decisions belong in Latch—not in the managed host file.
+Static project instructions may hold paths, file rules, agent behavior, and
+setup.
 
 ### 4. Honor write and graph hints
 
