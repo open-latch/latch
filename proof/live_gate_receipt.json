@@ -1,8 +1,8 @@
 {
   "backend": "codex",
-  "better_next_action": "Keep SQLite and, if cross-machine data movement is required, implement explicit export/import with documented limitations as permitted by id=1.",
+  "better_next_action": "Keep SQLite and implement a documented explicit export/import workflow; if true multi-user accounts are now mandatory, seek an explicit human decision to supersede id=1 before implementation.",
   "capture_command": "bash bin/latch_proof_packet.sh --capture-live --backend codex",
-  "captured_at_utc": "2026-07-25T16:27:14Z",
+  "captured_at_utc": "2026-07-25T19:21:02Z",
   "demo_kind": "synthetic_no_history_fixture",
   "evidence_nodes": [
     {
@@ -30,10 +30,10 @@
   "observed": true,
   "recommendation": "DO_NOT_PROCEED",
   "request": "Add multi-user accounts by moving the datastore from local SQLite to a hosted Postgres service.",
-  "risk_if_proceed": "The implementation would violate the project\u2019s local-first, no-hosted-database direction and introduce an explicitly rejected service dependency.",
+  "risk_if_proceed": "It would overturn the app\u2019s local-first architecture and introduce the hosted database path that the canonical decision explicitly rejected.",
   "schema_version": 2,
-  "source_commit": "a16495718646e15eaf2c196322103d2c0a824476",
-  "summary": "The canonical decision explicitly keeps the demo app local-first on embedded SQLite and rejects moving to hosted Postgres for multi-user accounts or sync (id=1). The request directly repeats that ruled-out path.",
+  "source_commit": "892f7ba811c74e7c8c5efbc58080e703f0272c0d",
+  "summary": "The canonical decision explicitly keeps the demo app local-first on embedded SQLite and rejects moving to hosted Postgres for multi-user accounts or synchronization (id=1). The request directly repeats that rejected path; the approved alternative is SQLite with explicit export/import if cross-machine data movement is needed.",
   "tested_runtime_git_blobs": {
     ".gitattributes": "dfdb8b771ce07609491fa2e83698969fd917a135",
     "benchmarks/fixtures/wedge_v1.jsonl": "f32c5544a247c43490b5b84a6c4c4a057e91716b",
@@ -52,7 +52,7 @@
     "src/codex_compact.py": "d0575ced55a80e1e15534eaade803222caeca4fc",
     "src/codex_doctor.py": "56e59d3df6fa138b9a001ce80552253a0ee641a8",
     "src/codex_hooks.py": "55a63d31600fd660ceff99eeea9b798f453c1995",
-    "src/codex_session.py": "7b9ecca670372590c37dd39826cc3b48fe4a1016",
+    "src/codex_session.py": "2ebe22c3913e7f2f343a7d295288901a3095e38c",
     "src/codex_transcript.py": "84fda09f7697e3ca92036961930b118a731ce3a6",
     "src/compactor.py": "c217a78daa371bb48ecfd05733b7cefada703148",
     "src/correlator.py": "35654700fd547016ab57dcd45882ec7bc63c3fd7",
