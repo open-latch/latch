@@ -14,14 +14,14 @@ This packet combines one observed live gate receipt with two small, deterministi
 
 ## Observed live gate
 
-Captured with the `codex` backend on commit `fadc8b6e428367e07dfacabbf43adb7a87f0c998`. This is a synthetic no-history fixture and used no personal conversation history.
+Captured with the `codex` backend on commit `a16495718646e15eaf2c196322103d2c0a824476`. This is a synthetic no-history fixture and used no personal conversation history.
 
 ```text
 Request: Add multi-user accounts by moving the datastore from local SQLite to a hosted Postgres service.
 Recommendation: DO_NOT_PROCEED
-Summary: The request directly contradicts the canonical decision to keep the demo app local-first on a single embedded SQLite file and explicitly rejects moving to a hosted/client-server database such as managed Postgres for multi-user accounts or sync (id=1). The allowed direction is to remain on local SQLite and use explicit export/import if data needs to move between machines.
-Risk if proceed: Proceeding would unwind the local-first demo constraint and repeat an explicitly rejected hosted-database path.
-Better next action: Keep SQLite as the datastore and implement explicit export/import for machine-to-machine data movement, documenting its limits.
+Summary: The canonical decision explicitly keeps the demo app local-first on embedded SQLite and rejects moving to hosted Postgres for multi-user accounts or sync (id=1). The request directly repeats that ruled-out path.
+Risk if proceed: The implementation would violate the project’s local-first, no-hosted-database direction and introduce an explicitly rejected service dependency.
+Better next action: Keep SQLite and, if cross-machine data movement is required, implement explicit export/import with documented limitations as permitted by id=1.
 Cited evidence:
 - id=1 decision status=canonical: Keep the demo app local-first on SQLite — no hosted database
 Worktree changed before/after gate: no
@@ -33,7 +33,7 @@ The gate used an actual model call. `SKIPPED`, `PROCEED`, empty evidence, or a c
 
 | Mode | Passed | Required retrieval | Supporting rationale |
 | --- | ---: | ---: | ---: |
-| `latch_full` | 8/8 | 100% | 100% |
+| `latch_evidence` | 8/8 | 100% | 100% |
 | `active_seed_graph` | 8/8 | 100% | 100% |
 | `stale_search` | 7/8 | 88% | 83% |
 | `memory_like` | 4/8 | 71% | 72% |
@@ -63,7 +63,7 @@ This deterministic fixture eval grades seed-report capture and filtering; it is 
 
 ## Reproduce
 
-The deterministic results were generated from commit `fadc8b6e428367e07dfacabbf43adb7a87f0c998`.
+The deterministic results were generated from commit `a16495718646e15eaf2c196322103d2c0a824476`.
 
 ```bash
 bash bin/latch_eval.sh
