@@ -64,12 +64,17 @@ def marker_path(project_path: str | os.PathLike | None = None) -> Path:
 
 
 def _fallback_scope_key(project_path: str | os.PathLike | None = None) -> str:
-    """Stable, non-identifying key for this OS user + install + selected vault."""
+    """Stable, non-identifying key for this OS user + install + selected vault.
+
+    Platforms without a provable numeric owner cannot use the private fallback
+    at all; keep path calculation deterministic there without assuming a home
+    directory exists.
+    """
     uid = _current_uid()
     user_identity = (
         f"uid:{uid}"
         if uid is not None
-        else f"ownership-unavailable:{_canonical_path(Path.home())}"
+        else "ownership-unavailable"
     )
     identity = "\0".join(
         (

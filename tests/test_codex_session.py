@@ -8,6 +8,7 @@ import stat
 import sys
 import tempfile
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
@@ -280,6 +281,33 @@ def test_fallback_path_is_scoped_by_vault_and_workspace():
     print("PASS fallback_path_is_scoped_by_vault_and_workspace")
 
 
+def test_fallback_path_does_not_require_home_without_provable_owner():
+    root = Path(tempfile.mkdtemp(prefix="codex_session_fallback_no_home_"))
+    project = root / "workspace"
+    project.mkdir()
+    try:
+        with (
+            mock.patch.object(codex_session, "_current_uid", return_value=None),
+            mock.patch.object(
+                codex_session.Path,
+                "home",
+                side_effect=RuntimeError("home unavailable"),
+            ),
+        ):
+            fallback = codex_session._fallback_marker_path(project)
+        _assert(
+            fallback.name == codex_session.MARKER_FILE,
+            "fallback path calculation must remain available without a home",
+        )
+        _assert(
+            Path(tempfile.gettempdir()) in fallback.parents,
+            f"fallback path must remain below tempfile.gettempdir(): {fallback}",
+        )
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+    print("PASS fallback_path_does_not_require_home_without_provable_owner")
+
+
 def test_fallback_refuses_symlinked_scope_directory():
     if codex_session._current_uid() is None:
         return
@@ -363,6 +391,7 @@ if __name__ == "__main__":
     test_marker_read_uses_freshness_then_path_precedence()
     test_newer_fallback_wins_over_stale_primary()
     test_fallback_path_is_scoped_by_vault_and_workspace()
+    test_fallback_path_does_not_require_home_without_provable_owner()
     test_fallback_refuses_symlinked_scope_directory()
     test_fallback_fails_closed_without_provable_os_ownership()
     print("\nAll codex_session tests pass.")
