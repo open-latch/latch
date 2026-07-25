@@ -52,9 +52,9 @@ Request: Add multi-user accounts by moving the datastore from local SQLite to a 
 
 ```text
 Recommendation: DO_NOT_PROCEED
-Summary: The canonical decision explicitly keeps the demo app local-first on embedded SQLite and rejects moving to hosted Postgres for multi-user accounts or synchronization (id=1). The request directly repeats that rejected path; the approved alternative is SQLite with explicit export/import if cross-machine data movement is needed.
-Risk if proceed: It would overturn the app’s local-first architecture and introduce the hosted database path that the canonical decision explicitly rejected.
-Better next action: Keep SQLite and implement a documented explicit export/import workflow; if true multi-user accounts are now mandatory, seek an explicit human decision to supersede id=1 before implementation.
+Summary: The canonical decision (id=1) explicitly requires the demo app to remain local-first on embedded SQLite and rejects moving to hosted Postgres for multi-user accounts or synchronization. The request directly contradicts that established datastore direction.
+Risk if proceed: The app would lose its intentionally local-first, no-hosted-database architecture and introduce unsupported multi-user infrastructure.
+Better next action: Keep SQLite; if cross-machine data movement is needed, implement explicit export/import and document its limitations as allowed by id=1.
 Cited evidence:
 - id=1 decision status=canonical: Keep the demo app local-first on SQLite — no hosted database
 Worktree changed before/after gate: no
