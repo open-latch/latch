@@ -33,6 +33,7 @@ def _stub_main(monkeypatch, tmp_path: Path, *, prompt: str) -> list[dict]:
 
 
 def test_candidate_selection_uses_fixed_retrieval_bounds() -> None:
+    assert (ups.MAX_INJECT, ups.SIM_FLOOR) == (5, 0.55)
     candidates = [
         {"id": idx, "kind": "decision", "score": score}
         for idx, score in enumerate((0.90, 0.80, 0.70, 0.60, 0.55, 0.54), 1)
