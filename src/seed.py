@@ -991,9 +991,20 @@ def discover_sources(
         : max(0, MAX_SOURCE_SCAN - len(cursor_items))
     ]
 
+    # In-window transcripts that discovery's own outer caps drop before any
+    # per-source filtering. These are invisible to stats["eligible"], so
+    # coverage that ignores them can claim "all N sessions in the window" while
+    # MAX_SOURCE_SCAN / MAX_SOURCE_INVENTORY silently omitted some.
+    if stats is not None:
+        stats["in_window_total"] = len(ordered)
+        stats["scan_truncated"] = max(0, len(ordered) - len(scan_items))
+        stats["inventory_truncated"] = 0
+
     eligible: list[SeedSource] = []
-    for mtime, agent, path, session_id, _exact in scan_items:
+    for examined, (mtime, agent, path, session_id, _exact) in enumerate(scan_items):
         if len(eligible) >= MAX_SOURCE_INVENTORY:
+            if stats is not None:
+                stats["inventory_truncated"] = len(scan_items) - examined
             break
         if stats is not None:
             stats["inventory_considered"] += 1
@@ -1519,7 +1530,10 @@ def estimate_llm_calls(session_count: int, *, calls_per_session: int, max_llm_ca
 
 
 def coverage_plan(
-    args: argparse.Namespace, eligible: int, project_path: str | None = None,
+    args: argparse.Namespace,
+    eligible: int,
+    project_path: str | None = None,
+    discovery_omitted: int = 0,
 ) -> dict[str, Any]:
     """Exact per-run coverage, derived from pre-scan counts before any call.
 
@@ -1543,39 +1557,72 @@ def coverage_plan(
     # inside discover_sources, so measuring coverage against the list it already
     # returned would report "all N in the window" while silently dropping the
     # sessions it discarded.
+    # An answer of "full" raises flags, but llm_candidates still clamps to the
+    # hard ceiling. Treating the raised raw value as real would report full
+    # coverage while execution quietly ran fewer calls, so the ceiling is a
+    # first-class constraint and per_run is clamped by it here too.
+    per_run = min(per_run, HARD_MAX_LLM_CALLS_CEILING)
     limits: dict[str, int] = {"per_run_cap": per_run, "session_cap": session_cap}
     if remaining_daily is not None:
         limits["daily_budget"] = remaining_daily
     binding, binding_limit = min(limits.items(), key=lambda kv: (kv[1], kv[0]))
+    if binding == "per_run_cap" and per_run >= HARD_MAX_LLM_CALLS_CEILING:
+        binding = "hard_ceiling"
+    # Sessions discovery's own outer caps dropped before eligibility was even
+    # assessed. They are in the window and will not be read, so full coverage
+    # is false whatever the other caps say.
+    omitted = max(0, int(discovery_omitted or 0))
+    total_in_window = eligible + omitted
     covered = min(eligible, binding_limit)
     return {
         "eligible_sessions": eligible,
+        "in_window_total": total_in_window,
+        "discovery_omitted": omitted,
         "covered_sessions": covered,
-        "shortfall_sessions": max(0, eligible - covered),
-        "full_coverage": covered >= eligible,
+        "shortfall_sessions": max(0, total_in_window - covered),
+        "full_coverage": covered >= total_in_window,
         "per_run_cap": per_run,
         "session_cap": session_cap,
+        "hard_ceiling": HARD_MAX_LLM_CALLS_CEILING,
         "remaining_daily_nonheal": remaining_daily,
         "binding_constraint": binding,
-        # Only caps the user can raise here are fixable by the "full" choice.
-        # The daily budget is not one of them — it needs /latch-budget-approve.
-        "raisable_by_flags": binding != "daily_budget",
-        "calls_needed_for_full_coverage": eligible,
+        # Caps the "full" choice can actually raise. The daily budget needs
+        # /latch-budget-approve; the hard ceiling and discovery's outer caps
+        # cannot be raised from this prompt at all, so promising full when
+        # either binds would be a lie.
+        "raisable_by_flags": (
+            binding not in {"daily_budget", "hard_ceiling"} and omitted == 0
+        ),
+        "calls_needed_for_full_coverage": total_in_window,
     }
 
 
 def render_coverage_lines(plan: dict[str, Any]) -> list[str]:
-    eligible = plan["eligible_sessions"]
+    total = plan.get("in_window_total", plan["eligible_sessions"])
     covered = plan["covered_sessions"]
     if plan["full_coverage"]:
-        return [f"Coverage: all {eligible} session(s) in the window will be read."]
+        return [f"Coverage: all {total} session(s) in the window will be read."]
     lines = [
-        f"Coverage: {covered} of {eligible} session(s) will be read — "
+        f"Coverage: {covered} of {total} session(s) will be read — "
         f"{plan['shortfall_sessions']} would be skipped.",
         "This is a cap, not a latch failure: the skipped sessions are never "
         "opened, so nothing in them can be found.",
     ]
+    if plan.get("discovery_omitted"):
+        lines.append(
+            f"{plan['discovery_omitted']} in-window session(s) were dropped by "
+            "latch's own discovery limits before eligibility was assessed "
+            f"(scan {MAX_SOURCE_SCAN} / inventory {MAX_SOURCE_INVENTORY}); "
+            "narrow the window or the source selection to bring them in range."
+        )
     binding = plan["binding_constraint"]
+    if binding == "hard_ceiling":
+        lines.append(
+            f"The binding limit is latch's absolute per-run ceiling "
+            f"({plan['hard_ceiling']} calls). It cannot be raised from this "
+            "prompt; seed in smaller windows across several runs."
+        )
+        return lines
     if binding == "daily_budget":
         lines.append(
             f"The binding limit is your daily non-heal model-call budget "
@@ -1597,7 +1644,10 @@ def render_coverage_lines(plan: dict[str, Any]) -> list[str]:
 
 
 def confirm_llm_budget(
-    args: argparse.Namespace, eligible: int, project_path: str | None = None,
+    args: argparse.Namespace,
+    eligible: int,
+    project_path: str | None = None,
+    discovery_omitted: int = 0,
 ) -> str:
     """Confirm coverage before spending calls; never truncate silently.
 
@@ -1611,7 +1661,7 @@ def confirm_llm_budget(
     if args.llm != "yes":
         return "proceed"
     stream = sys.stderr if args.format == "json" else sys.stdout
-    plan = coverage_plan(args, eligible, project_path)
+    plan = coverage_plan(args, eligible, project_path, discovery_omitted)
     args.coverage_plan = plan
 
     if plan["full_coverage"]:
@@ -1646,14 +1696,31 @@ def confirm_llm_budget(
         return "proceed"
     if choice == "full":
         if not plan["raisable_by_flags"]:
-            # The daily budget is binding; raising per-run flags cannot satisfy
-            # "full", so promising it would be a lie. Say so and re-ask.
-            print(
-                "Cannot reach full coverage in this run: the daily non-heal "
-                "budget is the binding limit. Run /latch-budget-approve, then "
-                "rerun seeding.",
-                file=stream,
-            )
+            # Raising per-run flags cannot satisfy "full" when the daily
+            # budget, latch's hard ceiling, or discovery's own outer caps are
+            # what bind. Promising full coverage anyway would be exactly the
+            # silent-truncation failure this prompt exists to prevent.
+            binding = plan["binding_constraint"]
+            if binding == "daily_budget":
+                reason = (
+                    "the daily non-heal budget is the binding limit — run "
+                    "/latch-budget-approve, then rerun seeding"
+                )
+            elif binding == "hard_ceiling":
+                reason = (
+                    f"latch's absolute per-run ceiling "
+                    f"({plan.get('hard_ceiling')} calls) is the binding limit "
+                    "— seed in smaller windows across several runs"
+                )
+            else:
+                reason = (
+                    f"{plan.get('discovery_omitted', 0)} in-window session(s) "
+                    "are beyond latch's discovery limits and cannot be reached "
+                    "by raising this cap — narrow the window or the source "
+                    "selection"
+                )
+            print(f"Cannot reach full coverage in this run: {reason}.",
+                  file=stream)
             return "cancel"
         needed = plan["calls_needed_for_full_coverage"]
         args.max_llm_calls = max(int(args.max_llm_calls or 0), needed)
@@ -1699,8 +1766,16 @@ def _prompt_coverage_choice(plan: dict[str, Any], *, stream) -> str:
 def _prompt_reduce_window(args: argparse.Namespace, *, stream) -> bool:
     smaller = [days for days in LOOKBACK_CHOICES if days < args.lookback_days]
     if not smaller:
-        print("Already at the smallest lookback window.", file=stream)
-        return True
+        # Returning success here yielded a "rescan" that changed nothing;
+        # repeating it exhausted the reconfirm loop and the run proceeded
+        # without the user ever consenting to the shortfall. Fail closed.
+        print(
+            f"Already at the smallest lookback window ({args.lookback_days} "
+            "days); it cannot be reduced further. Choose 'as_is' to accept "
+            "partial coverage, or raise the caps.",
+            file=stream,
+        )
+        return False
     print(f"Lookback choices smaller than {args.lookback_days}: "
           f"{', '.join(str(d) for d in smaller)}", file=stream)
     chosen = _prompt_int(
@@ -6129,11 +6204,14 @@ def main(argv: list[str] | None = None) -> int:
         # discarded. An answer that raises the session cap or shrinks the window
         # changes discovery itself, so we re-discover and confirm again instead
         # of filtering the stale list.
+        coverage_confirmed = False
         for _ in range(MAX_COVERAGE_RECONFIRMS):
-            eligible = int(
-                (args.discovery_stats or {}).get("eligible", len(sources))
+            stats_now = args.discovery_stats or {}
+            eligible = int(stats_now.get("eligible", len(sources)))
+            omitted = int(stats_now.get("scan_truncated", 0) or 0) + int(
+                stats_now.get("inventory_truncated", 0) or 0
             )
-            verdict = confirm_llm_budget(args, eligible, args.project)
+            verdict = confirm_llm_budget(args, eligible, args.project, omitted)
             if verdict == "cancel":
                 emit_seed_cli_failure(
                     args,
@@ -6142,6 +6220,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 return 1
             if verdict != "rescan":
+                coverage_confirmed = True
                 break
             try:
                 sources = discover_sources(
@@ -6182,6 +6261,19 @@ def main(argv: list[str] | None = None) -> int:
                     return 1
                 args.sources_skipped_unchanged = len(already_applied)
             args.sources_selected = len(sources)
+        if not coverage_confirmed:
+            # Falling out of the loop means every pass asked to re-scan and the
+            # user never accepted a plan. Proceeding here would spend calls on
+            # an un-consented shortfall, so fail closed.
+            emit_seed_cli_failure(
+                args,
+                code="llm_budget_cancelled",
+                message=(
+                    "Seed pass cancelled: coverage was never confirmed after "
+                    f"{MAX_COVERAGE_RECONFIRMS} attempts."
+                ),
+            )
+            return 1
 
         call_sources = (
             planned_llm_sources(sources, max_calls=args.max_llm_calls)
