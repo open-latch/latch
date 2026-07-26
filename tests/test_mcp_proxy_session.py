@@ -15,15 +15,18 @@ when the Cursor install uses Codex model backends or stale Codex markers exist.
 """
 from __future__ import annotations
 
+import io
 import shutil
 import sys
 import tempfile
+from contextlib import redirect_stderr
 from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import codex_session  # noqa: E402
+import mcp_broker  # noqa: E402
 import mcp_proxy  # noqa: E402
 import mcp_runtime  # noqa: E402
 import paths  # noqa: E402
@@ -41,7 +44,13 @@ def _clean_env(**overrides):
     the test runner's own ``CLAUDE_CODE_SESSION_ID`` (present when this suite is
     run from inside a Claude Code session) from leaking into the fallback cases.
     """
-    return mock.patch.dict(mcp_proxy.os.environ, overrides, clear=True)
+    isolated = {
+        name: mcp_proxy.os.environ[name]
+        for name in (paths.TEST_ROOT_ENV, paths.TEST_CAPABILITY_ENV)
+        if name in mcp_proxy.os.environ
+    }
+    isolated.update(overrides)
+    return mock.patch.dict(mcp_proxy.os.environ, isolated, clear=True)
 
 
 def test_resolve_session_prefers_neutral_latch_override():
@@ -107,7 +116,6 @@ def test_resolve_session_leaves_cursor_mcp_calls_unattributed():
                 "Cursor MCP calls must not inherit process ids or Codex markers",
             )
     finally:
-        shutil.rmtree(project_dir, ignore_errors=True)
         shutil.rmtree(tmp, ignore_errors=True)
     print("PASS resolve_session_leaves_cursor_mcp_calls_unattributed")
 
@@ -125,7 +133,6 @@ def test_resolve_session_reads_codex_marker_when_env_lacks_thread():
                 "SessionStart marker",
             )
     finally:
-        shutil.rmtree(project_dir, ignore_errors=True)
         shutil.rmtree(tmp, ignore_errors=True)
     print("PASS resolve_session_reads_codex_marker_when_env_lacks_thread")
 
@@ -141,7 +148,6 @@ def test_resolve_session_reports_missing_codex_marker():
                 "instead of guessing an id",
             )
     finally:
-        shutil.rmtree(project_dir, ignore_errors=True)
         shutil.rmtree(tmp, ignore_errors=True)
     print("PASS resolve_session_reports_missing_codex_marker")
 
@@ -182,6 +188,17 @@ def test_connection_metadata_carries_typed_settings_and_private_child_env():
         "heartbeat_s": 3.0,
         "stale_s": 19.0,
     }, metadata)
+    digest = metadata["vault_context_digest"]
+    _assert(
+        isinstance(digest, str)
+        and len(digest) == 64
+        and all(character in "0123456789abcdef" for character in digest),
+        metadata,
+    )
+    _assert(
+        mcp_proxy.os.environ[paths.TEST_CAPABILITY_ENV] not in repr(metadata),
+        "test capability must never be serialized into proxy metadata",
+    )
     _assert("OPENAI_API_KEY" not in metadata, metadata)
     _assert("ANTHROPIC_API_KEY" not in metadata, metadata)
     _assert("LATCH_ARBITRARY_POISON" not in metadata, metadata)
@@ -254,6 +271,66 @@ def test_windows_child_environment_deduplicates_case_insensitive_names():
     print("PASS windows_child_environment_deduplicates_case_insensitive_names")
 
 
+def test_empty_vault_root_override_reads_as_unset():
+    """An empty root override must resolve like an absent one.
+
+    ``vault_identity.platform_production_root`` / ``platform_durability_root``
+    already treat an empty value as unset (and the XDG spec requires it of
+    ``XDG_DATA_HOME`` / ``XDG_STATE_HOME``), so the daemon fence must agree —
+    otherwise a legitimate environment cannot start the proxy at all.
+    """
+    for name in mcp_broker.DAEMON_VAULT_ROOT_ENV_VARS:
+        with _clean_env():
+            absent = mcp_broker.vault_context_digest()
+        with _clean_env(**{name: ""}):
+            blank = mcp_broker.vault_context_digest()
+            metadata = mcp_proxy.connection_metadata()
+        _assert(blank == absent, f"{name}='' must digest as unset")
+        _assert(metadata["vault_context_digest"] == absent, name)
+    print("PASS empty_vault_root_override_reads_as_unset")
+
+
+def test_malformed_vault_root_override_is_a_diagnostic_not_a_traceback():
+    """A non-empty but unusable root stays an error, reported cleanly.
+
+    ``BrokerError`` subclasses ``RuntimeError``, so before this was caught it
+    escaped ``main``'s ``ValueError`` handler as a traceback and the operator
+    never reached the legacy-fallback guidance.
+    """
+    for value in ("relative/data", "   "):
+        with _clean_env(XDG_DATA_HOME=value):
+            try:
+                mcp_broker.vault_context_digest()
+            except mcp_broker.BrokerError:
+                pass
+            else:
+                raise AssertionError(f"XDG_DATA_HOME={value!r} must be refused")
+            stderr = io.StringIO()
+            with redirect_stderr(stderr):
+                code = mcp_proxy.main()
+        _assert(code == 2, (value, code))
+        _assert(
+            "invalid MCP connection configuration" in stderr.getvalue(),
+            stderr.getvalue(),
+        )
+        _assert("Traceback" not in stderr.getvalue(), stderr.getvalue())
+    print("PASS malformed_vault_root_override_is_a_diagnostic_not_a_traceback")
+
+
+def test_daemon_environment_never_donates_a_blank_vault_root():
+    for name in mcp_broker.DAEMON_VAULT_ROOT_ENV_VARS:
+        env = mcp_broker._daemon_environment({name: ""})
+        _assert(name not in env, (name, env))
+        # os.environ itself refuses an embedded NUL, so this rejection is only
+        # reachable through an explicit source mapping.
+        try:
+            mcp_broker._daemon_environment({name: "/tmp/with\0nul"})
+        except mcp_broker.BrokerError:
+            continue
+        raise AssertionError(f"{name} with an embedded NUL must be refused")
+    print("PASS daemon_environment_never_donates_a_blank_vault_root")
+
+
 if __name__ == "__main__":
     test_resolve_session_prefers_neutral_latch_override()
     test_resolve_session_uses_claude_session_ahead_of_codex()
@@ -265,4 +342,7 @@ if __name__ == "__main__":
     test_connection_metadata_carries_typed_settings_and_private_child_env()
     test_command_resolution_cannot_preempt_explicit_path_with_cwd()
     test_windows_child_environment_deduplicates_case_insensitive_names()
+    test_empty_vault_root_override_reads_as_unset()
+    test_malformed_vault_root_override_is_a_diagnostic_not_a_traceback()
+    test_daemon_environment_never_donates_a_blank_vault_root()
     print("\nAll mcp_proxy._resolve_session tests pass.")

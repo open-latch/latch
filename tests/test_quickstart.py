@@ -420,9 +420,12 @@ def test_quickstart_pin_uses_explicit_or_environment_override():
                 "pin helper should forward the installer result")
         _assert(qs.pin_kb_for_quickstart("/explicit/kb", dry_run=True) ==
                 ("OK", "pinned"), "explicit pin should be accepted")
+        _assert(qs.pin_kb_for_quickstart("", dry_run=False) == ("OK", "pinned"),
+                "explicit empty input must reach the installer's fail-closed validator")
         _assert(calls == [
             ("/env/latch-kb", False),
             ("/explicit/kb", True),
+            ("", False),
         ], calls)
     finally:
         qs.install_engine.pin_kb_dir = original_pin
@@ -439,7 +442,11 @@ def test_quickstart_pin_uses_explicit_or_environment_override():
 
 def test_quickstart_persists_transient_env_pin_for_later_processes():
     root = Path(tempfile.mkdtemp(prefix="latch-quickstart-durable-pin-"))
-    target = root / "isolated kb"
+    target = (
+        qs.paths.validated_test_root()
+        / "vaults"
+        / f"quickstart-durable-{root.name}"
+    )
     seed_cwd = root / "seed cwd"
     mcp_cwd = root / "different mcp cwd"
     seed_cwd.mkdir()
@@ -468,6 +475,8 @@ def test_quickstart_persists_transient_env_pin_for_later_processes():
 
         # A later Codex/MCP process starts elsewhere without the bootstrap env.
         env.pop("LATCH_KB_DIR", None)
+        env.pop(qs.paths.TEST_ROOT_ENV, None)
+        env.pop(qs.paths.TEST_CAPABILITY_ENV, None)
         later_db = subprocess.check_output(
             [sys.executable, "-c", "import paths; print(paths.db_path())"],
             cwd=mcp_cwd,
@@ -591,18 +600,22 @@ def test_quickstart_pin_conflict_stops_before_wiring():
         qs.install_engine.resolve_python = lambda _value: "/py"
         qs.agent_preflight_errors = lambda *_args, **_kwargs: []
         qs.paths.resolve_maintenance_executable = lambda _backend: "/bin/codex"
-        qs.pin_kb_for_quickstart = lambda *_args, **_kwargs: (
-            "ERROR", "effective target conflicts with existing pin"
-        )
         qs.run_steps = lambda *_args, **_kwargs: ran.append(True) or 0
-        rc = qs.main([
-            "--agents", "codex",
-            "--project", str(project),
-            "--skip-doctor",
-            "--no-seed",
-        ])
-        _assert(rc == 2, f"pin conflict should fail with status 2, got {rc}")
-        _assert(ran == [], "pin conflict must stop before installer subprocesses")
+        for level in ("ERROR", "FAIL"):
+            qs.pin_kb_for_quickstart = lambda *_args, level=level, **_kwargs: (
+                level, "effective target is unsafe or conflicts with existing pin"
+            )
+            rc = qs.main([
+                "--agents", "codex",
+                "--project", str(project),
+                "--skip-doctor",
+                "--no-seed",
+            ])
+            _assert(rc == 2, f"{level} pin should fail with status 2, got {rc}")
+            _assert(
+                ran == [],
+                f"{level} pin must stop before installer subprocesses",
+            )
     finally:
         qs.install_engine.resolve_python = original["resolve_python"]
         qs.agent_preflight_errors = original["agent_preflight_errors"]

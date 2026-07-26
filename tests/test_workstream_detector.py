@@ -10,6 +10,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
 import db  # noqa: E402
+import paths  # noqa: E402
 import workstream_detector as detector  # noqa: E402
 
 
@@ -817,7 +818,7 @@ def test_auto_open_probation_rolls_back_only_after_target_with_full_releases():
 
 
 def _connect(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> sqlite3.Connection:
-    path = tmp_path / "kb.db"
+    path = paths.project_dir(str(tmp_path)) / "kb.db"
     monkeypatch.setattr(db, "db_path", lambda _cwd=None: path)
     monkeypatch.setattr(
         db,

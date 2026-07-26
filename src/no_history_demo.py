@@ -7,10 +7,14 @@ decision into a throwaway KB, run latch_gate, and print the receipt.
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import os
+import secrets
 import shutil
 import sys
 import tempfile
+import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,6 +25,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 import db  # noqa: E402
 import gate  # noqa: E402
 import paths  # noqa: E402
+import vault_identity  # noqa: E402
 
 
 DEMO_REQUEST = (
@@ -57,6 +62,9 @@ class DemoFixture:
     project: Path
     kb_dir: Path
     decision_id: int
+    test_root: Path
+    test_capability: str
+    owns_test_root: bool
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -105,6 +113,52 @@ def pinned_kb_dir(kb_dir: Path) -> Iterator[None]:
 
 
 @contextmanager
+def _test_runtime(test_root: Path, capability: str) -> Iterator[None]:
+    """Activate an authenticated disposable root and restore ambient state."""
+    saved = {
+        name: os.environ.get(name)
+        for name in (
+            paths.TEST_ROOT_ENV,
+            paths.TEST_CAPABILITY_ENV,
+            "LATCH_KB_DIR",
+            "CLAUDE_KB_DIR",
+        )
+    }
+    os.environ[paths.TEST_ROOT_ENV] = str(test_root)
+    os.environ[paths.TEST_CAPABILITY_ENV] = capability
+    os.environ.pop("LATCH_KB_DIR", None)
+    os.environ.pop("CLAUDE_KB_DIR", None)
+    try:
+        yield
+    finally:
+        for name, value in saved.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+
+def _demo_test_identity(root: Path) -> tuple[Path, str, bool]:
+    existing = paths.validated_test_root()
+    if existing is not None:
+        return existing, os.environ[paths.TEST_CAPABILITY_ENV], False
+    test_root = root / ".latch-test-runtime"
+    test_root.mkdir(parents=True, exist_ok=False)
+    capability = secrets.token_hex(32)
+    (test_root / paths.TEST_SENTINEL).write_text(
+        json.dumps({
+            "format": 1,
+            "root_uuid": str(uuid.uuid4()),
+            "capability_sha256": hashlib.sha256(
+                capability.encode("utf-8")
+            ).hexdigest(),
+        }, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return test_root.resolve(), capability, True
+
+
+@contextmanager
 def gate_backend(name: str | None) -> Iterator[None]:
     old = os.environ.get("LATCH_GATE_BACKEND")
     if name:
@@ -120,9 +174,7 @@ def gate_backend(name: str | None) -> Iterator[None]:
 
 def create_fixture(root: Path) -> DemoFixture:
     project = root / "project" / "no-history-demo-app"
-    kb_dir = root / "kb"
     project.mkdir(parents=True, exist_ok=True)
-    kb_dir.mkdir(parents=True, exist_ok=True)
     (project / "GOVERNANCE.md").write_text(DEMO_GOVERNANCE, encoding="utf-8")
     (project / "app.py").write_text(
         "import sqlite3\n\n\n"
@@ -131,30 +183,37 @@ def create_fixture(root: Path) -> DemoFixture:
         "    return sqlite3.connect(\"app.db\")\n",
         encoding="utf-8",
     )
-    with pinned_kb_dir(kb_dir):
-        conn = db.connect(str(project))
-        try:
-            decision_id = db.insert_node(
-                conn,
-                kind="decision",
-                title=DEMO_DECISION_TITLE,
-                body=DEMO_DECISION_BODY,
-                status="canonical",
-                session_id="no-history-demo",
-            )
-        finally:
-            conn.close()
+    test_root, capability, owns_test_root = _demo_test_identity(root)
+    with _test_runtime(test_root, capability):
+        kb_dir = paths.project_dir(str(root / "kb"))
+        with pinned_kb_dir(kb_dir):
+            conn = db.connect(str(project))
+            try:
+                decision_id = db.insert_node(
+                    conn,
+                    kind="decision",
+                    title=DEMO_DECISION_TITLE,
+                    body=DEMO_DECISION_BODY,
+                    status="canonical",
+                    session_id="no-history-demo",
+                )
+            finally:
+                conn.close()
     return DemoFixture(
         root=root,
         project=project,
         kb_dir=kb_dir,
         decision_id=decision_id,
+        test_root=test_root,
+        test_capability=capability,
+        owns_test_root=owns_test_root,
     )
 
 
 def run_gate(fixture: DemoFixture, *, request: str, use_llm: bool,
              max_chains: int, backend: str | None) -> dict:
-    with pinned_kb_dir(fixture.kb_dir), gate_backend(backend):
+    with _test_runtime(fixture.test_root, fixture.test_capability), \
+            pinned_kb_dir(fixture.kb_dir), gate_backend(backend):
         conn = db.connect(str(fixture.project))
         try:
             return gate.run_gate(
@@ -166,6 +225,19 @@ def run_gate(fixture: DemoFixture, *, request: str, use_llm: bool,
             )
         finally:
             conn.close()
+
+
+def cleanup_fixture(fixture: DemoFixture) -> None:
+    """Delete the identified test vault before removing other fixture files."""
+    with _test_runtime(fixture.test_root, fixture.test_capability):
+        identity = vault_identity.read_identity(fixture.kb_dir / "kb.db")
+        if identity is not None:
+            vault_identity.safe_delete_test_vault(
+                fixture.kb_dir,
+                expected_uuid=identity.vault_uuid,
+                capability=fixture.test_capability,
+            )
+    shutil.rmtree(fixture.root, ignore_errors=True)
 
 
 def _chain_contains_decision(out: dict, decision_id: int) -> bool:
@@ -272,7 +344,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     finally:
         if fixture and not args.keep and not args.work_dir:
-            shutil.rmtree(fixture.root, ignore_errors=True)
+            cleanup_fixture(fixture)
 
 
 if __name__ == "__main__":

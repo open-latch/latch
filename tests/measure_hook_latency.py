@@ -17,6 +17,8 @@ import time
 from pathlib import Path
 
 _SRC = Path(__file__).resolve().parent.parent / "src"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _isolation  # noqa: E402,F401
 sys.path.insert(0, str(_SRC))
 
 import db  # noqa: E402
@@ -29,7 +31,7 @@ import paths  # noqa: E402
 def main() -> int:
     tmp = tempfile.mkdtemp(prefix="kb_latency_")
     print(f"project: {tmp}")
-    os.environ["LATCH_KB_DIR"] = tmp
+    os.environ["LATCH_KB_DIR"] = str(paths.project_dir(tmp))
     os.environ["CLAUDE_KB_IN_MAINTENANCE"] = "1"
     paths._PINNED_DIR = False
 

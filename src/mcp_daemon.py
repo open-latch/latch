@@ -647,8 +647,26 @@ async def _handle_connection(stream: SocketStream, state: DaemonState, token: st
             return
         op = metadata.get("op")
         if op == "probe":
+            supplied_digest = metadata.get("vault_context_digest")
+            owner_digest = mcp_broker.vault_context_digest()
+            if (
+                supplied_digest is not None
+                and (
+                    not isinstance(supplied_digest, str)
+                    or not secrets.compare_digest(supplied_digest, owner_digest)
+                )
+            ):
+                await stream.send(
+                    b'{"ok":false,"error":"vault_context_mismatch"}\n'
+                )
+                return
             state.touch()
-            response = {"ok": True, "pid": os.getpid(), "runtime_key": mcp_broker.RUNTIME_KEY}
+            response = {
+                "ok": True,
+                "pid": os.getpid(),
+                "runtime_key": mcp_broker.RUNTIME_KEY,
+                "vault_context_digest": owner_digest,
+            }
             await stream.send(json.dumps(response, separators=(",", ":")).encode() + b"\n")
             return
         if op != "mcp":
@@ -659,6 +677,16 @@ async def _handle_connection(stream: SocketStream, state: DaemonState, token: st
             capability_epoch = 0
         if capability_epoch < mcp_broker.PROXY_CAPABILITY_EPOCH:
             await _run_fresh_task_rejection(stream, buffer, metadata, state)
+            return
+        supplied_digest = metadata.get("vault_context_digest")
+        owner_digest = mcp_broker.vault_context_digest()
+        if (
+            not isinstance(supplied_digest, str)
+            or not secrets.compare_digest(supplied_digest, owner_digest)
+        ):
+            await stream.send(
+                b'{"ok":false,"error":"vault_context_mismatch"}\n'
+            )
             return
         await _run_mcp_connection(stream, buffer, metadata, state)
     except (anyio.EndOfStream, anyio.ClosedResourceError, anyio.BrokenResourceError):

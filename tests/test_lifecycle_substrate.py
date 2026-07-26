@@ -11,11 +11,12 @@ sys.path.insert(0, str(ROOT / "src"))
 
 import db  # noqa: E402
 import lifecycle_signals  # noqa: E402
+import paths  # noqa: E402
 import schema_version  # noqa: E402
 
 
 def _connect(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> sqlite3.Connection:
-    path = tmp_path / "kb.db"
+    path = paths.project_dir(str(tmp_path)) / "kb.db"
     monkeypatch.setattr(db, "db_path", lambda _cwd=None: path)
     monkeypatch.setattr(
         db,
@@ -40,7 +41,7 @@ def _open_payload() -> dict:
     return {"assigned_member_ids": [], "watch_pair": None, "probation": {}}
 
 
-def test_schema_v2_tables_and_reconnect_are_idempotent(tmp_path, monkeypatch):
+def test_current_schema_tables_and_reconnect_are_idempotent(tmp_path, monkeypatch):
     conn = _connect(tmp_path, monkeypatch)
     names = {
         row["name"]
@@ -53,10 +54,10 @@ def test_schema_v2_tables_and_reconnect_are_idempotent(tmp_path, monkeypatch):
         "workstream_derivation_candidates",
         "workstream_op_events",
     } <= names
-    assert schema_version.read(conn) == 2
+    assert schema_version.read(conn) == schema_version.KB_SCHEMA_VERSION
     conn.close()
     reopened = db.connect(str(tmp_path))
-    assert schema_version.read(reopened) == 2
+    assert schema_version.read(reopened) == schema_version.KB_SCHEMA_VERSION
     reopened.close()
 
 

@@ -29,13 +29,16 @@ if os.name != "nt":
 SRC = Path(__file__).resolve().parent.parent / "src"
 LAUNCHER = SRC / "mcp_launcher_win.py"
 PYTHONW = Path(sys.executable).with_name("pythonw.exe")
+sys.path.insert(0, str(SRC))
+
+import paths  # noqa: E402
 
 
-def _env(tmp_path: Path) -> dict:
+def _env(tmp_path: Path, kb_dir: Path) -> dict:
     env = os.environ.copy()
     env["LATCH_ADAPTER"] = "cursor"
     env["LATCH_PYTHON"] = sys.executable
-    env["LATCH_KB_DIR"] = str(tmp_path / "kb")
+    env["LATCH_KB_DIR"] = str(kb_dir)
     env["LATCH_MCP_LAUNCHER_LOG"] = str(tmp_path / "launcher.log")
     return env
 
@@ -142,11 +145,11 @@ def _result(msg):
     return msg.get("result") or {}
 
 
-def _start_launcher(tmp_path: Path):
+def _start_launcher(tmp_path: Path, kb_dir: Path):
     proc = subprocess.Popen(
         [str(PYTHONW), str(LAUNCHER)],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        cwd=str(tmp_path), env=_env(tmp_path),
+        cwd=str(tmp_path), env=_env(tmp_path, kb_dir),
     )
     out = _Reader(proc.stdout)
     out.start()
@@ -162,10 +165,10 @@ def _initialize(proc, out, *, request_id: int) -> None:
     _send(proc, {"jsonrpc": "2.0", "method": "notifications/initialized"})
 
 
-def _daemon_pid(tmp_path: Path) -> int:
+def _daemon_pid(kb_dir: Path) -> int:
     deadline = time.time() + 30
     while time.time() < deadline:
-        for path in (tmp_path / "kb").rglob("mcp-daemon.json"):
+        for path in kb_dir.rglob("mcp-daemon.json"):
             try:
                 payload = json.loads(path.read_text(encoding="utf-8"))
                 pid = payload.get("pid")
@@ -187,10 +190,12 @@ def _close_launcher(proc) -> int:
 
 def test_launcher_full_mcp_lifecycle_and_shared_daemon_survival(tmp_path):
     assert PYTHONW.is_file(), PYTHONW
+    kb_dir = paths.project_dir(str(tmp_path / "win-launcher-protocol"))
+    assert kb_dir.is_relative_to(paths.validated_test_root() / "vaults")
     first = second = None
     daemon_pid = None
     try:
-        first, first_out = _start_launcher(tmp_path)
+        first, first_out = _start_launcher(tmp_path, kb_dir)
         _initialize(first, first_out, request_id=1)
 
         _send(first, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
@@ -211,7 +216,7 @@ def test_launcher_full_mcp_lifecycle_and_shared_daemon_survival(tmp_path):
         content = recent.get("content")
         assert isinstance(content, list) and len(content) >= 1, recent.keys()
 
-        daemon_pid = _daemon_pid(tmp_path)
+        daemon_pid = _daemon_pid(kb_dir)
         child_pids = _descendant_pids(first.pid)
         assert child_pids, "expected at least the server child under the launcher"
         proxy_pids = child_pids - {daemon_pid}
@@ -223,14 +228,14 @@ def test_launcher_full_mcp_lifecycle_and_shared_daemon_survival(tmp_path):
         assert all(not _pid_alive(pid) for pid in proxy_pids), proxy_pids
         assert _pid_alive(daemon_pid), "shared daemon died with first Cursor connection"
 
-        second, second_out = _start_launcher(tmp_path)
+        second, second_out = _start_launcher(tmp_path, kb_dir)
         _initialize(second, second_out, request_id=5)
         _send(second, {"jsonrpc": "2.0", "id": 6, "method": "tools/call",
                        "params": {"name": "latch_recent", "arguments": {"limit": 5}}})
         second_recent = _result(second_out.next_json())
         assert second_recent.get("isError") is not True
         assert isinstance(second_recent.get("content"), list)
-        assert _daemon_pid(tmp_path) == daemon_pid, "second launcher did not reuse daemon"
+        assert _daemon_pid(kb_dir) == daemon_pid, "second launcher did not reuse daemon"
         assert _close_launcher(second) == 0
         second = None
         assert _pid_alive(daemon_pid), "shared daemon died with second Cursor connection"

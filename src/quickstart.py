@@ -202,11 +202,12 @@ def pin_kb_for_quickstart(
     dry_run: bool,
 ) -> tuple[str, str]:
     """Persist the one-KB source of truth before any surface is wired."""
-    override = (
-        kb_dir
-        or os.environ.get("LATCH_KB_DIR")
-        or os.environ.get("CLAUDE_KB_DIR")
-    )
+    override = kb_dir
+    if override is None:
+        override = (
+            os.environ.get("LATCH_KB_DIR")
+            or os.environ.get("CLAUDE_KB_DIR")
+        )
     return install_engine.pin_kb_dir(override, dry_run)
 
 
@@ -481,7 +482,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                           "--cursor-history is explicitly enabled)"))
     ap.add_argument("--kb-dir",
                     help=("pin this installation to one explicit KB directory; "
-                          "fresh installs otherwise use <LATCH_HOME>/store"))
+                          "fresh installs otherwise use the platform data root "
+                          "outside the source checkout"))
     ap.add_argument("--lookback-days", type=int, default=90,
                     help="history horizon for initial-KB seeding (default: 90)")
     ap.add_argument("--last-sessions", type=int, default=50,
@@ -647,7 +649,7 @@ def main(argv: list[str] | None = None) -> int:
 
     pin_level, pin_msg = pin_kb_for_quickstart(args.kb_dir, dry_run=args.dry_run)
     print(f"  KB pin       : [{pin_level}] {pin_msg}")
-    if pin_level == "ERROR":
+    if pin_level in {"ERROR", "FAIL"}:
         print("Quickstart stopped before agent configuration or seed writes.", file=sys.stderr)
         return 2
     if not args.dry_run:

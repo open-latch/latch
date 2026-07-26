@@ -72,7 +72,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+import paths
 import versioning
+import vault_identity
 
 SERVER_NAME = "latch"
 LEGACY_SERVER_NAMES = ("claude-kb",)
@@ -143,7 +145,7 @@ LATCH_COMMAND_MARKERS = (
 # (id=302/307/335/1461/1523/1555) structurally impossible.
 KB_LOCATION_PATH = KB_HOME / "kb_location.json"
 PROJECTS_DIR = KB_HOME / "projects"
-DEFAULT_STORE_DIR = KB_HOME / "store"
+DEFAULT_STORE_DIR = vault_identity.default_production_vault()
 
 
 def seed_next_step_message(
@@ -286,6 +288,33 @@ def _abs(p: str) -> str:
     if path.exists():
         return str(path.absolute())
     return p
+
+
+def mcp_launch_command(
+    python_path: str,
+    server_py: str,
+    *,
+    system: str | None = None,
+) -> tuple[str, str]:
+    """Return the windowless MCP command pair for supported Windows venvs.
+
+    ``pythonw.exe`` cannot use MCP pipes directly, so it runs the managed
+    ``mcp_launcher_win.py`` supervisor. The supervisor hands the inherited
+    handles to base ``python.exe`` with ``CREATE_NO_WINDOW``. Hooks keep using
+    the original console interpreter because they are not long-lived stdio
+    servers.
+    """
+    if (system or platform.system()) != "Windows":
+        return python_path, server_py
+    resolved = shutil.which(python_path) or python_path
+    python = Path(resolved)
+    launcher = Path(server_py).with_name("mcp_launcher_win.py")
+    if python.name.lower() != "python.exe" or not launcher.is_file():
+        return python_path, server_py
+    pythonw = python.with_name("pythonw.exe")
+    if not pythonw.is_file():
+        return python_path, server_py
+    return str(pythonw), str(launcher)
 
 
 def find_claude() -> str | None:
@@ -461,7 +490,8 @@ def pin_kb_dir(kb_dir_override: str | None, dry_run: bool) -> tuple[str, str]:
     Idempotent: an existing pin is never overwritten (re-running install must
     not relocate a user's KB). With no pin yet:
       * ``--kb-dir`` wins, then ``LATCH_KB_DIR`` / ``CLAUDE_KB_DIR``;
-      * a FRESH install (no legacy per-cwd KBs) defaults to ``<KB_HOME>/store``;
+      * a FRESH install defaults to the platform production-data directory,
+        outside this source checkout;
       * an install that already has per-cwd KBs and no ``--kb-dir`` is LEFT in
         legacy mode — writing a default would silently orphan existing
         knowledge — with guidance to pin explicitly. This is the forward-only
@@ -513,6 +543,18 @@ def pin_kb_dir(kb_dir_override: str | None, dry_run: bool) -> tuple[str, str]:
                     f"{str(existing_path)!r}; refusing to seed one KB and later open another. "
                     "Unset the override to keep the existing pin, or migrate the pin explicitly."
                 )
+        resolved_existing_path = existing_path.resolve()
+        try:
+            resolved_existing_path.relative_to(KB_HOME.resolve())
+            inside_source = True
+        except ValueError:
+            inside_source = False
+        if inside_source:
+            return "WARN", (
+                f"existing production KB pin is inside the source checkout: {existing}. "
+                "It was not moved automatically; create and verify an external backup, "
+                "then migrate it to an external --kb-dir before normal operation."
+            )
         return "OK", f"already pinned -> {existing} (left unchanged)"
     if effective_override:
         target = absolute_kb_dir(effective_override)
@@ -524,7 +566,22 @@ def pin_kb_dir(kb_dir_override: str | None, dry_run: bool) -> tuple[str, str]:
             "(e.g. the projects/<dir> you want to keep)."
         )
     else:
-        target = DEFAULT_STORE_DIR
+        test_root = paths.validated_test_root()
+        target = (
+            test_root / "vaults" / "latch-install-default"
+            if test_root is not None
+            else DEFAULT_STORE_DIR
+        )
+    target = target.expanduser().resolve()
+    try:
+        target.relative_to(KB_HOME.resolve())
+        inside_source = True
+    except ValueError:
+        inside_source = False
+    if inside_source:
+        return "FAIL", (
+            f"refusing production KB directory inside the source checkout: {target}"
+        )
     target_str = str(target).replace("\\", "/")
     if dry_run:
         return "DRY", f"would pin KB dir -> {target_str} (write {KB_LOCATION_PATH.name})"
@@ -809,7 +866,7 @@ def check(python_path: str, server_py: str) -> int:
             rows.append((False, "KB NOT pinned: legacy per-cwd mode with existing project "
                                 "KBs (wrong-DB bug class live - pin with --kb-dir; id=1556)"))
         else:
-            rows.append((True, "KB not pinned yet (fresh install — pin defaults to store/)"))
+            rows.append((True, "KB not pinned yet (fresh install — pin defaults outside source)"))
 
     failed = 0
     for ok, label in rows:
@@ -835,7 +892,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--check", action="store_true", help="verify wiring only; exit 1 if incomplete")
     ap.add_argument("--kb-dir", help="pin the single KB directory (id=1556); written to "
                                      "kb_location.json so the DB is never selected from cwd. "
-                                     "Default on a fresh install: <KB_HOME>/store. An existing "
+                                     "Default on a fresh install: platform data root outside the "
+                                     "source checkout. An existing "
                                      "per-cwd install is left in legacy mode unless this is given.")
     ap.add_argument("--no-seed-prompt", action="store_true",
                     help="leave the initial KB pending and print its review command")
@@ -844,9 +902,10 @@ def main(argv: list[str] | None = None) -> int:
 
     python_path = resolve_python(args.python)
     server_py = str((KB_HOME / "src" / "mcp_server.py")).replace("\\", "/")
+    mcp_python, mcp_server = mcp_launch_command(python_path, server_py)
 
     if args.check:
-        return check(python_path, server_py)
+        return check(mcp_python, mcp_server)
 
     if not SNIPPET_PATH.exists():
         print(f"error: missing {SNIPPET_PATH}", file=sys.stderr)
@@ -871,7 +930,7 @@ def main(argv: list[str] | None = None) -> int:
 
     pin_level, pin_msg = pin_kb_dir(args.kb_dir, args.dry_run)
     print(f"  [{pin_level:4}] KB dir: {pin_msg}")
-    if pin_level == "ERROR":
+    if pin_level in {"ERROR", "FAIL"}:
         print("\nNo changes written.")
         return 2
 
@@ -880,9 +939,9 @@ def main(argv: list[str] | None = None) -> int:
         print("  [WARN] claude CLI not found on PATH — cannot register the MCP server.")
         print("         Install Claude Code, then re-run, or register manually:")
         print(f"           claude mcp add {SERVER_NAME} --scope user -- "
-              f"{python_path} {server_py}")
+              f"{mcp_python} {mcp_server}")
     else:
-        level, msg = register_mcp(claude, python_path, server_py, args.dry_run)
+        level, msg = register_mcp(claude, mcp_python, mcp_server, args.dry_run)
         print(f"  [{level:4}] MCP server: {msg}")
         if level == "FAIL":
             return 1

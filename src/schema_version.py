@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime, timezone
 from pathlib import Path
 
 from versioning import KB_SCHEMA_VERSION, LATCH_VERSION
@@ -71,17 +70,16 @@ def backup_connection(
     from_version: int,
     to_version: int = KB_SCHEMA_VERSION,
 ) -> Path:
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-    backup = db_file.with_name(
-        f"{db_file.name}.bak.schema-{from_version}-to-{to_version}.{stamp}"
+    # Local import avoids a module cycle: db -> schema_version -> vault_backup
+    # and vault_backup imports db only inside cadence entry points.
+    import vault_backup
+
+    return vault_backup.create_pre_migration_snapshot(
+        conn,
+        db_file,
+        from_version=from_version,
+        to_version=to_version,
     )
-    backup.parent.mkdir(parents=True, exist_ok=True)
-    dest = sqlite3.connect(str(backup))
-    try:
-        conn.backup(dest)
-    finally:
-        dest.close()
-    return backup
 
 
 def backup_database(

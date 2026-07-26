@@ -36,12 +36,12 @@ What it does NOT remove unless asked:
     every project a user synced. Pass ``--claude-md PATH`` (repeatable) to strip
     the region from a given project's CLAUDE.md (delegates to
     ``claude_md_sync.unsync`` — the region-logic single source of truth).
-  * **Project KB data** (``${LATCH_HOME}/projects/<proj>/`` SQLite + logs;
+  * **KB data** (the immutable production vault and its protected backups;
     legacy ``${CLAUDE_KB_HOME}`` installs are still honored),
     the ``DISABLE`` / ``DISABLE_WRITE`` kill-switch files, and the repo/.venv
     are left in place so a user can uninstall the wiring without losing their
-    accumulated KB. ``--purge`` removes the projects/ data + kill-switch files
-    (the repo + venv you delete by hand: ``rm -rf ${LATCH_HOME}``).
+    accumulated KB. ``--purge`` now removes only kill-switch files; there is no
+    uninstall option that deletes a production KB.
   * **Project-local Cursor wiring** is removed only when ``--cursor-project`` is
     supplied. Pass ``--cursor-only`` to leave the global Claude Code engine
     wiring untouched. That path removes latch-owned ``.cursor/mcp.json`` server entries,
@@ -74,6 +74,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import sys
 from datetime import datetime, timezone
@@ -448,18 +449,13 @@ def cursor_project_removed(project: str) -> list[tuple[bool, str]]:
 
 
 # --------------------------------------------------------------------------- #
-# Purge (opt-in: KB data + kill-switch files)
+# Purge (opt-in: non-KB kill-switch files only)
 # --------------------------------------------------------------------------- #
 def purge_data(dry_run: bool) -> list[str]:
-    changes: list[str] = []
-    projects = KB_HOME / "projects"
-    if projects.is_dir():
-        if dry_run:
-            changes.append(f"would delete KB data dir {projects} "
-                           "(all projects' SQLite + logs)")
-        else:
-            shutil.rmtree(projects, ignore_errors=True)
-            changes.append(f"deleted KB data dir {projects}")
+    changes: list[str] = [
+        "production KB data and protected backups are permanently retained; "
+        "uninstall has no data-deletion path"
+    ]
     for flag in ("DISABLE", "DISABLE_WRITE"):
         f = KB_HOME / flag
         if f.exists():
@@ -469,6 +465,41 @@ def purge_data(dry_run: bool) -> list[str]:
                 f.unlink()
                 changes.append(f"removed kill-switch file {f}")
     return changes
+
+
+def source_checkout_removal_message() -> str:
+    """Describe whether the persisted vault proves source removal is data-safe."""
+    active = next(
+        (
+            value.strip()
+            for value in (
+                os.environ.get("LATCH_KB_DIR"),
+                os.environ.get("CLAUDE_KB_DIR"),
+            )
+            if value and value.strip()
+        ),
+        None,
+    )
+    selected = active or ie._read_pin()
+    if selected:
+        candidate = Path(selected).expanduser()
+        if candidate.is_absolute():
+            resolved = candidate.resolve()
+            source = KB_HOME.resolve()
+            try:
+                resolved.relative_to(source)
+                inside_source = True
+            except ValueError:
+                inside_source = False
+            if not inside_source:
+                return (
+                    "The source checkout can be removed separately after uninstall; "
+                    "the persisted production vault is outside it."
+                )
+    return (
+        "Keep the source checkout for now: no verified external KB pin was found. "
+        "Migrate and verify any legacy or in-checkout KB before removing it."
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -559,7 +590,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--cursor-only", action="store_true",
                     help="remove/check only --cursor-project wiring; preserve global Claude Code wiring")
     ap.add_argument("--purge", action="store_true",
-                    help="also delete KB data (projects/) and kill-switch files")
+                    help="remove kill-switch files; production KB data is always retained")
     ap.add_argument("--yes", "-y", action="store_true",
                     help="skip the confirmation prompt")
     args = ap.parse_args(argv)
@@ -674,9 +705,9 @@ def main(argv: list[str] | None = None) -> int:
         print("Note: any CLAUDE.md you synced still has the managed region — strip "
               "it with:  bash bin/uninstall.sh --claude-md /path/to/CLAUDE.md")
     if not args.purge:
-        print(f"Your KB data is kept at {KB_HOME}/projects/ (re-add with "
-              "bin/install_engine.sh, or --purge to delete).")
-    print(f"To remove latch entirely, delete the repo:  rm -rf {KB_HOME}\n")
+        print("Your production KB and protected backups are retained; uninstall "
+              "has no production-data deletion option.")
+    print(source_checkout_removal_message() + "\n")
     print("Verify removal any time with: bash bin/uninstall.sh --check")
     return rc
 

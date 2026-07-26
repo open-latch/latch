@@ -191,6 +191,34 @@ def test_cursor_only_main_never_calls_global_uninstall():
         shutil.rmtree(root, ignore_errors=True)
 
 
+def test_source_checkout_removal_requires_effective_external_pin(
+    tmp_path, monkeypatch
+):
+    source = tmp_path / "source"
+    source.mkdir()
+    external = tmp_path / "external-vault"
+    pin_file = source / "kb_location.json"
+    pin_file.write_text(
+        json.dumps({"kb_dir": str(external)}) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(ue, "KB_HOME", source)
+    monkeypatch.setattr(ie, "KB_LOCATION_PATH", pin_file)
+    monkeypatch.delenv("LATCH_KB_DIR", raising=False)
+    monkeypatch.delenv("CLAUDE_KB_DIR", raising=False)
+
+    _assert(
+        "can be removed" in ue.source_checkout_removal_message(),
+        "a persisted external pin should make source removal data-safe",
+    )
+
+    monkeypatch.setenv("LATCH_KB_DIR", str(source / "projects" / "active"))
+    _assert(
+        ue.source_checkout_removal_message().startswith("Keep the source checkout"),
+        "an active in-source environment override must outrank an external file pin",
+    )
+
+
 if __name__ == "__main__":
     test_remove_commands_removes_exact_source_body_without_path_marker()
     test_remove_commands_preserves_user_modified_same_name_command()

@@ -26,7 +26,6 @@ def test_cursor_session_marker_round_trip():
             tmp, session_id="cursor-conversation",
         ) == payload
     finally:
-        shutil.rmtree(project_dir, ignore_errors=True)
         shutil.rmtree(tmp, ignore_errors=True)
 
 
@@ -44,7 +43,6 @@ def test_cursor_session_markers_are_scoped_across_interleaved_conversations():
             tmp, session_id="conversation-b",
         )["transcript_path"] == "/tmp/b.jsonl"
     finally:
-        shutil.rmtree(project_dir, ignore_errors=True)
         shutil.rmtree(tmp, ignore_errors=True)
 
 
@@ -66,7 +64,6 @@ def test_late_transcript_refresh_fills_once_and_rejects_changes():
         else:
             raise AssertionError("expected a changed transcript path to fail closed")
     finally:
-        shutil.rmtree(project_dir, ignore_errors=True)
         shutil.rmtree(tmp, ignore_errors=True)
 
 
@@ -79,7 +76,6 @@ def test_cursor_session_marker_missing_or_invalid():
         cursor_session.marker_path(tmp).write_text("{bad", encoding="utf-8")
         assert cursor_session.read_session_id(tmp) is None
     finally:
-        shutil.rmtree(project_dir, ignore_errors=True)
         shutil.rmtree(tmp, ignore_errors=True)
 
 
@@ -107,5 +103,4 @@ def test_cursor_transcript_resolution_is_exact_and_fail_closed():
             else:
                 raise AssertionError(f"expected fail-closed mismatch for {kwargs}")
     finally:
-        shutil.rmtree(project_dir, ignore_errors=True)
         shutil.rmtree(tmp, ignore_errors=True)

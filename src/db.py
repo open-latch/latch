@@ -16,6 +16,7 @@ from typing import Any, Iterable, Mapping, Sequence
 
 import log_utils
 import schema_version
+import vault_identity
 from paths import SCHEMA_PATH, db_path, ensure_project_dir
 
 
@@ -173,6 +174,9 @@ def connect(cwd: str | None = None) -> sqlite3.Connection:
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='nodes'"
         ).fetchone() is not None
         installed_schema = schema_version.ensure_supported(conn)
+        existing_identity = (
+            vault_identity.read_identity(Path(path)) if had_nodes else None
+        )
         if had_nodes and installed_schema < schema_version.KB_SCHEMA_VERSION:
             schema_version.backup_connection(
                 conn,
@@ -180,11 +184,50 @@ def connect(cwd: str | None = None) -> sqlite3.Connection:
                 from_version=installed_schema,
                 to_version=schema_version.KB_SCHEMA_VERSION,
             )
-        _load_vec(conn)
-        _ensure_schema(conn)
+        elif had_nodes and existing_identity is None:
+            # Identity adoption is itself a mutation. Freeze an external,
+            # verified production baseline first even when no schema migration
+            # is due.
+            import vault_backup
+
+            vault_backup.create_pre_migration_snapshot(
+                conn,
+                Path(path),
+                from_version=installed_schema,
+                to_version=installed_schema,
+                reason="identity-adoption",
+            )
+
+        migration_due = installed_schema < schema_version.KB_SCHEMA_VERSION
+        if existing_identity is not None:
+            # Reserve the current compatibility boundary before any current-
+            # only trigger/DDL repair. Old writers then refuse even if this
+            # process stops partway through an idempotent migration.
+            if migration_due:
+                schema_version.stamp_current(conn, record_migration=True)
+            conn._kb_vault_identity = vault_identity.ensure_identity(
+                conn, Path(path).parent, new_vault=False
+            )
+            # Existing identity and registry are validated before ordinary
+            # schema repair or optional native extension setup.
+            _load_vec(conn)
+            _ensure_schema(conn)
+        else:
+            # New or legacy-unidentified vaults have no identity to validate.
+            # Complete the idempotent schema chain, durably fence this writer
+            # version, and only then commit the first v3 identity row.
+            _load_vec(conn)
+            _ensure_schema(conn)
+            schema_version.stamp_current(
+                conn,
+                record_migration=(not had_nodes or migration_due),
+            )
+            conn._kb_vault_identity = vault_identity.ensure_identity(
+                conn, Path(path).parent, new_vault=not had_nodes
+            )
         schema_version.stamp_current(
             conn,
-            record_migration=(not had_nodes or installed_schema < schema_version.KB_SCHEMA_VERSION),
+            record_migration=(not had_nodes or migration_due),
         )
         return conn
     except Exception:
@@ -213,6 +256,9 @@ def connect_readonly(cwd: str | None = None) -> sqlite3.Connection:
                 f"KB schema {installed_schema} must be migrated to "
                 f"{schema_version.KB_SCHEMA_VERSION} before read-only access"
             )
+        conn._kb_vault_identity = vault_identity.validate_existing_identity(
+            conn, path.parent
+        )
         _load_vec(conn)
         return conn
     except Exception:
@@ -618,9 +664,10 @@ def _migrate_seed_import_ledgers(conn: sqlite3.Connection) -> None:
 def _migrate_lifecycle_substrate(conn: sqlite3.Connection) -> None:
     """Add append-only lifecycle telemetry, operation, and derivation ledgers.
 
-    The migration is deliberately additive and idempotent. Schema version 2 is
-    the minimum-writer gate: old binaries refuse the stamped database before
-    reaching this migration chain, while current binaries can safely reconnect.
+    The migration is deliberately additive and idempotent. The current schema
+    version is the minimum-writer gate: old binaries refuse the stamped
+    database before reaching this chain, while current binaries can safely
+    reconnect.
     """
     conn.executescript(
         """

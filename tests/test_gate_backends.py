@@ -81,7 +81,9 @@ def _chain() -> dict:
 
 
 def _cleanup_project(project_path: Path) -> None:
-    shutil.rmtree(paths.project_dir(str(project_path)), ignore_errors=True)
+    # The pytest capability root owns vault teardown at session exit. Tests do
+    # not recursively delete any path returned by paths.project_dir().
+    del project_path
 
 
 def test_claude_backend_remains_supported():

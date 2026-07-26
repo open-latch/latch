@@ -25,7 +25,9 @@ from pathlib import Path
 TESTS = Path(__file__).resolve().parent
 sys.path.insert(0, str(TESTS))
 
+import _isolation  # noqa: E402,F401
 from test_mcp_shared_runtime import McpClient, _stop_daemon  # noqa: E402
+from test_mcp_shared_runtime import _temp_vault  # noqa: E402
 
 
 def _rss_bytes(pid: int) -> int | None:
@@ -80,7 +82,7 @@ def main() -> int:
     if args.sessions < 1 or args.requests < 1:
         parser.error("--sessions and --requests must be positive")
 
-    kb_dir = Path(tempfile.mkdtemp(prefix="latch_mcp_scaling_"))
+    kb_dir = _temp_vault()
     clients: list[McpClient] = []
     try:
         started = time.perf_counter()
@@ -132,7 +134,7 @@ def main() -> int:
             "runtime_key": statuses[0]["daemon"]["runtime_key"],
         }
         if args.compare_legacy:
-            legacy_dir = Path(tempfile.mkdtemp(prefix="latch_mcp_legacy_"))
+            legacy_dir = _temp_vault()
             legacy: McpClient | None = None
             try:
                 legacy = McpClient(legacy_dir, "legacy-measure", force_legacy=True)
@@ -167,7 +169,6 @@ def main() -> int:
             finally:
                 if legacy is not None:
                     legacy.close()
-                shutil.rmtree(legacy_dir, ignore_errors=True)
         if result["owner_footprint_bytes"] is not None:
             result["summed_runtime_footprint_bytes"] = (
                 result["owner_footprint_bytes"] + result["summed_proxy_footprint_bytes"]
@@ -181,7 +182,6 @@ def main() -> int:
         for client in clients:
             client.close()
         _stop_daemon(kb_dir)
-        shutil.rmtree(kb_dir, ignore_errors=True)
 
 
 if __name__ == "__main__":

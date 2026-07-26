@@ -28,9 +28,12 @@ again selects the on-disk DB. Multiple KBs are possible only by explicit opt-in
 from __future__ import annotations
 
 import json
+import hashlib
+import hmac
 import math
 import os
 import re
+import sys
 import tempfile
 import warnings
 from pathlib import Path
@@ -78,6 +81,75 @@ MAINTENANCE_EXECUTABLE_COMMANDS = {
 # Lazily-resolved, cached pinned KB dir. Sentinel ``False`` = "not yet resolved"
 # (distinct from a resolved ``None`` meaning "no pin configured → legacy mode").
 _PINNED_DIR: "Path | None | bool" = False
+
+TEST_ROOT_ENV = "LATCH_TEST_ROOT"
+TEST_CAPABILITY_ENV = "LATCH_TEST_CAPABILITY"
+TEST_SENTINEL = ".latch-test-root.json"
+
+
+class UnsafeTestExecutionError(RuntimeError):
+    """Raised before a directly-run test can resolve the production KB pin."""
+
+
+def _is_relative_to(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+        return True
+    except ValueError:
+        return False
+
+
+def validated_test_root(
+    env: "dict[str, str] | os._Environ[str] | None" = None,
+) -> Path | None:
+    """Return the authenticated disposable test root, or ``None``.
+
+    Test mode is a capability, not a boolean environment flag.  The root must
+    exist, contain the per-run sentinel, and the sentinel must bind the secret
+    inherited by pytest subprocesses.  A partially configured or forged test
+    environment fails closed instead of falling through to the production pin.
+    Callers that are constructing a child environment may supply the exact
+    source mapping so validation happens before process creation.
+    """
+    values = os.environ if env is None else env
+    raw_root = values.get(TEST_ROOT_ENV)
+    capability = values.get(TEST_CAPABILITY_ENV)
+    if raw_root is None and capability is None:
+        return None
+    if not raw_root or not capability:
+        raise UnsafeTestExecutionError(
+            "incomplete Latch test capability; refusing KB path resolution"
+        )
+    try:
+        root = Path(raw_root).resolve(strict=True)
+        payload = json.loads((root / TEST_SENTINEL).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise UnsafeTestExecutionError(
+            "invalid Latch test root sentinel; refusing KB path resolution"
+        ) from exc
+    expected = str(payload.get("capability_sha256") or "")
+    actual = hashlib.sha256(capability.encode("utf-8")).hexdigest()
+    if not expected or not hmac.compare_digest(expected, actual):
+        raise UnsafeTestExecutionError(
+            "Latch test capability does not match its root sentinel"
+        )
+    return root
+
+
+def _direct_test_script() -> bool:
+    """True for any directly executed Python entry under ``tests/``.
+
+    pytest is safe because ``tests/conftest.py`` establishes a capability before
+    test modules import runtime code.  Direct scripts used to bypass that hook;
+    they are now refused unless they explicitly import the isolation bootstrap.
+    """
+    if not sys.argv:
+        return False
+    try:
+        entry = Path(sys.argv[0]).resolve()
+    except OSError:
+        return False
+    return entry.suffix == ".py" and entry.parent.name == "tests"
 
 
 def _validated_maintenance_runner(
@@ -517,6 +589,9 @@ def sanitize_cwd(cwd: str | os.PathLike) -> str:
     normalized = _normalize_input_path(str(cwd))
     is_windows_abs = bool(_WINDOWS_DRIVE_RE.match(normalized))
     resolved = Path(normalized).resolve()
+    test_root = validated_test_root()
+    if test_root is not None and resolved.parent == (test_root / "vaults").resolve():
+        return resolved.name
     if resolved.parent == PROJECTS_ROOT.resolve():
         return resolved.name
     # For a Windows drive path, transform the LEXICAL `normalized` string — on
@@ -537,6 +612,24 @@ def project_dir(cwd: str | os.PathLike | None = None) -> Path:
     one fixed KB directory is returned — this is what makes the wrong-DB bug
     class structurally impossible. ``cwd`` is honored only in legacy
     (unconfigured) mode, where it selects a per-project dir as before."""
+    test_root = validated_test_root()
+    if test_root is not None:
+        raw_pin = os.environ.get("LATCH_KB_DIR") or os.environ.get("CLAUDE_KB_DIR")
+        if raw_pin:
+            candidate = Path(raw_pin).expanduser().resolve()
+            allowed = (test_root / "vaults").resolve()
+            if candidate != allowed and _is_relative_to(candidate, allowed):
+                return candidate
+            raise UnsafeTestExecutionError(
+                "test subprocess KB pin is outside its authenticated disposable root"
+            )
+        scope = cwd or os.getcwd()
+        return test_root / "vaults" / sanitize_cwd(scope)
+    if _direct_test_script():
+        raise UnsafeTestExecutionError(
+            "direct test execution is not allowed without an authenticated "
+            "disposable Latch test root; run `python -m pytest ...`"
+        )
     pinned = _resolve_pinned_dir()
     if pinned is not None:
         return pinned

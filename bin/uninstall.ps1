@@ -11,7 +11,9 @@
        latch-owned MCP permission rules from ~/.claude/settings.json, preserving
        every other hook/permission;
     3. removes latch's slash commands from ~/.claude/commands/.
-  Leaves your KB data (projects/) and the repo in place by default.
+  Leaves production KB data, protected backups, and the repo in place by default.
+  `--purge` removes only DISABLE/DISABLE_WRITE kill-switch files; production
+  KB data and protected backups are always retained.
   settings.json is backed up to a timestamped settings.json.latchbak-<UTC>
   before any write. Idempotent.
 

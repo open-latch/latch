@@ -1,13 +1,11 @@
-"""pytest session setup: isolate the suite from configured Latch installs.
+"""pytest session setup: bind the suite to a disposable authenticated KB root.
 
-**pytest is the supported test runner for latch.** This conftest forces legacy
-(per-cwd) KB resolution for the whole session (via ``_isolation``) so each test's
-``db.connect(tempfile.mkdtemp())`` gets an isolated DB instead of the one real
-pinned KB (``kb_location.json`` / ``LATCH_KB_DIR`` / ``CLAUDE_KB_DIR``; KB
-id=1556). It never reads or writes the on-disk pin.
+**pytest is the supported test runner for latch.** This conftest creates a
+capability-bound temporary root before any test module loads.  Every KB path,
+including paths resolved by child processes, stays under that root.
 
-Directly-executed test scripts (``python tests/test_x.py``) on a pinned machine
-are NOT hermetic unless that script ``import _isolation`` itself — run via pytest.
+Directly-executed test scripts are refused unless they explicitly load the same
+bootstrap before importing runtime modules.
 """
 import sys
 from pathlib import Path
