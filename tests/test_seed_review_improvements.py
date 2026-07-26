@@ -2563,6 +2563,8 @@ def test_full_choice_cannot_promise_what_the_daily_budget_forbids(monkeypatch, c
             "eligible_sessions": 30, "covered_sessions": 10,
             "shortfall_sessions": 20, "full_coverage": False,
             "per_run_cap": 30, "session_cap": 30, "remaining_daily_nonheal": 10,
+            "hard_ceiling": seed.HARD_MAX_LLM_CALLS_CEILING,
+            "in_window_total": 30, "discovery_omitted": 0,
             "binding_constraint": "daily_budget", "raisable_by_flags": False,
             "calls_needed_for_full_coverage": 30,
         },
@@ -2580,3 +2582,51 @@ def test_raising_the_cap_triggers_a_rescan_rather_than_proceeding(monkeypatch):
     assert seed.confirm_llm_budget(args, 75) == "rescan"
     assert args.max_llm_calls == 75
     assert args.max_sessions == 75
+
+
+def test_discovery_outer_caps_count_against_full_coverage():
+    """PR 62 re-review P1: MAX_SOURCE_SCAN / MAX_SOURCE_INVENTORY drop in-window
+    transcripts before eligibility is assessed, so coverage that ignored them
+    reported full coverage of a window it had already truncated."""
+    plan = seed.coverage_plan(
+        _coverage_args(max_llm_calls=500, max_sessions=500), 200,
+        None, 1,
+    )
+    assert plan["eligible_sessions"] == 200
+    assert plan["in_window_total"] == 201
+    assert plan["discovery_omitted"] == 1
+    assert plan["full_coverage"] is False
+    assert plan["raisable_by_flags"] is False
+    assert any("discovery limits" in line
+               for line in seed.render_coverage_lines(plan))
+
+
+def test_coverage_cannot_promise_more_than_the_hard_ceiling(monkeypatch):
+    """PR 62 re-review P1: choosing "full" raised max_llm_calls past
+    HARD_MAX_LLM_CALLS_CEILING after main's one-time validation; coverage then
+    reported full while llm_candidates clamped back to the ceiling."""
+    monkeypatch.setattr(seed, "HARD_MAX_LLM_CALLS_CEILING", 10)
+    plan = seed.coverage_plan(_coverage_args(max_llm_calls=30, max_sessions=30), 30)
+    assert plan["per_run_cap"] == 10
+    assert plan["covered_sessions"] == 10
+    assert plan["full_coverage"] is False
+    assert plan["binding_constraint"] == "hard_ceiling"
+    assert plan["raisable_by_flags"] is False
+
+
+def test_full_choice_refuses_when_the_hard_ceiling_binds(monkeypatch, capsys):
+    monkeypatch.setattr(seed, "HARD_MAX_LLM_CALLS_CEILING", 10)
+    monkeypatch.setattr(seed, "_prompt_coverage_choice", lambda *_a, **_k: "full")
+    assert seed.confirm_llm_budget(
+        _coverage_args(max_llm_calls=30, max_sessions=30), 30,
+    ) == "cancel"
+    assert "ceiling" in capsys.readouterr().out
+
+
+def test_reduce_at_minimum_window_cancels_instead_of_looping(capsys):
+    """PR 62 re-review P2: at the smallest window "reduce" returned success
+    without changing anything, so repeating it exhausted the reconfirm loop and
+    the run proceeded although the user never accepted the shortfall."""
+    args = _coverage_args(lookback_days=min(seed.LOOKBACK_CHOICES))
+    assert seed._prompt_reduce_window(args, stream=sys.stdout) is False
+    assert "smallest lookback window" in capsys.readouterr().out
