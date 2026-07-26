@@ -1,8 +1,8 @@
 {
   "live_demo": {
-    "backend": "codex",
-    "better_next_action": "Keep SQLite; if cross-machine data movement is needed, implement explicit export/import and document its limitations as allowed by id=1.",
-    "captured_at_utc": "2026-07-25T19:26:12Z",
+    "backend": "claude",
+    "better_next_action": "Stay on local SQLite per id=1; if the real need is data mobility, implement the sanctioned explicit export/import step and document its limits, and take any genuine multi-user-accounts requirement back to the user as a decision to revisit rather than an implementation task.",
+    "captured_at_utc": "2026-07-26T02:55:29Z",
     "demo_kind": "synthetic_no_history_fixture",
     "evidence_nodes": [
       {
@@ -30,13 +30,13 @@
     "observed": true,
     "recommendation": "DO_NOT_PROCEED",
     "request": "Add multi-user accounts by moving the datastore from local SQLite to a hosted Postgres service.",
-    "risk_if_proceed": "The app would lose its intentionally local-first, no-hosted-database architecture and introduce unsupported multi-user infrastructure.",
-    "source_commit": "ef94b3f53d6db6a46f5cd810e927335651354edc",
-    "summary": "The canonical decision (id=1) explicitly requires the demo app to remain local-first on embedded SQLite and rejects moving to hosted Postgres for multi-user accounts or synchronization. The request directly contradicts that established datastore direction."
+    "risk_if_proceed": "The deliberate local-first architecture is unwound and the app acquires a hosted-database dependency that decision id=1 explicitly rejected.",
+    "source_commit": "5fd087017116e6441734ba3b77f33a85acf1b796",
+    "summary": "Node id=1 is a canonical decision that explicitly keeps the demo app local-first on a single embedded SQLite file, and it names the exact request as its rejected path: moving the datastore to a hosted or client-server database (e.g. managed Postgres) to add multi-user accounts or sync. The request is a verbatim revival of that ruled-out path, not an adjacent variation, so there is no modification that preserves both the request and the decision. The allowed path in the same node is to stay on SQLite and, if data must move between machines, add an explicit export/import step with documented limits."
   },
   "reproduction": {
     "check_packet": "bash bin/latch_proof_packet.sh --check",
-    "recapture_live_demo": "bash bin/latch_proof_packet.sh --capture-live --backend codex",
+    "recapture_live_demo": "bash bin/latch_proof_packet.sh --capture-live --backend claude",
     "seed_report_eval": "bash bin/latch_seed_report_eval.sh",
     "wedge_eval": "bash bin/latch_eval.sh"
   },
@@ -64,8 +64,8 @@
       "filtered": 4
     }
   },
-  "source_commit": "ef94b3f53d6db6a46f5cd810e927335651354edc",
-  "tested_runtime_manifest_sha256": "8dac7cbe73fb2127e03d2cf3328fb31be0b5d4296f0999a792da27bc024476e8",
+  "source_commit": "5fd087017116e6441734ba3b77f33a85acf1b796",
+  "tested_runtime_manifest_sha256": "6e28c3f0e62dcf8dc08865cebf524480e13be7fe2d51d9b99b2d9504bd28c120",
   "thesis": "Latch preserves project judgment and can surface a rejected path before an agent changes files.",
   "wedge_v1": {
     "baseline_boundary": "memory_like is an internal active-search-only ablation. It is not a benchmark of any third-party memory product.",
