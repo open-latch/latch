@@ -9,7 +9,7 @@ Windows.
 
 - Repository: `https://github.com/open-latch/latch.git`
 - Branch: `agent/kb-incident-hardening`
-- Reviewed runtime baseline: `1ae49daed3ad4256436919ec66d11e4b4a84e17e`
+- Reviewed runtime baseline: `c104c7f1da0359f200cf0d45f3940bcbe7a5934c`
 
 The branch may contain later handoff-documentation and generated-proof commits.
 Before testing, verify that the reviewed runtime baseline is an ancestor and
@@ -21,7 +21,7 @@ git switch --force-create agent/kb-incident-hardening `
   --track origin/agent/kb-incident-hardening
 git status --short --branch
 git rev-parse HEAD
-$SafetyCommit = "1ae49daed3ad4256436919ec66d11e4b4a84e17e"
+$SafetyCommit = "c104c7f1da0359f200cf0d45f3940bcbe7a5934c"
 git merge-base --is-ancestor `
   $SafetyCommit HEAD
 if ($LASTEXITCODE -ne 0) { throw "Reviewed runtime baseline is not an ancestor" }
@@ -285,8 +285,8 @@ PASS requires all of the following:
 - Launcher evidence shows `pythonw.exe` supervising base `python.exe`, the child
   has `CREATE_NO_WINDOW`, and its PID is assigned to the kill-on-close job.
 - The daemon lifecycle `daemon_spawned` event identifies the executable, argv,
-  parent PID, child PID, and Windows flags including no-window, detached, and
-  new-process-group bits.
+  parent PID, child PID, and Windows flags including `CREATE_NO_WINDOW` and
+  `CREATE_NEW_PROCESS_GROUP`, with `DETACHED_PROCESS` absent.
 
 FAIL is any failed test, failed MCP call, missing attribution receipt, or visible
 window belonging to a command line under this latch checkout. A visible window
