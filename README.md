@@ -49,9 +49,9 @@ Request: Add multi-user accounts by moving the datastore from local SQLite to a 
 
 ```text
 Recommendation: DO_NOT_PROCEED
-Summary: The canonical decision (id=1) explicitly requires the demo app to remain local-first on embedded SQLite and rejects moving to hosted Postgres for multi-user accounts or synchronization. The request directly contradicts that established datastore direction.
-Risk if proceed: The app would lose its intentionally local-first, no-hosted-database architecture and introduce unsupported multi-user infrastructure.
-Better next action: Keep SQLite; if cross-machine data movement is needed, implement explicit export/import and document its limitations as allowed by id=1.
+Summary: The request directly repeats the rejected path in the KB: moving the local SQLite datastore to a hosted/client-server database such as managed Postgres to add multi-user accounts or sync (id=1). The canonical decision is to keep the demo app local-first on a single embedded SQLite file, with export/import as the allowed data-movement path.
+Risk if proceed: It would violate the explicit local-first SQLite constraint and reopen a path already rejected for this demo app.
+Better next action: Keep SQLite and implement any cross-machine data movement as an explicit export/import flow with documented limits.
 Cited evidence:
 - id=1 decision status=canonical: Keep the demo app local-first on SQLite — no hosted database
 Worktree changed before/after gate: no
@@ -142,8 +142,9 @@ irm https://raw.githubusercontent.com/open-latch/latch/main/install.ps1 | iex
 That's the install. The quickstart wires your agent and then prompts you to
 seed. **Restart the agent** afterward so its tools and hooks load.
 
-**Then seed — this is the real first step, not an optional demo.** An empty KB catches nothing;
-seeding is what lets latch gate the decisions already in *your* history. Point it at your recent
+**Then seed — this is the real first step, not an optional demo.** From here latch captures decisions
+as you work; seeding is how you skip the wait. It backfills what your project already settled, so the
+gate has something of *yours* to cite today rather than in three weeks. Point it at your recent
 sessions:
 
 ```bash
@@ -155,7 +156,9 @@ sessions:
 ```
 
 It is review-first — the pass prints a structured report and writes only the candidates you approve
-(enter `none` at the prompt to dismiss the whole report without writing anything).
+(enter `none` at the prompt to dismiss the whole report without writing anything). It recovers what
+your transcripts actually contain, not everything you have ever decided; whatever it misses gets
+captured as you work.
 `--cursor-history` is opt-in and never implicit: it reads only IDE conversations assigned to this
 project, excludes CLI sessions, cloud chats, and subagents, and fails closed if Cursor's metadata is
 missing. The full walkthrough, source options, and review flags are in
