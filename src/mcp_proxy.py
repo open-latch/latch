@@ -824,7 +824,9 @@ def main() -> int:
         return 0
     try:
         metadata = connection_metadata()
-    except ValueError as exc:
+    except (ValueError, mcp_broker.BrokerError) as exc:
+        # A malformed vault-root override reaches here through
+        # vault_context_digest; it must read as a diagnostic, not a traceback.
         sys.stderr.write(f"[latch] invalid MCP connection configuration: {exc}\n")
         return 2
     try:

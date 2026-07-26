@@ -77,7 +77,18 @@ class BrokerError(RuntimeError):
     pass
 
 
-def _canonical_context_path(value: str, *, name: str) -> str:
+def _canonical_context_path(value: str, *, name: str) -> str | None:
+    """Canonicalize one root override, or None when the value means "unset".
+
+    An empty value is unset, matching what ``vault_identity``'s
+    ``platform_production_root`` / ``platform_durability_root`` already resolve
+    for the same variables (and what the XDG spec requires of an empty
+    ``XDG_DATA_HOME`` / ``XDG_STATE_HOME``). A non-empty but malformed value
+    stays a hard error, so a genuinely misconfigured root is never silently
+    ignored — it just has to reach the caller as a diagnostic, not a traceback.
+    """
+    if not value:
+        return None
     if not value.strip() or "\0" in value:
         raise BrokerError(f"{name} must name a non-empty absolute directory")
     candidate = Path(value).expanduser()
@@ -980,7 +991,13 @@ def _daemon_environment(
             continue
         if not isinstance(raw, str):
             raise BrokerError(f"{name} must name a non-empty absolute directory")
-        env[name] = _canonical_context_path(raw, name=name)
+        canonical = _canonical_context_path(raw, name=name)
+        if canonical is None:
+            # An empty override is unset. Drop it rather than donating a blank
+            # value the child would read back as a configured root.
+            env.pop(name, None)
+            continue
+        env[name] = canonical
 
     test_root = paths.validated_test_root(values)
     if test_root is not None:
