@@ -39,6 +39,9 @@ DEFAULT_MAX_CANDIDATES = 20
 # budget, while HARD_MAX_TOTAL_CANDIDATES keeps any run bounded by construction.
 CANDIDATES_PER_SESSION_TARGET = 8
 HARD_MAX_TOTAL_CANDIDATES = 200
+# Bounds the raise-cap / shrink-window re-confirm loop so an odd answer
+# sequence cannot spin.
+MAX_COVERAGE_RECONFIRMS = 4
 # 20 is the DEFAULT, not a ceiling. It used to be a hard clamp, so
 # `--max-llm-calls 500` silently became 20 and sessions 21..N were selected,
 # reported as selected, and then never read — the exact "latch missed my
@@ -1515,21 +1518,6 @@ def estimate_llm_calls(session_count: int, *, calls_per_session: int, max_llm_ca
     return min(session_count * calls_per_session, max_llm_calls)
 
 
-def _source_mtime_at_or_after(source: SeedSource, cutoff: datetime) -> bool:
-    """Window-shrink filter over already-discovered sources.
-
-    A smaller lookback is always a subset of the one discovery already used,
-    so re-filtering in place is exact and avoids a second full scan.
-    """
-    try:
-        observed = datetime.fromisoformat(source.mtime)
-    except (TypeError, ValueError):
-        return True
-    if observed.tzinfo is None:
-        observed = observed.replace(tzinfo=timezone.utc)
-    return observed >= cutoff
-
-
 def coverage_plan(
     args: argparse.Namespace, eligible: int, project_path: str | None = None,
 ) -> dict[str, Any]:
@@ -1542,6 +1530,7 @@ def coverage_plan(
     truncates, and a truncation the user cannot see reads as latch failing.
     """
     per_run = max(0, int(getattr(args, "max_llm_calls", 0) or 0))
+    session_cap = max(0, int(getattr(args, "max_sessions", 0) or 0))
     remaining_daily = None
     if project_path is not None:
         try:
@@ -1549,10 +1538,15 @@ def coverage_plan(
             remaining_daily = budget.remaining_nonheal(project_path)
         except Exception:  # budget storage is advisory here, never fatal
             remaining_daily = None
-    binding_limit = per_run
-    binding = "per_run_cap"
-    if remaining_daily is not None and remaining_daily < per_run:
-        binding_limit, binding = remaining_daily, "daily_budget"
+    # Three independent limits can truncate a run. Whichever is smallest is the
+    # one the user must act on, and --last-sessions belongs here: it is applied
+    # inside discover_sources, so measuring coverage against the list it already
+    # returned would report "all N in the window" while silently dropping the
+    # sessions it discarded.
+    limits: dict[str, int] = {"per_run_cap": per_run, "session_cap": session_cap}
+    if remaining_daily is not None:
+        limits["daily_budget"] = remaining_daily
+    binding, binding_limit = min(limits.items(), key=lambda kv: (kv[1], kv[0]))
     covered = min(eligible, binding_limit)
     return {
         "eligible_sessions": eligible,
@@ -1560,8 +1554,12 @@ def coverage_plan(
         "shortfall_sessions": max(0, eligible - covered),
         "full_coverage": covered >= eligible,
         "per_run_cap": per_run,
+        "session_cap": session_cap,
         "remaining_daily_nonheal": remaining_daily,
         "binding_constraint": binding,
+        # Only caps the user can raise here are fixable by the "full" choice.
+        # The daily budget is not one of them — it needs /latch-budget-approve.
+        "raisable_by_flags": binding != "daily_budget",
         "calls_needed_for_full_coverage": eligible,
     }
 
@@ -1577,12 +1575,18 @@ def render_coverage_lines(plan: dict[str, Any]) -> list[str]:
         "This is a cap, not a latch failure: the skipped sessions are never "
         "opened, so nothing in them can be found.",
     ]
-    if plan["binding_constraint"] == "daily_budget":
+    binding = plan["binding_constraint"]
+    if binding == "daily_budget":
         lines.append(
             f"The binding limit is your daily non-heal model-call budget "
-            f"({plan['remaining_daily_nonheal']} call(s) left today), not "
-            f"--max-llm-calls ({plan['per_run_cap']}). Run "
-            "/latch-budget-approve to lift it for the rest of today."
+            f"({plan['remaining_daily_nonheal']} call(s) left today). Raising "
+            "--max-llm-calls cannot lift it; run /latch-budget-approve to "
+            "clear it for the rest of today, then rerun."
+        )
+    elif binding == "session_cap":
+        lines.append(
+            f"The binding limit is --last-sessions ({plan['session_cap']}). "
+            f"Full coverage needs {plan['calls_needed_for_full_coverage']}."
         )
     else:
         lines.append(
@@ -1593,50 +1597,76 @@ def render_coverage_lines(plan: dict[str, Any]) -> list[str]:
 
 
 def confirm_llm_budget(
-    args: argparse.Namespace, source_count: int, project_path: str | None = None,
-) -> bool:
-    """Confirm coverage before spending calls; never truncate silently."""
+    args: argparse.Namespace, eligible: int, project_path: str | None = None,
+) -> str:
+    """Confirm coverage before spending calls; never truncate silently.
+
+    `eligible` is the count of in-window sessions BEFORE --last-sessions and
+    --max-llm-calls reduce it, so a shortfall caused by either is visible.
+
+    Returns "proceed" | "cancel" | "rescan". "rescan" means the answer changed
+    discovery inputs (a raised session cap or a smaller window), so the caller
+    must re-discover and confirm again rather than reuse the stale list.
+    """
     if args.llm != "yes":
-        return True
-    plan = coverage_plan(args, source_count, project_path)
-    args.coverage_plan = plan
-    estimate = estimate_llm_calls(
-        source_count,
-        calls_per_session=1,
-        max_llm_calls=args.max_llm_calls,
-    )
-    if estimate == 0:
-        return True
-
+        return "proceed"
     stream = sys.stderr if args.format == "json" else sys.stdout
-    quiet = plan["full_coverage"] and estimate <= args.llm_warning_threshold
-    if quiet or args.yes:
-        # Non-interactive runs still SAY what they will skip, so one-command
-        # activation (id=1986) stays unattended without hiding a shortfall.
-        if not plan["full_coverage"]:
-            for line in render_coverage_lines(plan):
-                print(line, file=stream)
-        return True
+    plan = coverage_plan(args, eligible, project_path)
+    args.coverage_plan = plan
 
+    if plan["full_coverage"]:
+        estimate = min(eligible, plan["per_run_cap"])
+        if estimate == 0 or estimate <= args.llm_warning_threshold or args.yes:
+            return "proceed"
+        print("", file=stream)
+        for line in render_coverage_lines(plan):
+            print(line, file=stream)
+        # default=False keeps the pre-existing consent posture: an unattended
+        # run must not start spending model calls. --yes is handled above.
+        return "proceed" if _prompt_yes_no_on_stream(
+            f"Continue with LLM refinement ({estimate} call(s))",
+            default=False, stream=stream,
+        ) else "cancel"
+
+    # Shortfall. Report it unconditionally -- including when the cap is 0 and
+    # no call would be made at all, which previously returned success in
+    # silence -- so a partial or empty seed is never mistaken for latch
+    # failing to find the user's history.
     print("", file=stream)
     for line in render_coverage_lines(plan):
         print(line, file=stream)
-    if plan["full_coverage"]:
-        # default=False keeps the pre-existing consent posture: an unattended
-        # run must not start spending model calls. --yes is the documented way
-        # to accept non-interactively, and it is handled above.
-        return _prompt_yes_no_on_stream(
-            f"Continue with LLM refinement ({estimate} call(s))",
-            default=False,
-            stream=stream,
-        )
+    if args.yes:
+        # One-command activation (id=1986) stays unattended, but never quiet.
+        return "proceed"
+
     choice = _prompt_coverage_choice(plan, stream=stream)
+    if choice == "cancel":
+        return "cancel"
+    if choice == "as_is":
+        return "proceed"
     if choice == "full":
-        args.max_llm_calls = plan["calls_needed_for_full_coverage"]
-        return True
+        if not plan["raisable_by_flags"]:
+            # The daily budget is binding; raising per-run flags cannot satisfy
+            # "full", so promising it would be a lie. Say so and re-ask.
+            print(
+                "Cannot reach full coverage in this run: the daily non-heal "
+                "budget is the binding limit. Run /latch-budget-approve, then "
+                "rerun seeding.",
+                file=stream,
+            )
+            return "cancel"
+        needed = plan["calls_needed_for_full_coverage"]
+        args.max_llm_calls = max(int(args.max_llm_calls or 0), needed)
+        args.max_sessions = max(int(args.max_sessions or 0), needed)
+        return "rescan"
     if choice == "reduce":
-        return _prompt_reduce_window(args, stream=stream)
-    return choice == "as_is"
+        if not _prompt_reduce_window(args, stream=stream):
+            return "cancel"
+        # Re-discover against the smaller window and confirm again: the new
+        # window may still be over cap, and filtering the already-selected
+        # subset would not be an honest recount.
+        return "rescan"
+    return "cancel"
 
 
 def _prompt_coverage_choice(plan: dict[str, Any], *, stream) -> str:
@@ -1680,7 +1710,7 @@ def _prompt_reduce_window(args: argparse.Namespace, *, stream) -> bool:
         stream=stream,
     )
     args.lookback_days = chosen
-    args.rescan_after_window_change = True
+
     return True
 
 
@@ -2149,8 +2179,13 @@ def grounded_source_excerpt(
             term for term in normalized_candidate.split() if len(term) > 3
         }
         shared = focus_terms & candidate_terms
-        if len(shared) < 2:
-            continue
+        # Conflict detection runs BEFORE the relevance gate. A terse user
+        # correction ("No, keep them read-only.") shares too few terms with the
+        # claim to clear the two-term bar, so gating on relevance first let the
+        # correction be skipped entirely — and the assistant fallback then
+        # relaunched the very claim the user had just overruled. Relevance
+        # decides which evidence to *rank*, never whether a user turn carries
+        # authority to invalidate.
         safe_candidate, _ = redact_seed_text(candidate)
         evidence_candidate = SeedCandidate(
             kind="decision",
@@ -2176,6 +2211,10 @@ def grounded_source_excerpt(
         ):
             ranked_candidates.clear()
             ranked_candidates.append((-1.0, user_turn_index, ""))
+            continue
+        if len(shared) < 2:
+            # Relevance gate: too weak to cite as evidence, but it has already
+            # had its chance to invalidate the claim above.
             continue
         score = len(shared) / max(1, min(len(focus_terms), len(candidate_terms)))
         ranked_candidates.append((
@@ -6083,25 +6122,66 @@ def main(argv: list[str] | None = None) -> int:
                 }))
             return 1
 
-        # Coverage is confirmed against every eligible session, before the cap
-        # truncates anything. planned_llm_sources() already applies the cap, so
-        # asking after it would report coverage of the truncated list as full
-        # and hide the shortfall this prompt exists to surface. The answer can
-        # raise the cap or shrink the window, so the source list is only fixed
-        # afterwards -- which is also why consent runs on the final list.
-        if not confirm_llm_budget(args, len(sources), args.project):
-            emit_seed_cli_failure(
-                args,
-                code="llm_budget_cancelled",
-                message="Seed pass cancelled before any LLM calls.",
+        # Coverage is confirmed against every ELIGIBLE session -- the count
+        # before --last-sessions and --max-llm-calls reduce it. discover_sources
+        # already applied --last-sessions, so measuring against the list it
+        # returned would report "all N in the window" while hiding whatever it
+        # discarded. An answer that raises the session cap or shrinks the window
+        # changes discovery itself, so we re-discover and confirm again instead
+        # of filtering the stale list.
+        for _ in range(MAX_COVERAGE_RECONFIRMS):
+            eligible = int(
+                (args.discovery_stats or {}).get("eligible", len(sources))
             )
-            return 1
-
-        if getattr(args, "rescan_after_window_change", False):
-            cutoff = utc_now() - timedelta(days=args.lookback_days)
-            sources = [s for s in sources if _source_mtime_at_or_after(s, cutoff)]
+            verdict = confirm_llm_budget(args, eligible, args.project)
+            if verdict == "cancel":
+                emit_seed_cli_failure(
+                    args,
+                    code="llm_budget_cancelled",
+                    message="Seed pass cancelled before any LLM calls.",
+                )
+                return 1
+            if verdict != "rescan":
+                break
+            try:
+                sources = discover_sources(
+                    source=args.source,
+                    project_path=args.project,
+                    lookback_days=args.lookback_days,
+                    max_sessions=args.max_sessions,
+                    claude_home=args.claude_home,
+                    codex_home=args.codex_home,
+                    cursor_transcripts=args.cursor_transcript,
+                    cursor_session_id=args.cursor_session_id,
+                    cursor_history=args.cursor_history,
+                    cursor_home=args.cursor_home,
+                    cursor_state_db=args.cursor_state_db,
+                    all_projects=args.all_projects,
+                    focus_query=args.new_workstream,
+                    stats=args.discovery_stats,
+                )
+            except cursor_transcript.CursorTranscriptError as e:
+                print(f"Cursor seed source unavailable: {e}", file=sys.stderr)
+                return 2
+            if not args.force_reimport:
+                try:
+                    sources, already_applied = split_applied_sources(
+                        sources,
+                        project_path=args.project,
+                        workstream_scope=scope_key,
+                    )
+                except SeedSourceLedgerError:
+                    emit_seed_cli_failure(
+                        args,
+                        code="seed_source_ledger_unavailable",
+                        message=(
+                            "Seed extraction stopped because the existing "
+                            "source ledger could not be read safely."
+                        ),
+                    )
+                    return 1
+                args.sources_skipped_unchanged = len(already_applied)
             args.sources_selected = len(sources)
-            args.coverage_plan = coverage_plan(args, len(sources), args.project)
 
         call_sources = (
             planned_llm_sources(sources, max_calls=args.max_llm_calls)
