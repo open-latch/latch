@@ -1,4 +1,5 @@
 from __future__ import annotations
+import argparse
 
 import json
 import os
@@ -2437,3 +2438,195 @@ def test_plugin_registry_entries_never_become_subjects():
     assert seed.source_subject(transcript) == (
         "Consolidate the review findings before handing back to implementation."
     )
+
+
+def test_assistant_evidence_is_used_when_no_user_turn_supports_the_claim():
+    """User turns are ~0.1% of a transcript, so user-only evidence left most
+    candidates citing an unrelated line or nothing. Assistant turns are cited
+    as a labelled second tier."""
+    source = _source(
+        "codex:assistant-fallback",
+        text=(
+            "[user] ok\n"
+            "[assistant] WAL journaling is required so a crash mid-write "
+            "cannot truncate the decision vault."
+        ),
+    )
+    excerpt = seed.grounded_source_excerpt(
+        "WAL journaling is required so a crash mid-write cannot truncate "
+        "the decision vault.",
+        source=source,
+        title="Require WAL journaling for the decision vault",
+        body="WAL journaling protects the decision vault from crash truncation.",
+    )
+    assert excerpt.startswith(seed.ASSISTANT_EXCERPT_PREFIX)
+    assert "WAL journaling is required" in excerpt
+
+
+def test_user_evidence_still_outranks_assistant_evidence():
+    """The assistant tier must never displace a qualifying user turn."""
+    source = _source(
+        "codex:user-outranks-assistant",
+        text=(
+            "[assistant] We should use Postgres for local decision storage.\n"
+            "[user] Use SQLite for local decision storage, not Postgres."
+        ),
+    )
+    excerpt = seed.grounded_source_excerpt(
+        "We should use Postgres for local decision storage.",
+        source=source,
+        title="Use SQLite for local decision storage",
+        body="Use SQLite for local decision storage.",
+    )
+    assert not excerpt.startswith(seed.ASSISTANT_EXCERPT_PREFIX)
+    assert "SQLite" in excerpt
+
+
+def test_stale_claim_gets_no_assistant_fallback_receipt():
+    """A newer conflicting user correction suppresses the excerpt entirely --
+    falling back to supportive assistant text would relaunch the stale claim
+    with a receipt that looks like evidence."""
+    source = _source(
+        "codex:stale-no-fallback",
+        text=(
+            "[assistant] Seed reports should stay writable for operators.\n"
+            "[user] Keep seed reports writable for operators.\n"
+            "[user] No, keep seed reports read-only for operators."
+        ),
+    )
+    excerpt = seed.grounded_source_excerpt(
+        "Seed reports should stay writable for operators.",
+        source=source,
+        title="Keep seed reports writable for operators",
+        body="Keep seed reports writable for operators.",
+    )
+    assert excerpt == ""
+
+
+def _coverage_args(**over):
+    base = dict(llm="yes", max_llm_calls=20, max_sessions=50,
+                llm_warning_threshold=10, yes=False, format="text",
+                lookback_days=90)
+    base.update(over)
+    return argparse.Namespace(**base)
+
+
+def test_terse_user_correction_still_invalidates_despite_low_term_overlap():
+    """PR 62 review P1: the two-term relevance gate ran before conflict
+    detection, so a terse correction was skipped and the assistant fallback
+    relaunched the claim the user had just overruled."""
+    source = _source(
+        "codex:terse-correction",
+        text=(
+            "[assistant] Seed reports should stay writable for operators.\n"
+            "[user] No, keep them read-only."
+        ),
+    )
+    assert seed.grounded_source_excerpt(
+        "Seed reports should stay writable for operators.",
+        source=source,
+        title="Keep seed reports writable for operators",
+        body="Keep seed reports writable for operators.",
+    ) == ""
+
+
+def test_coverage_counts_sessions_dropped_by_the_session_cap():
+    """PR 62 review P1: --last-sessions is applied inside discover_sources, so
+    coverage measured against its return value reported full coverage while
+    eligible sessions had been discarded."""
+    plan = seed.coverage_plan(_coverage_args(max_llm_calls=200, max_sessions=50), 200)
+    assert plan["full_coverage"] is False
+    assert plan["binding_constraint"] == "session_cap"
+    assert plan["covered_sessions"] == 50
+    assert plan["shortfall_sessions"] == 150
+    assert "--last-sessions" in " ".join(seed.render_coverage_lines(plan))
+
+
+def test_zero_llm_call_cap_reports_its_shortfall(capsys):
+    """PR 62 review P2: estimate==0 returned success without printing, so a
+    0-coverage run looked like latch finding nothing."""
+    verdict = seed.confirm_llm_budget(_coverage_args(max_llm_calls=0, yes=True), 3)
+    assert verdict == "proceed"
+    out = capsys.readouterr().out
+    assert "0 of 3" in out
+    assert "cap, not a latch failure" in out
+
+
+def test_full_choice_cannot_promise_what_the_daily_budget_forbids(monkeypatch, capsys):
+    """PR 62 review P2: choosing "full" only raised per-run flags, so a binding
+    daily budget still produced partial coverage while promising full."""
+    monkeypatch.setattr(seed, "_prompt_coverage_choice", lambda *_a, **_k: "full")
+    args = _coverage_args(max_llm_calls=30, max_sessions=30)
+    monkeypatch.setattr(
+        seed, "coverage_plan",
+        lambda *_a, **_k: {
+            "eligible_sessions": 30, "covered_sessions": 10,
+            "shortfall_sessions": 20, "full_coverage": False,
+            "per_run_cap": 30, "session_cap": 30, "remaining_daily_nonheal": 10,
+            "hard_ceiling": seed.HARD_MAX_LLM_CALLS_CEILING,
+            "in_window_total": 30, "discovery_omitted": 0,
+            "binding_constraint": "daily_budget", "raisable_by_flags": False,
+            "calls_needed_for_full_coverage": 30,
+        },
+    )
+    assert seed.confirm_llm_budget(args, 30) == "cancel"
+    assert "/latch-budget-approve" in capsys.readouterr().out
+
+
+def test_raising_the_cap_triggers_a_rescan_rather_than_proceeding(monkeypatch):
+    """"full" must re-discover: raising --last-sessions changes what discovery
+    returns, so reusing the stale capped list would not deliver the coverage
+    the user just asked for."""
+    monkeypatch.setattr(seed, "_prompt_coverage_choice", lambda *_a, **_k: "full")
+    args = _coverage_args(max_llm_calls=20, max_sessions=20)
+    assert seed.confirm_llm_budget(args, 75) == "rescan"
+    assert args.max_llm_calls == 75
+    assert args.max_sessions == 75
+
+
+def test_discovery_outer_caps_count_against_full_coverage():
+    """PR 62 re-review P1: MAX_SOURCE_SCAN / MAX_SOURCE_INVENTORY drop in-window
+    transcripts before eligibility is assessed, so coverage that ignored them
+    reported full coverage of a window it had already truncated."""
+    plan = seed.coverage_plan(
+        _coverage_args(max_llm_calls=500, max_sessions=500), 200,
+        None, 1,
+    )
+    assert plan["eligible_sessions"] == 200
+    assert plan["in_window_total"] == 201
+    assert plan["discovery_omitted"] == 1
+    assert plan["full_coverage"] is False
+    assert plan["raisable_by_flags"] is False
+    assert any("discovery limits" in line
+               for line in seed.render_coverage_lines(plan))
+
+
+def test_coverage_cannot_promise_more_than_the_hard_ceiling(monkeypatch):
+    """PR 62 re-review P1: choosing "full" raised max_llm_calls past
+    HARD_MAX_LLM_CALLS_CEILING after main's one-time validation; coverage then
+    reported full while llm_candidates clamped back to the ceiling."""
+    monkeypatch.setattr(seed, "HARD_MAX_LLM_CALLS_CEILING", 10)
+    plan = seed.coverage_plan(_coverage_args(max_llm_calls=30, max_sessions=30), 30)
+    assert plan["per_run_cap"] == 10
+    assert plan["covered_sessions"] == 10
+    assert plan["full_coverage"] is False
+    assert plan["binding_constraint"] == "hard_ceiling"
+    assert plan["raisable_by_flags"] is False
+
+
+def test_full_choice_refuses_when_the_hard_ceiling_binds(monkeypatch, capsys):
+    monkeypatch.setattr(seed, "HARD_MAX_LLM_CALLS_CEILING", 10)
+    monkeypatch.setattr(seed, "_prompt_coverage_choice", lambda *_a, **_k: "full")
+    assert seed.confirm_llm_budget(
+        _coverage_args(max_llm_calls=30, max_sessions=30), 30,
+    ) == "cancel"
+    assert "ceiling" in capsys.readouterr().out
+
+
+def test_reduce_at_minimum_window_cancels_instead_of_looping(capsys):
+    """PR 62 re-review P2: at the smallest window "reduce" returned success
+    without changing anything, so repeating it exhausted the reconfirm loop and
+    the run proceeded although the user never accepted the shortfall."""
+    args = _coverage_args(lookback_days=min(seed.LOOKBACK_CHOICES))
+    assert seed._prompt_reduce_window(args, stream=sys.stdout) is False
+    assert "smallest lookback window" in capsys.readouterr().out

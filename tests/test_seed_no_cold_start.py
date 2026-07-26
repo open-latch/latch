@@ -238,6 +238,12 @@ def test_redaction_precedes_prompt_preview_cache_and_persisted_body(
 def test_model_calls_are_source_bounded_valid_empty_is_success_and_output_is_capped(
     tmp_path, monkeypatch,
 ):
+    """A node-dense session is no longer truncated per source.
+
+    A flat per-source cap of 6 held total recall to a 60.6% ceiling against
+    the restored KB: the richest sessions lost the most. Boundedness now
+    comes from the global --max-candidates bound instead.
+    """
     sources = [_source(f"claude:session-{index}") for index in range(3)]
     prompts: list[str] = []
     responses = [
@@ -259,8 +265,8 @@ def test_model_calls_are_source_bounded_valid_empty_is_success_and_output_is_cap
                     ("open_question", "Choose retention window", "We still need to decide the long-term retention window.", ["open_question"]),
                     ("workstream", "Activation improvements", "Continue the multi-session activation improvement lane.", ["ongoing_workstream"]),
                     ("idea", "Add source receipts", "Expose structured source receipts during review.", ["idea"]),
-                    ("fact", "Seventh candidate", "This item must be excluded by the per-source cap.", ["verified_outcome"]),
-                    ("fact", "Eighth candidate", "This item must also be excluded by the cap.", ["verified_outcome"]),
+                    ("fact", "Seventh candidate", "This item survives: there is no per-source cap.", ["verified_outcome"]),
+                    ("fact", "Eighth candidate", "This item also survives; the global bound applies instead.", ["verified_outcome"]),
                 ]
             ],
         }),
@@ -306,9 +312,10 @@ def test_model_calls_are_source_bounded_valid_empty_is_success_and_output_is_cap
     assert stats["succeeded_source_ids"] == [sources[0].id, sources[2].id]
     assert stats["failed_source_ids"] == [sources[1].id]
     assert stats["accepted_candidates_by_source"][sources[0].id] == 0
-    assert stats["accepted_candidates_by_source"][sources[2].id] == 6
-    assert selection_calls == [(6, 20)]
-    assert len(candidates) <= seed.MAX_CANDIDATES_PER_SOURCE
+    assert stats["accepted_candidates_by_source"][sources[2].id] == 8
+    assert selection_calls == [(8, 20)]
+    assert seed.MAX_CANDIDATES_PER_SOURCE is None
+    assert len(candidates) <= 20
     assert all(candidate.source_ids == [sources[2].id] for candidate in candidates)
 
 
@@ -920,8 +927,18 @@ def test_discovery_redacts_pem_and_bearer_before_source_truncation(tmp_path):
     assert len(sources[0].text) <= seed.MAX_SOURCE_CHARS
 
 
-def test_llm_invocation_has_an_absolute_twenty_call_ceiling(tmp_path, monkeypatch):
-    sources = [_source(f"claude:hard-cap-{index}") for index in range(25)]
+def test_llm_invocation_honours_an_explicit_cap_above_the_default(
+    tmp_path, monkeypatch,
+):
+    """20 is the default, not a ceiling.
+
+    It used to be a hard clamp, so a user who asked for more coverage silently
+    got 20 sessions read and the rest skipped without being told — which reads
+    as latch missing their history. An explicit cap is now honoured up to
+    HARD_MAX_LLM_CALLS_CEILING, which exists only so a typo cannot start an
+    unbounded model-call run.
+    """
+    sources = [_source(f"claude:explicit-cap-{index}") for index in range(25)]
     calls = 0
     monkeypatch.setattr(
         budget,
@@ -944,13 +961,48 @@ def test_llm_invocation_has_an_absolute_twenty_call_ceiling(tmp_path, monkeypatc
     assert seed.llm_candidates(
         sources,
         project_path=str(tmp_path),
-        max_calls=10_000,
+        max_calls=25,
         max_candidates=20,
         backend="codex",
         stats=stats,
     ) == []
-    assert calls == seed.HARD_MAX_LLM_CALLS == 20
-    assert stats["attempted"] == 20
+    assert calls == 25
+    assert stats["attempted"] == 25
+    assert seed.DEFAULT_MAX_LLM_CALLS_BASE == 20
+    assert seed.HARD_MAX_LLM_CALLS_CEILING >= 25
+
+
+def test_llm_invocation_still_has_an_absolute_outer_ceiling(tmp_path, monkeypatch):
+    """Removing the clamp must not make the run unbounded."""
+    sources = [_source(f"claude:ceiling-{index}") for index in range(3)]
+    calls = 0
+    monkeypatch.setattr(
+        budget,
+        "check_and_record",
+        lambda *_args, **_kwargs: (True, {"count_nonheal": 1}),
+    )
+    monkeypatch.setattr(seed, "HARD_MAX_LLM_CALLS_CEILING", 2)
+
+    def invoke(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return model_backends.ModelCallResult(
+            text=json.dumps({"seed_candidates": []}),
+            error=None,
+            timed_out=False,
+            backend="codex",
+        )
+
+    monkeypatch.setattr(model_backends, "invoke_prompt", invoke)
+    assert seed.llm_candidates(
+        sources,
+        project_path=str(tmp_path),
+        max_calls=10_000,
+        max_candidates=20,
+        backend="codex",
+        stats={},
+    ) == []
+    assert calls == 2
 
 
 def test_existing_workstream_preflight_stops_before_discovery_or_model(
