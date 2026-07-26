@@ -43,7 +43,7 @@ HARD_MAX_TOTAL_CANDIDATES = 200
 # `--max-llm-calls 500` silently became 20 and sessions 21..N were selected,
 # reported as selected, and then never read — the exact "latch missed my
 # history" failure this default now surfaces instead of hiding. The real
-# ceiling only exists so a typo cannot start an unbounded paid run.
+# ceiling only exists so a typo cannot start an unbounded model-call run.
 DEFAULT_MAX_LLM_CALLS_BASE = 20
 HARD_MAX_LLM_CALLS_CEILING = int(
     os.environ.get("LATCH_SEED_MAX_LLM_CALLS_CEILING") or 500

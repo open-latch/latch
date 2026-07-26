@@ -936,7 +936,7 @@ def test_llm_invocation_honours_an_explicit_cap_above_the_default(
     got 20 sessions read and the rest skipped without being told — which reads
     as latch missing their history. An explicit cap is now honoured up to
     HARD_MAX_LLM_CALLS_CEILING, which exists only so a typo cannot start an
-    unbounded paid run.
+    unbounded model-call run.
     """
     sources = [_source(f"claude:explicit-cap-{index}") for index in range(25)]
     calls = 0
