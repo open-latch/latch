@@ -14,14 +14,14 @@ This packet combines one observed live gate receipt with two small, deterministi
 
 ## Observed live gate
 
-Captured with the `claude` backend on commit `5fd087017116e6441734ba3b77f33a85acf1b796`. This is a synthetic no-history fixture and used no personal conversation history.
+Captured with the `claude` backend on commit `7ac75da67a97132c7cf288f13b46d01bb1958e3d`. This is a synthetic no-history fixture and used no personal conversation history.
 
 ```text
 Request: Add multi-user accounts by moving the datastore from local SQLite to a hosted Postgres service.
 Recommendation: DO_NOT_PROCEED
-Summary: Node id=1 is a canonical decision that explicitly keeps the demo app local-first on a single embedded SQLite file, and it names the exact request as its rejected path: moving the datastore to a hosted or client-server database (e.g. managed Postgres) to add multi-user accounts or sync. The request is a verbatim revival of that ruled-out path, not an adjacent variation, so there is no modification that preserves both the request and the decision. The allowed path in the same node is to stay on SQLite and, if data must move between machines, add an explicit export/import step with documented limits.
-Risk if proceed: The deliberate local-first architecture is unwound and the app acquires a hosted-database dependency that decision id=1 explicitly rejected.
-Better next action: Stay on local SQLite per id=1; if the real need is data mobility, implement the sanctioned explicit export/import step and document its limits, and take any genuine multi-user-accounts requirement back to the user as a decision to revisit rather than an implementation task.
+Summary: The seed decision (id=1) explicitly locks the demo app to local-first single-file SQLite and names the exact rejected path: moving the datastore to a hosted or client-server database such as a managed Postgres service in order to add multi-user accounts or sync. The request is that rejected path verbatim, so executing it would unwind a deliberate standing decision rather than extend it. The allowed alternative is already specified in the same node: stay on SQLite and add an explicit export/import step with documented limits if data must move between machines.
+Risk if proceed: The app loses its local-first property and takes on a hosted-database dependency the project deliberately rejected, in exchange for a multi-user capability that was already ruled out of scope.
+Better next action: Keep the SQLite datastore and, if the real need is moving data between machines, implement the sanctioned export/import step with its limits documented (id=1); if genuine multi-user accounts are now required, reopen decision id=1 with the user before touching the storage layer.
 Cited evidence:
 - id=1 decision status=canonical: Keep the demo app local-first on SQLite — no hosted database
 Worktree changed before/after gate: no
@@ -63,7 +63,7 @@ This deterministic fixture eval grades seed-report capture and filtering; it is 
 
 ## Reproduce
 
-The deterministic results were generated from commit `5fd087017116e6441734ba3b77f33a85acf1b796`.
+The deterministic results were generated from commit `7ac75da67a97132c7cf288f13b46d01bb1958e3d`.
 
 ```bash
 bash bin/latch_eval.sh
