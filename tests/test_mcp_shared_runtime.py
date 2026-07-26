@@ -1069,7 +1069,20 @@ def test_prompt_after_idle_exit_wakes_owner_and_emits_truthful_bounded_receipt()
                 break
             time.sleep(0.05)
         _assert(new_pid is not None and new_pid != old_pid, "hook wake did not start a new owner")
-        rows = _lifecycle_rows(kb_dir)
+        # Discovery is published immediately before the daemon appends its
+        # startup receipt.  Wait for that asynchronous receipt instead of
+        # racing the two adjacent startup steps on faster CI runners.
+        receipt_deadline = time.monotonic() + 5.0
+        rows: list[dict[str, Any]] = []
+        while time.monotonic() < receipt_deadline:
+            rows = _lifecycle_rows(kb_dir)
+            if any(
+                row.get("event") == "daemon_started"
+                and row.get("reason") == "prompt_hook"
+                for row in rows
+            ):
+                break
+            time.sleep(0.05)
         _assert(
             any(row.get("event") == "prompt_retrieval_degraded" for row in rows),
             "degraded prompt lifecycle event missing",
