@@ -4,7 +4,6 @@ Covers two-category split (nonheal=100/day, heal default 33/day, env-overridable
   * initial state, record_invocation per category, check_and_record gating
   * approve_today resets BOTH counters and unlocks both
   * date rollover, corrupt-JSON fallback
-  * brief_line surfacing logic (quiet, near-cap, at-cap, approved)
   * legacy state migration: `{count}` -> `{count_nonheal}` on first load
   * category isolation: exhausting one category does not block the other
 """
@@ -344,105 +343,6 @@ def test_legacy_count_field_migrates_to_nonheal():
         _cleanup(tmp)
 
 
-def test_brief_line_quiet_when_both_below_threshold():
-    tmp = _tmp_project()
-    try:
-        line = budget.brief_line(tmp)
-        _assert(line is None, f"empty should be quiet: {line!r}")
-        for _ in range(60):
-            budget.record_invocation(tmp, category="nonheal")
-        for _ in range(30):
-            budget.record_invocation(tmp, category="heal")
-        # 60/100 nonheal = 60%, 30/50 heal = 60% — both below 75%. Pin caps so
-        # the test exercises the threshold logic independent of the default.
-        line = budget.brief_line(tmp, nonheal_cap=100, heal_cap=50)
-        _assert(line is None, f"both below 75% should be quiet: {line!r}")
-        print("PASS brief_line_quiet_when_both_below_threshold")
-    finally:
-        _cleanup(tmp)
-
-
-def test_brief_line_surfaces_only_loud_category():
-    """Non-heal near cap, heal quiet — only non-heal surfaces."""
-    tmp = _tmp_project()
-    try:
-        for _ in range(80):
-            budget.record_invocation(tmp, category="nonheal")
-        for _ in range(5):
-            budget.record_invocation(tmp, category="heal")
-        line = budget.brief_line(tmp, nonheal_cap=100, heal_cap=50)
-        _assert(line is not None, "expected non-None line")
-        _assert("80/100 non-heal" in line, f"non-heal not surfaced: {line!r}")
-        _assert("heal" not in line.replace("non-heal", ""),
-                f"heal leaked into line when it should be quiet: {line!r}")
-        print("PASS brief_line_surfaces_only_loud_category")
-    finally:
-        _cleanup(tmp)
-
-
-def test_brief_line_surfaces_both_when_both_near_cap():
-    tmp = _tmp_project()
-    try:
-        for _ in range(80):
-            budget.record_invocation(tmp, category="nonheal")
-        for _ in range(40):
-            budget.record_invocation(tmp, category="heal")
-        line = budget.brief_line(tmp, nonheal_cap=100, heal_cap=50)
-        _assert(line is not None, "expected non-None line")
-        _assert("80/100 non-heal" in line and "40/50 heal" in line,
-                f"both categories should surface: {line!r}")
-        print("PASS brief_line_surfaces_both_when_both_near_cap")
-    finally:
-        _cleanup(tmp)
-
-
-def test_brief_line_at_cap_shows_approve_hint():
-    tmp = _tmp_project()
-    try:
-        for _ in range(100):
-            budget.record_invocation(tmp, category="nonheal")
-        line = budget.brief_line(tmp)
-        _assert(line is not None and "/latch-budget-approve" in line,
-                f"expected unlock hint: {line!r}")
-        _assert("100/100 non-heal" in line, f"expected at-cap count: {line!r}")
-        print("PASS brief_line_at_cap_shows_approve_hint")
-    finally:
-        _cleanup(tmp)
-
-
-def test_brief_line_at_cap_heal_only_shows_approve_hint():
-    """Heal at cap on its own (the today=2026-05-20 scenario) should also
-    surface the unlock hint."""
-    tmp = _tmp_project()
-    try:
-        for _ in range(50):
-            budget.record_invocation(tmp, category="heal")
-        line = budget.brief_line(tmp, heal_cap=50)
-        _assert(line is not None and "/latch-budget-approve" in line,
-                f"expected unlock hint when heal alone is at cap: {line!r}")
-        _assert("50/50 heal" in line, f"expected at-cap heal count: {line!r}")
-        print("PASS brief_line_at_cap_heal_only_shows_approve_hint")
-    finally:
-        _cleanup(tmp)
-
-
-def test_brief_line_surfaces_approved_state():
-    tmp = _tmp_project()
-    try:
-        budget.approve_today(tmp)
-        budget.record_invocation(tmp, category="nonheal")
-        budget.record_invocation(tmp, category="nonheal")
-        budget.record_invocation(tmp, category="heal")
-        line = budget.brief_line(tmp)
-        _assert(line is not None and "approved" in line.lower(),
-                f"expected approved line: {line!r}")
-        _assert("non-heal 2" in line and "heal 1" in line,
-                f"expected per-category counts: {line!r}")
-        print("PASS brief_line_surfaces_approved_state")
-    finally:
-        _cleanup(tmp)
-
-
 if __name__ == "__main__":
     test_initial_state_is_empty()
     test_filelock_timeout_is_oserror_compatible()
@@ -458,12 +358,6 @@ if __name__ == "__main__":
     test_corrupt_json_fails_closed_for_budget_consumers()
     test_prepare_storage_detects_corrupt_state_before_consent()
     test_legacy_count_field_migrates_to_nonheal()
-    test_brief_line_quiet_when_both_below_threshold()
-    test_brief_line_surfaces_only_loud_category()
-    test_brief_line_surfaces_both_when_both_near_cap()
-    test_brief_line_at_cap_shows_approve_hint()
-    test_brief_line_at_cap_heal_only_shows_approve_hint()
-    test_brief_line_surfaces_approved_state()
     print("\nAll budget tests pass.")
 
 

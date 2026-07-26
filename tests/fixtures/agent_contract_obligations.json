@@ -31,6 +31,12 @@
       "scenario_ids": ["read_full_node", "honest_no_evidence"]
     },
     {
+      "id": "catch_up_direction",
+      "description": "Compose bounded project direction, a small raw progress chronology, and an authoritative foreground-node read for catch-up.",
+      "markers": {"shared_contract": ["`latch_project_direction(compact=true)` as the initial", "`latch_recent(kind=\"progress\", limit=3)`", "`foregrounded_item.id`"]},
+      "scenario_ids": ["catch_up_direction"]
+    },
+    {
       "id": "honest_evidence",
       "description": "Never silently bypass Latch or invent ids, history, verdicts, or receipts.",
       "markers": {"shared_contract": ["No silent Latch bypass", "no invented Latch evidence", "instead of inventing ids"]},

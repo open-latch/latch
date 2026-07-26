@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-"""VS Code/Copilot SessionStart hook: AGENTS.md re-sync + brief.
+"""VS Code/Copilot SessionStart hook: silent AGENTS.md sync.
 
 This is intentionally thinner than Claude Code's lifecycle hook and separate
 from Codex's hook. VS Code's hook support is still preview, and VS Code can
-also discover Claude Code hook files. The VS Code adapter should only surface
-read-side context at session start and keep AGENTS.md fresh; it should not
-spawn transcript compaction or write Codex session markers.
+also discover Claude Code hook files. It does not spawn transcript compaction
+or write Codex session markers. Healthy startup emits no model context.
 """
 from __future__ import annotations
 
@@ -19,16 +18,15 @@ SRC = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(SRC))
 sys.path.insert(0, str(SRC / "hooks"))
 
-from _common import hook_field, log, read_hook_input, transcript_path  # noqa: E402
+from _common import hook_field, log, read_hook_input  # noqa: E402
 
-import budget  # noqa: E402
-import db  # noqa: E402
 from paths import is_disabled, is_in_compact, is_unlatched_mode  # noqa: E402
 from session_start import (  # noqa: E402
-    _build_briefing,
-    _build_unlatched_brief,
+    _build_unlatched_notice,
     _build_unlatched_system_message,
     _emit_session_start_context,
+    _join_startup_notices,
+    _managed_doc_wiring_notice,
 )
 
 
@@ -44,16 +42,12 @@ def vscode_project_cwd(payload: dict) -> str:
     )
 
 
-def vscode_session_id(payload: dict) -> str | None:
-    return hook_field(payload, "session_id", "sessionId", "id")
-
-
 def main() -> int:
     if is_in_compact():
         return 0
     if is_unlatched_mode():
         _emit_session_start_context(
-            _build_unlatched_brief(),
+            _build_unlatched_notice(),
             system_message=_build_unlatched_system_message(),
         )
         return 0
@@ -62,57 +56,18 @@ def main() -> int:
 
     payload = read_hook_input()
     cwd = vscode_project_cwd(payload)
-    sid = vscode_session_id(payload)
-    tpath = transcript_path(payload)
-
-    surfaced_ids: list[int] = []
-    try:
-        conn = db.connect(cwd)
-        try:
-            if sid:
-                db.upsert_session(conn, sid, cwd, tpath)
-            orphan_count = len(db.orphaned_sessions(conn, cwd))
-        finally:
-            conn.close()
-    except Exception as e:
-        log(f"vscode_session_start db error: {e}")
-        orphan_count = 0
-
-    try:
-        budget_line = budget.brief_line(cwd)
-    except Exception as e:
-        log(f"vscode_session_start budget brief_line failed: {e}")
-        budget_line = None
 
     agents_md_action = _auto_sync_agents_md(cwd)
-
-    briefing = _build_briefing(
-        cwd,
-        orphan_count=orphan_count,
-        budget_line=budget_line,
-        surfaced_ids=surfaced_ids,
-        claude_md_synced=(agents_md_action == "synced"),
-        synced_doc_name="AGENTS.md",
+    wiring_notice = _managed_doc_wiring_notice(
+        agents_md_action,
+        doc_name="AGENTS.md",
+        manual_command=f"{SRC.parent}/bin/install_agents_md.sh --yes",
     )
-
-    if sid and surfaced_ids:
-        try:
-            conn = db.connect(cwd)
-            try:
-                db.record_retrievals(
-                    conn,
-                    session_id=sid,
-                    turn=0,
-                    items=[(nid, None) for nid in surfaced_ids],
-                    source="vscode_session_start",
-                )
-            finally:
-                conn.close()
-        except Exception as e:
-            log(f"vscode_session_start record_retrievals failed: {e}")
-
-    if briefing:
-        _emit_session_start_context(briefing)
+    notice = _join_startup_notices(
+        wiring_notice,
+    )
+    if notice:
+        _emit_session_start_context(notice)
 
     return 0
 
@@ -130,7 +85,7 @@ def _auto_sync_agents_md(cwd: str) -> str | None:
         return action
     except Exception as e:
         log(f"agents_md auto-sync skipped: {e}")
-        return None
+        return "error"
 
 
 if __name__ == "__main__":

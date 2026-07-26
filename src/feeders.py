@@ -9,7 +9,7 @@ its declared building blocks into view instead of waiting for text similarity
 to resurface them.
 
 Deterministic by design — SQL over nodes/edges, no model calls — so it is safe
-on the SessionStart hot path and inside the compactor's context assembly.
+inside project-direction and compactor context assembly.
 """
 from __future__ import annotations
 

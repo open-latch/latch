@@ -10,9 +10,11 @@ from ``AGENTS.md``, so this installer owns only those Codex surfaces.
 from __future__ import annotations
 
 import argparse
+import copy
 import os
 import re
 import sys
+import tomllib
 from pathlib import Path
 
 import agents_md_sync
@@ -51,6 +53,8 @@ CODEX_SKILL_NAMES = (
 )
 
 _TABLE_RE = re.compile(r"^\s*\[([^\]]+)\]\s*(?:#.*)?$")
+_ARRAY_TABLE_RE = re.compile(r"^\s*\[\[([^\]]+)\]\]\s*(?:#.*)?$")
+_FEATURE_HOOK_RE = re.compile(r"^(\s*)(hooks|codex_hooks)\s*=(.*)$")
 _OWNED_TABLES = tuple(f"mcp_servers.{name}" for name in ALL_SERVER_NAMES)
 
 
@@ -58,8 +62,154 @@ class CodexSkillCollisionError(RuntimeError):
     pass
 
 
+class CodexConfigMergeError(RuntimeError):
+    pass
+
+
 def _toml_string(value: str) -> str:
     return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _table_header(line: str) -> tuple[str, bool] | None:
+    """Return a raw TOML table name and whether it is an array-of-tables."""
+    match = _ARRAY_TABLE_RE.match(line)
+    if match:
+        return match.group(1).strip(), True
+    match = _TABLE_RE.match(line)
+    if match:
+        return match.group(1).strip(), False
+    return None
+
+
+def _is_features_table_name(raw_name: str) -> bool:
+    return raw_name in {"features", '"features"', "'features'"}
+
+
+def _contains_multiline_toml_string(text: str) -> bool:
+    """Detect real TOML multiline string delimiters, ignoring comments/strings."""
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if char == "#":
+            newline = text.find("\n", index)
+            index = len(text) if newline < 0 else newline + 1
+            continue
+        if text.startswith('"""', index) or text.startswith("'''", index):
+            return True
+        if char not in {'"', "'"}:
+            index += 1
+            continue
+
+        quote = char
+        index += 1
+        while index < len(text):
+            char = text[index]
+            if quote == '"' and char == "\\":
+                index += 2
+                continue
+            index += 1
+            if char == quote or char == "\n":
+                break
+    return False
+
+
+def _parse_config(text: str, *, stage: str) -> dict:
+    try:
+        return tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
+        raise CodexConfigMergeError(
+            f"Codex config is invalid TOML {stage}: {exc}; no changes were written"
+        ) from exc
+
+
+def _validate_supported_config_shape(text: str, parsed: dict) -> None:
+    """Reject valid TOML forms the comment-preserving line merge cannot edit."""
+    if _contains_multiline_toml_string(text):
+        raise CodexConfigMergeError(
+            "Codex config contains a multiline TOML string, which this "
+            "comment-preserving installer cannot safely rewrite; no changes were written"
+        )
+
+    features_headers = [
+        header
+        for line in text.splitlines()
+        if (header := _table_header(line)) is not None
+        and not header[1]
+        and _is_features_table_name(header[0])
+    ]
+    features = parsed.get("features")
+    if features is None:
+        return
+    if not isinstance(features, dict) or len(features_headers) != 1:
+        raise CodexConfigMergeError(
+            "Codex config uses an unsupported features representation. Convert "
+            "inline/dotted features to a standalone [features] table and rerun; "
+            "no changes were written"
+        )
+
+
+def _unowned_config_projection(parsed: dict) -> dict:
+    """Remove only fields this installer owns for before/after comparison."""
+    projected = copy.deepcopy(parsed)
+    features = projected.get("features")
+    if features is not None and not isinstance(features, dict):
+        raise CodexConfigMergeError(
+            "Codex config features value cannot be safely merged; no changes were written"
+        )
+    if isinstance(features, dict):
+        features.pop("hooks", None)
+        features.pop("codex_hooks", None)
+        if not features:
+            projected.pop("features", None)
+
+    servers = projected.get("mcp_servers")
+    if servers is not None and not isinstance(servers, dict):
+        raise CodexConfigMergeError(
+            "Codex config mcp_servers value cannot be safely merged; "
+            "no changes were written"
+        )
+    if isinstance(servers, dict):
+        for name in ALL_SERVER_NAMES:
+            servers.pop(name, None)
+        if not servers:
+            projected.pop("mcp_servers", None)
+    return projected
+
+
+def _validate_merged_config(text: str, *, before: dict, mcp_block: str) -> None:
+    parsed = _parse_config(text, stage="after the proposed merge")
+    features = parsed.get("features")
+    if not isinstance(features, dict) or features.get("hooks") is not True:
+        raise CodexConfigMergeError(
+            "Codex config merge did not produce [features] hooks = true; "
+            "no changes were written"
+        )
+    if "codex_hooks" in features:
+        raise CodexConfigMergeError(
+            "Codex config merge left the deprecated features.codex_hooks alias; "
+            "no changes were written"
+        )
+    rendered = _parse_config(mcp_block, stage="while rendering the managed MCP block")
+    servers = parsed.get("mcp_servers")
+    if (
+        not isinstance(servers, dict)
+        or servers.get(SERVER_NAME) != rendered["mcp_servers"][SERVER_NAME]
+    ):
+        raise CodexConfigMergeError(
+            "Codex config merge did not produce the canonical latch MCP block; "
+            "no changes were written"
+        )
+    legacy_names = [name for name in LEGACY_SERVER_NAMES if name in servers]
+    if legacy_names:
+        raise CodexConfigMergeError(
+            "Codex config merge left deprecated latch MCP server name(s): "
+            f"{', '.join(legacy_names)}; no changes were written"
+        )
+    if _unowned_config_projection(parsed) != _unowned_config_projection(before):
+        raise CodexConfigMergeError(
+            "Codex config merge could not prove preservation of unrelated TOML "
+            "settings; no changes were written"
+        )
 
 
 def render_mcp_block(python_path: str, server_py: str) -> str:
@@ -113,10 +263,10 @@ def _strip_existing_server_tables(text: str) -> tuple[str, bool]:
     removing = False
     changed = False
     for line in lines:
-        m = _TABLE_RE.match(line)
-        if m:
-            name = m.group(1).strip()
-            if _is_owned_table(name):
+        header = _table_header(line)
+        if header:
+            name, is_array = header
+            if not is_array and _is_owned_table(name):
                 removing = True
                 changed = True
                 continue
@@ -126,7 +276,115 @@ def _strip_existing_server_tables(text: str) -> tuple[str, bool]:
     return "\n".join(out).rstrip("\n"), changed
 
 
+def _feature_hook_line(line: str) -> tuple[str, str, str] | None:
+    """Return indentation, key, and value/comment text for a hook feature line."""
+    match = _FEATURE_HOOK_RE.match(line)
+    if not match:
+        return None
+    return match.group(1), match.group(2), match.group(3)
+
+
+def _inline_comment(value: str) -> str:
+    marker = value.find("#")
+    return value[marker:].strip() if marker >= 0 else ""
+
+
+def _merge_hooks_feature(text: str) -> tuple[str, bool]:
+    """Canonicalize Codex lifecycle activation as ``[features] hooks = true``.
+
+    The former ``codex_hooks`` feature name is removed.  Unrelated feature
+    settings, tables, and comments stay byte-for-byte intact apart from the
+    surrounding newline normalization already performed by ``merge_config``.
+    """
+    lines = text.splitlines()
+    features_start: int | None = None
+    for index, line in enumerate(lines):
+        header = _table_header(line)
+        if header and not header[1] and _is_features_table_name(header[0]):
+            features_start = index
+            break
+
+    if features_start is None:
+        addition = ["[features]", "hooks = true"]
+        if lines and lines[-1].strip():
+            lines.append("")
+        lines.extend(addition)
+        return "\n".join(lines).rstrip("\n"), True
+
+    features_end = len(lines)
+    for index in range(features_start + 1, len(lines)):
+        if _table_header(lines[index]):
+            features_end = index
+            break
+
+    flag_rows: list[tuple[int, str, str, str]] = []
+    for index in range(features_start + 1, features_end):
+        parsed = _feature_hook_line(lines[index])
+        if parsed:
+            indent, key, value = parsed
+            flag_rows.append((index, indent, key, value))
+
+    canonical = next((row for row in flag_rows if row[2] == "hooks"), None)
+    selected = canonical or (flag_rows[0] if flag_rows else None)
+    changed = False
+    if selected is None:
+        insert_at = features_end
+        while insert_at > features_start + 1 and not lines[insert_at - 1].strip():
+            insert_at -= 1
+        lines.insert(insert_at, "hooks = true")
+        return "\n".join(lines).rstrip("\n"), True
+
+    selected_index, indent, _key, value = selected
+    comment = _inline_comment(value)
+    replacement = f"{indent}hooks = true" + (f" {comment}" if comment else "")
+    if lines[selected_index] != replacement:
+        lines[selected_index] = replacement
+        changed = True
+
+    # Remove deprecated aliases and duplicate canonical keys. Preserve any
+    # inline comment as a standalone comment at the same location.
+    for index, row_indent, _row_key, row_value in reversed(flag_rows):
+        if index == selected_index:
+            continue
+        comment = _inline_comment(row_value)
+        if comment:
+            lines[index] = f"{row_indent}{comment}"
+        else:
+            del lines[index]
+        changed = True
+
+    return "\n".join(lines).rstrip("\n"), changed
+
+
+def _canonical_hooks_feature(text: str) -> tuple[bool, str]:
+    """Whether config contains exactly the supported lifecycle feature flag."""
+    try:
+        parsed = _parse_config(text, stage="before status inspection")
+        _validate_supported_config_shape(text, parsed)
+    except CodexConfigMergeError as exc:
+        return False, str(exc)
+    features = parsed.get("features")
+    if not isinstance(features, dict):
+        return False, (
+            "Codex lifecycle hooks are missing; run bin/install_codex.sh to set "
+            "[features] hooks = true"
+        )
+    if "codex_hooks" in features:
+        return False, (
+            "Codex lifecycle hooks use deprecated features.codex_hooks; "
+            "run bin/install_codex.sh to set [features] hooks = true"
+        )
+    if features.get("hooks") is not True:
+        return False, (
+            "Codex lifecycle hooks are disabled, missing, or invalid; "
+            "run bin/install_codex.sh to set [features] hooks = true"
+        )
+    return True, "Codex lifecycle hooks enabled ([features] hooks = true)"
+
+
 def merge_config(existing: str, python_path: str, server_py: str) -> tuple[str, list[str]]:
+    parsed = _parse_config(existing, stage="before the proposed merge")
+    _validate_supported_config_shape(existing, parsed)
     changes: list[str] = []
     text, removed_block = _strip_managed_block(existing)
     if removed_block:
@@ -134,8 +392,12 @@ def merge_config(existing: str, python_path: str, server_py: str) -> tuple[str, 
     text, removed_tables = _strip_existing_server_tables(text)
     if removed_tables:
         changes.append("replaced existing latch-owned MCP server table")
+    text, feature_changed = _merge_hooks_feature(text)
+    if feature_changed:
+        changes.append("enabled Codex lifecycle hooks feature")
     block = render_mcp_block(python_path, server_py)
     new = (text.rstrip("\n") + "\n\n" + block + "\n") if text.strip() else block + "\n"
+    _validate_merged_config(new, before=parsed, mcp_block=block)
     if new == existing:
         return new, []
     if new != existing:
@@ -157,9 +419,15 @@ def config_status(path: Path, python_path: str, server_py: str) -> tuple[bool, s
     if not path.exists():
         return False, f"Codex config missing: {path}"
     current = path.read_text(encoding="utf-8")
-    desired, changes = merge_config(current, python_path, server_py)
+    hooks_enabled, hooks_detail = _canonical_hooks_feature(current)
+    if not hooks_enabled:
+        return False, hooks_detail
+    try:
+        desired, changes = merge_config(current, python_path, server_py)
+    except CodexConfigMergeError as exc:
+        return False, f"Codex config cannot be safely merged: {exc}"
     if desired == current and not changes:
-        return True, f"Codex MCP block installed in {path}"
+        return True, f"Codex MCP block installed in {path}; {hooks_detail}"
     normalized_py = python_path.replace("\\", "/")
     normalized_server = server_py.replace("\\", "/")
     for legacy in LEGACY_SERVER_NAMES:
@@ -167,7 +435,8 @@ def config_status(path: Path, python_path: str, server_py: str) -> tuple[bool, s
                 and normalized_py in current
                 and normalized_server in current):
             return True, (f"Codex MCP block uses legacy server name {legacy!r} in {path}; "
-                          f"still supported, fresh installs use {SERVER_NAME!r}")
+                          f"still supported, fresh installs use {SERVER_NAME!r}; "
+                          f"{hooks_detail}")
     return False, f"Codex MCP block missing or drifted in {path}"
 
 
@@ -386,7 +655,13 @@ def main(argv: list[str] | None = None) -> int:
             return 1
 
     existing = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
-    new_config, changes = merge_config(existing, python_path, server_py)
+    try:
+        new_config, changes = merge_config(existing, python_path, server_py)
+    except CodexConfigMergeError as exc:
+        print("\nlatch Codex installer\n")
+        print(f"  [XX] Codex config merge refused: {exc}")
+        print("\nNo Codex configuration changes were written.")
+        return 2
     new_hooks = ""
     hook_changes: list[str] = []
     if not args.skip_hooks:
@@ -434,7 +709,7 @@ def main(argv: list[str] | None = None) -> int:
                 for c in hook_changes:
                     print(f"          - {c}")
         else:
-            print("  [OK  ] Codex hooks already include the latch SessionStart brief")
+            print("  [OK  ] Codex hooks already include the latch SessionStart hook")
 
     if not args.skip_skills:
         skill_changes = sync_codex_skills(skills_dir, dry_run=args.dry_run)

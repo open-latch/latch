@@ -16,12 +16,12 @@ $disableWrite = Join-Path $KbHome "DISABLE_WRITE"
 
 if ($env:LATCH_UNLATCHED) {
   Write-Host "  [UNLATCHED] `$env:LATCH_UNLATCHED is set - latch influence is OFF for vanilla-agent mode."
-  Write-Host "             disabled: session briefs, prompt KB injection, compaction, self-heal, maintenance."
+  Write-Host "             disabled: prompt KB injection, compaction, self-heal, maintenance."
   Write-Host "             still true: KB files stay local/unchanged; latch remains installed; control commands/MCP registration remain."
   Write-Host "             resume: unset LATCH_UNLATCHED, then run /unlatch"
 } elseif (Test-Path $unlatched) {
   Write-Host "  [UNLATCHED] $unlatched exists - latch influence is OFF for vanilla-agent mode."
-  Write-Host "             disabled: session briefs, prompt KB injection, compaction, self-heal, maintenance."
+  Write-Host "             disabled: prompt KB injection, compaction, self-heal, maintenance."
   Write-Host "             still true: KB files stay local/unchanged; latch remains installed; control commands/MCP registration remain."
   Write-Host "             resume: run /unlatch"
 } elseif ($env:LATCH_DISABLE) {
@@ -33,28 +33,6 @@ if ($env:LATCH_UNLATCHED) {
   Write-Host "             resume: .\bin\latch_enable.ps1"
 } else {
   Write-Host "  [ENABLED ] no UNLATCHED/DISABLE sentinel or env var - hooks active."
-}
-
-$Python = if ($env:LATCH_PYTHON) { $env:LATCH_PYTHON } else { $env:CLAUDE_KB_PYTHON }
-if (-not $Python) {
-  foreach ($candidate in @(
-    (Join-Path $KbHome ".venv\Scripts\python.exe"),
-    (Join-Path $KbHome ".venv\bin\python")
-  )) {
-    if (Test-Path -LiteralPath $candidate -PathType Leaf) {
-      $Python = $candidate
-      break
-    }
-  }
-}
-if (-not $Python) { $Python = "python" }
-try {
-  & $Python (Join-Path $KbHome "src\intensity_cli.py")
-  if ($LASTEXITCODE -gt 1) {
-    Write-Host "  warning: intensity status command exited $LASTEXITCODE"
-  }
-} catch {
-  Write-Host "Latch intensity: unavailable (could not run src\intensity_cli.py)"
 }
 
 if ($env:LATCH_DISABLE_WRITE) {

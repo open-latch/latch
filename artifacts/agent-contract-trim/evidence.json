@@ -16,8 +16,8 @@
     "remote_or_public_git_actions_at_capture": "PR 6 still points to prior verified head f9829d02390b7bcaf11ac2c2ce3c0fcbdd6a0774; this rebased refresh remains local until exact-head verification and final review complete"
   },
   "wiring_version": {
-    "before": 2,
-    "candidate": 3
+    "before": 3,
+    "candidate": 4
   },
   "measurement": {
     "method": "Render each managed surface with kb_home=/opt/latch, include managed begin/end markers, count splitlines and whitespace-delimited words, and hash UTF-8 bytes.",
@@ -29,18 +29,18 @@
       "cursor_always_loaded": {"lines": 319, "words": 2562, "bytes": 17711, "sha256": "25c8bec2ae365a25aed9ce295dc9347d49d97e3d0ddb534f8d8a7c1dcc4ecc2c"}
     },
     "candidate": {
-      "source_snippet": {"lines": 89, "words": 574, "bytes": 4367, "sha256": "2b8a64e16f1fedd43624dab7e2f4cb0b2182b4fbe6371e0277c8c8157cedde69"},
-      "claude_managed_block": {"lines": 94, "words": 638, "bytes": 4773, "sha256": "888285fa29c52507ff27de12f39d17000aeb9f7c1bf5f214f39c40f66902b214"},
-      "agents_managed_block": {"lines": 94, "words": 639, "bytes": 4784, "sha256": "fd6ed49e5ad833179eaa230bc46554242217b7bd43ae5abd833df10c51521e5a"},
-      "cursor_rule": {"lines": 46, "words": 350, "bytes": 2477, "sha256": "b5a74f8d452363c275b0902ace3b0aa0fe8043cfd80ea203251205d359e0ccbf"},
-      "cursor_always_loaded": {"lines": 141, "words": 989, "bytes": 7262, "sha256": "7e8f8bb286b6b7d11fbad5df650863ca3b54e5d6ca0d00c48dd332327291c0c1"}
+      "source_snippet": {"lines": 89, "words": 546, "bytes": 4307, "sha256": "cc7b4da760b5a7cdb85af5a8281a66cfef4b8cfe3bbdf8a6ff2119c2e775c83f"},
+      "claude_managed_block": {"lines": 94, "words": 610, "bytes": 4713, "sha256": "a05b8345516a83618c5080fddbfb4243473ac61553916377ab85f32950bb0415"},
+      "agents_managed_block": {"lines": 94, "words": 611, "bytes": 4724, "sha256": "08c80c907eca114d8ab292c778b2c058b1a8600aa2483caef75c000c9870e795"},
+      "cursor_rule": {"lines": 46, "words": 342, "bytes": 2415, "sha256": "bec222afae7cfb1bc06053c6b9bc1d0f3bb235fd50f7a9ebbd7736aa23e88532"},
+      "cursor_always_loaded": {"lines": 141, "words": 953, "bytes": 7140, "sha256": "52cf2ff0af20cc3c57cfe8b9ae23b8bb434e9dc788e87e653fe749e2d371d390"}
     },
     "reductions_percent": {
-      "source_snippet": {"lines": 64.8, "words": 71.6},
-      "claude_managed_block": {"lines": 63.3, "words": 68.9},
-      "agents_managed_block": {"lines": 63.3, "words": 68.8},
-      "cursor_rule": {"lines": 25.8, "words": 31.5},
-      "cursor_always_loaded": {"lines": 55.8, "words": 61.4}
+      "source_snippet": {"lines": 64.8, "words": 73.0},
+      "claude_managed_block": {"lines": 63.3, "words": 70.2},
+      "agents_managed_block": {"lines": 63.3, "words": 70.2},
+      "cursor_rule": {"lines": 25.8, "words": 33.1},
+      "cursor_always_loaded": {"lines": 55.8, "words": 62.8}
     },
     "budgets": {
       "claude_managed_block": {"max_lines": 100, "max_words": 650, "passed": true},
@@ -144,7 +144,7 @@
   "update_and_rollback": {
     "result": "passed",
     "evidence": [
-      "Version 2 managed documents repair once to version 3 and preserve user content.",
+      "Version 3 managed documents repair once to version 4 and preserve user content.",
       "Unmanaged projects remain untouched.",
       "Version 999 managed documents and Cursor rules are refused rather than downgraded.",
       "Managed-document and Cursor-rule backups reproduce the older bytes; restoring those bytes is detected as older and safely rolls forward again.",

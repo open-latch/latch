@@ -25,9 +25,9 @@ unrelated Cursor configuration.
 
 The base adapter provides the shared latch MCP tools, a Cursor-native activation
 rule, project-local commands and workflow skills, and the shared `AGENTS.md`
-behavior contract. Pass `--with-hooks` to add SessionStart briefing, an exact
-current-session transcript handoff, per-prompt pre-edit gate enforcement, and
-post-tool latch activity context.
+behavior contract. Pass `--with-hooks` to add a silent exact current-session
+transcript handoff, per-prompt pre-edit gate enforcement, and post-tool latch
+activity context.
 
 The Cursor Agent CLI is the native model backend for gate, maintenance, seed,
 and compaction calls. Current-session compaction and default Cursor seeding use
@@ -39,10 +39,9 @@ deliberately unsupported.
 
 The `.cursor/hooks.json` merge installs four latch hook paths:
 
-- `sessionStart` records the current Cursor conversation/transcript pair for
-  direct hook activity and explicit current-session workflows, re-syncs an
-  already-managed `AGENTS.md`, and returns the KB brief through Cursor's native
-  `additional_context` field. Cursor's reused MCP process has no verified
+- `sessionStart` silently records the current Cursor conversation/transcript
+  pair for direct hook activity and explicit current-session workflows, and
+  re-syncs an already-managed `AGENTS.md`. Cursor's reused MCP process has no verified
   per-request conversation id, so MCP structural rows remain unattributed
   instead of inheriting another interleaved conversation's project marker.
 - `beforeSubmitPrompt` fingerprints the current prompt without storing its text,
@@ -88,11 +87,11 @@ overrides remain available with `--model-backend codex` or
 The installed `/latch-compact` command and `run_cursor_compact_now` wrappers
 compact only the current conversation. Resolution fails closed unless the
 opt-in SessionStart hook recorded an exact per-session conversation id and
-`transcript_path` pair and the wrapper receives that surfaced session id
-explicitly. Because Cursor may not retain the original SessionStart text in a
-long chat, `beforeSubmitPrompt` re-injects the same payload-derived conversation
-id on every prompt. latch never scans Cursor databases or guesses the most
-recent chat.
+`transcript_path` pair and the wrapper receives the session id shown by
+`beforeSubmitPrompt` explicitly. That prompt hook supplies the same
+payload-derived conversation id on every prompt; SessionStart does not inject a
+startup brief. latch never scans Cursor databases or guesses the most recent
+chat.
 
 The command/skill requests Cursor `required_permissions: ["all"]` on its first
 Shell call because compaction writes latch-owned budget, session, and KB state

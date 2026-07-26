@@ -980,7 +980,7 @@ def main(argv: list[str] | None = None) -> int:
         if not args.skip_mcp:
             print(cursor_ide_enablement_guidance())
         if not args.with_hooks:
-            print("Cursor hooks were not installed; re-run with --with-hooks for session briefing, pre-edit gating, and activity context.")
+            print("Cursor hooks were not installed; re-run with --with-hooks for session bookkeeping, pre-edit gating, and activity context.")
         if args.with_hooks and os.name == "nt":
             print(
                 "\nWindows note: the long-lived latch MCP server is launched\n"

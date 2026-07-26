@@ -81,7 +81,7 @@ CREATE TABLE IF NOT EXISTS sessions (
 CREATE INDEX IF NOT EXISTS idx_sessions_ended ON sessions(ended_at);
 
 -- Per-session active set: which nodes have already been injected into context
--- (via SessionStart brief or per-prompt retrieval). Used by UserPromptSubmit
+-- via per-prompt retrieval. Used by UserPromptSubmit
 -- to dedupe and to power graph traversal on drill-down follow-ups.
 CREATE TABLE IF NOT EXISTS session_retrievals (
     session_id        TEXT    NOT NULL,
@@ -92,7 +92,7 @@ CREATE TABLE IF NOT EXISTS session_retrievals (
     last_injected_turn  INTEGER NOT NULL DEFAULT 0,
     hit_count         INTEGER NOT NULL DEFAULT 1,
     sim_at_first      REAL,
-    source            TEXT    NOT NULL,  -- 'session_start' | 'prompt' | 'graph'
+    source            TEXT    NOT NULL,  -- 'prompt' | 'graph'; legacy rows may use 'session_start'
     PRIMARY KEY (session_id, node_id)
 );
 
@@ -126,15 +126,15 @@ CREATE INDEX IF NOT EXISTS idx_retrieval_events_workstream
     ON retrieval_events(workstream_id_at_event, ts);
 
 -- Step 9: held-object focus pointers. Activity-bumped + decay-weighted.
--- Top-K rows by score = "current active workstreams". Read by SessionStart
--- brief and kb_gate traversal seeding. Cap (3) is enforced in code,
+-- Top-K rows by score = "current active workstreams". Read by project
+-- direction and kb_gate traversal seeding. Cap (3) is enforced in code,
 -- not schema, so manual focus pin operations can transiently exceed it.
 CREATE TABLE IF NOT EXISTS focus (
     workstream_id INTEGER PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
     rank          INTEGER NOT NULL,
     score         REAL    NOT NULL,
     set_at        TEXT    NOT NULL DEFAULT (datetime('now')),
-    set_by        TEXT    NOT NULL,           -- 'auto' | 'user' | 'session_start'
+    set_by        TEXT    NOT NULL,           -- 'auto' | 'user'; legacy rows may use 'session_start'
     pinned        INTEGER NOT NULL DEFAULT 0  -- 1 = never auto-evict
 );
 

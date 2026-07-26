@@ -28,8 +28,6 @@ ${LATCH_HOME}/
 ├── src/
 │   ├── schema.sql            # SQLite schema (nodes, edges, sessions, FTS)
 │   ├── paths.py              # pinned/shared KB selection + legacy CWD fallback
-│   ├── intensity_cli.py      # install-wide Quiet/Standard/Full selector
-│   ├── intensity_evals.py    # frozen tier policy/cost envelope eval
 │   ├── db.py                 # SQLite helpers
 │   ├── embeddings.py         # local ONNX MiniLM embedder (vendored all-MiniLM-L6-v2)
 │   ├── search.py             # hybrid FTS + cosine retrieval
@@ -54,8 +52,8 @@ ${LATCH_HOME}/
 │       ├── _common.py
 │       ├── stop.py           # turn counter + auto-compact every 5 turns
 │       ├── session_end.py    # final compact + promote to canonical
-│       ├── session_start.py  # reconcile orphans + brief new session
-│       └── user_prompt_submit.py  # tier-controlled prompt context surfacing
+│       ├── session_start.py  # silent managed-document repair
+│       └── user_prompt_submit.py  # bounded prompt context surfacing
 ├── bin/                      # wrappers: slash commands, installers, latch_doctor
 ├── commands/                 # slash command markdown (copy to ~/.claude/commands/)
 ├── vendor/                   # vendored ONNX MiniLM model + tokenizer (no download)
@@ -90,27 +88,16 @@ ${LATCH_HOME}/
   - `Stop` hook (every turn) — increments turn counter, fires compactor in
     the background every 5 turns. Cheap, non-blocking.
   - `SessionEnd` hook — final compact, promotes summary to canonical.
-  - `SessionStart` hook — reconciles any prior session that never got a
-    SessionEnd (laptop sleep, VS Code reload, crash), then emits a tier-bounded
-    brief with workstreams + open questions + parked ideas.
-  - `UserPromptSubmit` hook — tier-controlled context surfacing: Quiet skips
-    hook-added similarity work, Standard similarity-scores every eligible
-    prompt but injects only on the first prompt and topic shifts, and Full
-    retrieves and injects on every eligible prompt.
-- **Intensity.** The uncached install-wide choice lives in
-  `latch_settings.json`; `LATCH_INTENSITY` is a process-scoped runtime
-  override. Quickstart and the installers default a genuinely fresh install to
-  Standard and persist the result. During quickstart only, existing KB evidence
-  makes a settings-less install preserve Full. A manually wired, settings-less
-  runtime does not inspect KB evidence and resolves to legacy Full. If a valid
-  `LATCH_INTENSITY` is present during quickstart, its value is persisted
-  install-wide on apply. A malformed saved setting, a missing `intensity` key,
-  or an invalid saved value falls back to Quiet with a specific warning. An
-  invalid environment override uses a valid saved setting when present and
-  otherwise falls back to Quiet; quickstart rejects invalid explicit input.
-  The setting changes hook-added briefs and prompt context only. The static
-  managed contract, including its live read, remains the same; gate assembly
-  and classification do not consume intensity.
+  - `SessionStart` hooks perform silent host bootstrap such as exact session
+    markers, transcript handoff, managed-file repair, and gate-state setup.
+    Healthy startup emits no project brief.
+  - `UserPromptSubmit` performs bounded local retrieval on every eligible
+    prompt, including same-topic graph drill-down, and keeps hit, no-hit, and
+    degraded-runtime receipts visible.
+- **On-demand orientation.** Catch-up prompts route to the compact
+  `latch_project_direction` report, add three raw `latch_recent` progress rows,
+  then read the foreground node. Recent remains chronological rather than
+  acting as a second synthesized brief.
 - **Decision-chain gate.** `kb_gate` assembles a chain of related
   nodes (decisions, abandoned paths, active constraints) for a coding
   request, then classifies the request as `PROCEED` / `MODIFY` /
@@ -186,7 +173,7 @@ The interpreter is resolved automatically (`$LATCH_PYTHON`, legacy
 
 ### Per-project CLAUDE.md (the behavior half)
 
-Engine wiring makes the tools/hooks/brief *available*; it does not tell the
+Engine wiring makes the tools and hooks *available*; it does not tell the
 agent to *use* them. `bin/install_claude_md.{sh,ps1}`, run from a project root,
 injects `claude_md_snippet.md` into a **managed region** delimited by
 `<!-- BEGIN LATCH SNIPPET … -->` / `<!-- END LATCH SNIPPET -->`, substituting
@@ -202,7 +189,7 @@ pre-commit / CI). The snippet is Tier-A only (engine contract, no project
 facts); keep project facts and decisions in the KB via `kb_insert`, never in
 CLAUDE.md.
 
-### Codex preview install (MCP + AGENTS.md + start brief)
+### Codex preview install (MCP + AGENTS.md + silent startup)
 
 Codex support is intentionally adapter-specific. It does **not** reuse the
 Claude Code installer, does **not** call `claude mcp add`, and does **not**
@@ -222,7 +209,7 @@ write to `~/.claude/settings.json`.
   tables** before appending the managed block, including stale nested env/tool
   tables, so TOML never ends up with duplicate table definitions or mismatched
   model backends.
-- **Manages Codex `hooks.json` for the read-side `SessionStart` brief only.**
+- **Manages Codex `hooks.json` for the silent `SessionStart` bootstrap only.**
   It preserves unrelated user hooks, removes older latch-owned Codex
   `SessionStart` / `Stop` entries, and installs
   `src/hooks/codex_session_start.py`. It does not install Stop or SessionEnd
@@ -239,8 +226,8 @@ Usage from the project root whose `AGENTS.md` should receive the latch contract:
 /path/to/latch/bin/install_codex.sh --check
 ```
 
-Current boundary: this is still the Codex Act 1 wedge plus a read-side start
-brief. Manual compaction is
+Current boundary: this is still the Codex Act 1 wedge plus silent startup
+bookkeeping. Manual compaction is
 available through `bin/run_codex_compact_now.sh` or
 `bin/run_codex_compact_now.ps1`: it resolves the Codex session from the first
 arg or `$CODEX_THREAD_ID`, validates the matching
@@ -251,8 +238,9 @@ claude` available to exercise the legacy shared Claude CLI backend. Pass
 `--background --wait` to validate the transcript in the parent process, detach
 the compactor child, poll `codex_compact_background.log` for this launch's final
 JSON, and return the completion result. Bare `--background` is reserved for
-explicit fire-and-forget launches. Codex has a `SessionStart` brief hook, but
-automatic Stop/SessionEnd turn/end compaction remains deliberately deferred.
+explicit fire-and-forget launches. Codex has a silent `SessionStart` hook for
+the exact transcript marker and managed wiring repair, but automatic
+Stop/SessionEnd turn/end compaction remains deliberately deferred.
 
 ### Cursor adapter install (project MCP + rules + commands + AGENTS.md)
 
@@ -279,9 +267,9 @@ unsupported.
 - **Syncs `AGENTS.md`** using the same shared managed-region mechanics as
   Codex, branded for Cursor on first wiring.
 - **Optionally manages `.cursor/hooks.json`** when `--with-hooks` is passed.
-  The hook layer adds SessionStart context, exact current-session handoff,
-  per-prompt fail-closed pre-edit gate enforcement, and post-tool latch
-  activity context while preserving unrelated hooks.
+  The hook layer adds a silent current-session marker, per-prompt fail-closed
+  pre-edit gate enforcement, and post-tool latch activity context while
+  preserving unrelated hooks.
 
 Usage from the project root whose Cursor workspace should use latch:
 
@@ -325,14 +313,12 @@ acceptance.
 - `bash bin/latch_cursor_doctor.sh --model-backend codex` — Cursor adapter
   health check: static config/launch/rule/commands plus optional live
   `agent mcp list` / `agent mcp list-tools latch`.
-- In a new session: inspect the tier-bounded `SessionStart` brief. For Standard
-  or Full on a supported prompt-hook host, tail
-  `<selected-kb-dir>/retrieve.log`; expect intensity-tagged rows and
-  `path="vector"`/`"graph"` when retrieval runs. Quiet should instead record
-  `skip="intensity_quiet"` and must not wake the embedding runtime. A first
-  Standard/Full prompt may record `skip="embed_daemon_unavailable"` while the
-  shared owner starts. Calling `kb_recent` in-session should return nodes (or an
-  empty list).
+- In a new session on a supported prompt-hook host, tail
+  `<selected-kb-dir>/retrieve.log`; expect `path="vector"`/`"graph"` when
+  retrieval runs. A first prompt may record `skip="embed_daemon_unavailable"`
+  while the shared owner starts. Healthy SessionStart bookkeeping should emit
+  no model-visible payload. Calling `kb_recent` in-session should return nodes
+  (or an empty list).
 
 ## Maintenance (automatic — no setup)
 
@@ -395,10 +381,10 @@ latch-scoped (other hooks/skills/plugins keep running). `bin/latch_enable.sh`
 resumes; `bin/latch_status.sh` reports state. Finer:
 `bash bin/latch_disable.sh --write-only` (or the `DISABLE_WRITE` file /
 `LATCH_DISABLE_WRITE` env var; legacy `CLAUDE_KB_DISABLE_WRITE` still works)
-stops only the write-side hooks
-(Stop / SessionEnd / compactor) while leaving the SessionStart brief +
-tier-configured prompt surfacing live. `latch_enable.sh` leaves `DISABLE_WRITE`
-in place by default; `--all` removes it too. Windows: the `.ps1` equivalents.
+stops only the write-side hooks (Stop / SessionEnd / compactor) while leaving
+read-side prompt retrieval and silent host bootstrap live.
+`latch_enable.sh` leaves `DISABLE_WRITE` in place by default; `--all` removes
+it too. Windows: the `.ps1` equivalents.
 
 ### Logs
 

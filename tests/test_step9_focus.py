@@ -12,7 +12,6 @@ Exercises:
 - pin / unpin / drop semantics
 - bump_focus_for_nodes resolves leaf -> workstream and dedupes
 - kb_focus_cli list / set / pin / unpin / drop / prune end-to-end
-- SessionStart brief reads focus when populated, falls back when empty
 """
 from __future__ import annotations
 
@@ -32,7 +31,6 @@ sys.path.insert(0, str(_SRC / "hooks"))
 
 import db  # noqa: E402
 import kb_focus_cli  # noqa: E402
-import session_start as ss  # noqa: E402
 
 
 def _assert(cond, msg):
@@ -517,62 +515,6 @@ def test_cli_prune_runs_and_reports_deleted():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-# ---------- SessionStart brief integration ----------
-
-def test_session_brief_uses_focus_when_populated():
-    tmp, conn = _fresh_db()
-    try:
-        a = db.insert_node(conn, kind="workstream", title="aaa-not-focused",
-                           body="aaa", status="canonical")
-        b = db.insert_node(conn, kind="workstream", title="bbb-focused",
-                           body="bbb", status="canonical")
-        for _ in range(5):
-            db.bump_focus(conn, b)  # b dominates focus
-        conn.close()
-
-        out = ss._build_briefing(tmp, orphan_count=0, budget_line=None,
-                                 surfaced_ids=[])
-        _assert("Focus (active workstreams)" in out,
-                f"focused brief missing focus header: {out!r}")
-        _assert("bbb-focused" in out, f"focused workstream not in brief: {out!r}")
-        _assert("aaa-not-focused" not in out,
-                f"non-focused WS leaked into focused brief: {out!r}")
-        print("PASS session_brief_uses_focus_when_populated")
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
-
-
-def test_session_brief_falls_back_to_recent_when_focus_empty():
-    tmp, conn = _fresh_db()
-    try:
-        ws = db.insert_node(conn, kind="workstream", title="recent-only",
-                            body="r", status="canonical")
-        conn.close()
-        out = ss._build_briefing(tmp, orphan_count=0, budget_line=None,
-                                 surfaced_ids=[])
-        _assert("Active workstreams" in out,
-                f"empty-focus brief should use legacy header: {out!r}")
-        _assert("recent-only" in out, f"recent WS missing from fallback: {out!r}")
-        print("PASS session_brief_falls_back_to_recent_when_focus_empty")
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
-
-
-def test_session_brief_marks_pinned_workstreams():
-    tmp, conn = _fresh_db()
-    try:
-        ws = db.insert_node(conn, kind="workstream", title="pin-me",
-                            body="...", status="canonical")
-        db.pin_focus(conn, ws)
-        conn.close()
-        out = ss._build_briefing(tmp, orphan_count=0, budget_line=None,
-                                 surfaced_ids=[])
-        _assert("(pinned)" in out, f"pinned marker missing: {out!r}")
-        print("PASS session_brief_marks_pinned_workstreams")
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
-
-
 if __name__ == "__main__":
     test_bump_focus_inserts_new_row()
     test_bump_focus_accumulates_on_existing_row()
@@ -601,7 +543,4 @@ if __name__ == "__main__":
     test_cli_rejects_non_workstream_node()
     test_cli_unknown_subcommand_returns_error()
     test_cli_prune_runs_and_reports_deleted()
-    test_session_brief_uses_focus_when_populated()
-    test_session_brief_falls_back_to_recent_when_focus_empty()
-    test_session_brief_marks_pinned_workstreams()
     print("\nAll step9 focus tests pass.")

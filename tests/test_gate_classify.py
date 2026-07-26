@@ -410,9 +410,7 @@ def test_run_gate_appends_jsonl_log_line():
     hashed; the raw excerpt is omitted by default (structural-only invariant,
     id=1108 §3 / id=1225)."""
     tmp, conn = _fresh_db()
-    original_intensity = gate.paths.latch_intensity
     try:
-        gate.paths.latch_intensity = lambda: "quiet"
         seed = _ins(conn, "decision", "Redis session cache", "Redis session cache body")
         # use_llm=False → skipped verdict path; logging must still fire.
         gate.run_gate(
@@ -427,10 +425,10 @@ def test_run_gate_appends_jsonl_log_line():
             "ts", "project", "query_hash", "query_chars",
             "recommendation", "skipped", "evidence_ids", "decision_chain",
             "seed_count", "seed_ids", "reachable_count", "elapsed_ms",
-            "budget_count", "intensity", "seeds", "chain_lane_contacts",
+            "budget_count", "seeds", "chain_lane_contacts",
         ):
             _assert(k in entry, f"required field {k!r} missing: {entry}")
-        _assert(entry["intensity"] == "quiet", entry)
+        _assert("intensity" not in entry, entry)
         _assert(entry["skipped"] is True, f"skipped path should log True: {entry}")
         # Structural-only: no raw query text by default, anywhere in the row.
         _assert("query_excerpt" not in entry,
@@ -452,19 +450,13 @@ def test_run_gate_appends_jsonl_log_line():
                 and entry["elapsed_ms"] >= 0,
                 f"elapsed_ms numeric and non-negative: {entry}")
         # Second call → second line, same file.
-        gate.paths.latch_intensity = lambda: (_ for _ in ()).throw(
-            RuntimeError("resolver unavailable")
-        )
         gate.run_gate(
             conn, "Redis session cache", project_path=tmp, use_llm=False,
         )
         lines2 = log_path.read_text(encoding="utf-8").strip().splitlines()
         _assert(len(lines2) == 2, f"second call appends: got {len(lines2)}")
-        _assert(json.loads(lines2[1])["intensity"] is None,
-                f"resolver failure should retain row with null tier: {lines2[1]}")
         print("PASS run_gate_appends_jsonl_log_line")
     finally:
-        gate.paths.latch_intensity = original_intensity
         _cleanup(tmp, conn)
 
 

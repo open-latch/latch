@@ -32,8 +32,18 @@ def test_render_substitutes_placeholder():
     _assert("{{LATCH_COMPACTION_TEXT}}" not in out,
             "host compaction placeholder must be substituted")
     _assert(out.strip() != "", "rendered contract must be non-empty")
-    _assert('ToolSearch(query="mcp__latch latch_search latch_get latch_recent latch_gate")' in out,
+    _assert(
+        'ToolSearch(query="mcp__latch latch_search latch_get latch_recent '
+        'latch_project_direction latch_gate")' in out,
             "contract should prefer latch-named MCP tools")
+    _assert("latch_project_direction(compact=true)" in out,
+            "contract should route catch-up through bounded project direction")
+    _assert('latch_recent(kind="progress", limit=3)' in out,
+            "contract should add a small raw progress chronology")
+    _assert("foregrounded_item.id" in out,
+            "contract should fetch the foreground catch-up node")
+    _assert("raw chronology" in out,
+            "contract should not describe latch_recent as a catch-up summary")
     _assert("select:mcp__latch__kb_search" not in out,
             "contract should not use brittle exact-select legacy discovery")
     _assert("/latch-compact" in out and "/kb-compact" not in out,

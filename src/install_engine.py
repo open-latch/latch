@@ -13,8 +13,8 @@ playbook and were the #1 source of install friction:
      ``~/.claude/settings.json`` — it only reads them from the ``claude mcp``
      registry (``~/.claude.json``, written by ``claude mcp add``) or a project
      ``.mcp.json``. Hooks *are* read from settings.json, so a settings.json-only
-     install looks half-alive (the SessionStart brief fires) while the
-     latch-named tools never connect. We register with
+     install looks half-alive (startup bookkeeping runs) while the latch-named
+     tools never connect. We register with
      ``claude mcp add --scope user`` so the tools load in every project.
 
   2. **Merge the hooks** (SessionStart / UserPromptSubmit / Stop / SessionEnd)

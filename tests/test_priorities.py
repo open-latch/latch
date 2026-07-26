@@ -1,4 +1,4 @@
-"""Priorities ("top of mind") store + gate/brief integration.
+"""Priorities ("top of mind") store + gate integration.
 
 Exercises src/priorities.py and its wiring into gate.py against throwaway KBs:
 
@@ -28,7 +28,6 @@ import db          # noqa: E402
 import embeddings  # noqa: E402
 import gate        # noqa: E402
 import priorities  # noqa: E402
-import session_start  # noqa: E402
 
 
 def _assert(cond, msg):
@@ -773,65 +772,7 @@ def test_classifier_prompt_omits_block_when_empty():
 
 def test_render_helpers_empty_are_falsy():
     _assert(priorities.render_for_gate([]) == "", "empty gate render is ''")
-    _assert(priorities.render_for_brief([]) == [], "empty brief render is []")
     print("PASS render_helpers_empty_are_falsy")
-
-
-# ---------- SessionStart brief integration ----------
-
-def test_brief_renders_priorities_section():
-    tmp, conn = _fresh_db()
-    try:
-        priorities.add_priority(conn, "always consider security")
-        conn.close()
-        brief = session_start._build_briefing(tmp)
-        _assert("## Top of mind (priorities)" in brief,
-                f"priorities section missing from brief: {brief!r}")
-        _assert("always consider security" in brief,
-                "priority text missing from brief")
-        shutil.rmtree(tmp, ignore_errors=True)
-        print("PASS brief_renders_priorities_section")
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
-
-
-def test_brief_renders_workstream_priorities_under_workstream():
-    tmp, conn = _fresh_db()
-    try:
-        ws = _ins(
-            conn, "workstream", "Scoped brief WS", "brief body",
-            status="canonical",
-        )
-        priorities.add_priority(conn, "overall brief directive")
-        priorities.add_priority(conn, "scoped brief directive", workstream_id=ws)
-        conn.close()
-        brief = session_start._build_briefing(tmp)
-        _assert("## Top of mind (priorities)" in brief,
-                f"overall priorities section missing: {brief!r}")
-        _assert("overall brief directive" in brief,
-                f"overall directive missing: {brief!r}")
-        _assert("Scoped brief WS" in brief, f"workstream missing: {brief!r}")
-        _assert("Workstream priorities:" in brief,
-                f"workstream priority heading missing: {brief!r}")
-        _assert("scoped brief directive" in brief,
-                f"scoped directive missing: {brief!r}")
-        print("PASS brief_renders_workstream_priorities_under_workstream")
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
-
-
-def test_brief_omits_priorities_section_when_none():
-    tmp, conn = _fresh_db()
-    try:
-        # An idea so the brief still builds, but no priorities.
-        _ins(conn, "idea", "some idea", "an idea body")
-        conn.close()
-        brief = session_start._build_briefing(tmp)
-        _assert("## Top of mind (priorities)" not in brief,
-                f"priorities section must be omitted when none: {brief!r}")
-        print("PASS brief_omits_priorities_section_when_none")
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
 
 
 if __name__ == "__main__":
@@ -863,7 +804,4 @@ if __name__ == "__main__":
     test_classifier_prompt_groups_workstream_priorities()
     test_classifier_prompt_omits_block_when_empty()
     test_render_helpers_empty_are_falsy()
-    test_brief_renders_priorities_section()
-    test_brief_renders_workstream_priorities_under_workstream()
-    test_brief_omits_priorities_section_when_none()
     print("\nAll priorities tests pass.")

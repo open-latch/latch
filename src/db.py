@@ -16,7 +16,7 @@ from typing import Any, Iterable, Mapping, Sequence
 
 import log_utils
 import schema_version
-from paths import SCHEMA_PATH, db_path, ensure_project_dir, latch_intensity
+from paths import SCHEMA_PATH, db_path, ensure_project_dir
 
 
 VEC_DIM = 384  # all-MiniLM-L6-v2
@@ -186,6 +186,34 @@ def connect(cwd: str | None = None) -> sqlite3.Connection:
             conn,
             record_migration=(not had_nodes or installed_schema < schema_version.KB_SCHEMA_VERSION),
         )
+        return conn
+    except Exception:
+        conn.close()
+        raise
+
+
+def connect_readonly(cwd: str | None = None) -> sqlite3.Connection:
+    """Open an existing, current-schema KB without any setup writes.
+
+    Diagnostics and other read-only surfaces must remain usable when a pinned
+    vault is readable but intentionally outside the host's writable sandbox.
+    This connector never creates a directory or database, migrates a schema,
+    stamps metadata, or commits.
+    """
+    path = Path(db_path(cwd)).expanduser().resolve()
+    uri = path.as_uri() + "?mode=ro"
+    conn = sqlite3.connect(uri, uri=True, factory=_Connection)
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("PRAGMA query_only = ON")
+        conn.execute("PRAGMA foreign_keys = ON")
+        installed_schema = schema_version.ensure_supported(conn)
+        if installed_schema < schema_version.KB_SCHEMA_VERSION:
+            raise schema_version.SchemaMigrationRequiredError(
+                f"KB schema {installed_schema} must be migrated to "
+                f"{schema_version.KB_SCHEMA_VERSION} before read-only access"
+            )
+        _load_vec(conn)
         return conn
     except Exception:
         conn.close()
@@ -2054,16 +2082,6 @@ def recent_nodes(
     return [dict(r) for r in conn.execute(sql, params).fetchall()]
 
 
-def node_count(conn: sqlite3.Connection, *, include_stale: bool = False) -> int:
-    """Total node count, stale excluded by default. A single COUNT(*) — no
-    embeddings/numpy — so it is safe to call on the hot SessionStart path.
-    Used to detect a near-empty (new-user) KB for the getting-started brief."""
-    sql = "SELECT COUNT(*) FROM nodes"
-    if not include_stale:
-        sql += " WHERE status != 'stale'"
-    return int(conn.execute(sql).fetchone()[0])
-
-
 # ---------- ref-count / promotion / decay (step 4) ----------
 
 def bump_ref_count(conn: sqlite3.Connection, node_ids: Sequence[int]) -> None:
@@ -2253,12 +2271,6 @@ def add_edge(
 
     if pre_capture is not None:
         pre_capture["elapsed_ms"] = int((time.perf_counter() - t0) * 1000)
-        try:
-            pre_capture["intensity"] = latch_intensity()
-        except Exception:
-            # Telemetry must never turn a committed edge write into a caller-
-            # visible failure.
-            pre_capture["intensity"] = None
         log_utils.emit_event(
             "reconciliation", pre_capture,
             project_path=project_path,
@@ -2772,20 +2784,6 @@ def get_active_with_meta(
     return [dict(r) for r in rows]
 
 
-def orphaned_sessions(conn: sqlite3.Connection, project_path: str) -> list[dict]:
-    """Sessions that never got a SessionEnd but had work since their last compact."""
-    rows = conn.execute(
-        """
-        SELECT * FROM sessions
-        WHERE project_path = ?
-          AND ended_at IS NULL
-          AND turn_count > last_compact_turn
-        """,
-        (project_path,),
-    ).fetchall()
-    return [dict(r) for r in rows]
-
-
 # ---------- FTS ----------
 
 def fts_search(
@@ -2825,8 +2823,7 @@ def _sanitize_fts(query: str) -> str:
 
 # ---------- focus (step 9 §4.3) ----------
 
-# Cap on auto-bumped active rows. Pinned rows persist beyond the cap. The
-# render path (SessionStart brief) shows pinned + top-FOCUS_CAP auto.
+# Cap on auto-bumped active rows. Pinned rows persist beyond the cap.
 FOCUS_CAP = 3
 # Multiplicative decay applied per hour elapsed since the row was last
 # bumped. Stored score drifts over time — true score = stored * decay^h.

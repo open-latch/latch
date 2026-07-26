@@ -14,10 +14,10 @@ Treat `AGENTS.md` as the shared Latch contract for live reads, authority and
 reconciliation, visible receipts, durable capture, write hints, and compaction.
 This rule adds Cursor-specific enforcement:
 
-- If the session brief exists but the IDE has no Latch tools, do not repeatedly call
-  `latch_gate`. Ask the user to open Cursor Settings > Tools & MCP, enable
-  workspace server `latch`, confirm it reports tools enabled (count may vary),
-  and start a fresh Agent chat. `agent mcp list` does not prove the IDE toggle.
+- If the IDE has no Latch tools, do not repeatedly call `latch_gate`. Ask the
+  user to open Cursor Settings > Tools & MCP, enable workspace server `latch`,
+  confirm it reports tools enabled (count may vary), and start a fresh Agent chat.
+  `agent mcp list` does not prove the IDE toggle.
 - Before an ordinary coding mutation, pass the current user request verbatim to
   `latch_gate`. When `findings.must_display_to_user=true`, show the **Latch
   gate** block before editing.
@@ -38,9 +38,9 @@ This rule adds Cursor-specific enforcement:
 - Use `/latch-seed` only for the exact current hook-provided Cursor transcript;
   preview candidates before any confirmed staging write.
 
-Cursor's installed surface is project MCP, this rule, shared `AGENTS.md`, and
-project-local `.cursor/commands` plus `.cursor/skills`. `--with-hooks` adds
-session, current-prompt gate, and activity hooks. The Cursor Agent CLI is the
-native model backend. Manual compaction is fail-closed on the exact current
+Cursor's installed surface is project MCP, this rule, shared `AGENTS.md`,
+`.cursor/commands`, and `.cursor/skills`. `--with-hooks` adds session, gate,
+and activity hooks. The Cursor Agent CLI is the native model backend.
+Manual compaction is fail-closed on the exact current
 `transcript_path`; Latch never discovers or guesses historical Cursor
 transcripts.

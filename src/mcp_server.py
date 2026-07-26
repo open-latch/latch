@@ -183,6 +183,8 @@ COMPACT_LOG_FILE_NAME = "compact_excerpt.log"
 SAFETY_NET_BYTES = 80_000
 # Fallback excerpt length when the safety net force-truncates.
 SAFETY_NET_FALLBACK_CHARS = 200
+LIFECYCLE_NOTICE_TEXT_CHARS = 600
+LIFECYCLE_NOTICE_METADATA_CHARS = 160
 
 
 def _log_compact(
@@ -428,6 +430,96 @@ def _run_public_kb_mutation(
         return _writer_lock_busy_response()
 
 
+def _kb_activity_carrier(result: Any) -> dict | None:
+    """Return the dict whose ``kb_activity`` is visible on this read result."""
+    if isinstance(result, dict) and isinstance(result.get("kb_activity"), dict):
+        return result
+    if (
+        isinstance(result, list)
+        and result
+        and isinstance(result[0], dict)
+        and isinstance(result[0].get("kb_activity"), dict)
+    ):
+        return result[0]
+    return None
+
+
+def _attach_pending_lifecycle_notice(result: Any) -> Any:
+    """Attach, validate, then claim one rare lifecycle foreground notice.
+
+    Selection is read-only. The exact item is claimed on a fresh writer
+    connection only after a successful result has a JSON-serializable
+    ``kb_activity`` carrier. If the claim loses a race or cannot run, restore
+    the original activity so the result never implies that an unclaimed notice
+    was delivered. Project-direction deliberately does not call this helper.
+    """
+    if not lifecycle_receipts.RECEIPTS_CHANNEL_LIVE:
+        return result
+    carrier = _kb_activity_carrier(result)
+    if carrier is None:
+        return result
+    try:
+        with db.connect_readonly(_project_cwd()) as conn:
+            pending = lifecycle_receipts.pending_surface_items(conn, limit=1)
+    except Exception:
+        return result
+    if not pending:
+        return result
+
+    item = pending[0]
+    original_activity = carrier["kb_activity"]
+    notice = {
+        key: (
+            str(item[key])[:(
+                LIFECYCLE_NOTICE_TEXT_CHARS
+                if key == "text"
+                else LIFECYCLE_NOTICE_METADATA_CHARS
+            )]
+            if isinstance(item[key], str)
+            else item[key]
+        )
+        for key in (
+            "surface_kind",
+            "text",
+            "op",
+            "op_key",
+            "operation_id",
+            "candidate_key",
+            "workstream_id",
+        )
+        if item.get(key) is not None
+    }
+    prepared_activity = dict(original_activity)
+    prepared_activity["summary"] = (
+        f"{str(original_activity.get('summary') or '').rstrip()} "
+        f"Lifecycle {notice['surface_kind']}: {notice['text']}"
+    ).strip()
+    prepared_activity["lifecycle_notice"] = notice
+    carrier["kb_activity"] = prepared_activity
+    try:
+        # Match the compact-response boundary before making the one-way claim.
+        # Oversized base reads remain valid authority reads, but must not
+        # consume a notice the host may reject before delivery.
+        encoded = json.dumps(result, default=str).encode("utf-8")
+        if len(encoded) > SAFETY_NET_BYTES:
+            carrier["kb_activity"] = original_activity
+            return result
+        project_path = _project_cwd()
+        with lockfile.writer_lock(project_path, timeout_s=0.0):
+            with _conn() as conn:
+                claim = lifecycle_receipts.claim_pending_surface_item(
+                    conn,
+                    item,
+                    session_id=_project_session_id(),
+                )
+        if isinstance(claim, dict) and claim.get("created") is True:
+            return result
+    except Exception:
+        pass
+    carrier["kb_activity"] = original_activity
+    return result
+
+
 def _run_public_priority_mutation(
     operation: Callable[[Any], dict],
 ) -> dict:
@@ -649,8 +741,10 @@ def kb_search(
     Returns: list of node dicts. Compact-mode rows include `id`, `kind`,
     `title`, `body_excerpt`, `body_chars`, `status`, `score`, `updated_at`,
     plus the standard metadata fields. When non-empty, the first row carries
-    `kb_activity` with a foreground summary agents must show. Full bodies are
-    still on disk — `body_chars > len(body_excerpt)` signals truncation.
+    `kb_activity` with a foreground summary agents must show; a rare pending
+    lifecycle receipt or suggestion may be attached there after the read
+    transaction closes. Full bodies are still on disk —
+    `body_chars > len(body_excerpt)` signals truncation.
     """
     if paths.is_unlatched_mode():
         return _unlatched_response("latch_search")
@@ -674,7 +768,9 @@ def kb_search(
     if verbose:
         for r in results:
             r.pop("_fts_snippet", None)
-        return _stamp_list_activity(results, activity)
+        return _attach_pending_lifecycle_notice(
+            _stamp_list_activity(results, activity)
+        )
     compact, strategy = _compact_search_rows(results)
     compact, triggered = _apply_safety_net(compact)
     _log_compact(
@@ -683,7 +779,9 @@ def kb_search(
         verbose_requested=False, safety_net_triggered=triggered,
         excerpt_strategy=strategy,
     )
-    return _stamp_list_activity(compact, activity)
+    return _attach_pending_lifecycle_notice(
+        _stamp_list_activity(compact, activity)
+    )
 
 
 @mcp.tool(name="latch_get")
@@ -706,6 +804,10 @@ def kb_get(
     Distinct from `supersedes` (full replacement, marks old stale). A node
     surfaced via `reconciliation_banner` remains canonical and factually true
     in its own scope — only the framing has been constrained or updated.
+
+    A successful result may also carry one rare pending lifecycle receipt or
+    suggestion in `kb_activity`. It is selected read-only and claimed only
+    after the result is prepared on a fresh connection.
     """
     if paths.is_unlatched_mode():
         return _unlatched_response("latch_get")
@@ -761,7 +863,7 @@ def kb_get(
             nodes=[_activity_node(node)],
             hints=_activity_hints(node),
         )
-        return node
+    return _attach_pending_lifecycle_notice(node)
 
 
 @mcp.tool(name="latch_recent")
@@ -774,11 +876,17 @@ def kb_recent(
     limit: int = 20,
     verbose: bool = False,
 ) -> dict | list[dict]:
-    """Most recently updated nodes, optionally filtered.
+    """Raw chronology of recently updated nodes, optionally filtered.
 
     Pass `created_by="alice"` (or any user identifier) to see what a specific
     user has been working on. Attribution is metadata only — never used as
     input to ranking or arbitration.
+
+    This is chronological evidence, not a synthesized catch-up or project-
+    direction view. For "where did we leave off?", "catch me up", "resume", or
+    "what's next", first call `latch_project_direction(compact=True)`, add
+    `latch_recent(kind="progress", limit=3)` for raw chronology, then fetch the
+    report's `foregrounded_item.id` with `latch_get`.
 
     `verbose` (default False): compact rows return `body_excerpt` (prefix
     excerpt — kb_recent has no query, so no FTS snippet is available) +
@@ -803,7 +911,9 @@ def kb_recent(
     if verbose:
         for r in rows:
             r.pop("embedding", None)
-        return _stamp_list_activity(rows, activity)
+        return _attach_pending_lifecycle_notice(
+            _stamp_list_activity(rows, activity)
+        )
     compact = _compact_recent_rows(rows)
     compact, triggered = _apply_safety_net(compact)
     _log_compact(
@@ -812,7 +922,9 @@ def kb_recent(
         verbose_requested=False, safety_net_triggered=triggered,
         excerpt_strategy="prefix",
     )
-    return _stamp_list_activity(compact, activity)
+    return _attach_pending_lifecycle_notice(
+        _stamp_list_activity(compact, activity)
+    )
 
 
 @mcp.tool(name="latch_project_direction")
@@ -821,15 +933,24 @@ def kb_project_direction(
     limit: int = 3,
     member_limit: int = 20,
     unanchored_limit: int = 5,
+    compact: bool = False,
 ) -> dict:
     """Read-only project-direction report.
 
     Assembles the current workstream spine from existing KB primitives:
-    active/recent workstreams, governing decisions with derived authority tiers,
-    backlog/open items, constraints, recent progress, artifact coordinates,
-    recent unanchored evidence, and a next action. This is intentionally a
-    report layer over the current nodes/edges/focus/artifact tables, not a broad
-    storage or retrieval rebuild.
+    active/recent workstreams, governing decisions with derived authority
+    tiers, backlog/open items, constraints, recent progress, artifact
+    coordinates, recent unanchored evidence, active priorities, a labeled
+    declared-or-inferred next action, omitted counts, and a foregrounded item.
+    This is a report layer over current nodes/edges/focus/artifact tables, not
+    a broad storage or retrieval rebuild.
+
+    For "where did we leave off?", "catch me up", "resume", or "what's next",
+    use `compact=True`. Compact mode clamps caller-supplied limits and trims
+    every repeated section under a hard payload ceiling. Complete the catch-up
+    with `latch_recent(kind="progress", limit=3)` and `latch_get` on
+    `foregrounded_item.id`. The tool remains strictly read-only in both modes
+    and never claims lifecycle notices.
     """
     if paths.is_unlatched_mode():
         return _unlatched_response("latch_project_direction")
@@ -839,6 +960,7 @@ def kb_project_direction(
             limit=limit,
             member_limit=member_limit,
             unanchored_limit=unanchored_limit,
+            compact=compact,
         )
     report["kb_activity"] = _kb_activity(
         action="read",
@@ -854,6 +976,8 @@ def kb_project_direction(
             for row in report.get("workstreams", [])[:5]
         ],
     )
+    if compact:
+        report = project_direction.enforce_compact_report_bytes(report)
     return report
 
 
@@ -1806,16 +1930,15 @@ def kb_priority_add(
     """Add a standing priority.
 
     Overall priorities (workstream_id omitted) are 'top of mind' directives
-    latch weighs on EVERY latch_gate and surfaces in the SessionStart brief,
-    regardless of whether a given prompt is about them (e.g. security review,
-    cross-platform installability). Workstream priorities
-    (workstream_id=<workstream node id>) are additive guidance weighed only
-    when the current gate request resolves to that workstream; they are also
-    shown under active workstreams in the SessionStart brief for visibility.
+    latch weighs on EVERY latch_gate, regardless of whether a given prompt is
+    about them (e.g. security review, cross-platform installability).
+    Workstream priorities (workstream_id=<workstream node id>) are additive
+    guidance weighed only when the current gate request resolves to that
+    workstream. Both remain visible through `latch_priority_list`.
 
     `text` is the directive itself (keep it short — it is shown in full in the
-    gate prompt and the brief). `note` is optional extra rationale stored in
-    the body.
+    gate prompt and priority list). `note` is optional extra rationale stored
+    in the body.
 
     Ranking: omit `rank` (the common case) and the priority **floats** — it
     stacks onto the top of the unlocked region (newest-first) and never displaces
@@ -1900,8 +2023,8 @@ def kb_priority_reorder(node_id: int, new_rank: int | None = None) -> dict:
 @mcp.tool(name="latch_priority_retire")
 @mcp.tool(name="kb_priority_retire")
 def kb_priority_retire(node_id: int) -> dict:
-    """Retire (soft-delete) a priority so it stops being injected into gates and
-    the brief, moving it to the graveyard with the date it was retired
+    """Retire (soft-delete) a priority so it stops appearing in gates and active
+    priority listings, moving it to the graveyard with the date it was retired
     (`retired_at`). Reversible — the node persists as 'stale' for audit; never
     hard-deleted. Remaining active priorities renumber to close the gap."""
     if paths.is_unlatched_mode():

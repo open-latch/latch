@@ -9,6 +9,7 @@ DISABLE_WRITE
 # install-time KB-dir pin (id=1556) — per-installation config holding an absolute
 # path, written by install_engine.py. Never committed; each install pins its own.
 kb_location.json
+# Legacy local intensity artifact: quarantined from git, never read by runtime.
 latch_settings.json
 **/runtime_settings.json
 

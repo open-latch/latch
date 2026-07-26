@@ -1,8 +1,9 @@
 """Fail-closed current Cursor session transcript resolution.
 
-Cursor SessionStart supplies both conversation identity and ``transcript_path``.
-Latch records that pair in its project marker and resolves only that explicit
-handoff.  This module never scans Cursor databases or guesses from recent files.
+Cursor's current-session hooks supply conversation identity and
+``transcript_path``. Latch records that pair in its project marker and resolves
+only that explicit handoff. This module never scans Cursor databases or guesses
+from recent files.
 """
 from __future__ import annotations
 
@@ -25,12 +26,12 @@ def resolve_current(
     if not explicit_sid:
         raise CursorTranscriptError(
             "an explicit current Cursor session id is required; use the id "
-            "surfaced by the SessionStart hook"
+            "shown in the current prompt context"
         )
     marker = cursor_session.read_marker(project_path, session_id=explicit_sid)
     if not marker:
         raise CursorTranscriptError(
-            f"no SessionStart marker for requested Cursor session {explicit_sid}"
+            f"no current-session marker for requested Cursor session {explicit_sid}"
         )
     marker_sid = marker.get("session_id")
     if not isinstance(marker_sid, str) or not marker_sid.strip():

@@ -16,7 +16,7 @@
 # Flags:
 #   --write-only   create DISABLE_WRITE instead of DISABLE — no-ops only the
 #                  write-side hooks (Stop / SessionEnd / compactor) while leaving
-#                  the SessionStart brief + per-prompt KB injection live.
+#                  automatic read-side retrieval live.
 set -euo pipefail
 KB_HOME="${LATCH_HOME:-${CLAUDE_KB_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}}"
 

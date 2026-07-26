@@ -431,7 +431,7 @@ def build_public_results(
     assert_tested_runtime_matches(live_receipt, root=root)
     wedge = evals.run_cases(evals.load_cases([evals.DEFAULT_FIXTURE]))
     seed_report = seed_report_evals.run_seed_report_eval()
-    comparison = wedge["summary"]["comparisons"]["latch_full_vs_memory_like"]
+    comparison = wedge["summary"]["comparisons"]["latch_evidence_vs_memory_like"]
     results = {
         "schema_version": 2,
         "source_commit": tested_commit,
@@ -468,7 +468,7 @@ def build_public_results(
                 name: compact_mode(wedge["modes"][name])
                 for name in evals.DEFAULT_MODES
             },
-            "latch_full_vs_memory_like": comparison,
+            "latch_evidence_vs_memory_like": comparison,
             "memory_like_definition": evals.MODE_DESCRIPTIONS["memory_like"],
             "baseline_boundary": (
                 "memory_like is an internal active-search-only ablation. It is "
@@ -535,7 +535,7 @@ def render_readme(results: dict[str, Any]) -> str:
     live = results["live_demo"]
     wedge = results["wedge_v1"]
     seed = results["seed_report_eval"]
-    comparison = wedge["latch_full_vs_memory_like"]
+    comparison = wedge["latch_evidence_vs_memory_like"]
     evidence = canonical_fixture_evidence(live)
     lines = [
         "# Latch V1 public proof packet",

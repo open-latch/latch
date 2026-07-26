@@ -326,7 +326,7 @@ def test_reconciliation_log_supersedes_emits_row():
         _assert(r["src_kind"] == "fact", r)
         _assert(r["dst_kind"] == "fact", r)
         _assert(r["session_id"] == "sess-supersedes", r)
-        _assert(r["intensity"] in {"quiet", "standard", "full"}, r)
+        _assert("intensity" not in r, r)
         print("PASS reconciliation_log_supersedes_emits_row")
     finally:
         _wipe_project_dir(tmp)

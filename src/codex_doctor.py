@@ -20,6 +20,7 @@ import agents_md_sync
 import codex_hooks
 import compactor
 import codex_transcript
+import db
 import install_codex
 import install_engine
 import paths
@@ -46,16 +47,6 @@ def _exists_or_on_path(command: str) -> bool:
 def check_codex_config(config_path: Path, python_path: str, server_py: str) -> Check:
     ok, detail = install_codex.config_status(config_path, python_path, server_py)
     return Check("Codex config.toml MCP block", OK if ok else FAIL, detail)
-
-
-def check_latch_intensity() -> Check:
-    value, source, warning = paths.latch_intensity_state()
-    detail = f"{value} ({source}); {paths.latch_intensity_change_hint()}"
-    return Check(
-        "Latch intensity",
-        WARN if warning else OK,
-        f"{detail}; {warning}" if warning else detail,
-    )
 
 
 def check_agents_md(agents_path: Path) -> Check:
@@ -86,6 +77,98 @@ def check_mcp_launch_target(python_path: str, server_py: str) -> Check:
     if missing:
         return Check("Codex MCP launch target", FAIL, "; ".join(missing))
     return Check("Codex MCP launch target", OK, f"{python_path} -> {server_py}")
+
+
+def _nearest_existing_ancestor(path: Path) -> Path:
+    """Find the first lexically existing path at or above ``path``."""
+    current = path
+    while not os.path.lexists(current):
+        parent = current.parent
+        if parent == current:
+            break
+        current = parent
+    return current
+
+
+def check_kb_access(cwd: str | None = None) -> Check:
+    """Verify the selected KB is schema-compatible and writable.
+
+    The probe itself is read-only. Ordinary retrieval, gate, capture, and
+    lifecycle paths need a writable KB, so a read-only vault is not healthy.
+    """
+    db_file = paths.db_path(cwd)
+    if not db_file.exists():
+        if os.path.lexists(db_file):
+            return Check(
+                "Latch KB access",
+                FAIL,
+                f"{db_file} exists but does not resolve to a usable KB file; "
+                "repair the dangling link before using Latch or seeding data",
+            )
+        creation_ancestor = _nearest_existing_ancestor(db_file.parent)
+        ancestor_is_dir = creation_ancestor.is_dir()
+        access_mode = os.W_OK | (os.X_OK if os.name != "nt" else 0)
+        ancestor_writable = ancestor_is_dir and os.access(
+            creation_ancestor, access_mode,
+        )
+        if ancestor_writable:
+            creation_detail = (
+                "the selected parent directory is writable"
+                if creation_ancestor == db_file.parent
+                else (
+                    f"its nearest existing ancestor {creation_ancestor} is "
+                    "writable, so the missing parent directories can be created"
+                )
+            )
+            return Check(
+                "Latch KB access",
+                WARN,
+                f"{db_file} is not initialized yet; {creation_detail}, so "
+                "quickstart may continue to the seed step",
+            )
+        if not ancestor_is_dir:
+            obstacle = f"its nearest existing ancestor {creation_ancestor} is not a directory"
+        elif creation_ancestor == db_file.parent:
+            obstacle = "its parent directory is not writable"
+        else:
+            obstacle = (
+                f"its nearest existing ancestor {creation_ancestor} is not writable"
+            )
+        return Check(
+            "Latch KB access",
+            FAIL,
+            f"{db_file} is not initialized and {obstacle}; the KB cannot be "
+            "created for retrieval, capture, or seed data",
+        )
+    try:
+        conn = db.connect_readonly(cwd)
+        conn.close()
+    except Exception as e:
+        return Check(
+            "Latch KB access",
+            FAIL,
+            f"{db_file} could not be opened read-only with a compatible schema: {e}",
+        )
+
+    unwritable: list[str] = []
+    if not os.access(db_file, os.W_OK):
+        unwritable.append("database file")
+    if not os.access(db_file.parent, os.W_OK):
+        unwritable.append("parent directory")
+    if unwritable:
+        return Check(
+            "Latch KB access",
+            FAIL,
+            f"{db_file} is readable and schema compatible, but "
+            f"{' and '.join(unwritable)} {'are' if len(unwritable) > 1 else 'is'} "
+            "not writable; ordinary retrieval, gate, capture, and lifecycle "
+            "operations cannot run reliably",
+        )
+    return Check(
+        "Latch KB access",
+        OK,
+        f"{db_file} is readable, schema compatible, and appears writable",
+    )
 
 
 def check_compact_resolution(session_id: str | None, *, require: bool = False) -> Check:
@@ -215,9 +298,9 @@ def run_all(
     require_compact: bool = False,
 ) -> list[Check]:
     checks = [
-        check_latch_intensity(),
         check_codex_config(config_path, python_path, server_py),
         check_mcp_launch_target(python_path, server_py),
+        check_kb_access(),
     ]
     if skip_hooks:
         checks.append(Check("Codex SessionStart hook", WARN, "skipped (--skip-hooks)"))

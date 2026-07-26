@@ -66,7 +66,7 @@ function Write-DisableReceipt {
 }
 
 function Show-UnlatchedFacts {
-  Write-Host "  disabled: session briefs, prompt KB injection, gate guidance,"
+  Write-Host "  disabled: prompt KB injection, gate guidance,"
   Write-Host "            Stop/SessionEnd compaction, self-heal, maintenance, and"
   Write-Host "            automatic latch writes for this latch install."
   Write-Host "  still true: KB files stay local and unchanged; latch remains installed;"

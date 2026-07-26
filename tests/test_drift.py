@@ -223,33 +223,6 @@ def test_only_scans_staging():
         _cleanup(tmp, conn)
 
 
-# ---------- latest_pending ----------
-
-def test_latest_pending_counts_distinct_nodes():
-    tmp, conn = _fresh_db()
-    try:
-        tgt = _node(conn)
-        a = _node(conn, body=f"id={tgt}")
-        b = _node(conn, body=f"id={tgt}")
-        drift.sweep(conn, tmp)
-        n, day = drift.latest_pending(tmp)
-        _assert(n == 2, f"two distinct flagged nodes expected, got {n}")
-        _assert(day == datetime.now(timezone.utc).strftime("%Y-%m-%d"), day)
-        print("PASS latest_pending_counts_distinct_nodes")
-    finally:
-        _cleanup(tmp, conn)
-
-
-def test_latest_pending_empty():
-    tmp, conn = _fresh_db()
-    try:
-        n, day = drift.latest_pending(tmp)
-        _assert(n == 0 and day is None, f"expected (0, None), got {(n, day)}")
-        print("PASS latest_pending_empty")
-    finally:
-        _cleanup(tmp, conn)
-
-
 def test_sweep_clean_db_no_rows():
     tmp, conn = _fresh_db()
     try:

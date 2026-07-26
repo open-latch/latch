@@ -1,9 +1,9 @@
 """Server-managed rolling "Latest" region for living-summary node bodies.
 
 Slice 2a of the kb_append work (spec id=1519; targets the token round-trip
-measured in id=1509). The region lives at the TOP of the body so the
-SessionStart brief and kb_get — which surface the body head — show the newest
-state with NO read-path change. Entries are newest-first and capped, so a
+measured in id=1509). The region lives at the TOP of the body so kb_get and
+other compact reads show the newest state with NO read-path change. Entries are
+newest-first and capped, so a
 workstream body stays terse (restores the stable-pointer intent, id=353 /
 id=339) instead of accreting the "Recent ship reports" bloat that produced the
 ~9.5 KB bodies (id=1320).
