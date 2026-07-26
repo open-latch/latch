@@ -9,7 +9,7 @@ Windows.
 
 - Repository: `https://github.com/open-latch/latch.git`
 - Branch: `agent/kb-incident-hardening`
-- Reviewed runtime baseline: `22284ef48912af3fe11e6c9161e5b2c3ff1f1f33`
+- Reviewed runtime baseline: `6c9577d0147245b3000a384ee487a5d1b10906d9`
 
 The branch may contain later handoff-documentation and generated-proof commits.
 Before testing, verify that the reviewed runtime baseline is an ancestor and
@@ -21,7 +21,7 @@ git switch --force-create agent/kb-incident-hardening `
   --track origin/agent/kb-incident-hardening
 git status --short --branch
 git rev-parse HEAD
-$SafetyCommit = "22284ef48912af3fe11e6c9161e5b2c3ff1f1f33"
+$SafetyCommit = "6c9577d0147245b3000a384ee487a5d1b10906d9"
 git merge-base --is-ancestor `
   $SafetyCommit HEAD
 if ($LASTEXITCODE -ne 0) { throw "Reviewed runtime baseline is not an ancestor" }
