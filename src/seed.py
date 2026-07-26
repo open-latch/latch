@@ -89,6 +89,9 @@ SEED_CANDIDATE_PREAMBLE = (
 ROLE_LINE_RE = re.compile(r"^\[([A-Za-z0-9_?. -]+)\]\s*(.*)")
 CURSOR_USER_QUERY_RE = re.compile(r"<user_query>\s*(.*?)\s*</user_query>", re.DOTALL)
 USER_ROLES = {"user", "human"}
+# Assistant turns are second-tier evidence: only consulted when no user turn
+# qualifies, and always labelled. User authority still overrides them.
+ASSISTANT_EVIDENCE_ROLES = {"assistant", "agent", "model"}
 WHITESPACE_RE = re.compile(r"\s+")
 
 # High-confidence patterns only. This is a bounded safety layer, not a claim of
@@ -1994,6 +1997,62 @@ def parse_json_envelope(raw: str) -> dict:
 
 MIN_CITED_EXCERPT_CHARS = 24
 MAX_CITED_EXCERPT_CHARS = 600
+ASSISTANT_EXCERPT_PREFIX = "assistant: "
+
+
+def assistant_evidence_excerpt(
+    cited: str, *, source: SeedSource, focus_terms: set[str], normalized,
+) -> str:
+    """Fallback evidence from assistant turns, explicitly labelled as such.
+
+    User turns are only 0.1% of a transcript, so restricting evidence to them
+    left most candidates citing an unrelated user line or nothing at all —
+    measured, only 8.5% of shown excerpts actually supported their candidate.
+    Assistant turns carry the reasoning most claims actually come from.
+
+    This never competes with user evidence: the caller only reaches here when
+    no user turn qualified, and a user correction that fails closed still
+    suppresses the excerpt entirely. The `assistant: ` prefix keeps the receipt
+    honest about who said it, so a reader never mistakes model reasoning for a
+    user instruction.
+    """
+    best: tuple[float, int, str] | None = None
+    cited_hit: tuple[int, str] | None = None
+    in_assistant = False
+    index = 0
+    for raw in source.text.splitlines():
+        raw = raw.strip()
+        if not raw:
+            continue
+        match = ROLE_LINE_RE.match(raw)
+        if match:
+            role = match.group(1).split()[0].lower()
+            in_assistant = role in ASSISTANT_EVIDENCE_ROLES
+            if not in_assistant:
+                continue
+            line = match.group(2).strip()
+        elif in_assistant:
+            line = raw
+        else:
+            continue
+        if should_skip_subject_candidate(line) or len(line) < 20:
+            continue
+        index += 1
+        terms = {t for t in normalized(line).split() if len(t) > 3}
+        shared = focus_terms & terms
+        if len(shared) < 2:
+            continue
+        safe, _ = redact_seed_text(line)
+        text = ASSISTANT_EXCERPT_PREFIX + clip(safe, 360)
+        score = len(shared) / max(1, min(len(focus_terms), len(terms)))
+        if cited and cited in WHITESPACE_RE.sub(" ", safe):
+            if cited_hit is None or index > cited_hit[0]:
+                cited_hit = (index, text)
+        if best is None or (score, index) > (best[0], best[1]):
+            best = (score, index, text)
+    if cited_hit is not None:
+        return cited_hit[1]
+    return best[2] if best else ""
 
 
 def verbatim_model_excerpt(value: Any, *, source: SeedSource) -> str:
@@ -2127,11 +2186,16 @@ def grounded_source_excerpt(
         if cited and cited in WHITESPACE_RE.sub(" ", safe_candidate):
             cited_matches.append((score, user_turn_index, clip(safe_candidate, 360)))
     if not ranked_candidates:
-        return ""
+        # No user turn supports this claim. Rather than show nothing, cite the
+        # assistant turn it actually came from, clearly labelled.
+        return assistant_evidence_excerpt(
+            cited, source=source, focus_terms=focus_terms, normalized=normalized,
+        )
     best = max(ranked_candidates, key=lambda item: (item[0], item[1]))
     if best[0] < 0:
         # Fail-closed on a newer conflicting user correction outranks the
-        # model's citation: the cited turn is stale, not merely unranked.
+        # model's citation AND any assistant text: the claim is stale, so it
+        # gets no receipt at all rather than one that looks supportive.
         return ""
     if cited_matches:
         # The model told us which turn it relied on. Term-overlap ranking

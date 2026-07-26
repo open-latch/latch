@@ -2437,3 +2437,66 @@ def test_plugin_registry_entries_never_become_subjects():
     assert seed.source_subject(transcript) == (
         "Consolidate the review findings before handing back to implementation."
     )
+
+
+def test_assistant_evidence_is_used_when_no_user_turn_supports_the_claim():
+    """User turns are ~0.1% of a transcript, so user-only evidence left most
+    candidates citing an unrelated line or nothing. Assistant turns are cited
+    as a labelled second tier."""
+    source = _source(
+        "codex:assistant-fallback",
+        text=(
+            "[user] ok\n"
+            "[assistant] WAL journaling is required so a crash mid-write "
+            "cannot truncate the decision vault."
+        ),
+    )
+    excerpt = seed.grounded_source_excerpt(
+        "WAL journaling is required so a crash mid-write cannot truncate "
+        "the decision vault.",
+        source=source,
+        title="Require WAL journaling for the decision vault",
+        body="WAL journaling protects the decision vault from crash truncation.",
+    )
+    assert excerpt.startswith(seed.ASSISTANT_EXCERPT_PREFIX)
+    assert "WAL journaling is required" in excerpt
+
+
+def test_user_evidence_still_outranks_assistant_evidence():
+    """The assistant tier must never displace a qualifying user turn."""
+    source = _source(
+        "codex:user-outranks-assistant",
+        text=(
+            "[assistant] We should use Postgres for local decision storage.\n"
+            "[user] Use SQLite for local decision storage, not Postgres."
+        ),
+    )
+    excerpt = seed.grounded_source_excerpt(
+        "We should use Postgres for local decision storage.",
+        source=source,
+        title="Use SQLite for local decision storage",
+        body="Use SQLite for local decision storage.",
+    )
+    assert not excerpt.startswith(seed.ASSISTANT_EXCERPT_PREFIX)
+    assert "SQLite" in excerpt
+
+
+def test_stale_claim_gets_no_assistant_fallback_receipt():
+    """A newer conflicting user correction suppresses the excerpt entirely --
+    falling back to supportive assistant text would relaunch the stale claim
+    with a receipt that looks like evidence."""
+    source = _source(
+        "codex:stale-no-fallback",
+        text=(
+            "[assistant] Seed reports should stay writable for operators.\n"
+            "[user] Keep seed reports writable for operators.\n"
+            "[user] No, keep seed reports read-only for operators."
+        ),
+    )
+    excerpt = seed.grounded_source_excerpt(
+        "Seed reports should stay writable for operators.",
+        source=source,
+        title="Keep seed reports writable for operators",
+        body="Keep seed reports writable for operators.",
+    )
+    assert excerpt == ""
