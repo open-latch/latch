@@ -7,16 +7,12 @@
 </p>
 
 <p align="center">
-  <em>A decision seatbelt for coding agents.</em>
+  <em>A decision seatbelt for coding agents — it stops the work that never should have happened.</em>
 </p>
 
 <p align="center">
-  Local-first &middot; reversible &middot; cited. A fresh agent proposes a settled-and-rejected
-  path; latch fires a gate with the receipt before a single file changes.
-</p>
-
-<p align="center">
-  <em>Same coding agent, same request, run twice — the only difference is whether the project's earlier decision was captured in latch.</em>
+  Local-first &middot; reversible &middot; cited. Try the gate in ~2 minutes without touching your
+  data — or seed it from your own sessions and watch it catch a decision you actually made.
 </p>
 
 <p align="center">
@@ -24,7 +20,7 @@
 </p>
 
 <p align="center">
-  <sub><b>Case 1 — no decision captured:</b> the agent rebuilds the change the project had ruled out.</sub>
+  <sub><b>Case 1 — same agent, same request, no decision captured:</b> it rebuilds the change the project had ruled out.</sub>
 </p>
 <p align="center">
   <sub><b>Case 2 — same prompt, decision in latch:</b> the gate cites the ruling and stops to let you decide, before a single file changes.</sub>
@@ -34,8 +30,9 @@
   <a href="#the-receipt">The receipt</a> &middot;
   <a href="#why-a-gate-not-a-rule">Why a gate</a> &middot;
   <a href="#get-started">Get started</a> &middot;
+  <a href="#try-it-in-2-minutes">2-minute demo</a> &middot;
   <a href="#supported-agents">Agents</a> &middot;
-  <a href="#safety-and-control">Safety</a>
+  <a href="#safety-and-control">Overhead &amp; safety</a>
 </p>
 
 ---
@@ -119,6 +116,10 @@ records whether the gate actually ran.
 failure class — the rule still reaches the agent as text it can talk past. latch runs the check as
 code at the action boundary, so it complements those tools rather than competing with them.
 
+And the check is cheap: the per-prompt retrieval hook runs locally in roughly 120–150 ms, and the
+gate itself is a model call that fires only on write-shaped work — never on every prompt. Numbers
+and repro scripts are in [Safety and control](#safety-and-control).
+
 ## Get started
 
 **Prerequisites:** Git, and at least one installed agent CLI — **Claude Code**, **Codex**, or
@@ -153,38 +154,27 @@ sessions:
 /path/to/latch/bin/latch_seed.sh --source cursor --cursor-history --last-sessions 20 --apply
 ```
 
-It is review-first — the pass prints a structured report and writes only the candidates you approve.
-At the prompt, enter `none` to explicitly dismiss the whole report and finalize
-those exact source revisions without creating KB nodes. For a cached
-digest-bound review, repeat the preview's exact `--source` (and workstream
-flags) alongside `--preview-digest DIGEST --apply --dismiss-all`.
-`--cursor-history` is never implicit. It intersects Cursor's local project
-membership and typed conversation metadata before reading a transcript, so only
-IDE conversations assigned to the selected project and marked non-subagent are
-eligible—even if two project paths collide in Cursor's lossy folder naming.
-Cursor CLI sessions, cloud chats, other projects, and subagents are excluded.
-If that metadata is missing or changes shape, the Cursor-history leg fails
-closed. Cursor-only seeding stops; `--source all` records Cursor history as
-unavailable and continues with any authorized Claude, Codex, or exact-current
-Cursor sources. Interactive quickstart asks with a default of **No**;
-non-interactive runs require the flag.
-Applying a cached history preview must repeat `--cursor-history`; that consent
-choice is included in the preview digest.
-The full walkthrough and source options are in [See it catch](#see-it-catch-seed-then-gate); to read
-the installer first, pin a release, or install to a custom directory, see
-[Install details](#install-details).
+It is review-first — the pass prints a structured report and writes only the candidates you approve
+(enter `none` at the prompt to dismiss the whole report without writing anything).
+`--cursor-history` is opt-in and never implicit: it reads only IDE conversations assigned to this
+project, excludes CLI sessions, cloud chats, and subagents, and fails closed if Cursor's metadata is
+missing. The full walkthrough, source options, and review flags are in
+[See it catch](#see-it-catch-seed-then-gate) and the
+[first-run mission](./docs/first_run_mission.md); to read the installer first, pin a release, or
+install to a custom directory, see [Install details](#install-details).
 
-## Using latch in more than one repo
+### Try it in 2 minutes
 
-You install latch once. The runtime and your KB are shared, and for **Claude Code** and **Codex** the
-tools and hooks are registered per-user — so the engine is already reachable in every repo on your
-machine. What each repo still needs is its own **contract**: the managed `CLAUDE.md` / `AGENTS.md`
-block that tells the agent to actually consult latch and run the gate before it acts. (**Cursor** is
-wired entirely per-repo — its MCP server, rule, and commands all live in the project.)
+No history you want to point latch at yet — or want proof before seeding? Run the public-safe
+fixture in a throwaway repo. It exercises the full gate path without reading any of your data:
 
-So to protect another repo, run the install command — or `/path/to/latch/bin/latch_quickstart.sh` —
-**from inside that repo**. It reuses the same pinned KB and just writes that repo's contract; then
-restart the agent. Without this step a new repo may show latch's tools but never be told to use them.
+```bash
+/path/to/latch/bin/latch_demo_no_history.sh
+# Windows: C:\path\to\latch\bin\latch_demo_no_history.ps1
+```
+
+The fixture is synthetic — it proves the gate fires, not that latch understood your history.
+Seeding your own sessions is what makes the catches yours.
 
 ## See it catch: seed, then gate
 
@@ -221,15 +211,8 @@ diff -u /tmp/latch-proof.before /tmp/latch-proof.after
 
 The diff should be empty — the gate ran, and no files moved.
 
-**No history to seed yet?** Run the public-safe fixture in a throwaway repo. It exercises the gate
-path without touching your data:
-
-```bash
-/path/to/latch/bin/latch_demo_no_history.sh
-# Windows: C:\path\to\latch\bin\latch_demo_no_history.ps1
-```
-
-The fixture is synthetic: it proves the gate fires, not that latch understood your history. The
+**No history to seed yet?** Run the [2-minute fixture](#try-it-in-2-minutes) from Get started — it
+proves the gate path without touching your data. The
 [first-run mission](./docs/first_run_mission.md) and the
 [proof-ready demo runbook](./runbooks/hook_proof_demo.md) carry the exact paths, success criteria,
 and receipt checks.
@@ -266,6 +249,18 @@ Compaction is user-initiated because it spends a model call and writes a durable
 - Cursor: `/latch-compact` from the current hooked conversation
 
 Or, you can simply ask latch in natural language, and the agent will offer the matching command.
+
+## Using latch in more than one repo
+
+You install latch once. The runtime and your KB are shared, and for **Claude Code** and **Codex** the
+tools and hooks are registered per-user — so the engine is already reachable in every repo on your
+machine. What each repo still needs is its own **contract**: the managed `CLAUDE.md` / `AGENTS.md`
+block that tells the agent to actually consult latch and run the gate before it acts. (**Cursor** is
+wired entirely per-repo — its MCP server, rule, and commands all live in the project.)
+
+So to protect another repo, run the install command — or `/path/to/latch/bin/latch_quickstart.sh` —
+**from inside that repo**. It reuses the same pinned KB and just writes that repo's contract; then
+restart the agent. Without this step a new repo may show latch's tools but never be told to use them.
 
 ## Safety and control
 
@@ -397,14 +392,14 @@ curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/open-lat
 
 **Inspect or pin before you run.** To inspect either installer first, download the script and read it
 locally. The piped command follows `main`; for a stable build, pin both the script and the checkout
-ref so the install cannot drift back to `main`:
+ref to the latest tagged release (currently `v1.0.0`) so the install cannot drift back to `main`:
 
 ```bash
-curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/open-latch/latch/vX.Y.Z/install.sh | LATCH_INSTALL_REF=vX.Y.Z bash
+curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/open-latch/latch/v1.0.0/install.sh | LATCH_INSTALL_REF=v1.0.0 bash
 ```
 
 ```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/open-latch/latch/vX.Y.Z/install.ps1))) -Ref vX.Y.Z
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/open-latch/latch/v1.0.0/install.ps1))) -Ref v1.0.0
 ```
 
 ### Automatic retrieval and catch-up

@@ -23,6 +23,10 @@ INSTALL_SH = ROOT / "install.sh"
 INSTALL_PS1 = ROOT / "install.ps1"
 RELEASE_WORKFLOW = ROOT / ".github" / "workflows" / "public-release-hygiene.yml"
 
+sys.path.insert(0, str(ROOT / "src"))
+
+from versioning import LATCH_VERSION  # noqa: E402
+
 
 def run(*args: str, cwd: Path | None = None, env: dict[str, str] | None = None):
     return subprocess.run(
@@ -559,8 +563,11 @@ def test_bootstrap_script_contracts_and_syntax():
     ) in workflow
     assert "uv==0.11.28" in workflow
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    assert "LATCH_INSTALL_REF=vX.Y.Z bash" in readme
-    assert "))) -Ref vX.Y.Z" in readme
+    # The README's advertised pin must track the shipped VERSION, not a
+    # placeholder — a stale pin here means users copy an install line for a
+    # release that does not exist.
+    assert f"LATCH_INSTALL_REF=v{LATCH_VERSION} bash" in readme
+    assert f"))) -Ref v{LATCH_VERSION}" in readme
     runtime_inputs = (ROOT / "requirements-runtime.txt").read_text(encoding="utf-8")
     ci_inputs = (ROOT / "requirements-ci.txt").read_text(encoding="utf-8")
     runtime_lock = (ROOT / "requirements.lock").read_text(encoding="utf-8")
