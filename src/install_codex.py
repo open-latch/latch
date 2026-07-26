@@ -682,7 +682,7 @@ def main(argv: list[str] | None = None) -> int:
 
     pin_level, pin_msg = install_engine.pin_kb_dir(args.kb_dir, args.dry_run)
     print(f"  [{pin_level:4}] KB dir: {pin_msg}")
-    if pin_level == "ERROR":
+    if pin_level in {"ERROR", "FAIL"}:
         print("\nNo Codex configuration changes were written.")
         return 2
 

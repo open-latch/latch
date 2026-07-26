@@ -420,8 +420,9 @@ first), and latch's Claude Code slash commands. Not
 removed unless asked: the CLAUDE.md managed region (name it explicitly,
 repeatable: `--claude-md /path/to/CLAUDE.md`), project-local Cursor wiring
 (name the project explicitly with `--cursor-project /path/to/project`), and
-your KB data (`projects/<proj>/` SQLite + logs — add `--purge` to delete it and
-the kill-switch sentinel files). Cursor project removal strips only latch-owned
+your production KB data and protected backups. `--purge` removes only the
+kill-switch sentinel files; there is no production-KB deletion path. Cursor
+project removal strips only latch-owned
 `.cursor/mcp.json` server entries, a clean latch Cursor rule, latch-owned
 `.cursor/commands` files, and the managed `AGENTS.md` region. Restart the host
 agent afterward so the MCP roster + commands reload. To remove latch entirely,

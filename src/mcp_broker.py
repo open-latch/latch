@@ -26,7 +26,7 @@ import paths
 
 
 PROTOCOL_VERSION = 1
-PROXY_CAPABILITY_EPOCH = 3
+PROXY_CAPABILITY_EPOCH = 4
 DISCOVERY_FILE = "mcp-daemon.json"
 START_LOCK_FILE = "mcp-daemon.start.lock"
 OWNER_FENCE_FILE = "mcp-daemon.owner.lock"
@@ -50,17 +50,78 @@ START_REASONS = frozenset({
     "prompt_hook",
 })
 WINDOWS_CREATE_NO_WINDOW = 0x08000000
-WINDOWS_DETACHED_PROCESS = 0x00000008
 WINDOWS_CREATE_NEW_PROCESS_GROUP = 0x00000200
 DAEMON_OS_ENV_VARS = mcp_runtime.PROCESS_OS_ENV_VARS
 DAEMON_OWNER_ENV_VARS: tuple[str, ...] = ()
+DAEMON_VAULT_ROOT_ENV_VARS = (
+    "LATCH_PRODUCTION_DATA_ROOT",
+    "LATCH_VAULT_REGISTRY_ROOT",
+    "LATCH_DURABILITY_ROOT",
+    "XDG_DATA_HOME",
+    "XDG_STATE_HOME",
+)
 DAEMON_HELPER_ENV_VARS = (
     "LATCH_MCP_DAEMON_START_TIMEOUT_SEC",
+)
+VAULT_CONTEXT_PLATFORM_ENV_VARS = (
+    "HOME",
+    "USERPROFILE",
+    "HOMEDRIVE",
+    "HOMEPATH",
+    "APPDATA",
+    "LOCALAPPDATA",
 )
 
 
 class BrokerError(RuntimeError):
     pass
+
+
+def _canonical_context_path(value: str, *, name: str) -> str:
+    if not value.strip() or "\0" in value:
+        raise BrokerError(f"{name} must name a non-empty absolute directory")
+    candidate = Path(value).expanduser()
+    if not candidate.is_absolute():
+        raise BrokerError(f"{name} must name an absolute directory")
+    return str(candidate.resolve())
+
+
+def vault_context_digest(
+    source: dict[str, str] | os._Environ[str] | None = None,
+) -> str:
+    """Fingerprint path authority without exposing paths or test capability."""
+    values = os.environ if source is None else source
+    test_root = paths.validated_test_root(values)
+    roots: dict[str, str | None] = {}
+    for name in DAEMON_VAULT_ROOT_ENV_VARS:
+        raw = values.get(name)
+        roots[name] = (
+            _canonical_context_path(raw, name=name)
+            if isinstance(raw, str)
+            else None
+        )
+    platform_inputs: dict[str, str | None] = {}
+    for name in VAULT_CONTEXT_PLATFORM_ENV_VARS:
+        raw = values.get(name)
+        if isinstance(raw, str) and raw:
+            candidate = Path(raw).expanduser()
+            platform_inputs[name] = str(
+                candidate.resolve() if candidate.is_absolute() else candidate
+            )
+        else:
+            platform_inputs[name] = None
+    payload = {
+        "format": 1,
+        "platform": sys.platform,
+        "install_root": str(paths.KB_ROOT.resolve()),
+        "vault_dir": str(runtime_dir().resolve()),
+        "root_overrides": roots,
+        "platform_root_inputs": platform_inputs,
+        "test_root": str(test_root) if test_root is not None else None,
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
 
 
 def _utc_now() -> str:
@@ -611,6 +672,13 @@ def read_discovery(runtime_key: str | None = None) -> dict[str, Any] | None:
         return None
     if payload.get("protocol") != PROTOCOL_VERSION:
         return None
+    digest = payload.get("vault_context_digest")
+    if (
+        not isinstance(digest, str)
+        or len(digest) != 64
+        or any(character not in "0123456789abcdef" for character in digest)
+    ):
+        return None
     if payload.get("host") != "127.0.0.1":
         return None
     if not isinstance(payload.get("port"), int):
@@ -686,12 +754,19 @@ def probe_discovery(
                     "token": payload["token"],
                     "runtime_key": payload["runtime_key"],
                     "proxy_pid": os.getpid(),
+                    "proxy_capability_epoch": PROXY_CAPABILITY_EPOCH,
+                    "vault_context_digest": vault_context_digest(),
                 },
                 op="probe",
             )
             line = sock.makefile("rb").readline(4096)
             response = json.loads(line.decode("utf-8"))
-            return bool(response.get("ok") and response.get("pid") == payload["pid"])
+            return bool(
+                response.get("ok")
+                and response.get("pid") == payload["pid"]
+                and response.get("vault_context_digest")
+                == payload.get("vault_context_digest")
+            )
     except (OSError, ValueError, KeyError, AttributeError, TypeError):
         return False
 
@@ -711,6 +786,14 @@ def _checked_discovery() -> dict[str, Any] | None:
     payload = read_discovery()
     if payload is not None and isinstance(payload.get("error"), str):
         raise BrokerError(payload["error"])
+    if payload is not None and not secrets.compare_digest(
+        payload["vault_context_digest"],
+        vault_context_digest(),
+    ):
+        raise BrokerError(
+            "shared latch daemon vault context differs from this process; "
+            "use one consistent vault/registry/durability configuration"
+        )
     return payload
 
 
@@ -803,13 +886,8 @@ def _start_reason(value: str) -> str:
 
 
 def _windows_creation_flags() -> int:
-    # Windows documents CREATE_NO_WINDOW as ignored when DETACHED_PROCESS is
-    # also set. Keep both intentionally: DETACHED_PROCESS protects daemon
-    # lifetime semantics, while CREATE_NO_WINDOW remains defense in depth for
-    # launch variants where detachment is unavailable or later narrowed.
     return (
         getattr(subprocess, "CREATE_NO_WINDOW", WINDOWS_CREATE_NO_WINDOW)
-        | getattr(subprocess, "DETACHED_PROCESS", WINDOWS_DETACHED_PROCESS)
         | getattr(
             subprocess,
             "CREATE_NEW_PROCESS_GROUP",
@@ -896,6 +974,18 @@ def _daemon_environment(
             for name in names
             if isinstance(values.get(name), str)
         }
+    for name in DAEMON_VAULT_ROOT_ENV_VARS:
+        raw = values.get(name)
+        if raw is None:
+            continue
+        if not isinstance(raw, str):
+            raise BrokerError(f"{name} must name a non-empty absolute directory")
+        env[name] = _canonical_context_path(raw, name=name)
+
+    test_root = paths.validated_test_root(values)
+    if test_root is not None:
+        env[paths.TEST_ROOT_ENV] = str(test_root)
+        env[paths.TEST_CAPABILITY_ENV] = values[paths.TEST_CAPABILITY_ENV]
     env["LATCH_HOME"] = str(paths.KB_ROOT)
     env["LATCH_KB_DIR"] = str(runtime_dir())
     return env
@@ -1048,6 +1138,18 @@ def connect_mcp(
     metadata: dict[str, Any], *, start_reason: str = "proxy_connect"
 ) -> tuple[socket.socket, dict[str, Any]]:
     project_cwd = str(metadata.get("project_cwd") or os.getcwd())
+    local_digest = vault_context_digest()
+    metadata_digest = metadata.get("vault_context_digest")
+    capability_epoch = metadata.get("proxy_capability_epoch")
+    if (
+        isinstance(capability_epoch, int)
+        and capability_epoch >= PROXY_CAPABILITY_EPOCH
+        and (
+            not isinstance(metadata_digest, str)
+            or not secrets.compare_digest(metadata_digest, local_digest)
+        )
+    ):
+        raise BrokerError("MCP proxy vault context changed after initialization")
     payload = ensure_daemon(project_cwd, start_reason=start_reason)
     last_error: Exception | None = None
     for _attempt in range(2):
@@ -1062,6 +1164,7 @@ def connect_mcp(
                 {
                     "token": payload["token"],
                     "runtime_key": RUNTIME_KEY,
+                    "vault_context_digest": local_digest,
                 }
             )
             _send_prelude(sock, prelude, op="mcp")
@@ -1089,6 +1192,7 @@ def publish_discovery(
         "runtime_key": key,
         "owner_runtime_key": owner_runtime_key or RUNTIME_KEY,
         "required_proxy_capability_epoch": PROXY_CAPABILITY_EPOCH,
+        "vault_context_digest": vault_context_digest(),
         "compatibility": compatibility,
         "host": "127.0.0.1",
         "port": int(port),

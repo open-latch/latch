@@ -143,6 +143,122 @@ def test_invalid_manifest_timestamp_does_not_block_other_expired_pruning(tmp_pat
     assert Path(newest["database"]).exists()
 
 
+def test_orphan_daily_manifest_cannot_suppress_required_daily_snapshot(tmp_path):
+    _seed(tmp_path)
+    start = datetime(2026, 5, 1, 0, 0, tzinfo=UTC)
+    orphan = vault_backup.create_snapshot(
+        str(tmp_path), reason="orphan", now=start
+    )
+    manifest_path = Path(orphan["manifest"])
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    payload["snapshot"] = "missing.db"
+    manifest_path.chmod(0o600)
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    replacement = vault_backup.create_snapshot(
+        str(tmp_path), reason="replacement", now=start + timedelta(hours=1)
+    )
+
+    assert replacement["tier"] == "daily"
+    assert Path(replacement["database"]).is_file()
+
+
+def test_shortened_manifest_deadline_never_allows_early_pruning(tmp_path):
+    _seed(tmp_path)
+    start = datetime(2026, 5, 1, 0, 0, tzinfo=UTC)
+    shortened = vault_backup.create_snapshot(
+        str(tmp_path), reason="shortened", now=start
+    )
+    vault_backup.create_snapshot(
+        str(tmp_path), reason="newer", now=start + timedelta(days=1)
+    )
+    manifest_path = Path(shortened["manifest"])
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    payload["protected_until"] = (start + timedelta(days=1)).isoformat()
+    manifest_path.chmod(0o600)
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    result = vault_backup.prune_expired(
+        str(tmp_path), now=start + timedelta(days=2)
+    )
+
+    assert result["deleted"] == 0
+    assert result["skipped"] == 1
+    assert Path(shortened["database"]).is_file()
+
+
+def test_prune_rejects_snapshot_path_traversal_without_touching_victim(tmp_path):
+    _seed(tmp_path)
+    start = datetime(2026, 5, 1, 0, 0, tzinfo=UTC)
+    malicious = vault_backup.create_snapshot(
+        str(tmp_path), reason="traversal", now=start
+    )
+    vault_backup.create_snapshot(
+        str(tmp_path), reason="newer", now=start + timedelta(days=1)
+    )
+    victim = tmp_path / "outside-snapshot-victim.txt"
+    victim.write_bytes(b"must survive")
+    victim.chmod(0o640)
+    before_mode = victim.stat().st_mode & 0o777
+
+    manifest_path = Path(malicious["manifest"])
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    payload["snapshot"] = os.path.relpath(victim, manifest_path.parent)
+    payload["sha256"] = hashlib.sha256(victim.read_bytes()).hexdigest()
+    payload["bytes"] = victim.stat().st_size
+    manifest_path.chmod(0o600)
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    result = vault_backup.prune_expired(
+        str(tmp_path), now=start + timedelta(days=40)
+    )
+
+    assert result["deleted"] == 0
+    assert result["skipped"] == 1
+    assert victim.read_bytes() == b"must survive"
+    assert victim.stat().st_mode & 0o777 == before_mode
+
+
+def test_prune_rejects_symlinked_snapshot_without_touching_target(tmp_path):
+    _seed(tmp_path)
+    start = datetime(2026, 5, 1, 0, 0, tzinfo=UTC)
+    malicious = vault_backup.create_snapshot(
+        str(tmp_path), reason="symlink", now=start
+    )
+    vault_backup.create_snapshot(
+        str(tmp_path), reason="newer", now=start + timedelta(days=1)
+    )
+    victim = tmp_path / "symlink-target.txt"
+    victim.write_bytes(b"must survive")
+    victim.chmod(0o640)
+    before_mode = victim.stat().st_mode & 0o777
+    database = Path(malicious["database"])
+    link = database.with_name(database.name + ".candidate-link")
+    try:
+        link.symlink_to(victim)
+    except OSError as exc:
+        pytest.skip(f"symlink creation unavailable: {exc}")
+    database.chmod(0o600)
+    database.unlink()
+    link.rename(database)
+
+    manifest_path = Path(malicious["manifest"])
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    payload["sha256"] = hashlib.sha256(victim.read_bytes()).hexdigest()
+    payload["bytes"] = victim.stat().st_size
+    manifest_path.chmod(0o600)
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    result = vault_backup.prune_expired(
+        str(tmp_path), now=start + timedelta(days=40)
+    )
+
+    assert result["deleted"] == 0
+    assert result["skipped"] == 1
+    assert victim.read_bytes() == b"must survive"
+    assert victim.stat().st_mode & 0o777 == before_mode
+
+
 def test_test_runtime_ignores_durability_root_spoof(tmp_path, monkeypatch):
     unsafe = tmp_path / "would-be-test-backups"
     monkeypatch.setenv(vault_backup.DURABILITY_ROOT_ENV, str(unsafe))

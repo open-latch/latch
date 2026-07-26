@@ -185,6 +185,17 @@ def test_connection_metadata_carries_typed_settings_and_private_child_env():
         "heartbeat_s": 3.0,
         "stale_s": 19.0,
     }, metadata)
+    digest = metadata["vault_context_digest"]
+    _assert(
+        isinstance(digest, str)
+        and len(digest) == 64
+        and all(character in "0123456789abcdef" for character in digest),
+        metadata,
+    )
+    _assert(
+        mcp_proxy.os.environ[paths.TEST_CAPABILITY_ENV] not in repr(metadata),
+        "test capability must never be serialized into proxy metadata",
+    )
     _assert("OPENAI_API_KEY" not in metadata, metadata)
     _assert("ANTHROPIC_API_KEY" not in metadata, metadata)
     _assert("LATCH_ARBITRARY_POISON" not in metadata, metadata)

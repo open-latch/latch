@@ -99,16 +99,21 @@ def _is_relative_to(path: Path, parent: Path) -> bool:
         return False
 
 
-def validated_test_root() -> Path | None:
+def validated_test_root(
+    env: "dict[str, str] | os._Environ[str] | None" = None,
+) -> Path | None:
     """Return the authenticated disposable test root, or ``None``.
 
     Test mode is a capability, not a boolean environment flag.  The root must
     exist, contain the per-run sentinel, and the sentinel must bind the secret
     inherited by pytest subprocesses.  A partially configured or forged test
     environment fails closed instead of falling through to the production pin.
+    Callers that are constructing a child environment may supply the exact
+    source mapping so validation happens before process creation.
     """
-    raw_root = os.environ.get(TEST_ROOT_ENV)
-    capability = os.environ.get(TEST_CAPABILITY_ENV)
+    values = os.environ if env is None else env
+    raw_root = values.get(TEST_ROOT_ENV)
+    capability = values.get(TEST_CAPABILITY_ENV)
     if raw_root is None and capability is None:
         return None
     if not raw_root or not capability:

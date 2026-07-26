@@ -14,10 +14,11 @@ sys.path.insert(0, str(ROOT / "src"))
 import db  # noqa: E402
 import lifecycle_receipts  # noqa: E402
 import maintenance  # noqa: E402
+import paths  # noqa: E402
 
 
 def _connect(tmp_path: Path, monkeypatch) -> sqlite3.Connection:
-    path = tmp_path / "kb.db"
+    path = paths.project_dir(str(tmp_path)) / "kb.db"
     monkeypatch.setattr(db, "db_path", lambda _cwd=None: path)
     monkeypatch.setattr(
         db,

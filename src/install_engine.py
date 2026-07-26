@@ -72,6 +72,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import paths
 import versioning
 import vault_identity
 
@@ -565,7 +566,12 @@ def pin_kb_dir(kb_dir_override: str | None, dry_run: bool) -> tuple[str, str]:
             "(e.g. the projects/<dir> you want to keep)."
         )
     else:
-        target = DEFAULT_STORE_DIR
+        test_root = paths.validated_test_root()
+        target = (
+            test_root / "vaults" / "latch-install-default"
+            if test_root is not None
+            else DEFAULT_STORE_DIR
+        )
     target = target.expanduser().resolve()
     try:
         target.relative_to(KB_HOME.resolve())
@@ -924,7 +930,7 @@ def main(argv: list[str] | None = None) -> int:
 
     pin_level, pin_msg = pin_kb_dir(args.kb_dir, args.dry_run)
     print(f"  [{pin_level:4}] KB dir: {pin_msg}")
-    if pin_level == "ERROR":
+    if pin_level in {"ERROR", "FAIL"}:
         print("\nNo changes written.")
         return 2
 

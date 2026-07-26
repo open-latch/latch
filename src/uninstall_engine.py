@@ -74,6 +74,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import sys
 from datetime import datetime, timezone
@@ -466,6 +467,41 @@ def purge_data(dry_run: bool) -> list[str]:
     return changes
 
 
+def source_checkout_removal_message() -> str:
+    """Describe whether the persisted vault proves source removal is data-safe."""
+    active = next(
+        (
+            value.strip()
+            for value in (
+                os.environ.get("LATCH_KB_DIR"),
+                os.environ.get("CLAUDE_KB_DIR"),
+            )
+            if value and value.strip()
+        ),
+        None,
+    )
+    selected = active or ie._read_pin()
+    if selected:
+        candidate = Path(selected).expanduser()
+        if candidate.is_absolute():
+            resolved = candidate.resolve()
+            source = KB_HOME.resolve()
+            try:
+                resolved.relative_to(source)
+                inside_source = True
+            except ValueError:
+                inside_source = False
+            if not inside_source:
+                return (
+                    "The source checkout can be removed separately after uninstall; "
+                    "the persisted production vault is outside it."
+                )
+    return (
+        "Keep the source checkout for now: no verified external KB pin was found. "
+        "Migrate and verify any legacy or in-checkout KB before removing it."
+    )
+
+
 # --------------------------------------------------------------------------- #
 # --check (verify nothing latch-owned remains in Claude Code config)
 # --------------------------------------------------------------------------- #
@@ -671,8 +707,7 @@ def main(argv: list[str] | None = None) -> int:
     if not args.purge:
         print("Your production KB and protected backups are retained; uninstall "
               "has no production-data deletion option.")
-    print("The source checkout can be removed separately after uninstall; the "
-          "production vault is stored outside it.\n")
+    print(source_checkout_removal_message() + "\n")
     print("Verify removal any time with: bash bin/uninstall.sh --check")
     return rc
 

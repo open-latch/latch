@@ -233,6 +233,7 @@ def connection_metadata(project_cwd: str | None = None) -> dict[str, Any]:
         "proxy_started_at": _utc_now(),
         "runtime_key": mcp_broker.RUNTIME_KEY,
         "proxy_capability_epoch": mcp_broker.PROXY_CAPABILITY_EPOCH,
+        "vault_context_digest": mcp_broker.vault_context_digest(),
         "in_compact": _env_flag(COMPACT_ENV_VARS),
         "unlatched": _env_flag(UNLATCHED_ENV_VARS),
         "disabled": _env_flag(DISABLED_ENV_VARS),

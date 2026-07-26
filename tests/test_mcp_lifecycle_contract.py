@@ -195,6 +195,137 @@ def test_daemon_environment_is_closed_and_shared_by_both_start_paths(
         assert "LATCH_MCP_DAEMON_PROCESS" not in env
 
 
+def test_daemon_and_children_preserve_validated_vault_context(
+    monkeypatch, tmp_path
+):
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    install = tmp_path / "install"
+    test_root = mcp_broker.paths.validated_test_root()
+    source = {
+        "PATH": "/safe/bin",
+        "HOME": "/safe/home",
+        "LATCH_PRODUCTION_DATA_ROOT": str(tmp_path / "production"),
+        "LATCH_VAULT_REGISTRY_ROOT": str(tmp_path / "registry"),
+        "LATCH_DURABILITY_ROOT": str(tmp_path / "durability"),
+        "XDG_DATA_HOME": str(tmp_path / "xdg-data"),
+        "XDG_STATE_HOME": str(tmp_path / "xdg-state"),
+        mcp_broker.paths.TEST_ROOT_ENV: str(test_root),
+        mcp_broker.paths.TEST_CAPABILITY_ENV: os.environ[
+            mcp_broker.paths.TEST_CAPABILITY_ENV
+        ],
+        "LATCH_ARBITRARY_POISON": "must-not-cross",
+    }
+    monkeypatch.setattr(mcp_broker, "runtime_dir", lambda: vault)
+    monkeypatch.setattr(mcp_broker.paths, "KB_ROOT", install)
+
+    built = mcp_broker._daemon_environment(source)
+    expected_names = (
+        "LATCH_PRODUCTION_DATA_ROOT",
+        "LATCH_VAULT_REGISTRY_ROOT",
+        "LATCH_DURABILITY_ROOT",
+        "XDG_DATA_HOME",
+        "XDG_STATE_HOME",
+        mcp_broker.paths.TEST_ROOT_ENV,
+        mcp_broker.paths.TEST_CAPABILITY_ENV,
+    )
+    for name in expected_names:
+        assert built[name] == source[name]
+    assert "LATCH_ARBITRARY_POISON" not in built
+
+    with monkeypatch.context() as environment:
+        for name in tuple(os.environ):
+            environment.delenv(name, raising=False)
+        for name, value in built.items():
+            environment.setenv(name, value)
+        context = mcp_runtime.ConnectionContext(
+            connection_id="vault-context",
+            project_cwd=str(ROOT),
+            session_id=None,
+            session_source="none",
+            proxy_pid=123,
+            proxy_started_at="now",
+            runtime_key="test",
+        )
+        with mcp_runtime.bind_connection(context):
+            for child in (
+                mcp_runtime.connection_subprocess_environment("codex"),
+                mcp_runtime.autonomous_subprocess_environment(),
+            ):
+                for name in expected_names:
+                    assert child[name] == source[name]
+
+
+def test_daemon_environment_rejects_invalid_vault_context(tmp_path):
+    test_root = mcp_broker.paths.validated_test_root()
+    capability = os.environ[mcp_broker.paths.TEST_CAPABILITY_ENV]
+    with pytest.raises(mcp_broker.paths.UnsafeTestExecutionError):
+        mcp_broker._daemon_environment({
+            mcp_broker.paths.TEST_ROOT_ENV: str(test_root),
+        })
+    with pytest.raises(mcp_broker.paths.UnsafeTestExecutionError):
+        mcp_broker._daemon_environment({
+            mcp_broker.paths.TEST_ROOT_ENV: str(test_root),
+            mcp_broker.paths.TEST_CAPABILITY_ENV: capability + "-forged",
+        })
+    with pytest.raises(mcp_broker.BrokerError, match="absolute"):
+        mcp_broker._daemon_environment({
+            "LATCH_DURABILITY_ROOT": "relative/backups",
+        })
+
+
+@pytest.mark.parametrize(
+    "name",
+    mcp_broker.DAEMON_VAULT_ROOT_ENV_VARS,
+)
+def test_vault_context_digest_changes_with_root_authority(
+    monkeypatch, tmp_path, name
+):
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    monkeypatch.setattr(mcp_broker, "runtime_dir", lambda: vault)
+    first = os.environ.copy()
+    second = os.environ.copy()
+    first[name] = str(tmp_path / "first" / name.lower())
+    second[name] = str(tmp_path / "second" / name.lower())
+
+    assert mcp_broker.vault_context_digest(first) != (
+        mcp_broker.vault_context_digest(second)
+    )
+
+
+def test_vault_context_digest_is_normalized_and_discovery_is_opaque(
+    monkeypatch, tmp_path
+):
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    monkeypatch.setattr(mcp_broker, "runtime_dir", lambda: vault)
+    first = os.environ.copy()
+    second = os.environ.copy()
+    first["LATCH_DURABILITY_ROOT"] = str(tmp_path / "roots" / ".." / "backups")
+    second["LATCH_DURABILITY_ROOT"] = str(tmp_path / "backups")
+    assert mcp_broker.vault_context_digest(first) == (
+        mcp_broker.vault_context_digest(second)
+    )
+
+    monkeypatch.setenv("LATCH_DURABILITY_ROOT", str(tmp_path / "backups"))
+    discovery = mcp_broker.publish_discovery(
+        port=1234,
+        token="opaque-token",
+        pid=os.getpid(),
+        started_at="now",
+    )
+    serialized = discovery.read_text(encoding="utf-8")
+    capability = os.environ[mcp_broker.paths.TEST_CAPABILITY_ENV]
+    assert capability not in serialized
+    assert str(tmp_path / "backups") not in serialized
+    assert mcp_broker._checked_discovery() is not None
+
+    monkeypatch.setenv("LATCH_DURABILITY_ROOT", str(tmp_path / "different"))
+    with pytest.raises(mcp_broker.BrokerError, match="vault context differs"):
+        mcp_broker._checked_discovery()
+
+
 def test_daemon_context_revalidates_typed_connection_settings():
     metadata = {
         "project_cwd": str(ROOT),
@@ -310,8 +441,8 @@ def test_private_child_environment_is_validated_and_never_in_runtime_snapshot():
 def test_windows_daemon_creation_flags_are_defense_in_depth():
     flags = mcp_broker._windows_creation_flags()
     assert flags & mcp_broker.WINDOWS_CREATE_NO_WINDOW
-    assert flags & mcp_broker.WINDOWS_DETACHED_PROCESS
     assert flags & mcp_broker.WINDOWS_CREATE_NEW_PROCESS_GROUP
+    assert not (flags & 0x00000008)
 
 
 def test_windows_launcher_diagnostic_records_process_lineage():

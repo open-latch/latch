@@ -220,6 +220,47 @@ def _row_identity(row: sqlite3.Row | tuple[object, ...]) -> VaultIdentity:
     )
 
 
+def _validate_identity_for_path(
+    identity: VaultIdentity,
+    vault_dir: Path,
+) -> VaultIdentity:
+    if identity.classification not in CLASSIFICATIONS:
+        raise VaultSafetyError("vault has an invalid classification")
+    # Production identity may exist at a legacy location while it is being
+    # migrated. Test identity is valid only in an authenticated disposable
+    # root, so it can never be replayed in normal operation.
+    if (
+        identity.classification == CLASS_TEST
+        and _classification_for_path(vault_dir) != CLASS_TEST
+    ):
+        raise VaultSafetyError(
+            f"vault classification/path mismatch: {identity.classification} at {vault_dir}"
+        )
+    _validate_registry(identity)
+    return identity
+
+
+def validate_existing_identity(
+    conn: sqlite3.Connection,
+    vault_dir: Path,
+) -> VaultIdentity:
+    """Validate an existing immutable identity without creating or adopting it."""
+    table = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='vault_identity'"
+    ).fetchone()
+    if table is None:
+        raise VaultSafetyError("vault has no immutable identity")
+    rows = conn.execute(
+        "SELECT vault_uuid, classification, created_at, registry_fingerprint "
+        "FROM vault_identity ORDER BY slot"
+    ).fetchall()
+    if len(rows) != 1:
+        raise VaultSafetyError(
+            "vault must contain exactly one immutable identity row"
+        )
+    return _validate_identity_for_path(_row_identity(rows[0]), vault_dir)
+
+
 def ensure_identity(
     conn: sqlite3.Connection,
     vault_dir: Path,
@@ -240,21 +281,7 @@ def ensure_identity(
     if len(rows) > 1:
         raise VaultSafetyError("vault contains multiple identity rows")
     if rows:
-        identity = _row_identity(rows[0])
-        if identity.classification not in CLASSIFICATIONS:
-            raise VaultSafetyError("vault has an invalid classification")
-        # Production identity may exist at a legacy location while it is being
-        # migrated. Test identity is valid only in an authenticated disposable
-        # root, so it can never be replayed in normal operation.
-        if (
-            identity.classification == CLASS_TEST
-            and _classification_for_path(vault_dir) != CLASS_TEST
-        ):
-            raise VaultSafetyError(
-                f"vault classification/path mismatch: {identity.classification} at {vault_dir}"
-            )
-        _validate_registry(identity)
-        return identity
+        return _validate_identity_for_path(_row_identity(rows[0]), vault_dir)
 
     classification = (
         _classification_for_path(vault_dir) if new_vault else CLASS_PRODUCTION

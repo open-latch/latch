@@ -14,6 +14,7 @@ import os
 import re
 import shutil
 import sqlite3
+import stat
 import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -77,14 +78,135 @@ def _snapshot_dir(identity: vault_identity.VaultIdentity, vault_dir: Path) -> Pa
     return _durability_root(identity, vault_dir) / identity.vault_uuid / "snapshots"
 
 
+def _read_regular_file(path: Path) -> bytes:
+    """Read one regular file without following a final-component symlink."""
+    try:
+        before = path.lstat()
+    except OSError as exc:
+        raise BackupSafetyError(f"snapshot artifact is unavailable: {path}") from exc
+    if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
+        raise BackupSafetyError(f"snapshot artifact is not a regular file: {path}")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise BackupSafetyError(f"snapshot artifact could not be opened safely: {path}") from exc
+    try:
+        opened = os.fstat(descriptor)
+        try:
+            after = path.lstat()
+        except OSError as exc:
+            raise BackupSafetyError(
+                f"snapshot artifact changed during validation: {path}"
+            ) from exc
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or stat.S_ISLNK(after.st_mode)
+            or (opened.st_dev, opened.st_ino) != (after.st_dev, after.st_ino)
+        ):
+            raise BackupSafetyError(f"snapshot artifact changed during validation: {path}")
+        chunks: list[bytes] = []
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        return b"".join(chunks)
+    finally:
+        os.close(descriptor)
+
+
 def _read_manifest(path: Path) -> dict[str, Any]:
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
+        payload = json.loads(_read_regular_file(path).decode("utf-8"))
+    except (BackupSafetyError, UnicodeDecodeError, ValueError) as exc:
         raise BackupSafetyError(f"invalid backup manifest: {path}") from exc
     if not isinstance(payload, dict) or payload.get("format") != 1:
         raise BackupSafetyError(f"unsupported backup manifest: {path}")
     return payload
+
+
+def _direct_snapshot_pair(
+    snapshot_dir: Path,
+    manifest_path: Path,
+    manifest: dict[str, Any],
+) -> tuple[Path, Path]:
+    """Return a manifest/snapshot pair proven to be regular direct children."""
+    resolved_dir = snapshot_dir.resolve(strict=True)
+    manifest_path = manifest_path.absolute()
+    if (
+        manifest_path.name in {"", ".", ".."}
+        or "/" in manifest_path.name
+        or "\\" in manifest_path.name
+        or manifest_path.parent.resolve(strict=True) != resolved_dir
+    ):
+        raise BackupSafetyError("snapshot manifest is not a direct child")
+    _read_regular_file(manifest_path)
+
+    snapshot_name = str(manifest.get("snapshot") or "")
+    if (
+        snapshot_name in {"", ".", ".."}
+        or "/" in snapshot_name
+        or "\\" in snapshot_name
+        or Path(snapshot_name).name != snapshot_name
+    ):
+        raise BackupSafetyError("snapshot manifest path is not a direct filename")
+    snapshot = manifest_path.parent / snapshot_name
+    if snapshot.parent.resolve(strict=True) != resolved_dir:
+        raise BackupSafetyError("snapshot is not a direct child")
+    _read_regular_file(snapshot)
+    return manifest_path, snapshot
+
+
+def _make_opened_file_writable(path: Path) -> bool:
+    """Best-effort chmod of the validated inode, never a followed symlink."""
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError:
+        return False
+    try:
+        opened = os.fstat(descriptor)
+        try:
+            current = path.lstat()
+        except OSError:
+            return False
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or stat.S_ISLNK(current.st_mode)
+            or opened.st_nlink != 1
+            or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)
+        ):
+            return False
+        if opened.st_mode & stat.S_IWUSR:
+            return True
+        fchmod = getattr(os, "fchmod", None)
+        if callable(fchmod):
+            try:
+                fchmod(descriptor, 0o600)
+            except OSError:
+                return False
+            return True
+        if os.chmod not in os.supports_follow_symlinks:
+            return False
+        try:
+            os.chmod(path, 0o600, follow_symlinks=False)
+        except (NotImplementedError, OSError):
+            return False
+        try:
+            after = path.lstat()
+        except OSError:
+            return False
+        if (
+            stat.S_ISLNK(after.st_mode)
+            or (opened.st_dev, opened.st_ino) != (after.st_dev, after.st_ino)
+        ):
+            return False
+        return True
+    finally:
+        os.close(descriptor)
 
 
 def _manifests(snapshot_dir: Path) -> list[tuple[Path, dict[str, Any]]]:
@@ -100,12 +222,23 @@ def _manifests(snapshot_dir: Path) -> list[tuple[Path, dict[str, Any]]]:
     return out
 
 
-def _daily_exists(snapshot_dir: Path, day: str) -> bool:
-    return any(
-        payload.get("tier") == "daily"
-        and str(payload.get("created_at") or "").startswith(day)
-        for _path, payload in _manifests(snapshot_dir)
-    )
+def _daily_exists(snapshot_dir: Path, day: str, vault_uuid: str) -> bool:
+    for manifest_path, payload in _manifests(snapshot_dir):
+        if payload.get("tier") != "daily":
+            continue
+        if not str(payload.get("created_at") or "").startswith(day):
+            continue
+        try:
+            _manifest_semantics(
+                snapshot_dir,
+                manifest_path,
+                payload,
+                expected_vault_uuid=vault_uuid,
+            )
+        except BackupSafetyError:
+            continue
+        return True
+    return False
 
 
 def _sqlite_receipt(db_file: Path) -> dict[str, Any]:
@@ -295,7 +428,7 @@ def create_snapshot(
         snapshot_dir = _snapshot_dir(identity, vault_dir)
         snapshot_dir.mkdir(parents=True, exist_ok=True)
         day = created.date().isoformat()
-        daily = not _daily_exists(snapshot_dir, day)
+        daily = not _daily_exists(snapshot_dir, day, identity.vault_uuid)
         tier = "daily" if daily else "six-hour"
         retention = DAILY_RETENTION_DAYS if daily else FREQUENT_RETENTION_DAYS
         protected_until = created + timedelta(days=retention)
@@ -348,7 +481,47 @@ def _parse_timestamp(value: object, *, field: str) -> datetime:
         parsed = datetime.fromisoformat(str(value))
     except (TypeError, ValueError) as exc:
         raise BackupSafetyError(f"invalid {field} timestamp") from exc
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise BackupSafetyError(f"{field} timestamp must include a timezone")
+    return parsed.astimezone(timezone.utc)
+
+
+def _manifest_semantics(
+    snapshot_dir: Path,
+    manifest_path: Path,
+    manifest: dict[str, Any],
+    *,
+    expected_vault_uuid: str,
+) -> tuple[Path, Path, datetime, datetime]:
+    """Validate the code-owned retention and direct-pair contract."""
+    manifest_path, snapshot = _direct_snapshot_pair(
+        snapshot_dir, manifest_path, manifest
+    )
+    if manifest_path.suffix != ".json" or snapshot.suffix != ".db":
+        raise BackupSafetyError("snapshot pair has unexpected file extensions")
+    if manifest_path.stem != snapshot.stem:
+        raise BackupSafetyError("snapshot manifest and database names do not match")
+    if manifest.get("vault_uuid") != expected_vault_uuid:
+        raise BackupSafetyError("snapshot vault identity does not match")
+    tier = manifest.get("tier")
+    retention_days = {
+        "daily": DAILY_RETENTION_DAYS,
+        "six-hour": FREQUENT_RETENTION_DAYS,
+    }.get(tier)
+    if retention_days is None:
+        raise BackupSafetyError("snapshot manifest has an unknown retention tier")
+    created_at = _parse_timestamp(manifest.get("created_at"), field="created_at")
+    protected_until = _parse_timestamp(
+        manifest.get("protected_until"), field="protected_until"
+    )
+    if protected_until < created_at + timedelta(days=retention_days):
+        raise BackupSafetyError("snapshot protection deadline is shorter than policy")
+    body = _read_regular_file(snapshot)
+    if hashlib.sha256(body).hexdigest() != manifest.get("sha256"):
+        raise BackupSafetyError("snapshot hash differs from manifest")
+    if manifest.get("bytes") != len(body):
+        raise BackupSafetyError("snapshot byte count differs from manifest")
+    return manifest_path, snapshot, created_at, protected_until
 
 
 def prune_expired(
@@ -372,66 +545,70 @@ def prune_expired(
     if not candidates:
         return {"deleted": 0, "protected": 0, "skipped": 0}
     result = {"deleted": 0, "protected": 0, "skipped": 0}
-    dated_candidates: list[tuple[Path, dict[str, Any], datetime]] = []
+    dated_candidates: list[
+        tuple[Path, dict[str, Any], Path, datetime, datetime]
+    ] = []
     for manifest_path, manifest in candidates:
         try:
-            created_at = _parse_timestamp(
-                manifest.get("created_at"), field="created_at"
+            manifest_path, snapshot, created_at, protected_until = (
+                _manifest_semantics(
+                    snapshot_dir,
+                    manifest_path,
+                    manifest,
+                    expected_vault_uuid=identity.vault_uuid,
+                )
             )
         except BackupSafetyError:
             result["skipped"] += 1
             continue
-        dated_candidates.append((manifest_path, manifest, created_at))
+        dated_candidates.append(
+            (manifest_path, manifest, snapshot, created_at, protected_until)
+        )
     if not dated_candidates:
         return result
-    newest = max(dated_candidates, key=lambda item: item[2])[0]
-    for manifest_path, manifest, _created_at in dated_candidates:
+    newest = max(dated_candidates, key=lambda item: item[3])[0]
+    for (
+        manifest_path,
+        manifest,
+        snapshot,
+        _created_at,
+        protected_until,
+    ) in dated_candidates:
         if manifest_path == newest:
             result["protected"] += 1
-            continue
-        if manifest.get("vault_uuid") != identity.vault_uuid:
-            result["skipped"] += 1
-            continue
-        try:
-            protected_until = _parse_timestamp(
-                manifest.get("protected_until"), field="protected_until"
-            )
-        except BackupSafetyError:
-            result["skipped"] += 1
             continue
         if current < protected_until:
             result["protected"] += 1
             continue
-        snapshot = snapshot_dir / str(manifest.get("snapshot") or "")
-        if not snapshot.is_file():
+        if not all(
+            _make_opened_file_writable(path)
+            for path in (snapshot, manifest_path)
+        ):
             result["skipped"] += 1
             continue
-        digest = hashlib.sha256(snapshot.read_bytes()).hexdigest()
-        if digest != manifest.get("sha256"):
+        try:
+            _manifest_semantics(
+                snapshot_dir,
+                manifest_path,
+                manifest,
+                expected_vault_uuid=identity.vault_uuid,
+            )
+        except BackupSafetyError:
             result["skipped"] += 1
             continue
         for path in (snapshot, manifest_path):
-            try:
-                path.chmod(0o600)
-            except OSError:
-                pass
             path.unlink()
         result["deleted"] += 1
     return result
 
 
 def _verified_snapshot_source(manifest_path: Path) -> tuple[Path, dict[str, Any], Path]:
-    manifest_path = manifest_path.resolve(strict=True)
+    manifest_path = manifest_path.expanduser().absolute()
     manifest = _read_manifest(manifest_path)
-    snapshot_name = str(manifest.get("snapshot") or "")
-    if not snapshot_name or Path(snapshot_name).name != snapshot_name:
-        raise BackupSafetyError("snapshot manifest path is not a direct filename")
-    snapshot = manifest_path.parent / snapshot_name
-    if not snapshot.is_file():
-        raise BackupSafetyError("snapshot referenced by manifest is missing")
-    if snapshot.absolute() != snapshot.resolve(strict=True):
-        raise BackupSafetyError("refusing snapshot through a symlinked path")
-    digest = hashlib.sha256(snapshot.read_bytes()).hexdigest()
+    manifest_path, snapshot = _direct_snapshot_pair(
+        manifest_path.parent, manifest_path, manifest
+    )
+    digest = hashlib.sha256(_read_regular_file(snapshot)).hexdigest()
     if digest != manifest.get("sha256"):
         raise BackupSafetyError("snapshot hash differs from manifest")
     return manifest_path, manifest, snapshot
