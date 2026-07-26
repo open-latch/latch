@@ -301,9 +301,8 @@ def _read_recon_rows(tmp):
 
 
 def _wipe_project_dir(tmp):
-    proj_dir = paths.project_dir(tmp)
-    if proj_dir.exists():
-        shutil.rmtree(proj_dir, ignore_errors=True)
+    # The pytest capability root owns resolved vault teardown.
+    del tmp
 
 
 def test_reconciliation_log_supersedes_emits_row():

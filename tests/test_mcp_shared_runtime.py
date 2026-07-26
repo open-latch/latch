@@ -27,6 +27,7 @@ PROMPT_HOOK = ROOT / "src" / "hooks" / "user_prompt_submit.py"
 EPOCH_2_COMMIT = "5c9f39cdc558b98e4736ba15a7e6f5011168c7c1"
 sys.path.insert(0, str(ROOT / "src"))
 import mcp_broker  # noqa: E402
+import paths  # noqa: E402
 
 
 def _assert(condition: Any, message: str) -> None:
@@ -221,7 +222,10 @@ def _wait_for_pid_exit(pid: int, timeout_s: float = 5.0) -> None:
 
 
 def _temp_vault() -> Path:
-    vault = Path(tempfile.mkdtemp(prefix="latch_shared_mcp_"))
+    scope = Path(tempfile.mkdtemp(prefix="latch_shared_mcp_scope_"))
+    vault = paths.project_dir(str(scope))
+    scope.rmdir()
+    vault.mkdir(parents=True, exist_ok=True)
     now = datetime.now(timezone.utc).isoformat()
     (vault / "maintenance_state.json").write_text(
         json.dumps(
@@ -473,7 +477,6 @@ def test_parallel_clients_share_one_heavy_owner_and_keep_context_isolated() -> N
         for client in clients:
             client.close()
         _stop_daemon(kb_dir)
-        shutil.rmtree(kb_dir, ignore_errors=True)
 
 
 def test_second_client_invokes_backend_from_its_own_path() -> None:
@@ -537,7 +540,6 @@ def test_second_client_invokes_backend_from_its_own_path() -> None:
         for client in clients:
             client.close()
         _stop_daemon(kb_dir)
-        shutil.rmtree(kb_dir, ignore_errors=True)
 
 
 def test_owner_crash_restarts_on_next_call_without_replaying_inflight_work() -> None:
@@ -568,7 +570,6 @@ def test_owner_crash_restarts_on_next_call_without_replaying_inflight_work() -> 
         if client is not None:
             client.close()
         _stop_daemon(kb_dir)
-        shutil.rmtree(kb_dir, ignore_errors=True)
 
 
 def test_retained_proxy_recovers_after_in_place_compatible_upgrade() -> None:
@@ -684,7 +685,6 @@ def test_retained_proxy_recovers_after_in_place_compatible_upgrade() -> None:
         if bootstrap is not None:
             bootstrap.close()
         _stop_daemon(kb_dir)
-        shutil.rmtree(kb_dir, ignore_errors=True)
         shutil.rmtree(install, ignore_errors=True)
 
 
@@ -789,7 +789,6 @@ def _assert_historical_proxy_requires_fresh_task(commit: str) -> None:
         if client is not None:
             client.close()
         _stop_daemon(kb_dir)
-        shutil.rmtree(kb_dir, ignore_errors=True)
         shutil.rmtree(install, ignore_errors=True)
 
 
@@ -917,7 +916,6 @@ def test_historical_transport_receives_fresh_task_error_cross_platform(
                 process.kill()
                 process.wait(timeout=5.0)
         _stop_daemon(kb_dir)
-        shutil.rmtree(kb_dir, ignore_errors=True)
 
 
 def test_committed_mutation_with_lost_response_is_not_replayed_or_called_retryable() -> None:
@@ -971,7 +969,6 @@ def test_committed_mutation_with_lost_response_is_not_replayed_or_called_retryab
         if relay is not None:
             relay.close()
         _stop_daemon(kb_dir)
-        shutil.rmtree(kb_dir, ignore_errors=True)
 
 
 def test_idle_owner_is_reclaimed_and_lazily_recreated() -> None:
@@ -997,7 +994,6 @@ def test_idle_owner_is_reclaimed_and_lazily_recreated() -> None:
         if client is not None:
             client.close()
         _stop_daemon(kb_dir)
-        shutil.rmtree(kb_dir, ignore_errors=True)
 
 
 def test_prompt_embed_activity_keeps_owner_warm() -> None:
@@ -1021,7 +1017,6 @@ def test_prompt_embed_activity_keeps_owner_warm() -> None:
         if client is not None:
             client.close()
         _stop_daemon(kb_dir)
-        shutil.rmtree(kb_dir, ignore_errors=True)
 
 
 def test_prompt_after_idle_exit_wakes_owner_and_emits_truthful_bounded_receipt() -> None:
@@ -1074,7 +1069,20 @@ def test_prompt_after_idle_exit_wakes_owner_and_emits_truthful_bounded_receipt()
                 break
             time.sleep(0.05)
         _assert(new_pid is not None and new_pid != old_pid, "hook wake did not start a new owner")
-        rows = _lifecycle_rows(kb_dir)
+        # Discovery is published immediately before the daemon appends its
+        # startup receipt.  Wait for that asynchronous receipt instead of
+        # racing the two adjacent startup steps on faster CI runners.
+        receipt_deadline = time.monotonic() + 5.0
+        rows: list[dict[str, Any]] = []
+        while time.monotonic() < receipt_deadline:
+            rows = _lifecycle_rows(kb_dir)
+            if any(
+                row.get("event") == "daemon_started"
+                and row.get("reason") == "prompt_hook"
+                for row in rows
+            ):
+                break
+            time.sleep(0.05)
         _assert(
             any(row.get("event") == "prompt_retrieval_degraded" for row in rows),
             "degraded prompt lifecycle event missing",
@@ -1092,7 +1100,6 @@ def test_prompt_after_idle_exit_wakes_owner_and_emits_truthful_bounded_receipt()
         if client is not None:
             client.close()
         _stop_daemon(kb_dir)
-        shutil.rmtree(kb_dir, ignore_errors=True)
 
 
 def test_over_cap_idle_proxy_retires_itself_without_killing_peers() -> None:
@@ -1134,7 +1141,6 @@ def test_over_cap_idle_proxy_retires_itself_without_killing_peers() -> None:
         for client in clients:
             client.close()
         _stop_daemon(kb_dir)
-        shutil.rmtree(kb_dir, ignore_errors=True)
 
 
 if __name__ == "__main__":

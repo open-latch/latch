@@ -21,6 +21,31 @@ def _assert(cond, msg):
         raise AssertionError(msg)
 
 
+_MISSING_ENV = object()
+
+
+def _test_vault(name: str) -> Path:
+    test_root = paths.validated_test_root()
+    if test_root is None:
+        raise AssertionError("pytest isolation is required")
+    vaults = test_root / "vaults"
+    vaults.mkdir(parents=True, exist_ok=True)
+    return vaults / name
+
+
+def _set_test_pin(vault: Path):
+    previous = os.environ.get("LATCH_KB_DIR", _MISSING_ENV)
+    os.environ["LATCH_KB_DIR"] = str(vault)
+    return previous
+
+
+def _restore_test_pin(previous) -> None:
+    if previous is _MISSING_ENV:
+        os.environ.pop("LATCH_KB_DIR", None)
+    else:
+        os.environ["LATCH_KB_DIR"] = previous
+
+
 def _payload(
     project: str | Path,
     session_id: str,
@@ -53,7 +78,6 @@ def test_write_and_read_session_marker():
         _assert(payload["source"] == "codex_session_start", payload)
         _assert(codex_session.read_session_id(tmp) == "session-123", payload)
     finally:
-        shutil.rmtree(project_dir, ignore_errors=True)
         shutil.rmtree(tmp, ignore_errors=True)
     print("PASS write_and_read_session_marker")
 
@@ -73,7 +97,6 @@ def test_invalidate_marker_prevents_stale_session_inheritance():
             "new task without an id must not inherit prior attribution",
         )
     finally:
-        shutil.rmtree(project_dir, ignore_errors=True)
         shutil.rmtree(tmp, ignore_errors=True)
     print("PASS invalidate_marker_prevents_stale_session_inheritance")
 
@@ -90,26 +113,23 @@ def test_read_session_marker_missing_or_invalid_returns_none():
         _assert(codex_session.read_marker(tmp) is None, "bad marker should be None")
         _assert(codex_session.read_session_id(tmp) is None, "bad marker session id should be None")
     finally:
-        shutil.rmtree(project_dir, ignore_errors=True)
         shutil.rmtree(tmp, ignore_errors=True)
     print("PASS read_session_marker_missing_or_invalid_returns_none")
 
 
 def test_pinned_vault_keeps_workspace_markers_distinct():
-    shared = Path(tempfile.mkdtemp(prefix="codex_session_shared_vault_"))
+    shared = _test_vault("codex_session_shared_vault")
     project_a = Path(tempfile.mkdtemp(prefix="codex_session_project_a_"))
     project_b = Path(tempfile.mkdtemp(prefix="codex_session_project_b_"))
-    old = paths._PINNED_DIR
+    old = _set_test_pin(shared)
     try:
-        paths._PINNED_DIR = shared
         marker_a = codex_session.write_marker(project_a, "session-a")
         marker_b = codex_session.write_marker(project_b, "session-b")
         _assert(marker_a != marker_b, "pinned vault markers must be keyed by workspace")
         _assert(codex_session.read_session_id(project_a) == "session-a", marker_a)
         _assert(codex_session.read_session_id(project_b) == "session-b", marker_b)
     finally:
-        paths._PINNED_DIR = old
-        shutil.rmtree(shared, ignore_errors=True)
+        _restore_test_pin(old)
         shutil.rmtree(project_a, ignore_errors=True)
         shutil.rmtree(project_b, ignore_errors=True)
     print("PASS pinned_vault_keeps_workspace_markers_distinct")
@@ -121,12 +141,11 @@ def test_readonly_primary_uses_private_temp_fallback():
     root = Path(tempfile.mkdtemp(prefix="codex_session_fallback_"))
     project = root / "workspace"
     project.mkdir()
-    blocked_vault = root / "blocked-vault"
+    blocked_vault = _test_vault(f"blocked-{root.name}")
     blocked_vault.write_text("not a directory", encoding="utf-8")
-    old = paths._PINNED_DIR
+    old = _set_test_pin(blocked_vault)
     fallback_scope = None
     try:
-        paths._PINNED_DIR = blocked_vault
         expected_fallback = codex_session._fallback_marker_path(project)
         fallback_scope = expected_fallback.parents[2]
         written = codex_session.write_marker(
@@ -157,7 +176,7 @@ def test_readonly_primary_uses_private_temp_fallback():
                     f"fallback directory must be user-private: {directory}",
                 )
     finally:
-        paths._PINNED_DIR = old
+        _restore_test_pin(old)
         if fallback_scope is not None:
             shutil.rmtree(fallback_scope, ignore_errors=True)
         shutil.rmtree(root, ignore_errors=True)
@@ -170,12 +189,11 @@ def test_marker_read_uses_freshness_then_path_precedence():
     root = Path(tempfile.mkdtemp(prefix="codex_session_precedence_"))
     project = root / "workspace"
     project.mkdir()
-    vault = root / "vault"
+    vault = _test_vault(f"precedence-{root.name}")
     vault.write_text("initially block the primary path", encoding="utf-8")
-    old = paths._PINNED_DIR
+    old = _set_test_pin(vault)
     fallback_scope = None
     try:
-        paths._PINNED_DIR = vault
         fallback = codex_session.write_marker(project, "fallback-session")
         fallback_scope = fallback.parents[2]
         _assert(fallback == codex_session._fallback_marker_path(project), fallback)
@@ -199,7 +217,7 @@ def test_marker_read_uses_freshness_then_path_precedence():
             "primary must win over fallback",
         )
     finally:
-        paths._PINNED_DIR = old
+        _restore_test_pin(old)
         if fallback_scope is not None:
             shutil.rmtree(fallback_scope, ignore_errors=True)
         shutil.rmtree(root, ignore_errors=True)
@@ -212,12 +230,11 @@ def test_newer_fallback_wins_over_stale_primary():
     root = Path(tempfile.mkdtemp(prefix="codex_session_freshest_"))
     project = root / "workspace"
     project.mkdir()
-    vault = root / "vault"
+    vault = _test_vault(f"freshest-{root.name}")
     vault.mkdir()
-    old = paths._PINNED_DIR
+    old = _set_test_pin(vault)
     fallback_scope = None
     try:
-        paths._PINNED_DIR = vault
         primary = codex_session.marker_path(project)
         primary.parent.mkdir(parents=True)
         primary.write_text(
@@ -249,7 +266,7 @@ def test_newer_fallback_wins_over_stale_primary():
             "a stale readable primary must not override the newer fallback",
         )
     finally:
-        paths._PINNED_DIR = old
+        _restore_test_pin(old)
         if fallback_scope is not None:
             shutil.rmtree(fallback_scope, ignore_errors=True)
         shutil.rmtree(root, ignore_errors=True)
@@ -258,16 +275,15 @@ def test_newer_fallback_wins_over_stale_primary():
 
 def test_fallback_path_is_scoped_by_vault_and_workspace():
     root = Path(tempfile.mkdtemp(prefix="codex_session_fallback_scope_"))
-    vault_a = root / "vault-a"
-    vault_b = root / "vault-b"
+    vault_a = _test_vault(f"scope-a-{root.name}")
+    vault_b = _test_vault(f"scope-b-{root.name}")
     project_a = root / "workspace-a"
     project_b = root / "workspace-b"
-    old = paths._PINNED_DIR
+    old = _set_test_pin(vault_a)
     try:
-        paths._PINNED_DIR = vault_a
         a1 = codex_session._fallback_marker_path(project_a)
         a2 = codex_session._fallback_marker_path(project_b)
-        paths._PINNED_DIR = vault_b
+        _set_test_pin(vault_b)
         b1 = codex_session._fallback_marker_path(project_a)
         _assert(a1 != a2, "different workspaces must not share a fallback marker")
         _assert(a1 != b1, "different vaults must not share a fallback marker")
@@ -276,7 +292,7 @@ def test_fallback_path_is_scoped_by_vault_and_workspace():
             "fallback must preserve the marker filename",
         )
     finally:
-        paths._PINNED_DIR = old
+        _restore_test_pin(old)
         shutil.rmtree(root, ignore_errors=True)
     print("PASS fallback_path_is_scoped_by_vault_and_workspace")
 
@@ -314,14 +330,13 @@ def test_fallback_refuses_symlinked_scope_directory():
     root = Path(tempfile.mkdtemp(prefix="codex_session_fallback_symlink_"))
     project = root / "workspace"
     project.mkdir()
-    blocked_vault = root / "blocked-vault"
+    blocked_vault = _test_vault(f"symlink-blocked-{root.name}")
     blocked_vault.write_text("not a directory", encoding="utf-8")
     attacker = root / "attacker"
     attacker.mkdir()
-    old = paths._PINNED_DIR
+    old = _set_test_pin(blocked_vault)
     scope = None
     try:
-        paths._PINNED_DIR = blocked_vault
         scope = codex_session._fallback_marker_path(project).parents[2]
         try:
             scope.symlink_to(attacker, target_is_directory=True)
@@ -338,7 +353,7 @@ def test_fallback_refuses_symlinked_scope_directory():
             "fallback must not write through a symlinked scope directory",
         )
     finally:
-        paths._PINNED_DIR = old
+        _restore_test_pin(old)
         if scope is not None:
             try:
                 scope.unlink()
@@ -352,13 +367,12 @@ def test_fallback_fails_closed_without_provable_os_ownership():
     root = Path(tempfile.mkdtemp(prefix="codex_session_no_owner_"))
     project = root / "workspace"
     project.mkdir()
-    blocked_vault = root / "blocked-vault"
+    blocked_vault = _test_vault(f"no-owner-blocked-{root.name}")
     blocked_vault.write_text("not a directory", encoding="utf-8")
-    old_pin = paths._PINNED_DIR
+    old_pin = _set_test_pin(blocked_vault)
     old_uid = codex_session._current_uid
     fallback_scope = None
     try:
-        paths._PINNED_DIR = blocked_vault
         fallback_scope = codex_session._fallback_marker_path(project).parents[2]
         codex_session._current_uid = lambda: None
         try:
@@ -375,7 +389,7 @@ def test_fallback_fails_closed_without_provable_os_ownership():
         )
     finally:
         codex_session._current_uid = old_uid
-        paths._PINNED_DIR = old_pin
+        _restore_test_pin(old_pin)
         if fallback_scope is not None:
             shutil.rmtree(fallback_scope, ignore_errors=True)
         shutil.rmtree(root, ignore_errors=True)

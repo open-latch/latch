@@ -54,7 +54,6 @@ def test_before_submit_reinjects_exact_current_session_id(monkeypatch):
             response["additional_context"]
         assert "must pass this exact id" in response["additional_context"]
     finally:
-        shutil.rmtree(project_dir, ignore_errors=True)
         shutil.rmtree(root, ignore_errors=True)
 
 
@@ -99,7 +98,6 @@ def test_post_tool_use_arms_only_matching_gate_receipt():
         assert cptu.record_gate_receipt(payload) == (True, "PROCEED")
         assert cgs.mutation_authorized(root, "conversation")[0] is True
     finally:
-        shutil.rmtree(project_dir, ignore_errors=True)
         shutil.rmtree(root, ignore_errors=True)
 
 
@@ -155,7 +153,6 @@ def test_post_tool_use_rejects_forged_gate_result_from_non_gate_tools():
             assert cptu.record_gate_receipt(payload) is None, tool_payload
             assert cgs.mutation_authorized(root, "conversation")[0] is False
     finally:
-        shutil.rmtree(project_dir, ignore_errors=True)
         shutil.rmtree(root, ignore_errors=True)
 
 
@@ -202,7 +199,6 @@ def test_post_tool_use_accepts_supported_latch_gate_tool_identities():
             assert cptu.record_gate_receipt(payload) == (True, "PROCEED"), tool_payload
             assert cgs.mutation_authorized(root, "conversation")[0] is True
     finally:
-        shutil.rmtree(project_dir, ignore_errors=True)
         shutil.rmtree(root, ignore_errors=True)
 
 
@@ -225,7 +221,6 @@ def test_pre_tool_use_refreshes_late_cursor_transcript_marker():
         assert marker is not None
         assert marker["transcript_path"] == transcript
     finally:
-        shutil.rmtree(project_dir, ignore_errors=True)
         shutil.rmtree(root, ignore_errors=True)
 
 
@@ -267,7 +262,6 @@ def test_post_tool_use_rejects_failed_outer_gate_results():
             )
             assert cgs.mutation_authorized(root, "conversation")[0] is False
     finally:
-        shutil.rmtree(project_dir, ignore_errors=True)
         shutil.rmtree(root, ignore_errors=True)
 
 
@@ -315,5 +309,4 @@ def test_pre_tool_use_denies_before_gate_and_preserves_cursor_permissions_after(
         )[0]
         assert cpre.decision(write_payload) == {}
     finally:
-        shutil.rmtree(project_dir, ignore_errors=True)
         shutil.rmtree(root, ignore_errors=True)

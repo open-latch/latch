@@ -8,7 +8,7 @@
 #      every other hook/permission);
 #   3. removes latch's slash commands from ~/.claude/commands/.
 #
-# Leaves your KB data (projects/) and the repo in place by default. Flags:
+# Leaves production KB data, protected backups, and the repo in place by default. Flags:
 #   --dry-run             show what would change; write nothing
 #   --check               verify removal only; exit 1 if any latch wiring remains
 #   --claude-md PATH      also strip latch's managed region from this CLAUDE.md
@@ -16,7 +16,8 @@
 #   --cursor-project PATH also remove latch-owned Cursor wiring from this project
 #                         (.cursor/mcp.json, .cursor/rules, .cursor/commands,
 #                         AGENTS.md; repeatable)
-#   --purge               also delete projects/ data + DISABLE kill-switch files
+#   --purge               remove only DISABLE/DISABLE_WRITE kill-switch files;
+#                         production KB data and protected backups are retained
 #   --yes / -y            skip the confirmation prompt
 #
 # All logic lives in src/uninstall_engine.py (stdlib-only; shared with the

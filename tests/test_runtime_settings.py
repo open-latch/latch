@@ -204,6 +204,11 @@ def test_refresh_pinned_dir_moves_runtime_policy_to_new_vault(
     monkeypatch.setattr(paths, "KB_LOCATION_FILE", pin)
     monkeypatch.setattr(paths, "PROJECTS_ROOT", tmp_path / "projects")
     monkeypatch.setattr(paths, "_PINNED_DIR", None)
+    # This exercises production pin refresh semantics.  The authenticated
+    # pytest capability deliberately overrides production pin files, so remove
+    # it for this test after redirecting every relevant path into ``tmp_path``.
+    monkeypatch.delenv(paths.TEST_ROOT_ENV)
+    monkeypatch.delenv(paths.TEST_CAPABILITY_ENV)
 
     # Simulate quickstart first observing a legacy/unpinned snapshot, then
     # creating the fresh-install pin in the same process.

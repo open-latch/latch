@@ -221,7 +221,12 @@ def main() -> int:
         _JOB_HANDLE = None
         _diag(f"job-create failed (continuing without reaper): {exc}")
 
-    _diag(f"launching child={child_python} server={server_py}")
+    _diag(
+        f"parent_pid={os.getppid()} executable={sys.executable!r} "
+        f"argv={sys.argv!r} base_executable={getattr(sys, '_base_executable', None)!r} "
+        f"launching child={child_python!r} server={str(server_py)!r} "
+        f"creationflags=0x{CREATE_NO_WINDOW:08x}"
+    )
     proc = subprocess.Popen(
         [child_python, str(server_py)],
         stdin=stdin_fd,

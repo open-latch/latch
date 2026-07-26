@@ -488,6 +488,31 @@ def test_resolve_python_override_and_env():
     print("PASS resolve_python_override_and_env")
 
 
+def test_windows_mcp_launch_uses_windowless_supervisor_when_complete():
+    root = Path(tempfile.mkdtemp(prefix="latch-windowless-mcp-"))
+    try:
+        python = root / "python.exe"
+        pythonw = root / "pythonw.exe"
+        server = root / "src" / "mcp_server.py"
+        launcher = root / "src" / "mcp_launcher_win.py"
+        server.parent.mkdir()
+        for path in (python, pythonw, server, launcher):
+            path.write_bytes(b"")
+        assert ie.mcp_launch_command(
+            str(python), str(server), system="Windows"
+        ) == (str(pythonw), str(launcher))
+        launcher.unlink()
+        assert ie.mcp_launch_command(
+            str(python), str(server), system="Windows"
+        ) == (str(python), str(server))
+        assert ie.mcp_launch_command(
+            str(python), str(server), system="Linux"
+        ) == (str(python), str(server))
+    finally:
+        import shutil
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def test_resolve_python_preserves_virtualenv_symlink():
     if os.name == "nt":
         return
@@ -577,6 +602,30 @@ def test_pin_kb_dir_rejects_conflicting_effective_target():
             os.environ["CLAUDE_KB_DIR"] = saved_legacy
         shutil.rmtree(root, ignore_errors=True)
     print("PASS pin_kb_dir_rejects_conflicting_effective_target")
+
+
+def test_pin_kb_dir_default_stays_inside_authenticated_test_root(
+    tmp_path, monkeypatch
+):
+    location = tmp_path / "kb_location.json"
+    monkeypatch.setattr(ie, "KB_LOCATION_PATH", location)
+    monkeypatch.setattr(ie, "PROJECTS_DIR", tmp_path / "legacy-projects")
+    monkeypatch.delenv("LATCH_KB_DIR", raising=False)
+    monkeypatch.delenv("CLAUDE_KB_DIR", raising=False)
+
+    level, message = ie.pin_kb_dir(None, False)
+
+    recorded = Path(json.loads(location.read_text(encoding="utf-8"))["kb_dir"])
+    test_root = ie.paths.validated_test_root()
+    _assert(level == "OK", f"default test pin failed: {level}, {message}")
+    _assert(
+        recorded.is_relative_to(test_root / "vaults"),
+        f"default test pin escaped the authenticated disposable root: {recorded}",
+    )
+    _assert(
+        recorded != ie.DEFAULT_STORE_DIR,
+        "pytest must never create the real platform default production vault",
+    )
 
 
 def test_absolute_kb_dir_normalizes_git_bash_path_on_windows():
@@ -715,6 +764,37 @@ def test_no_seed_prompt_prints_seed_handoff_unless_suppressed():
         for name, value in original.items():
             setattr(ie, name, value)
     print("PASS no_seed_prompt_prints_seed_handoff_unless_suppressed")
+
+
+def test_main_stops_on_fail_pin_before_settings_write(tmp_path):
+    original = {
+        "SETTINGS_PATH": ie.SETTINGS_PATH,
+        "find_claude": ie.find_claude,
+        "apply_preflight_errors": ie.apply_preflight_errors,
+        "pin_kb_dir": ie.pin_kb_dir,
+    }
+    settings = tmp_path / "settings.json"
+    try:
+        ie.SETTINGS_PATH = settings
+        ie.find_claude = lambda: None
+        ie.apply_preflight_errors = lambda _claude: []
+        ie.pin_kb_dir = lambda _kb_dir, _dry_run: (
+            "FAIL", "refusing production KB directory inside the source checkout"
+        )
+        rc = ie.main([
+            "--python",
+            sys.executable,
+            "--no-seed-prompt",
+            "--suppress-seed-output",
+        ])
+        _assert(rc == 2, f"FAIL pin must stop the installer, got {rc}")
+        _assert(
+            not settings.exists(),
+            "FAIL pin must stop before installer settings writes",
+        )
+    finally:
+        for name, value in original.items():
+            setattr(ie, name, value)
 
 
 def test_apply_preflight_blocks_without_claude_cli():

@@ -482,7 +482,9 @@ def test_codex_skills_sync_status_and_collision():
 
 def test_main_installs_and_checks_codex_skills():
     d = Path(tempfile.mkdtemp(prefix="latch-codex-main-skills-"))
+    original_pin = ic.install_engine.pin_kb_dir
     try:
+        ic.install_engine.pin_kb_dir = lambda _value, _dry: ("OK", "pinned")
         config = d / "config.toml"
         skills = d / ".agents" / "skills"
         common = [
@@ -498,6 +500,7 @@ def test_main_installs_and_checks_codex_skills():
         _assert(rc == 0, f"Codex skill check should pass, got {rc}")
         print("PASS main_installs_and_checks_codex_skills")
     finally:
+        ic.install_engine.pin_kb_dir = original_pin
         shutil.rmtree(d, ignore_errors=True)
 
 
@@ -598,21 +601,25 @@ def test_pin_conflict_stops_before_codex_config_write():
     config = d / "config.toml"
     original_pin = ic.install_engine.pin_kb_dir
     try:
-        ic.install_engine.pin_kb_dir = lambda _value, _dry: (
-            "ERROR", "effective target conflicts with existing pin"
-        )
-        rc = ic.main([
-            "--python", sys.executable,
-            "--config", str(config),
-            "--hooks", str(d / "hooks.json"),
-            "--skills-dir", str(d / ".agents" / "skills"),
-            "--agents-md", str(d / "AGENTS.md"),
-            "--skip-agents",
-            "--skip-hooks",
-            "--suppress-seed-output",
-        ])
-        _assert(rc == 2, f"pin conflict should fail with status 2, got {rc}")
-        _assert(not config.exists(), "pin conflict must stop before Codex config writes")
+        for level in ("ERROR", "FAIL"):
+            ic.install_engine.pin_kb_dir = lambda _value, _dry, level=level: (
+                level, "effective target is unsafe or conflicts with existing pin"
+            )
+            rc = ic.main([
+                "--python", sys.executable,
+                "--config", str(config),
+                "--hooks", str(d / "hooks.json"),
+                "--skills-dir", str(d / ".agents" / "skills"),
+                "--agents-md", str(d / "AGENTS.md"),
+                "--skip-agents",
+                "--skip-hooks",
+                "--suppress-seed-output",
+            ])
+            _assert(rc == 2, f"{level} pin should fail with status 2, got {rc}")
+            _assert(
+                not config.exists(),
+                f"{level} pin must stop before Codex config writes",
+            )
     finally:
         ic.install_engine.pin_kb_dir = original_pin
         shutil.rmtree(d, ignore_errors=True)

@@ -23,6 +23,7 @@ def _assert(cond, msg):
 
 def test_no_history_fixture_seeds_rule_and_gate_context_without_history():
     root = Path(tempfile.mkdtemp(prefix="latch-no-history-test-"))
+    fixture = None
     try:
         fixture = demo.create_fixture(root)
         _assert((fixture.project / "GOVERNANCE.md").exists(),
@@ -48,7 +49,10 @@ def test_no_history_fixture_seeds_rule_and_gate_context_without_history():
         _assert(demo._chain_contains_decision(out, fixture.decision_id),
                 f"gate assembly should retrieve seeded decision: {out}")
     finally:
-        shutil.rmtree(root, ignore_errors=True)
+        if fixture is not None:
+            demo.cleanup_fixture(fixture)
+        else:
+            shutil.rmtree(root, ignore_errors=True)
     print("PASS no_history_fixture_seeds_rule_and_gate_context_without_history")
 
 

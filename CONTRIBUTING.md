@@ -87,3 +87,18 @@ useful for review context; do not put the tool in the commit author,
   `CLAUDE.md` outputs, `.latchbak` backups, or machine-specific paths.
 - Prefer proof-honest docs: describe what latch does now, and keep planning or
   internal-facing artifacts out of the public tree.
+
+## Safety-critical tests
+
+Run tests through pytest only:
+
+```bash
+.venv/bin/python -m pytest
+```
+
+`tests/conftest.py` creates a capability-bound disposable vault root inherited
+by subprocesses. Do not run `python tests/test_*.py`, recursively delete a path
+returned by `paths.project_dir()`, neutralize the capability, or point tests at
+`LATCH_KB_DIR`. Direct unsafe runners fail closed by design. Vault cleanup is
+owned by the disposable pytest root; production vault deletion has no supported
+API or force override.

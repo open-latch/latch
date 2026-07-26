@@ -615,7 +615,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--dry-run", action="store_true", help="print what would change")
     ap.add_argument("--check", action="store_true", help="verify wiring only")
     ap.add_argument("--kb-dir", help="pin one KB directory for every Codex project; "
-                                     "fresh installs otherwise use <LATCH_HOME>/store")
+                                     "fresh installs otherwise use the platform data "
+                                     "root outside the source checkout")
     ap.add_argument("--no-seed-prompt", action="store_true",
                     help="do not offer the post-install cold-start seed prompt")
     ap.add_argument("--suppress-seed-output", action="store_true", help=argparse.SUPPRESS)
@@ -623,6 +624,7 @@ def main(argv: list[str] | None = None) -> int:
 
     python_path = install_engine.resolve_python(args.python)
     server_py = str((KB_HOME / "src" / "mcp_server.py")).replace("\\", "/")
+    mcp_python, mcp_server = install_engine.mcp_launch_command(python_path, server_py)
     hook_py = str((KB_HOME / "src" / "hooks" / "codex_session_start.py")).replace("\\", "/")
     config_path = Path(args.config)
     hooks_path = Path(args.hooks)
@@ -630,7 +632,7 @@ def main(argv: list[str] | None = None) -> int:
     agents_path = Path(args.agents_md)
 
     if args.check:
-        ok_config, label = config_status(config_path, python_path, server_py)
+        ok_config, label = config_status(config_path, mcp_python, mcp_server)
         print(f"  [{'OK' if ok_config else 'XX'}] {label}")
         ok_hooks = True
         if not args.skip_hooks:
@@ -656,7 +658,7 @@ def main(argv: list[str] | None = None) -> int:
 
     existing = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
     try:
-        new_config, changes = merge_config(existing, python_path, server_py)
+        new_config, changes = merge_config(existing, mcp_python, mcp_server)
     except CodexConfigMergeError as exc:
         print("\nlatch Codex installer\n")
         print(f"  [XX] Codex config merge refused: {exc}")
@@ -680,7 +682,7 @@ def main(argv: list[str] | None = None) -> int:
 
     pin_level, pin_msg = install_engine.pin_kb_dir(args.kb_dir, args.dry_run)
     print(f"  [{pin_level:4}] KB dir: {pin_msg}")
-    if pin_level == "ERROR":
+    if pin_level in {"ERROR", "FAIL"}:
         print("\nNo Codex configuration changes were written.")
         return 2
 

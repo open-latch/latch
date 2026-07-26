@@ -194,7 +194,6 @@ def test_cursor_source_uses_exact_current_marker_without_history_scan():
         _assert(candidates and "Seeded rejected path" in candidates[0].title, candidates)
     finally:
         import shutil
-        shutil.rmtree(project_dir, ignore_errors=True)
         shutil.rmtree(root, ignore_errors=True)
 
 
@@ -407,7 +406,6 @@ def test_cursor_history_dedupes_exact_current_transcript():
         _assert(not sources[0].history_discovered, sources[0])
     finally:
         import shutil
-        shutil.rmtree(project_dir, ignore_errors=True)
         shutil.rmtree(root, ignore_errors=True)
 
 
@@ -1196,7 +1194,6 @@ def test_cursor_seed_apply_loads_exact_digest_bound_preview():
                 "successful apply should consume the cached preview")
     finally:
         import shutil
-        shutil.rmtree(project_dir, ignore_errors=True)
         shutil.rmtree(root, ignore_errors=True)
     print("PASS cursor_seed_apply_loads_exact_digest_bound_preview")
 

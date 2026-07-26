@@ -242,7 +242,13 @@ def _stub_probe_server(pid: int):
                 observed_ops.append(str(prelude.get("op") or ""))
                 if prelude.get("op") == "probe":
                     conn.sendall(
-                        json.dumps({"ok": True, "pid": pid}).encode() + b"\n"
+                        json.dumps({
+                            "ok": True,
+                            "pid": pid,
+                            "vault_context_digest": prelude.get(
+                                "vault_context_digest"
+                            ),
+                        }).encode() + b"\n"
                     )
             except (OSError, ValueError):
                 pass
