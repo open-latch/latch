@@ -247,8 +247,13 @@ Stop/SessionEnd turn/end compaction remains deliberately deferred.
 Cursor support is a project-local adapter around the shared latch MCP server.
 It does **not** write Claude Code or Codex config. The base install is
 hook-free; pass `--with-hooks` to add current-session context and pre-edit gate
-enforcement. Historical Cursor transcript discovery remains deliberately
-unsupported.
+enforcement. Historical Cursor discovery is never automatic; the separate
+initial-KB seed flow can explicitly enable a bounded, project-scoped local IDE
+scan with `--cursor-history`. Each transcript id must agree across Cursor's
+local project row, conversation/project membership, and typed composer header;
+missing or changed metadata fails closed for that history leg. Cursor-only
+seeding stops, while aggregate `--source all` seeding records the unavailable
+leg and continues with other authorized sources.
 
 `bin/install_cursor.{sh,ps1}` runs `src/install_cursor.py`, which:
 
@@ -263,7 +268,10 @@ unsupported.
 - **Installs project-local commands and workflow skills** for supported latch
   operations, including current-session seed and compaction. Those workflows
   use only the exact conversation/transcript pair recorded by the opt-in
-  SessionStart hook; latch does not scan Cursor's private history folders.
+  SessionStart hook. A separate shell/quickstart initial-KB flow may scan only
+  metadata-verified, non-subagent local IDE transcripts assigned to the current
+  project after explicit `--cursor-history` consent; it excludes
+  CLI/cloud/other-project/subagent data.
 - **Syncs `AGENTS.md`** using the same shared managed-region mechanics as
   Codex, branded for Cursor on first wiring.
 - **Optionally manages `.cursor/hooks.json`** when `--with-hooks` is passed.

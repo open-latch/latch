@@ -13,9 +13,10 @@ This adapter wires the local latch engine into Cursor's project surfaces:
 * With ``--with-hooks``, ``.cursor/hooks.json`` gets merge-safe session,
   per-prompt gate-enforcement, and activity hooks.
 
-It intentionally does not discover historical Cursor transcripts. The native
-Cursor backend is the default; ``--model-backend claude|codex`` remains an
-explicit compatibility override.
+The installer itself does not read historical Cursor transcripts. The separate
+initial-KB seed flow can opt in to metadata-verified, project-scoped local IDE
+history with ``--cursor-history``. The native Cursor backend is the default;
+``--model-backend claude|codex`` remains an explicit compatibility override.
 """
 from __future__ import annotations
 

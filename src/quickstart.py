@@ -150,10 +150,20 @@ def resolve_agents(
         print("Please enter one of: claude, codex, cursor, both, all")
 
 
-def seed_source_for_agents(agents: Sequence[str], requested: str = "auto") -> str:
+def seed_source_for_agents(
+    agents: Sequence[str],
+    requested: str = "auto",
+    *,
+    cursor_history: bool = False,
+) -> str:
     if requested != "auto":
         return requested
     selected = set(agents)
+    if cursor_history and "cursor" in selected:
+        # Cursor-only quickstart historically seeded any existing Claude and
+        # Codex logs. Opt-in should add Cursor, not silently remove those
+        # already-supported sources.
+        return "all"
     seedable = selected & {"claude", "codex"}
     if seedable == {"claude", "codex"} or not seedable:
         return "both"
@@ -361,8 +371,9 @@ def seed_command_args(
     backend: str,
     lookback_days: int = 90,
     last_sessions: int = 50,
+    cursor_history: bool = False,
 ) -> list[str]:
-    return [
+    command = [
         python_path,
         _src("seed.py"),
         "--project",
@@ -377,6 +388,9 @@ def seed_command_args(
         str(last_sessions),
         "--apply",
     ]
+    if cursor_history:
+        command.append("--cursor-history")
+    return command
 
 
 def format_command(command: Sequence[str]) -> str:
@@ -419,6 +433,7 @@ def offer_seed_after_quickstart(
     backend: str,
     lookback_days: int = 90,
     last_sessions: int = 50,
+    cursor_history: bool = False,
     run: Callable[..., subprocess.CompletedProcess] = subprocess.run,
 ) -> None:
     command = seed_command_args(
@@ -428,6 +443,7 @@ def offer_seed_after_quickstart(
         backend=backend,
         lookback_days=lookback_days,
         last_sessions=last_sessions,
+        cursor_history=cursor_history,
     )
     command_text = format_command(command)
     print()
@@ -461,7 +477,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                     choices=("auto", "claude", "codex", "cursor", "both", "all"),
                     default="auto",
                     help=("transcript source for seed setup (default follows --agents; "
-                          "Cursor requires a current SessionStart marker)"))
+                          "Cursor uses a current-session marker unless "
+                          "--cursor-history is explicitly enabled)"))
     ap.add_argument("--kb-dir",
                     help=("pin this installation to one explicit KB directory; "
                           "fresh installs otherwise use <LATCH_HOME>/store"))
@@ -479,6 +496,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                     help="Cursor model backend (default: native Cursor Agent CLI)")
     ap.add_argument("--cursor-with-hooks", action="store_true",
                     help="install and verify opt-in Cursor session/gate/activity hooks")
+    ap.add_argument(
+        "--cursor-history",
+        action="store_true",
+        help=(
+            "opt in to metadata-verified local Cursor IDE history for this "
+            "project during initial-KB seeding "
+            "(CLI/cloud/other projects/subagents excluded)"
+        ),
+    )
     ap.add_argument("--no-seed", action="store_true",
                     help="leave the initial KB pending and print its review command")
     return ap.parse_args(argv)
@@ -514,7 +540,42 @@ def main(argv: list[str] | None = None) -> int:
             print("No agent configuration changes were written.", file=sys.stderr)
             return 2
 
-    source = seed_source_for_agents(agents, args.seed_source)
+    if args.cursor_history and "cursor" not in agents:
+        print(
+            "error: --cursor-history requires Cursor in --agents.",
+            file=sys.stderr,
+        )
+        return 2
+    cursor_history = bool(args.cursor_history)
+    may_prompt_for_cursor_history = (
+        "cursor" in agents
+        and args.seed_source in {"auto", "cursor", "all"}
+        and not args.dry_run
+        and not args.no_seed
+        and _stdio_is_tty()
+    )
+    if not cursor_history and may_prompt_for_cursor_history:
+        print(
+            "Cursor IDE history is stored in a private local project layout. "
+            "This opt-in admits only conversations Cursor's local metadata "
+            "assigns to this project and still requires the normal redacted "
+            "source review before model use."
+        )
+        cursor_history = _prompt_yes_no(
+            "Include local Cursor IDE history in the initial KB",
+            default=False,
+        )
+    source = seed_source_for_agents(
+        agents,
+        args.seed_source,
+        cursor_history=cursor_history,
+    )
+    if cursor_history and source not in {"cursor", "all"}:
+        print(
+            "error: --cursor-history requires --seed-source cursor, all, or auto.",
+            file=sys.stderr,
+        )
+        return 2
     backend = seed_backend_for_agents(
         agents,
         cursor_model_backend=args.cursor_model_backend,
@@ -563,6 +624,7 @@ def main(argv: list[str] | None = None) -> int:
         backend=backend,
         lookback_days=args.lookback_days,
         last_sessions=args.last_sessions,
+        cursor_history=cursor_history,
     )
 
     print("\nlatch guided quickstart")
@@ -578,6 +640,7 @@ def main(argv: list[str] | None = None) -> int:
     if "cursor" in agents:
         print(f"  Cursor backend: {args.cursor_model_backend or 'cursor (native default)'}")
         print(f"  Cursor hooks  : {'enabled' if args.cursor_with_hooks else 'not installed'}")
+        print(f"  Cursor history: {'opted in' if cursor_history else 'not selected'}")
     print(f"  session cap  : {args.last_sessions}")
     print("  initial KB   : pending review")
     print(f"  mode         : {'DRY-RUN (no writes)' if args.dry_run else 'apply'}")
@@ -632,6 +695,7 @@ def main(argv: list[str] | None = None) -> int:
         backend=backend,
         lookback_days=args.lookback_days,
         last_sessions=args.last_sessions,
+        cursor_history=cursor_history,
     )
     return 0
 
