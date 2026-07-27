@@ -3,16 +3,16 @@
 </p>
 
 <p align="center">
-  <strong>latch catches your coding agent before it rebuilds what your project already ruled out.</strong>
+  <strong>You're paying for the same decisions over and over: every fresh agent session re-litigates settled calls and rebuilds paths you already rejected.</strong>
 </p>
 
 <p align="center">
-  <em>A decision seatbelt for coding agents — it stops the work that never should have happened.</em>
+  <em>latch makes your project's judgment compound &mdash; ratified decisions, rejected paths, and rationale carried into every run, and checked before an agent writes.</em>
 </p>
 
 <p align="center">
-  Local-first &middot; reversible &middot; cited. Try the gate in ~2 minutes without touching your
-  data — or seed it from your own sessions and watch it catch a decision you actually made.
+  Run more agents with less babysitting, and keep the codebase coherent while you do.
+  Local-first &middot; reversible &middot; cited.
 </p>
 
 <p align="center">
@@ -29,6 +29,7 @@
 <p align="center">
   <a href="#the-receipt">The receipt</a> &middot;
   <a href="#why-a-gate-not-a-rule">Why a gate</a> &middot;
+  <a href="#what-you-get-on-day-one">Day one</a> &middot;
   <a href="#get-started">Get started</a> &middot;
   <a href="#try-it-in-2-minutes">2-minute demo</a> &middot;
   <a href="#supported-agents">Agents</a> &middot;
@@ -36,6 +37,18 @@
 </p>
 
 ---
+
+**The payoff isn't only fewer mistakes — it's speed.** Because the agent stays inside decisions
+you've already made instead of re-opening a settled call, you re-catch less and can hand it more:
+run several agents in parallel without babysitting each one to check it isn't rebuilding a path you
+ruled out three sessions ago. That's the part cheaper-context and history-search tools don't give
+you — not better recall, but earned confidence that the agent is working inside your judgment.
+
+You can still override any verdict; reviving a rejected path just becomes a visible, cited decision
+instead of silent drift. The judgment stays yours; latch just keeps the agent inside it.
+
+New here? [Try the gate in ~2 minutes](#try-it-in-2-minutes) without touching your data — or
+[seed it from your own sessions](#get-started) and watch it catch a decision you actually made.
 
 ## The receipt
 
@@ -85,14 +98,6 @@ paths, rationale, and evidence in a local KB, then puts a go/no-go verdict in th
 **before files change** — and shows you the receipt. That is decision continuity, not a bigger
 transcript or a generic recall layer.
 
-The payoff isn't only fewer mistakes — it's speed. Because the agent stays inside decisions you've
-already made instead of re-opening a settled call, you re-catch less and can hand it more: run several
-agents in parallel without babysitting each one to check it isn't rebuilding a path you ruled out
-three sessions ago. That's the part cheaper-context and history-search tools don't give you — not
-better recall, but earned confidence that the agent is working inside your judgment. You can still
-override any verdict; reviving a rejected path just becomes a visible, cited decision instead of
-silent drift. The judgment stays yours; latch just keeps the agent inside it.
-
 It runs locally on one SQLite KB, needs no cloud account, and targets macOS, Windows, and Linux.
 Claude Code, Codex, and Cursor share the same KB, so judgment captured through one agent can gate
 another.
@@ -119,6 +124,27 @@ code at the action boundary, so it complements those tools rather than competing
 And the check is cheap: the per-prompt retrieval hook runs locally in roughly 120–150 ms, and the
 gate itself is a model call that fires only on write-shaped work — never on every prompt. Numbers
 and repro scripts are in [Safety and control](#safety-and-control).
+
+## What you get on day one
+
+Install and seed once, and from the next session on:
+
+- **Your judgment is in a local KB you own.** Seeding is review-first — `--apply` writes only the
+  candidates you approve, so nothing enters the KB you didn't ratify.
+- **Every agent reads it before answering,** and runs `latch_gate` before coding-shaped work: a
+  go/no-go verdict with cited node ids, returned before files change.
+- **You see receipts, not vibes.** latch shows a short foreground receipt when it shapes an answer or
+  a gate fires, and `/latch-gate-report` audits recent gate activity without writing anything.
+- **One KB, every agent.** A decision captured through Claude Code gates Codex and Cursor too —
+  install per repo to give each one its contract, but the judgment is shared.
+- **Nothing bloats your session start.** A healthy session start injects no standing project brief —
+  at most a few compact KB pointers, when they're relevant.
+- **Today's judgment carries into tomorrow.** `/latch-compact` at a stopping point writes the
+  session's decisions into the KB, so the next session starts inside them instead of re-deriving them.
+
+What day one does *not* give you is a catch you didn't seed: the gate is only as good as the
+decisions in your KB, and the honest limits are in
+[Where the gate doesn't help](#where-the-gate-doesnt-help).
 
 ## Get started
 
@@ -474,7 +500,7 @@ It should print `arm64`; the doctor detects the mismatch and prints the remedy.
 Source in this repository is licensed under the Apache License, Version 2.0. See
 [LICENSE](./LICENSE), [LICENSING.txt](./LICENSING.txt), and [NOTICE](./NOTICE).
 
-This public repo is the local single-player decision-seatbelt core: install, doctor, seed/report,
+This public repo is the local single-player decision-continuity core: install, doctor, seed/report,
 local KB, `latch_gate`, receipts, evals, and Claude Code / Codex / Cursor adapter wiring —
 inspectable, forkable, and useful without a cloud account. The latch name and branding are not
 licensed under Apache 2.0; see [TRADEMARK.md](./TRADEMARK.md) and [CONTRIBUTING.md](./CONTRIBUTING.md).
@@ -489,5 +515,5 @@ licensed under Apache 2.0; see [TRADEMARK.md](./TRADEMARK.md) and [CONTRIBUTING.
 | [Architecture](./ARCHITECTURE.md) | [Shared MCP runtime](./docs/mcp_resource_architecture.md) |
 
 Install internals, per-surface manual install, and maintenance machinery live in
-[ARCHITECTURE.md](./ARCHITECTURE.md). This README stays focused on the local decision-seatbelt
+[ARCHITECTURE.md](./ARCHITECTURE.md). This README stays focused on the local decision-continuity
 workflow.

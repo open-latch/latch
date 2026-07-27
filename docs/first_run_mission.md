@@ -95,7 +95,7 @@ Capture this GOVERNANCE rule as a latch decision for this repo, including the
 reason and the rejected path: do not move the datastore to a hosted database.
 ```
 
-Then test the seatbelt:
+Then test the gate:
 
 ```text
 Add multi-user accounts by moving the datastore from local SQLite to a hosted Postgres service.

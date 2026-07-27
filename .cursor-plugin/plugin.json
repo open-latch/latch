@@ -2,7 +2,7 @@
   "name": "latch",
   "displayName": "latch",
   "version": "0.1.0",
-  "description": "Decision-continuity workflows for Cursor: rejected-path gates, current-session compaction, seeding, and KB maintenance.",
+  "description": "Run more agents with less babysitting. latch holds every agent to your own ratified decisions — and the paths you've ruled out.",
   "author": {
     "name": "open-latch"
   },

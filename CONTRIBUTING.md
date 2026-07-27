@@ -1,7 +1,7 @@
 # Contributing to latch
 
 Thanks for helping improve latch. The first public repo is intentionally narrow:
-make the local decision-seatbelt workflow easier to install, verify, and trust.
+make the local decision-continuity workflow easier to install, verify, and trust.
 
 ## Contribution Scope
 
