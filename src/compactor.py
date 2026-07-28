@@ -503,6 +503,147 @@ def _project_lock(project_path: str):
         yield acquired
 
 
+def _content_has_user_text(content: Any) -> bool:
+    """Return whether a transcript content value carries human-authored text."""
+    if isinstance(content, str):
+        return bool(content.strip())
+    if isinstance(content, Mapping):
+        if content.get("type") in {"tool_result", "tool_use"}:
+            return False
+        return any(
+            _content_has_user_text(content.get(field))
+            for field in ("text", "content")
+        )
+    return (
+        any(_content_has_user_text(item) for item in content)
+        if isinstance(content, list)
+        else False
+    )
+
+
+def _event_has_user_message(
+    event: Mapping[str, Any],
+    *,
+    valid_codex_session: bool,
+) -> bool:
+    """Recognize human-authored messages in Claude/Cursor and Codex JSONL."""
+    event_type = event.get("type")
+    if (
+        str(event.get("promptSource") or "").lower() == "sdk"
+        or str(event.get("entrypoint") or "").lower() == "sdk-cli"
+        or event_type == "queue-operation"
+    ):
+        return False
+    payload = event.get("payload")
+    if event_type == "event_msg" and isinstance(payload, Mapping):
+        return (
+            valid_codex_session
+            and payload.get("type") == "user_message"
+            and any(
+                _content_has_user_text(payload.get(field))
+                for field in ("message", "text", "content")
+            )
+        )
+    if event_type == "response_item" and isinstance(payload, Mapping):
+        return (
+            valid_codex_session
+            and payload.get("type") == "message"
+            and str(payload.get("role") or "").lower() in {"user", "human"}
+            and _content_has_user_text(payload.get("content"))
+        )
+    message = event.get("message")
+    nested = message if isinstance(message, Mapping) else {}
+    role = nested.get("role") or event.get("role") or event_type
+    if str(role or "").lower() not in {"user", "human"}:
+        return False
+    content = nested.get("content") or nested.get("text")
+    if content is None:
+        content = event.get("content") or event.get("text")
+    if content is None and isinstance(message, str):
+        content = message
+    return _content_has_user_text(content)
+
+
+def _transcript_has_user_message(path: str | None) -> bool:
+    """Stream a raw transcript until an actual user-role message is found.
+
+    SessionEnd can run for sessions that never received a prompt.  Their
+    transcript path is commonly absent by the time the detached compactor
+    starts; invoking the summarizer anyway lets focus/related-node context
+    turn an empty session into durable "no substantive work" nodes.
+
+    Scan raw JSONL rather than ``read_transcript`` because the latter keeps only
+    the newest ``MAX_TRANSCRIPT_CHARS``.  User prompts near the start of a long
+    Codex/Cursor session must still qualify it for compaction.  The scan is
+    constant-memory and normally exits on one of the first records.
+    """
+    if not path:
+        return False
+    transcript = Path(path)
+    if not transcript.exists():
+        return False
+    valid_codex_session = False
+    with transcript.open("r", encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(event, Mapping):
+                continue
+            payload = event.get("payload")
+            if (
+                event.get("type") == "session_meta"
+                and isinstance(payload, Mapping)
+                and isinstance(payload.get("id"), str)
+                and payload["id"].strip()
+            ):
+                valid_codex_session = True
+                continue
+            if _event_has_user_message(
+                event,
+                valid_codex_session=valid_codex_session,
+            ):
+                return True
+    return False
+
+
+def _compaction_source_preflight(
+    session_id: str,
+    project_path: str,
+    transcript_path: str | None,
+    *,
+    final: bool,
+) -> dict:
+    """Fail closed before budget spend when a session has no source material."""
+    conn = db.connect(project_path)
+    try:
+        sess = db.get_session(conn, session_id)
+        stored_transcript = sess.get("transcript_path") if sess else None
+        effective_transcript = transcript_path or stored_transcript
+        prior_summary_id = sess.get("summary_node_id") if sess else None
+        prior_summary = (
+            db.get_node(conn, prior_summary_id)
+            if prior_summary_id is not None
+            else None
+        )
+        has_source = bool(
+            (sess and int(sess.get("turn_count") or 0) > 0)
+            or (prior_summary and (prior_summary.get("body") or "").strip())
+            or _transcript_has_user_message(effective_transcript)
+        )
+        if not has_source and final and sess is not None:
+            # Prevent repeated SessionEnd retries for the same empty session.
+            db.mark_ended(conn, session_id)
+        return {
+            "has_source": has_source,
+            "session_exists": sess is not None,
+            "transcript_path": effective_transcript,
+        }
+    finally:
+        conn.close()
+
+
 def run_compaction(
     session_id: str,
     project_path: str,
@@ -538,6 +679,41 @@ def run_compaction(
     with _project_lock(project_path) as acquired:
         if not acquired:
             return {"ok": False, "reason": "locked", "session_id": session_id}
+        try:
+            source = _compaction_source_preflight(
+                session_id,
+                project_path,
+                transcript_path,
+                final=final,
+            )
+        except Exception as exc:
+            _log(
+                f"compaction source preflight failed for {session_id}: "
+                f"{type(exc).__name__}"
+            )
+            return {
+                "ok": False,
+                "reason": "source_preflight_error",
+                "session_id": session_id,
+            }
+        if not source["has_source"]:
+            _log(
+                f"compaction skipped for {session_id}: no user turn, "
+                "prior summary, or readable user transcript"
+            )
+            return {
+                "ok": True,
+                "skipped": True,
+                "reason": "no_substantive_turns",
+                "session_id": session_id,
+                "summary_node_id": None,
+                "summary_written": False,
+                "inserted_nodes": 0,
+                "linked_edges": 0,
+                "lifecycle_events": 0,
+                "final": final,
+                "summarizer_backend": backend,
+            }
         # Budget gate — the backstop against auto-hook runaways. Check AND
         # reserve in one shot so the count is accurate even if the compaction
         # itself fails afterward (tokens were still spent).

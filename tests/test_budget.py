@@ -28,6 +28,7 @@ def _utc_date_iso(offset_days: int = 0) -> str:
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import budget  # noqa: E402
+import db  # noqa: E402
 import paths  # noqa: E402
 
 
@@ -399,6 +400,14 @@ def test_unreadable_budget_state_degrades_compaction_without_spend(
 
     def broken(*args, **kwargs):
         raise budget.BudgetStateError("budget state at /tmp/x is unreadable")
+
+    conn = db.connect(str(tmp_path))
+    try:
+        db.upsert_session(conn, "sid", str(tmp_path), None)
+        conn.execute("UPDATE sessions SET turn_count=1 WHERE id='sid'")
+        conn.commit()
+    finally:
+        conn.close()
 
     monkeypatch.setattr(budget, "check_and_record", broken)
     result = compactor.run_compaction("sid", str(tmp_path), None)

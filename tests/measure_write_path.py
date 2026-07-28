@@ -52,6 +52,7 @@ import db          # noqa: E402
 import embeddings  # noqa: E402
 import heal        # noqa: E402
 import lockfile    # noqa: E402
+import paths       # noqa: E402
 
 # A realistic large workstream body (~9.5 KB, matching id=338 per id=1310's trace).
 _LARGE_BODY = (
@@ -98,6 +99,22 @@ def _seed(conn, n: int) -> None:
         )
 
 
+def _assert_disposable_target(project: str | Path) -> Path:
+    """Prove this benchmark cannot resolve to a production vault."""
+    test_root = paths.validated_test_root()
+    if test_root is None:
+        raise RuntimeError(
+            "write-path benchmark requires the authenticated disposable test root"
+        )
+    target = paths.project_dir(project).resolve()
+    allowed = (test_root / "vaults").resolve()
+    if target == allowed or not target.is_relative_to(allowed):
+        raise RuntimeError(
+            f"write-path benchmark target escaped disposable root: {target}"
+        )
+    return target
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--nodes", type=int, default=300,
@@ -106,7 +123,9 @@ def main() -> int:
     args = ap.parse_args()
 
     tmp = tempfile.mkdtemp(prefix="kb_writepath_")
+    target = _assert_disposable_target(tmp)
     print(f"project (throwaway): {tmp}")
+    print(f"vault (authenticated disposable): {target}")
     print(f"large body: {len(_LARGE_BODY):,} chars   delta: {len(_DELTA_LINE):,} chars\n")
 
     conn = db.connect(tmp)

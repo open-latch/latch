@@ -175,6 +175,202 @@ def test_empty_compaction_result_does_not_mark_session_compacted():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_no_source_compaction_skips_before_budget_or_model():
+    tmp = tempfile.mkdtemp(prefix="kb_no_source_compact_test_")
+    old_budget = c.budget.check_and_record
+    old_invoke = c._invoke_summarizer
+    try:
+        conn = db.connect(tmp)
+        db.upsert_session(conn, "s-no-source", tmp, None)
+        conn.close()
+
+        def forbidden(*args, **kwargs):
+            raise AssertionError("empty session must not spend budget or call model")
+
+        c.budget.check_and_record = forbidden
+        c._invoke_summarizer = forbidden
+        out = c.run_compaction(
+            "s-no-source",
+            tmp,
+            None,
+            final=True,
+            summarizer_backend="codex",
+        )
+
+        _assert(out["ok"] is True, out)
+        _assert(out["skipped"] is True, out)
+        _assert(out["reason"] == "no_substantive_turns", out)
+        _assert(out["inserted_nodes"] == 0, out)
+        _assert(out["summary_written"] is False, out)
+
+        conn = db.connect(tmp)
+        sess = db.get_session(conn, "s-no-source")
+        node_count = conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0]
+        conn.close()
+        _assert(sess["ended_at"] is not None, sess)
+        _assert(node_count == 0, node_count)
+    finally:
+        c.budget.check_and_record = old_budget
+        c._invoke_summarizer = old_invoke
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_transcript_user_message_preflight_streams_past_tail_limit():
+    tmp = Path(tempfile.mkdtemp(prefix="kb_compact_source_test_"))
+    try:
+        claude = tmp / "claude.jsonl"
+        claude.write_text(
+            "\n".join([
+                json.dumps({
+                    "type": "user",
+                    "message": {"role": "user", "content": "do real work"},
+                }),
+                *[
+                    json.dumps({
+                        "type": "assistant",
+                        "message": {"content": "x" * 500},
+                    })
+                    for _ in range(400)
+                ],
+            ]) + "\n",
+            encoding="utf-8",
+        )
+        codex = tmp / "rollout-session.jsonl"
+        codex.write_text(
+            "\n".join([
+                json.dumps({
+                    "type": "session_meta",
+                    "payload": {"id": "session"},
+                }),
+                json.dumps({
+                    "type": "event_msg",
+                    "payload": {"type": "user_message", "message": "do real work"},
+                }),
+                *[
+                    json.dumps({
+                        "type": "event_msg",
+                        "payload": {
+                            "type": "agent_message",
+                            "message": "x" * 500,
+                        },
+                    })
+                    for _ in range(400)
+                ],
+            ]) + "\n",
+            encoding="utf-8",
+        )
+        cursor = tmp / "cursor.jsonl"
+        cursor.write_text(
+            "\n".join([
+                json.dumps({
+                    "type": "message",
+                    "message": {
+                        "role": "human",
+                        "content": "do real Cursor work",
+                    },
+                }),
+                *[
+                    json.dumps({
+                        "type": "assistant",
+                        "message": {"content": "x" * 500},
+                    })
+                    for _ in range(400)
+                ],
+            ]) + "\n",
+            encoding="utf-8",
+        )
+        metadata_only = tmp / "metadata-only.jsonl"
+        metadata_only.write_text(
+            json.dumps({"type": "system", "message": {"content": "setup"}}) + "\n",
+            encoding="utf-8",
+        )
+        tool_result_only = tmp / "tool-result-only.jsonl"
+        tool_result_only.write_text(
+            json.dumps({
+                "type": "user",
+                "message": {
+                    "content": [{"type": "tool_result", "content": "not a prompt"}],
+                },
+            }) + "\n",
+            encoding="utf-8",
+        )
+        sdk_only = tmp / "sdk-only.jsonl"
+        sdk_only.write_text(
+            json.dumps({
+                "type": "user",
+                "promptSource": "sdk",
+                "message": {"role": "user", "content": "synthetic prompt"},
+            }) + "\n",
+            encoding="utf-8",
+        )
+        nested_role = tmp / "nested-role.jsonl"
+        nested_role.write_text(
+            json.dumps({
+                "type": "message",
+                "message": {"role": "human", "content": "real Cursor prompt"},
+            }) + "\n",
+            encoding="utf-8",
+        )
+        metadata_free_codex = tmp / "metadata-free-codex.jsonl"
+        metadata_free_codex.write_text(
+            json.dumps({
+                "type": "event_msg",
+                "payload": {"type": "user_message", "message": "unbound prompt"},
+            }) + "\n",
+            encoding="utf-8",
+        )
+
+        _assert("[user] do real work" not in c.read_transcript(claude), claude)
+        _assert("[user] do real work" not in c.read_transcript(codex), codex)
+        _assert("do real Cursor work" not in c.read_transcript(cursor), cursor)
+        _assert(c._transcript_has_user_message(str(claude)), claude)
+        _assert(c._transcript_has_user_message(str(codex)), codex)
+        _assert(c._transcript_has_user_message(str(cursor)), cursor)
+        _assert(not c._transcript_has_user_message(str(metadata_only)), metadata_only)
+        _assert(
+            not c._transcript_has_user_message(str(tool_result_only)),
+            tool_result_only,
+        )
+        _assert(not c._transcript_has_user_message(str(sdk_only)), sdk_only)
+        _assert(c._transcript_has_user_message(str(nested_role)), nested_role)
+        _assert(
+            not c._transcript_has_user_message(str(metadata_free_codex)),
+            metadata_free_codex,
+        )
+        _assert(not c._transcript_has_user_message(str(tmp / "missing")), "missing")
+
+        project = tmp / "project"
+        project.mkdir()
+        conn = db.connect(str(project))
+        transcripts = {
+            "long-claude-session": claude,
+            "long-codex-session": codex,
+            "long-cursor-session": cursor,
+        }
+        for session_id, transcript in transcripts.items():
+            db.upsert_session(
+                conn,
+                session_id,
+                str(project),
+                str(transcript),
+            )
+        conn.close()
+        for session_id, transcript in transcripts.items():
+            source = c._compaction_source_preflight(
+                session_id,
+                str(project),
+                str(transcript),
+                final=True,
+            )
+            conn = db.connect(str(project))
+            session = db.get_session(conn, session_id)
+            conn.close()
+            _assert(source["has_source"] is True, (session_id, source))
+            _assert(session["ended_at"] is None, (session_id, session))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_empty_summary_does_not_clobber_prior_summary():
     tmp = tempfile.mkdtemp(prefix="kb_empty_summary_test_")
     try:
@@ -293,6 +489,8 @@ if __name__ == "__main__":
     test_failed_compact_archival()
     test_failed_compact_subprocess_none()
     test_empty_compaction_result_does_not_mark_session_compacted()
+    test_no_source_compaction_skips_before_budget_or_model()
+    test_transcript_user_message_preflight_streams_past_tail_limit()
     test_empty_summary_does_not_clobber_prior_summary()
     test_compactor_hard_allowlist_and_lifecycle_relation_boundary()
     print("\nAll compactor hardening tests pass.")
