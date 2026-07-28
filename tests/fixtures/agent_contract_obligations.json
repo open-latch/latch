@@ -56,14 +56,26 @@
     },
     {
       "id": "coding_gate",
-      "description": "Gate implementation-shaped work on the verbatim request and display a sourced receipt.",
-      "markers": {"shared_contract": ["call `latch_gate` with the user's request verbatim", "**Latch gate** block", "receipt/source basis"]},
-      "scenario_ids": ["gate_proceed", "gate_stop", "cursor_current_prompt_gate"]
+      "description": "Gate material implementation mutations once on the current user request and display a sourced receipt.",
+      "markers": {"shared_contract": ["Call `latch_gate` once on the user's current request verbatim", "code/config/test/runtime behavior or docs implementing the request", "Show each non-skipped **Latch gate** first", "receipt/source"]},
+      "scenario_ids": ["gate_proceed", "gate_stop", "gate_implementation_boundary", "cursor_current_prompt_gate"]
+    },
+    {
+      "id": "gate_scope_exclusions",
+      "description": "Do not gate non-implementation work; gate planning only when it crosses into implementation.",
+      "markers": {"shared_contract": ["explanation/status/search/diagnosis/read-only review/audit", "priorities/planning/", "handoffs/Latch/report/admin work", "Gate planning when implementation begins"]},
+      "scenario_ids": ["gate_nonimplementation_work", "gate_planning_transition"]
+    },
+    {
+      "id": "gate_receipt_reuse",
+      "description": "Reuse one gate receipt across unchanged implementation substeps and re-gate only material scope changes.",
+      "markers": {"shared_contract": ["Reuse it for unchanged substeps/verification/narration", "re-gate only material", "scope changes"]},
+      "scenario_ids": ["gate_once_per_material_request"]
     },
     {
       "id": "resolve_gate",
       "description": "Stop on non-PROCEED results and resolve uncovered claims through the supplied remedy.",
-      "markers": {"shared_contract": ["Stop and show `MODIFY`", "`NEEDS_HUMAN_JUDGMENT`", "`hop_deeper`, `code_trace`, or `flag_to_user`"]},
+      "markers": {"shared_contract": ["Stop `MODIFY`/`DO_NOT_PROCEED`/`NEEDS_HUMAN_JUDGMENT`", "hop_deeper/code_trace/flag_to_user", "Skipped/degraded/no verdict is not approval"]},
       "scenario_ids": ["gate_stop", "uncovered_claim", "degraded_gate"]
     },
     {
@@ -108,7 +120,7 @@
     {
       "id": "cursor_specific_enforcement",
       "description": "Keep Cursor current-prompt and one-shot operation enforcement in the Cursor rule without duplicating the full shared contract.",
-      "markers": {"cursor_rule": ["Treat `AGENTS.md` as the shared Latch contract", "Cursor Settings > Tools & MCP", "workspace server `latch`", "confirm it reports tools enabled (count may vary)", "start a fresh Agent chat", "current user", "`preToolUse`", "one-shot operation receipt", "Preview does not authorize apply", "`latch_pm_preview`", "matching `latch_insert`"]},
+      "markers": {"cursor_rule": ["Treat `AGENTS.md` as the shared Latch contract", "Cursor Settings > Tools & MCP", "workspace server `latch`", "confirm it reports tools enabled (count may vary)", "start a fresh Agent chat", "this prompt", "`preToolUse`", "one-shot operation receipt", "Preview does not authorize apply", "`latch_pm_preview`", "matching `latch_insert`"]},
       "scenario_ids": ["cursor_mcp_recovery", "cursor_current_prompt_gate", "cursor_operation_receipt"]
     }
   ]

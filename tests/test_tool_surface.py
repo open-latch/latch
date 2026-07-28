@@ -222,6 +222,21 @@ def test_legacy_prune_matches_proxy_hidden_policy():
     print("PASS legacy_prune_matches_proxy_hidden_policy")
 
 
+def test_gate_tool_schema_uses_the_implementation_mutation_boundary():
+    try:
+        import mcp_server
+    except Exception:
+        print("SKIP gate_tool_schema_uses_the_implementation_mutation_boundary")
+        return
+    description = mcp_server.kb_gate.__doc__ or ""
+    _assert("first material implementation mutation" in description, description)
+    _assert("planning-only" in description and "unchanged substeps" in description,
+            description)
+    _assert("BEFORE committing to an implementation plan" not in description,
+            description)
+    print("PASS gate_tool_schema_uses_the_implementation_mutation_boundary")
+
+
 def main():
     test_trimmed_tool_surface_flag_parsing()
     test_filter_tools_list_drops_kb_aliases_only()
@@ -233,6 +248,7 @@ def main():
     test_non_tools_list_responses_never_filtered()
     test_forward_rejects_kb_call_when_trimmed()
     test_legacy_prune_matches_proxy_hidden_policy()
+    test_gate_tool_schema_uses_the_implementation_mutation_boundary()
     print("OK test_tool_surface")
 
 

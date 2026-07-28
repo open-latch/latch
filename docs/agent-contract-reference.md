@@ -107,9 +107,28 @@ capture it with `latch_priority_add`; write it only with the user's approval.
 
 ## Gate receipts and degraded states
 
-`latch_gate` is the judgment layer for implementation-shaped requests. It
-searches current and stale nodes, walks relevant relations, and returns a
-recommendation with cited evidence.
+`latch_gate` is the judgment layer for material implementation mutations:
+product or source code, configuration, tests, runtime behavior, or
+documentation that itself implements the requested product/change work. Call
+it once, immediately before committing to or executing that mutation, with the
+then-current user request verbatim.
+
+Do not gate explanation, status or search, diagnosis, read-only review or
+audit, prioritization, planning-only work, handoffs, Latch node capture or
+maintenance, gate-report generation, or other administrative writes. Planning
+crosses the boundary only when it becomes implementation; gate then. A usable
+receipt covers unchanged substeps, verification, and narration for that
+material request. Re-gate only when the requested mutation scope materially
+changes.
+
+Cursor retains its stricter current-prompt mutation enforcement: one usable
+receipt covers unchanged implementation substeps in that prompt, while a later
+prompt that mutates must satisfy the hook's current-prompt receipt check.
+Explicit managed Latch operations still require their narrower one-shot
+operation receipt; a general gate receipt cannot bypass it.
+
+The gate searches current and stale nodes, walks relevant relations, and
+returns a recommendation with cited evidence.
 
 For each non-skipped result, the visible **Latch gate** block should include:
 

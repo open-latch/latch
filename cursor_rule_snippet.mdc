@@ -18,8 +18,8 @@ This rule adds Cursor-specific enforcement:
   user to open Cursor Settings > Tools & MCP, enable workspace server `latch`,
   confirm it reports tools enabled (count may vary), and start a fresh Agent chat.
   `agent mcp list` does not prove the IDE toggle.
-- Before an ordinary coding mutation, pass the current user request verbatim to
-  `latch_gate`. When `findings.must_display_to_user=true`, show the **Latch
+- Before an implementation mutation, call `latch_gate` once with this prompt
+  verbatim. When `findings.must_display_to_user=true`, show the **Latch
   gate** block before editing.
 - If the gate is skipped, degraded, has no recommendation, or used a rephrased
   request, say so and do not mutate while the opt-in gate hook is active.

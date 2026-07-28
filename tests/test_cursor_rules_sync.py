@@ -27,7 +27,10 @@ def test_render_rule_has_cursor_frontmatter_and_gate_contract():
     _assert("latch_gate" in out, "rule should name gate tool")
     _assert("findings.must_display_to_user=true" in out,
             "rule should require foreground gate findings")
-    _assert("preToolUse" in out and "current user request verbatim" in out,
+    _assert("preToolUse" in out
+            and "Before an implementation mutation" in out
+            and "once with this prompt" in out
+            and "verbatim" in out,
             "rule should explain current-prompt enforcement recovery")
     _assert("Cursor Settings > Tools & MCP" in out
             and "workspace server `latch`" in out
