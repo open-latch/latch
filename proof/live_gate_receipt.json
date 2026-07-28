@@ -1,8 +1,8 @@
 {
   "backend": "codex",
-  "better_next_action": "Keep SQLite and implement any cross-machine data movement as an explicit export/import flow with documented limits.",
+  "better_next_action": "Keep SQLite and either scope accounts to a single local installation or add an explicit export/import workflow with documented limitations (id=1).",
   "capture_command": "bash bin/latch_proof_packet.sh --capture-live --backend codex",
-  "captured_at_utc": "2026-07-26T01:47:24Z",
+  "captured_at_utc": "2026-07-28T01:59:51Z",
   "demo_kind": "synthetic_no_history_fixture",
   "evidence_nodes": [
     {
@@ -30,10 +30,10 @@
   "observed": true,
   "recommendation": "DO_NOT_PROCEED",
   "request": "Add multi-user accounts by moving the datastore from local SQLite to a hosted Postgres service.",
-  "risk_if_proceed": "It would violate the explicit local-first SQLite constraint and reopen a path already rejected for this demo app.",
+  "risk_if_proceed": "The implementation would overturn the established local-first, no-hosted-database architecture and introduce the specifically rejected hosted-service dependency.",
   "schema_version": 2,
-  "source_commit": "9a5b58520cb0475bbb8709f707a2d952331bb026",
-  "summary": "The request directly repeats the rejected path in the KB: moving the local SQLite datastore to a hosted/client-server database such as managed Postgres to add multi-user accounts or sync (id=1). The canonical decision is to keep the demo app local-first on a single embedded SQLite file, with export/import as the allowed data-movement path.",
+  "source_commit": "1d5f991f3ca3f5ca614a8c20d9d957582b9145cb",
+  "summary": "The canonical decision explicitly keeps the demo app local-first on embedded SQLite and rejects moving to hosted Postgres for multi-user accounts or synchronization (id=1). The request directly repeats that ruled-out path; the permitted direction is local SQLite with explicit export/import if portability is needed.",
   "tested_runtime_git_blobs": {
     ".gitattributes": "dfdb8b771ce07609491fa2e83698969fd917a135",
     "benchmarks/fixtures/wedge_v1.jsonl": "f32c5544a247c43490b5b84a6c4c4a057e91716b",
@@ -74,7 +74,7 @@
     "src/evals.py": "b5c70452b2a29204bff328700a5720888bdc36dc",
     "src/feeders.py": "dec71cb552580cd28789f1c1b4f733c00cc9b270",
     "src/gate.py": "81d81882861c26464fd0f895561bd6312614ba54",
-    "src/gate_report.py": "139ee87fc35c2c467df827fead08f258d235711b",
+    "src/gate_report.py": "34cab7cb4db623e9557c1ca4cc1910156a5755db",
     "src/heal.py": "c9b428fd20bcc5930c90290ccb6c891f0ba26478",
     "src/hooks/_common.py": "81a05bd16e89881978bf69834618531d21edca00",
     "src/hooks/codex_session_start.py": "f3b5bcb8e5b890a902770b868ded3ae2734e795d",
@@ -106,7 +106,7 @@
     "src/mcp_launcher_win.py": "777c2eb06dc664f05432d0e9d86feb16e4625602",
     "src/mcp_proxy.py": "c60d26740b871b57276c67c342d7682312fb4450",
     "src/mcp_runtime.py": "fb687139b218f647cb4bdaa167765c794513d0ca",
-    "src/mcp_server.py": "e0710c1850cd9b5672494210d2539c1dffdafbb3",
+    "src/mcp_server.py": "a8b4c0d4b1d5de3e1e7323c6a3903bb29192cb93",
     "src/migrate_v2.py": "ba243da076ef11eb00546542445e1680f9ff5776",
     "src/migrate_v3.py": "ba1b2a8d40c38b9319b0f8208c5825fb2dff8d31",
     "src/model_backends.py": "0321b825685d214d32855dbc3f08fdcbaf44d414",
