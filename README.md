@@ -129,21 +129,24 @@ and repro scripts are in [Safety and control](#safety-and-control).
 
 Install and seed once, and from the next session on:
 
-- **Your judgment is in a local KB you own.** Seeding is review-first — `--apply` writes only the
-  candidates you approve, so nothing enters the KB you didn't ratify.
-- **Every agent reads it before answering,** and runs `latch_gate` before coding-shaped work: a
-  go/no-go verdict with cited node ids, returned before files change.
-- **You see receipts, not vibes.** latch shows a short foreground receipt when it shapes an answer or
-  a gate fires, and `/latch-gate-report` audits recent gate activity without writing anything.
-- **One KB, every agent.** A decision captured through Claude Code gates Codex and Cursor too —
+- **Every decision on file is one you ratified.** Seeding is review-first — `--apply` writes only the
+  candidates you approve, so nothing is kept that you didn't sign off on.
+- **The gate runs on coding-shaped work** and returns a go/no-go verdict citing the exact decision it
+  relied on, before any file changes. On Claude Code and hook-enabled Cursor it runs as part of the
+  loop; on hosts without lifecycle hooks the contract asks the agent to run it, and every receipt
+  records whether it actually did.
+- **You get a receipt, not an assurance.** latch shows a short foreground receipt when it shapes an
+  answer or a gate fires, and `/latch-gate-report` audits recent gate activity without writing.
+- **Shared across your agents.** A decision captured through Claude Code gates Codex and Cursor too —
   install per repo to give each one its contract, but the judgment is shared.
-- **Nothing bloats your session start.** A healthy session start injects no standing project brief —
-  at most a few compact KB pointers, when they're relevant.
-- **Today's judgment carries into tomorrow.** `/latch-compact` at a stopping point writes the
-  session's decisions into the KB, so the next session starts inside them instead of re-deriving them.
+- **Your session start stays quiet.** A healthy session start injects no standing project brief — at
+  most five compact pointers, when they're relevant.
+- **Today's judgment carries into tomorrow, when you ask for it.** `/latch-compact` at a stopping
+  point is user-initiated by design — it spends a model call — and writes the session's decisions
+  down, so the next session inherits them instead of re-deriving them.
 
 What day one does *not* give you is a catch you didn't seed: the gate is only as good as the
-decisions in your KB, and the honest limits are in
+decisions you've ratified, and the honest limits are in
 [Where the gate doesn't help](#where-the-gate-doesnt-help).
 
 ## Get started
