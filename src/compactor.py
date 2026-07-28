@@ -503,6 +503,63 @@ def _project_lock(project_path: str):
         yield acquired
 
 
+def _transcript_has_user_message(path: str | None) -> bool:
+    """Return whether a transcript contains an actual user-role message.
+
+    SessionEnd can run for sessions that never received a prompt.  Their
+    transcript path is commonly absent by the time the detached compactor
+    starts; invoking the summarizer anyway lets focus/related-node context
+    turn an empty session into durable "no substantive work" nodes.
+
+    ``read_transcript`` normalizes both Claude and Codex transcripts to
+    ``[role]`` records.  Keep this preflight intentionally conservative:
+    existing compacted state or a recorded Stop turn also qualifies below.
+    """
+    if not path:
+        return False
+    text = read_transcript(path)
+    return any(
+        line.startswith("[user] ") and line[len("[user] "):].strip()
+        for line in text.splitlines()
+    )
+
+
+def _compaction_source_preflight(
+    session_id: str,
+    project_path: str,
+    transcript_path: str | None,
+    *,
+    final: bool,
+) -> dict:
+    """Fail closed before budget spend when a session has no source material."""
+    conn = db.connect(project_path)
+    try:
+        sess = db.get_session(conn, session_id)
+        stored_transcript = sess.get("transcript_path") if sess else None
+        effective_transcript = transcript_path or stored_transcript
+        prior_summary_id = sess.get("summary_node_id") if sess else None
+        prior_summary = (
+            db.get_node(conn, prior_summary_id)
+            if prior_summary_id is not None
+            else None
+        )
+        has_source = bool(
+            (sess and int(sess.get("turn_count") or 0) > 0)
+            or (prior_summary and (prior_summary.get("body") or "").strip())
+            or _transcript_has_user_message(effective_transcript)
+        )
+        if not has_source and final and sess is not None:
+            # Prevent repeated SessionEnd retries for the same empty session.
+            db.mark_ended(conn, session_id)
+        return {
+            "has_source": has_source,
+            "session_exists": sess is not None,
+            "transcript_path": effective_transcript,
+        }
+    finally:
+        conn.close()
+
+
 def run_compaction(
     session_id: str,
     project_path: str,
@@ -538,6 +595,41 @@ def run_compaction(
     with _project_lock(project_path) as acquired:
         if not acquired:
             return {"ok": False, "reason": "locked", "session_id": session_id}
+        try:
+            source = _compaction_source_preflight(
+                session_id,
+                project_path,
+                transcript_path,
+                final=final,
+            )
+        except Exception as exc:
+            _log(
+                f"compaction source preflight failed for {session_id}: "
+                f"{type(exc).__name__}"
+            )
+            return {
+                "ok": False,
+                "reason": "source_preflight_error",
+                "session_id": session_id,
+            }
+        if not source["has_source"]:
+            _log(
+                f"compaction skipped for {session_id}: no user turn, "
+                "prior summary, or readable user transcript"
+            )
+            return {
+                "ok": True,
+                "skipped": True,
+                "reason": "no_substantive_turns",
+                "session_id": session_id,
+                "summary_node_id": None,
+                "summary_written": False,
+                "inserted_nodes": 0,
+                "linked_edges": 0,
+                "lifecycle_events": 0,
+                "final": final,
+                "summarizer_backend": backend,
+            }
         # Budget gate — the backstop against auto-hook runaways. Check AND
         # reserve in one shot so the count is accurate even if the compaction
         # itself fails afterward (tokens were still spent).

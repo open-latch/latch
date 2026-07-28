@@ -175,6 +175,85 @@ def test_empty_compaction_result_does_not_mark_session_compacted():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_no_source_compaction_skips_before_budget_or_model():
+    tmp = tempfile.mkdtemp(prefix="kb_no_source_compact_test_")
+    old_budget = c.budget.check_and_record
+    old_invoke = c._invoke_summarizer
+    try:
+        conn = db.connect(tmp)
+        db.upsert_session(conn, "s-no-source", tmp, None)
+        conn.close()
+
+        def forbidden(*args, **kwargs):
+            raise AssertionError("empty session must not spend budget or call model")
+
+        c.budget.check_and_record = forbidden
+        c._invoke_summarizer = forbidden
+        out = c.run_compaction(
+            "s-no-source",
+            tmp,
+            None,
+            final=True,
+            summarizer_backend="codex",
+        )
+
+        _assert(out["ok"] is True, out)
+        _assert(out["skipped"] is True, out)
+        _assert(out["reason"] == "no_substantive_turns", out)
+        _assert(out["inserted_nodes"] == 0, out)
+        _assert(out["summary_written"] is False, out)
+
+        conn = db.connect(tmp)
+        sess = db.get_session(conn, "s-no-source")
+        node_count = conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0]
+        conn.close()
+        _assert(sess["ended_at"] is not None, sess)
+        _assert(node_count == 0, node_count)
+    finally:
+        c.budget.check_and_record = old_budget
+        c._invoke_summarizer = old_invoke
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_transcript_user_message_preflight_supports_claude_and_codex():
+    tmp = Path(tempfile.mkdtemp(prefix="kb_compact_source_test_"))
+    try:
+        claude = tmp / "claude.jsonl"
+        claude.write_text(
+            json.dumps({
+                "type": "user",
+                "message": {"role": "user", "content": "do real work"},
+            }) + "\n",
+            encoding="utf-8",
+        )
+        codex = tmp / "rollout-session.jsonl"
+        codex.write_text(
+            "\n".join([
+                json.dumps({
+                    "type": "session_meta",
+                    "payload": {"id": "session"},
+                }),
+                json.dumps({
+                    "type": "event_msg",
+                    "payload": {"type": "user_message", "message": "do real work"},
+                }),
+            ]) + "\n",
+            encoding="utf-8",
+        )
+        metadata_only = tmp / "metadata-only.jsonl"
+        metadata_only.write_text(
+            json.dumps({"type": "system", "message": {"content": "setup"}}) + "\n",
+            encoding="utf-8",
+        )
+
+        _assert(c._transcript_has_user_message(str(claude)), claude)
+        _assert(c._transcript_has_user_message(str(codex)), codex)
+        _assert(not c._transcript_has_user_message(str(metadata_only)), metadata_only)
+        _assert(not c._transcript_has_user_message(str(tmp / "missing")), "missing")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_empty_summary_does_not_clobber_prior_summary():
     tmp = tempfile.mkdtemp(prefix="kb_empty_summary_test_")
     try:
@@ -293,6 +372,8 @@ if __name__ == "__main__":
     test_failed_compact_archival()
     test_failed_compact_subprocess_none()
     test_empty_compaction_result_does_not_mark_session_compacted()
+    test_no_source_compaction_skips_before_budget_or_model()
+    test_transcript_user_message_preflight_supports_claude_and_codex()
     test_empty_summary_does_not_clobber_prior_summary()
     test_compactor_hard_allowlist_and_lifecycle_relation_boundary()
     print("\nAll compactor hardening tests pass.")
