@@ -1,8 +1,8 @@
 {
   "backend": "codex",
-  "better_next_action": "Keep SQLite; if portability is needed, implement explicit export/import and document its limitations as allowed by id=1.",
+  "better_next_action": "Keep SQLite and, if data portability is required, implement an explicit export/import workflow with documented limitations as allowed by id=1.",
   "capture_command": "bash bin/latch_proof_packet.sh --capture-live --backend codex",
-  "captured_at_utc": "2026-07-28T14:15:18Z",
+  "captured_at_utc": "2026-07-28T15:16:16Z",
   "demo_kind": "synthetic_no_history_fixture",
   "evidence_nodes": [
     {
@@ -30,10 +30,10 @@
   "observed": true,
   "recommendation": "DO_NOT_PROCEED",
   "request": "Add multi-user accounts by moving the datastore from local SQLite to a hosted Postgres service.",
-  "risk_if_proceed": "The implementation would violate the app's local-first, no-hosted-database architecture and introduce the specifically rejected multi-user hosting model.",
+  "risk_if_proceed": "The implementation would violate the app's canonical local-first, no-hosted-database direction and introduce an explicitly rejected deployment dependency.",
   "schema_version": 2,
-  "source_commit": "84c056bcacd7488ad16662cf4c25c60c6de15410",
-  "summary": "The canonical decision explicitly keeps the demo app local-first on embedded SQLite and rejects moving to hosted Postgres for multi-user accounts or synchronization (id=1). The request directly repeats that ruled-out path.",
+  "source_commit": "6cd016096a33035810a37c938feedf92b7268c44",
+  "summary": "The canonical decision explicitly keeps the demo app local-first on embedded SQLite and rejects moving to hosted Postgres for multi-user accounts or synchronization (id=1). The request directly repeats that ruled-out architectural path.",
   "tested_runtime_git_blobs": {
     ".gitattributes": "dfdb8b771ce07609491fa2e83698969fd917a135",
     "benchmarks/fixtures/wedge_v1.jsonl": "f32c5544a247c43490b5b84a6c4c4a057e91716b",
@@ -54,7 +54,7 @@
     "src/codex_hooks.py": "55a63d31600fd660ceff99eeea9b798f453c1995",
     "src/codex_session.py": "2ebe22c3913e7f2f343a7d295288901a3095e38c",
     "src/codex_transcript.py": "84fda09f7697e3ca92036961930b118a731ce3a6",
-    "src/compactor.py": "c217a78daa371bb48ecfd05733b7cefada703148",
+    "src/compactor.py": "61ee7587669ab22a877dc976abd548f918997b4d",
     "src/correlator.py": "35654700fd547016ab57dcd45882ec7bc63c3fd7",
     "src/correlator_cli.py": "9a575267673268f3db3e617c4a10ef9f50aa71ae",
     "src/cursor_backend.py": "64a3565d0303d5299d242bccbda0cb843db593d9",
