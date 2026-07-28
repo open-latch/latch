@@ -127,5 +127,6 @@ def test_shared_compactor_flattens_hook_provided_cursor_jsonl():
         text = compactor.read_transcript(transcript)
         assert "[user] remember this decision" in text
         assert "[assistant] captured" in text
+        assert compactor._transcript_has_user_message(str(transcript))
     finally:
         shutil.rmtree(root, ignore_errors=True)

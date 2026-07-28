@@ -503,25 +503,109 @@ def _project_lock(project_path: str):
         yield acquired
 
 
+def _content_has_user_text(content: Any) -> bool:
+    """Return whether a transcript content value carries human-authored text."""
+    if isinstance(content, str):
+        return bool(content.strip())
+    if isinstance(content, Mapping):
+        if content.get("type") in {"tool_result", "tool_use"}:
+            return False
+        return any(
+            _content_has_user_text(content.get(field))
+            for field in ("text", "content")
+        )
+    return (
+        any(_content_has_user_text(item) for item in content)
+        if isinstance(content, list)
+        else False
+    )
+
+
+def _event_has_user_message(
+    event: Mapping[str, Any],
+    *,
+    valid_codex_session: bool,
+) -> bool:
+    """Recognize human-authored messages in Claude/Cursor and Codex JSONL."""
+    event_type = event.get("type")
+    if (
+        str(event.get("promptSource") or "").lower() == "sdk"
+        or str(event.get("entrypoint") or "").lower() == "sdk-cli"
+        or event_type == "queue-operation"
+    ):
+        return False
+    payload = event.get("payload")
+    if event_type == "event_msg" and isinstance(payload, Mapping):
+        return (
+            valid_codex_session
+            and payload.get("type") == "user_message"
+            and any(
+                _content_has_user_text(payload.get(field))
+                for field in ("message", "text", "content")
+            )
+        )
+    if event_type == "response_item" and isinstance(payload, Mapping):
+        return (
+            valid_codex_session
+            and payload.get("type") == "message"
+            and str(payload.get("role") or "").lower() in {"user", "human"}
+            and _content_has_user_text(payload.get("content"))
+        )
+    message = event.get("message")
+    nested = message if isinstance(message, Mapping) else {}
+    role = nested.get("role") or event.get("role") or event_type
+    if str(role or "").lower() not in {"user", "human"}:
+        return False
+    content = nested.get("content") or nested.get("text")
+    if content is None:
+        content = event.get("content") or event.get("text")
+    if content is None and isinstance(message, str):
+        content = message
+    return _content_has_user_text(content)
+
+
 def _transcript_has_user_message(path: str | None) -> bool:
-    """Return whether a transcript contains an actual user-role message.
+    """Stream a raw transcript until an actual user-role message is found.
 
     SessionEnd can run for sessions that never received a prompt.  Their
     transcript path is commonly absent by the time the detached compactor
     starts; invoking the summarizer anyway lets focus/related-node context
     turn an empty session into durable "no substantive work" nodes.
 
-    ``read_transcript`` normalizes both Claude and Codex transcripts to
-    ``[role]`` records.  Keep this preflight intentionally conservative:
-    existing compacted state or a recorded Stop turn also qualifies below.
+    Scan raw JSONL rather than ``read_transcript`` because the latter keeps only
+    the newest ``MAX_TRANSCRIPT_CHARS``.  User prompts near the start of a long
+    Codex/Cursor session must still qualify it for compaction.  The scan is
+    constant-memory and normally exits on one of the first records.
     """
     if not path:
         return False
-    text = read_transcript(path)
-    return any(
-        line.startswith("[user] ") and line[len("[user] "):].strip()
-        for line in text.splitlines()
-    )
+    transcript = Path(path)
+    if not transcript.exists():
+        return False
+    valid_codex_session = False
+    with transcript.open("r", encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(event, Mapping):
+                continue
+            payload = event.get("payload")
+            if (
+                event.get("type") == "session_meta"
+                and isinstance(payload, Mapping)
+                and isinstance(payload.get("id"), str)
+                and payload["id"].strip()
+            ):
+                valid_codex_session = True
+                continue
+            if _event_has_user_message(
+                event,
+                valid_codex_session=valid_codex_session,
+            ):
+                return True
+    return False
 
 
 def _compaction_source_preflight(
