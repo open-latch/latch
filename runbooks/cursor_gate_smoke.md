@@ -144,9 +144,9 @@ Implement the rejected path from the seed report: <paste the forbidden approach/
 Expected Cursor behavior:
 
 1. Cursor reads latch context through MCP when relevant.
-2. Before presenting an implementation plan or editing files, Cursor calls
-   `latch_gate` with the request verbatim. A rephrased request does not arm the
-   mutation hook.
+2. Before the first implementation mutation, Cursor calls `latch_gate` with
+   the request verbatim. Planning-only discussion does not gate. A rephrased
+   request does not arm the mutation hook.
 3. Cursor shows a foreground block shaped like:
 
    ```text
@@ -165,6 +165,22 @@ Expected Cursor behavior:
 If Cursor tries to edit first, the `preToolUse` hook should deny the tool and
 tell the agent to run `latch_gate` verbatim. If a file changes anyway, the smoke
 proof failed.
+
+### Check the contract boundary
+
+Run these as separate smoke cases and record the visible tool-call count:
+
+| Case | Prompt sequence | Expected general `latch_gate` calls |
+| --- | --- | ---: |
+| Implementation | `Change <small source/config/test/runtime behavior or implementing doc>.` | 1, before mutation |
+| Non-implementation | `Explain the change, report status, then hand it off without editing.` | 0 |
+| Latch capture | Run `/latch-pm` to prepare the decision, then `/latch-pm apply`. | 0; preview/apply uses its narrower operation receipt |
+| Same scope | In one prompt, request an implementation plus its tests and verification. | 1 for the unchanged request |
+| Scope change | After the first gated change, request a materially different implementation. | 1 new call on the changed request |
+
+For Cursor, a later mutating prompt must still satisfy the current-prompt hook,
+even when the broader task is unchanged. Do not count that host enforcement as
+permission to gate the preceding explanation, handoff, or Latch-only prompt.
 
 ## Verify no pre-gate edits
 

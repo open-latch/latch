@@ -190,8 +190,8 @@ def _opening_sentence(report: dict[str, Any]) -> str:
     days = _int((report.get("window") or {}).get("days"))
     window = f"{days}-day window" if days else "reporting window"
     return (
-        f"In this {window}, Latch reviewed {gates} "
-        f"{_plural(gates, 'implementation plan')} before your agents acted."
+        f"In this {window}, structural logs recorded {gates} "
+        f"{_plural(gates, 'gate call')}."
     )
 
 
@@ -209,8 +209,8 @@ def _course_correction_lines(report: dict[str, Any]) -> list[str]:
 
     lines = [
         (
-            f"Latch suggested MODIFY on {modify} "
-            f"{_plural(modify, 'plan')} that looked like they needed a course correction."
+            f"Latch returned MODIFY on {modify} "
+            f"{_plural(modify, 'gate call')}."
         )
     ]
     outcome_bits = []
@@ -250,7 +250,7 @@ def _claim_story_lines(report: dict[str, Any]) -> list[str]:
     lines = [
         (
             f"Latch checked {claims} {_plural(claims, 'load-bearing claim')} "
-            "inside those plans."
+            "across those gate calls."
         )
     ]
     if grounded_bits:
@@ -452,8 +452,8 @@ def _node_commentary(node: dict[str, Any]) -> str:
         )
     if "roadmap" in lowered or "ordering" in lowered or "next-step" in lowered:
         return (
-            "This tied the plan back to sequencing, so current work stayed connected "
-            "to what should happen next."
+            "This tied recent gate activity back to sequencing, so current work "
+            "stayed connected to what should happen next."
         )
     if "workstream" in lowered:
         return (
@@ -461,8 +461,7 @@ def _node_commentary(node: dict[str, Any]) -> str:
             "gate calls."
         )
     return (
-        "This node was repeatedly used as current authority when Latch judged recent "
-        "plans."
+        "This node was repeatedly cited as current authority in recent gate calls."
     )
 
 

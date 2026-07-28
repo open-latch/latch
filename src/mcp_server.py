@@ -1541,12 +1541,14 @@ def kb_gate(request: str, max_chains: int = 5, verbose: bool = False) -> dict:
     node ids and a recommended better-next-action.
 
     **Invoke this autonomously** on user prompts that look like coding /
-    build / implement / refactor / add / extend requests, BEFORE committing
-    to an implementation plan. It is the next layer on top of the existing
-    "KB-first every prompt" rule — not a replacement. If the verdict is
-    PROCEED, continue normally. If it is MODIFY / DO_NOT_PROCEED, surface
-    the recommendation and cited nodes to the user before acting (side-note
-    v1 — the agent does not auto-redirect).
+    build / implement / refactor / add / extend requests, immediately BEFORE
+    the first material implementation mutation. Gate once per materially
+    scoped request, not unchanged substeps or verification. If planning-only
+    work later becomes implementation, gate then. This is the next layer on
+    top of the existing "KB-first every prompt" rule — not a replacement. If
+    the verdict is PROCEED, continue normally. If it is MODIFY /
+    DO_NOT_PROCEED, surface the recommendation and cited nodes to the user
+    before acting (side-note v1 — the agent does not auto-redirect).
 
     Skip this tool for: explanation requests, status questions, search
     queries, debugging an error in code you already wrote, or any

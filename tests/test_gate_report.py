@@ -158,7 +158,10 @@ def test_gate_report_summarizes_structural_logs_and_current_nodes():
 
         text = gate_report.format_text(report)
         _assert("# Latch Gate Report" in text, text)
-        _assert("Latch reviewed 2 implementation plans" in text, text)
+        _assert("structural logs recorded 2 gate calls" in text, text)
+        _assert("Latch returned MODIFY on 1 gate call" in text, text)
+        _assert("across those gate calls" in text, text)
+        _assert("implementation plan" not in text, text)
         _assert("2 accepted outcomes, including 1 MODIFY course correction" in text, text)
         _assert("2 nudges accepted as course corrections" not in text, text)
         _assert("Latch checked 5 load-bearing claims" in text, text)
@@ -171,6 +174,23 @@ def test_gate_report_summarizes_structural_logs_and_current_nodes():
         print("PASS gate_report_summarizes_structural_logs_and_current_nodes")
     finally:
         _cleanup(tmp, conn)
+
+
+def test_gate_report_does_not_infer_triggers_from_structural_logs():
+    report = {
+        "window": {"start": "2026-07-01", "end": "2026-07-01", "days": 1},
+        "why_it_matters": "Structural rows do not retain raw prompts.",
+        "used": {"gate_rows": 1},
+        "verdict_counts": {"PROCEED": 1},
+        "claim_signals": {},
+    }
+
+    text = gate_report.format_text(report)
+
+    _assert("structural logs recorded 1 gate call." in text, text)
+    _assert("implementation plan" not in text, text)
+    _assert("before your agents acted" not in text, text)
+    print("PASS gate_report_does_not_infer_triggers_from_structural_logs")
 
 
 def test_gate_report_ignores_raw_query_debug_fields():
@@ -252,6 +272,7 @@ def test_gate_report_cli_json_output():
 
 if __name__ == "__main__":
     test_gate_report_summarizes_structural_logs_and_current_nodes()
+    test_gate_report_does_not_infer_triggers_from_structural_logs()
     test_gate_report_ignores_raw_query_debug_fields()
     test_gate_report_cli_json_output()
     print("\nAll gate report tests pass.")

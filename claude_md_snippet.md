@@ -40,20 +40,19 @@ For sweeping directives, offer `latch_priority_add`; capture only with user appr
 
 ### 2. Gate and resolve implementation work
 
-Before planning write/change/add/refactor/fix work, call `latch_gate` with the user's request verbatim
-(legacy: `kb_gate`). Skip pure explanation, status, search, or exploration.
+Call `latch_gate` once on the user's current request verbatim before materially
+changing code/config/test/runtime behavior or docs implementing the request. Skip
+explanation/status/search/diagnosis/read-only review/audit, priorities/planning/
+handoffs/Latch/report/admin work. Gate planning when implementation begins.
+Reuse it for unchanged substeps/verification/narration; re-gate only material
+scope changes. Legacy: `kb_gate`; honor host enforcement.
 
-For every non-skipped result, show a concise **Latch gate** block first:
-recommendation, rationale, cited node ids/titles/status, receipt/source basis,
-risks or better action, and uncovered claims.
+Show each non-skipped **Latch gate** first: recommendation/rationale; cited
+ids/titles/status; receipt/source; risk/action; uncovered claims.
 
-Stop and show `MODIFY`, `DO_NOT_PROCEED`, or `NEEDS_HUMAN_JUDGMENT`; continue
-only after the user resolves or explicitly overrides it. On `PROCEED`, still
-show the receipt. Resolve uncovered claims by their suggested remedy:
-`hop_deeper`, `code_trace`, or `flag_to_user`.
-
-If a gate is skipped, degraded, or has no recommendation, report that honestly
-and never treat it as approval. Follow any host enforcement that blocks mutation.
+Stop `MODIFY`/`DO_NOT_PROCEED`/`NEEDS_HUMAN_JUDGMENT` for user resolution/
+override; show PROCEED receipt. Fix gaps: hop_deeper/code_trace/flag_to_user.
+Skipped/degraded/no verdict is not approval; report it.
 
 ### 3. Report and capture judgment
 
