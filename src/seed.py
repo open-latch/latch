@@ -34,10 +34,27 @@ DEFAULT_LOOKBACK_DAYS = 90
 LOOKBACK_CHOICES = (5, 14, 30, 90)
 DEFAULT_MAX_SESSIONS = 50
 DEFAULT_MAX_CANDIDATES = 20
-HARD_MAX_LLM_CALLS = 20
+# With the per-source cap gone, the global bound scales with how many sessions
+# were actually read so a 30-session seed is not squeezed into one 20-candidate
+# budget, while HARD_MAX_TOTAL_CANDIDATES keeps any run bounded by construction.
+CANDIDATES_PER_SESSION_TARGET = 8
+HARD_MAX_TOTAL_CANDIDATES = 200
+# Bounds the raise-cap / shrink-window re-confirm loop so an odd answer
+# sequence cannot spin.
+MAX_COVERAGE_RECONFIRMS = 4
+# 20 is the DEFAULT, not a ceiling. It used to be a hard clamp, so
+# `--max-llm-calls 500` silently became 20 and sessions 21..N were selected,
+# reported as selected, and then never read — the exact "latch missed my
+# history" failure this default now surfaces instead of hiding. The real
+# ceiling only exists so a typo cannot start an unbounded model-call run.
+DEFAULT_MAX_LLM_CALLS_BASE = 20
+HARD_MAX_LLM_CALLS_CEILING = int(
+    os.environ.get("LATCH_SEED_MAX_LLM_CALLS_CEILING") or 500
+)
+HARD_MAX_LLM_CALLS = DEFAULT_MAX_LLM_CALLS_BASE  # back-compat alias
 DEFAULT_MAX_LLM_CALLS = min(
-    int(os.environ.get("LATCH_SEED_MAX_LLM_CALLS") or HARD_MAX_LLM_CALLS),
-    HARD_MAX_LLM_CALLS,
+    int(os.environ.get("LATCH_SEED_MAX_LLM_CALLS") or DEFAULT_MAX_LLM_CALLS_BASE),
+    HARD_MAX_LLM_CALLS_CEILING,
 )
 DEFAULT_LLM_WARNING_THRESHOLD = int(os.environ.get("LATCH_SEED_LLM_CONFIRM_THRESHOLD") or 10)
 NO_LLM_INTERNAL_ENV = "LATCH_SEED_ALLOW_NO_LLM"
@@ -46,7 +63,13 @@ MAX_LLM_SOURCE_CHARS = 28_000
 MAX_SOURCE_INVENTORY = 200
 MAX_SOURCE_SCAN = 1_000
 RECENT_SOURCE_RESERVE = 0.20
-MAX_CANDIDATES_PER_SOURCE = 6
+# No per-source candidate cap. A flat cap truncated node-dense sessions before
+# the model's judgment mattered: measured against the restored KB, a 28-node
+# session could return at most 6, holding total recall to a 60.6% ceiling.
+# Boundedness now comes from the global --max-candidates bound applied in
+# merge_candidate_sets, so a run stays cost-bounded without silently dropping
+# the richest sessions.
+MAX_CANDIDATES_PER_SOURCE = None
 SEED_EXTRACTOR_VERSION = "seed-v2"
 # Exact-meaning identity is intentionally independent of the extractor release:
 # upgrading extraction must not duplicate an unchanged reviewed claim.
@@ -69,6 +92,9 @@ SEED_CANDIDATE_PREAMBLE = (
 ROLE_LINE_RE = re.compile(r"^\[([A-Za-z0-9_?. -]+)\]\s*(.*)")
 CURSOR_USER_QUERY_RE = re.compile(r"<user_query>\s*(.*?)\s*</user_query>", re.DOTALL)
 USER_ROLES = {"user", "human"}
+# Assistant turns are second-tier evidence: only consulted when no user turn
+# qualifies, and always labelled. User authority still overrides them.
+ASSISTANT_EVIDENCE_ROLES = {"assistant", "agent", "model"}
 WHITESPACE_RE = re.compile(r"\s+")
 
 # High-confidence patterns only. This is a bounded safety layer, not a claim of
@@ -349,8 +375,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                     type=int,
                     help=("maximum selected sessions after bounded value/recency ranking "
                           f"(default: {DEFAULT_MAX_SESSIONS}; configurable with --last-sessions N)"))
-    ap.add_argument("--max-candidates", type=int, default=DEFAULT_MAX_CANDIDATES,
-                    help=f"maximum candidates to show/write (default: {DEFAULT_MAX_CANDIDATES})")
+    ap.add_argument("--max-candidates", type=int, default=None,
+                    help=("maximum candidates to show/write (default: scales with "
+                          f"sessions read, {CANDIDATES_PER_SESSION_TARGET}/session, "
+                          f"floor {DEFAULT_MAX_CANDIDATES}, "
+                          f"hard max {HARD_MAX_TOTAL_CANDIDATES})"))
     ap.add_argument("--all-projects", action="store_true",
                     help="scan all recent local transcripts instead of filtering to --project")
     workstream = ap.add_mutually_exclusive_group()
@@ -962,9 +991,20 @@ def discover_sources(
         : max(0, MAX_SOURCE_SCAN - len(cursor_items))
     ]
 
+    # In-window transcripts that discovery's own outer caps drop before any
+    # per-source filtering. These are invisible to stats["eligible"], so
+    # coverage that ignores them can claim "all N sessions in the window" while
+    # MAX_SOURCE_SCAN / MAX_SOURCE_INVENTORY silently omitted some.
+    if stats is not None:
+        stats["in_window_total"] = len(ordered)
+        stats["scan_truncated"] = max(0, len(ordered) - len(scan_items))
+        stats["inventory_truncated"] = 0
+
     eligible: list[SeedSource] = []
-    for mtime, agent, path, session_id, _exact in scan_items:
+    for examined, (mtime, agent, path, session_id, _exact) in enumerate(scan_items):
         if len(eligible) >= MAX_SOURCE_INVENTORY:
+            if stats is not None:
+                stats["inventory_truncated"] = len(scan_items) - examined
             break
         if stats is not None:
             stats["inventory_considered"] += 1
@@ -1489,27 +1529,264 @@ def estimate_llm_calls(session_count: int, *, calls_per_session: int, max_llm_ca
     return min(session_count * calls_per_session, max_llm_calls)
 
 
-def confirm_llm_budget(args: argparse.Namespace, source_count: int) -> bool:
-    estimate = estimate_llm_calls(
-        source_count,
-        calls_per_session=1,
-        max_llm_calls=args.max_llm_calls,
-    )
-    if args.llm != "yes" or estimate == 0:
-        return True
-    if estimate <= args.llm_warning_threshold or args.yes:
-        return True
+def coverage_plan(
+    args: argparse.Namespace,
+    eligible: int,
+    project_path: str | None = None,
+    discovery_omitted: int = 0,
+) -> dict[str, Any]:
+    """Exact per-run coverage, derived from pre-scan counts before any call.
+
+    `eligible` is the number of in-window sessions discover_sources actually
+    found, so `covered`/`shortfall` are counted facts rather than an estimate.
+    Both stopping conditions are reported: this run's --max-llm-calls and the
+    shared daily non-heal budget, because whichever is smaller is the one that
+    truncates, and a truncation the user cannot see reads as latch failing.
+    """
+    per_run = max(0, int(getattr(args, "max_llm_calls", 0) or 0))
+    session_cap = max(0, int(getattr(args, "max_sessions", 0) or 0))
+    remaining_daily = None
+    if project_path is not None:
+        try:
+            import budget  # noqa: WPS433
+            remaining_daily = budget.remaining_nonheal(project_path)
+        except Exception:  # budget storage is advisory here, never fatal
+            remaining_daily = None
+    # Three independent limits can truncate a run. Whichever is smallest is the
+    # one the user must act on, and --last-sessions belongs here: it is applied
+    # inside discover_sources, so measuring coverage against the list it already
+    # returned would report "all N in the window" while silently dropping the
+    # sessions it discarded.
+    # An answer of "full" raises flags, but llm_candidates still clamps to the
+    # hard ceiling. Treating the raised raw value as real would report full
+    # coverage while execution quietly ran fewer calls, so the ceiling is a
+    # first-class constraint and per_run is clamped by it here too.
+    per_run = min(per_run, HARD_MAX_LLM_CALLS_CEILING)
+    limits: dict[str, int] = {"per_run_cap": per_run, "session_cap": session_cap}
+    if remaining_daily is not None:
+        limits["daily_budget"] = remaining_daily
+    binding, binding_limit = min(limits.items(), key=lambda kv: (kv[1], kv[0]))
+    if binding == "per_run_cap" and per_run >= HARD_MAX_LLM_CALLS_CEILING:
+        binding = "hard_ceiling"
+    # Sessions discovery's own outer caps dropped before eligibility was even
+    # assessed. They are in the window and will not be read, so full coverage
+    # is false whatever the other caps say.
+    omitted = max(0, int(discovery_omitted or 0))
+    total_in_window = eligible + omitted
+    covered = min(eligible, binding_limit)
+    return {
+        "eligible_sessions": eligible,
+        "in_window_total": total_in_window,
+        "discovery_omitted": omitted,
+        "covered_sessions": covered,
+        "shortfall_sessions": max(0, total_in_window - covered),
+        "full_coverage": covered >= total_in_window,
+        "per_run_cap": per_run,
+        "session_cap": session_cap,
+        "hard_ceiling": HARD_MAX_LLM_CALLS_CEILING,
+        "remaining_daily_nonheal": remaining_daily,
+        "binding_constraint": binding,
+        # Caps the "full" choice can actually raise. The daily budget needs
+        # /latch-budget-approve; the hard ceiling and discovery's outer caps
+        # cannot be raised from this prompt at all, so promising full when
+        # either binds would be a lie.
+        "raisable_by_flags": (
+            binding not in {"daily_budget", "hard_ceiling"} and omitted == 0
+        ),
+        "calls_needed_for_full_coverage": total_in_window,
+    }
+
+
+def render_coverage_lines(plan: dict[str, Any]) -> list[str]:
+    total = plan.get("in_window_total", plan["eligible_sessions"])
+    covered = plan["covered_sessions"]
+    if plan["full_coverage"]:
+        return [f"Coverage: all {total} session(s) in the window will be read."]
+    lines = [
+        f"Coverage: {covered} of {total} session(s) will be read — "
+        f"{plan['shortfall_sessions']} would be skipped.",
+        "This is a cap, not a latch failure: the skipped sessions are never "
+        "opened, so nothing in them can be found.",
+    ]
+    if plan.get("discovery_omitted"):
+        lines.append(
+            f"{plan['discovery_omitted']} in-window session(s) were dropped by "
+            "latch's own discovery limits before eligibility was assessed "
+            f"(scan {MAX_SOURCE_SCAN} / inventory {MAX_SOURCE_INVENTORY}); "
+            "narrow the window or the source selection to bring them in range."
+        )
+    binding = plan["binding_constraint"]
+    if binding == "hard_ceiling":
+        lines.append(
+            f"The binding limit is latch's absolute per-run ceiling "
+            f"({plan['hard_ceiling']} calls). It cannot be raised from this "
+            "prompt; seed in smaller windows across several runs."
+        )
+        return lines
+    if binding == "daily_budget":
+        lines.append(
+            f"The binding limit is your daily non-heal model-call budget "
+            f"({plan['remaining_daily_nonheal']} call(s) left today). Raising "
+            "--max-llm-calls cannot lift it; run /latch-budget-approve to "
+            "clear it for the rest of today, then rerun."
+        )
+    elif binding == "session_cap":
+        lines.append(
+            f"The binding limit is --last-sessions ({plan['session_cap']}). "
+            f"Full coverage needs {plan['calls_needed_for_full_coverage']}."
+        )
+    else:
+        lines.append(
+            f"The binding limit is --max-llm-calls ({plan['per_run_cap']}). "
+            f"Full coverage needs {plan['calls_needed_for_full_coverage']}."
+        )
+    return lines
+
+
+def confirm_llm_budget(
+    args: argparse.Namespace,
+    eligible: int,
+    project_path: str | None = None,
+    discovery_omitted: int = 0,
+) -> str:
+    """Confirm coverage before spending calls; never truncate silently.
+
+    `eligible` is the count of in-window sessions BEFORE --last-sessions and
+    --max-llm-calls reduce it, so a shortfall caused by either is visible.
+
+    Returns "proceed" | "cancel" | "rescan". "rescan" means the answer changed
+    discovery inputs (a raised session cap or a smaller window), so the caller
+    must re-discover and confirm again rather than reuse the stale list.
+    """
+    if args.llm != "yes":
+        return "proceed"
     stream = sys.stderr if args.format == "json" else sys.stdout
-    print(
-        f"\nLLM seed refinement may make up to {estimate} call(s) "
-        f"({source_count} session(s), capped at {args.max_llm_calls}).",
-        file=stream,
+    plan = coverage_plan(args, eligible, project_path, discovery_omitted)
+    args.coverage_plan = plan
+
+    if plan["full_coverage"]:
+        estimate = min(eligible, plan["per_run_cap"])
+        if estimate == 0 or estimate <= args.llm_warning_threshold or args.yes:
+            return "proceed"
+        print("", file=stream)
+        for line in render_coverage_lines(plan):
+            print(line, file=stream)
+        # default=False keeps the pre-existing consent posture: an unattended
+        # run must not start spending model calls. --yes is handled above.
+        return "proceed" if _prompt_yes_no_on_stream(
+            f"Continue with LLM refinement ({estimate} call(s))",
+            default=False, stream=stream,
+        ) else "cancel"
+
+    # Shortfall. Report it unconditionally -- including when the cap is 0 and
+    # no call would be made at all, which previously returned success in
+    # silence -- so a partial or empty seed is never mistaken for latch
+    # failing to find the user's history.
+    print("", file=stream)
+    for line in render_coverage_lines(plan):
+        print(line, file=stream)
+    if args.yes:
+        # One-command activation (id=1986) stays unattended, but never quiet.
+        return "proceed"
+
+    choice = _prompt_coverage_choice(plan, stream=stream)
+    if choice == "cancel":
+        return "cancel"
+    if choice == "as_is":
+        return "proceed"
+    if choice == "full":
+        if not plan["raisable_by_flags"]:
+            # Raising per-run flags cannot satisfy "full" when the daily
+            # budget, latch's hard ceiling, or discovery's own outer caps are
+            # what bind. Promising full coverage anyway would be exactly the
+            # silent-truncation failure this prompt exists to prevent.
+            binding = plan["binding_constraint"]
+            if binding == "daily_budget":
+                reason = (
+                    "the daily non-heal budget is the binding limit — run "
+                    "/latch-budget-approve, then rerun seeding"
+                )
+            elif binding == "hard_ceiling":
+                reason = (
+                    f"latch's absolute per-run ceiling "
+                    f"({plan.get('hard_ceiling')} calls) is the binding limit "
+                    "— seed in smaller windows across several runs"
+                )
+            else:
+                reason = (
+                    f"{plan.get('discovery_omitted', 0)} in-window session(s) "
+                    "are beyond latch's discovery limits and cannot be reached "
+                    "by raising this cap — narrow the window or the source "
+                    "selection"
+                )
+            print(f"Cannot reach full coverage in this run: {reason}.",
+                  file=stream)
+            return "cancel"
+        needed = plan["calls_needed_for_full_coverage"]
+        args.max_llm_calls = max(int(args.max_llm_calls or 0), needed)
+        args.max_sessions = max(int(args.max_sessions or 0), needed)
+        return "rescan"
+    if choice == "reduce":
+        if not _prompt_reduce_window(args, stream=stream):
+            return "cancel"
+        # Re-discover against the smaller window and confirm again: the new
+        # window may still be over cap, and filtering the already-selected
+        # subset would not be an honest recount.
+        return "rescan"
+    return "cancel"
+
+
+def _prompt_coverage_choice(plan: dict[str, Any], *, stream) -> str:
+    options = (
+        ("full", f"raise the cap to {plan['calls_needed_for_full_coverage']} "
+                 "for full coverage"),
+        ("reduce", "reduce the lookback window so the cap covers it"),
+        ("as_is", f"run as is, reading the {plan['covered_sessions']} most "
+                  "recent session(s)"),
+        ("cancel", "cancel"),
     )
-    return _prompt_yes_no_on_stream(
-        "Continue with LLM refinement",
-        default=False,
+    print("", file=stream)
+    for key, label in options:
+        print(f"  [{key}] {label}", file=stream)
+    valid = {key for key, _ in options}
+    for _ in range(3):
+        try:
+            raw = input("Choose [full/reduce/as_is/cancel] (default: as_is): ")
+        except EOFError:
+            # No stdin at all means no consent was given. Enter still selects
+            # as_is; only an unattended run without --yes cancels.
+            return "cancel"
+        answer = raw.strip().lower() or "as_is"
+        if answer in valid:
+            return answer
+        print("Enter one of: full, reduce, as_is, cancel.", file=stream)
+    return "cancel"
+
+
+def _prompt_reduce_window(args: argparse.Namespace, *, stream) -> bool:
+    smaller = [days for days in LOOKBACK_CHOICES if days < args.lookback_days]
+    if not smaller:
+        # Returning success here yielded a "rescan" that changed nothing;
+        # repeating it exhausted the reconfirm loop and the run proceeded
+        # without the user ever consenting to the shortfall. Fail closed.
+        print(
+            f"Already at the smallest lookback window ({args.lookback_days} "
+            "days); it cannot be reduced further. Choose 'as_is' to accept "
+            "partial coverage, or raise the caps.",
+            file=stream,
+        )
+        return False
+    print(f"Lookback choices smaller than {args.lookback_days}: "
+          f"{', '.join(str(d) for d in smaller)}", file=stream)
+    chosen = _prompt_int(
+        "New lookback window in days",
+        default=smaller[-1],
+        choices=tuple(smaller),
         stream=stream,
     )
+    args.lookback_days = chosen
+
+    return True
 
 
 def prepare_llm_budget_storage(project_path: str) -> bool:
@@ -1571,7 +1848,7 @@ def planned_llm_sources(
     Re-selecting at the call cap preserves the recent reserve inside the actual
     model plan, rather than merely inside the larger acquisition window.
     """
-    max_calls = min(max_calls, HARD_MAX_LLM_CALLS)
+    max_calls = min(max_calls, HARD_MAX_LLM_CALLS_CEILING)
     if max_calls <= 0:
         return []
     return select_sources(sources, max_sessions=min(len(sources), max_calls))
@@ -1587,7 +1864,7 @@ def llm_candidates(
     focus_workstream: str | None = None,
     stats: dict[str, Any] | None = None,
 ) -> list[SeedCandidate]:
-    max_calls = min(max_calls, HARD_MAX_LLM_CALLS)
+    max_calls = min(max_calls, HARD_MAX_LLM_CALLS_CEILING)
     if stats is not None:
         stats.update({
             "attempted": 0,
@@ -1692,7 +1969,8 @@ def llm_candidates(
             if cand:
                 out.append(cand)
                 accepted += 1
-                if accepted >= MAX_CANDIDATES_PER_SOURCE:
+                if MAX_CANDIDATES_PER_SOURCE is not None \
+                        and accepted >= MAX_CANDIDATES_PER_SOURCE:
                     break
         if stats is not None:
             if valid_envelope:
@@ -1822,6 +2100,89 @@ def parse_json_envelope(raw: str) -> dict:
     return obj if isinstance(obj, dict) else {}
 
 
+MIN_CITED_EXCERPT_CHARS = 24
+MAX_CITED_EXCERPT_CHARS = 600
+ASSISTANT_EXCERPT_PREFIX = "assistant: "
+
+
+def assistant_evidence_excerpt(
+    cited: str, *, source: SeedSource, focus_terms: set[str], normalized,
+) -> str:
+    """Fallback evidence from assistant turns, explicitly labelled as such.
+
+    User turns are only 0.1% of a transcript, so restricting evidence to them
+    left most candidates citing an unrelated user line or nothing at all —
+    measured, only 8.5% of shown excerpts actually supported their candidate.
+    Assistant turns carry the reasoning most claims actually come from.
+
+    This never competes with user evidence: the caller only reaches here when
+    no user turn qualified, and a user correction that fails closed still
+    suppresses the excerpt entirely. The `assistant: ` prefix keeps the receipt
+    honest about who said it, so a reader never mistakes model reasoning for a
+    user instruction.
+    """
+    best: tuple[float, int, str] | None = None
+    cited_hit: tuple[int, str] | None = None
+    in_assistant = False
+    index = 0
+    for raw in source.text.splitlines():
+        raw = raw.strip()
+        if not raw:
+            continue
+        match = ROLE_LINE_RE.match(raw)
+        if match:
+            role = match.group(1).split()[0].lower()
+            in_assistant = role in ASSISTANT_EVIDENCE_ROLES
+            if not in_assistant:
+                continue
+            line = match.group(2).strip()
+        elif in_assistant:
+            line = raw
+        else:
+            continue
+        if should_skip_subject_candidate(line) or len(line) < 20:
+            continue
+        index += 1
+        terms = {t for t in normalized(line).split() if len(t) > 3}
+        shared = focus_terms & terms
+        if len(shared) < 2:
+            continue
+        safe, _ = redact_seed_text(line)
+        text = ASSISTANT_EXCERPT_PREFIX + clip(safe, 360)
+        score = len(shared) / max(1, min(len(focus_terms), len(terms)))
+        if cited and cited in WHITESPACE_RE.sub(" ", safe):
+            if cited_hit is None or index > cited_hit[0]:
+                cited_hit = (index, text)
+        if best is None or (score, index) > (best[0], best[1]):
+            best = (score, index, text)
+    if cited_hit is not None:
+        return cited_hit[1]
+    return best[2] if best else ""
+
+
+def verbatim_model_excerpt(value: Any, *, source: SeedSource) -> str:
+    """Accept the model's cited excerpt only if it really is in the transcript.
+
+    Matching is whitespace-insensitive because the model reflows what it
+    copies, but it is otherwise exact — no paraphrase, no fuzzy overlap. The
+    haystack is the already-redacted `source.text`, so a hit cannot reintroduce
+    unredacted content.
+    """
+    if not isinstance(value, str):
+        return ""
+    excerpt = WHITESPACE_RE.sub(" ", value).strip()
+    if len(excerpt) < MIN_CITED_EXCERPT_CHARS:
+        return ""
+    excerpt = excerpt[:MAX_CITED_EXCERPT_CHARS]
+    haystack = WHITESPACE_RE.sub(" ", source.text)
+    if excerpt not in haystack:
+        return ""
+    # Re-run redaction anyway: cheap, and keeps the guarantee local rather than
+    # depending on source.text having been redacted upstream.
+    safe, _ = redact_seed_text(excerpt)
+    return safe
+
+
 def grounded_source_excerpt(
     value: Any,
     *,
@@ -1829,16 +2190,28 @@ def grounded_source_excerpt(
     title: str,
     body: str,
 ) -> str:
-    """Return a redacted transcript-grounded excerpt, never model-only prose."""
-    # The model-provided excerpt is only a hint. Never return it directly:
-    # evidence is re-selected from redacted user turns below.
-    del value
+    """Return a redacted transcript-grounded excerpt, never model-only prose.
+
+    Evidence is still re-selected from redacted user turns, and every existing
+    invariant holds: assistant prose is never citable, a newer conflicting user
+    correction still fails closed, and the relevance gate is unchanged.
+
+    What changed is only WHICH surviving user turn is cited. Term-overlap
+    ranking alone frequently picked a turn unrelated to the claim — measured
+    against the restored KB, the excerpt shown failed to support its own
+    candidate in the large majority of cases, which makes a seeded receipt
+    actively misleading. So when the model names the turn it relied on and
+    that turn independently clears every check, that turn is cited instead of
+    the highest-overlap one. An unverifiable citation is ignored, not trusted.
+    """
 
     def normalized(text: str) -> str:
         return re.sub(
             r"[^a-z0-9 ]+", " ",
             WHITESPACE_RE.sub(" ", text.lower()),
         ).strip()
+
+    cited = verbatim_model_excerpt(value, source=source)
 
     focus_terms = {
         term for term in normalized(f"{title} {body}").split()
@@ -1855,6 +2228,7 @@ def grounded_source_excerpt(
     )
     focus_targets = candidate_choice_targets(focus_candidate)
     ranked_candidates: list[tuple[float, int, str]] = []
+    cited_matches: list[tuple[int, str]] = []
     in_user_turn = False
     user_turn_index = 0
     for raw in source.text.splitlines():
@@ -1880,8 +2254,13 @@ def grounded_source_excerpt(
             term for term in normalized_candidate.split() if len(term) > 3
         }
         shared = focus_terms & candidate_terms
-        if len(shared) < 2:
-            continue
+        # Conflict detection runs BEFORE the relevance gate. A terse user
+        # correction ("No, keep them read-only.") shares too few terms with the
+        # claim to clear the two-term bar, so gating on relevance first let the
+        # correction be skipped entirely — and the assistant fallback then
+        # relaunched the very claim the user had just overruled. Relevance
+        # decides which evidence to *rank*, never whether a user turn carries
+        # authority to invalidate.
         safe_candidate, _ = redact_seed_text(candidate)
         evidence_candidate = SeedCandidate(
             kind="decision",
@@ -1908,16 +2287,51 @@ def grounded_source_excerpt(
             ranked_candidates.clear()
             ranked_candidates.append((-1.0, user_turn_index, ""))
             continue
+        if len(shared) < 2:
+            # Relevance gate: too weak to cite as evidence, but it has already
+            # had its chance to invalidate the claim above.
+            continue
         score = len(shared) / max(1, min(len(focus_terms), len(candidate_terms)))
         ranked_candidates.append((
             score,
             user_turn_index,
             clip(safe_candidate, 360),
         ))
+        if cited and cited in WHITESPACE_RE.sub(" ", safe_candidate):
+            cited_matches.append((score, user_turn_index, clip(safe_candidate, 360)))
     if not ranked_candidates:
-        return ""
+        # No user turn supports this claim. Rather than show nothing, cite the
+        # assistant turn it actually came from, clearly labelled.
+        return assistant_evidence_excerpt(
+            cited, source=source, focus_terms=focus_terms, normalized=normalized,
+        )
     best = max(ranked_candidates, key=lambda item: (item[0], item[1]))
-    return best[2] if best[0] >= 0 else ""
+    if best[0] < 0:
+        # Fail-closed on a newer conflicting user correction outranks the
+        # model's citation AND any assistant text: the claim is stale, so it
+        # gets no receipt at all rather than one that looks supportive.
+        return ""
+    if cited_matches:
+        # The model told us which turn it relied on. Term-overlap ranking
+        # regularly picks a different, unrelated turn, which is what made
+        # seeded receipts fail to support their own claims. Honour the
+        # citation, but only after it has cleared every check above:
+        # user-turn origin, relevance, staleness, and redaction.
+        cited_score, cited_index, cited_text = max(
+            cited_matches, key=lambda item: (item[1],),
+        )
+        # Recency still outranks the citation. If the user restated or refined
+        # the same point in a later turn that scores at least as well, cite
+        # that one: a citation identifies the claim, not which phrasing of it
+        # is current.
+        superseding = [
+            item for item in ranked_candidates
+            if item[1] > cited_index and item[0] >= cited_score
+        ]
+        if superseding:
+            return max(superseding, key=lambda item: (item[0], item[1]))[2]
+        return cited_text
+    return best[2]
 
 
 def candidate_from_llm_item(item: Any, src: SeedSource) -> SeedCandidate | None:
@@ -2056,6 +2470,21 @@ def merge_candidate_sets(
     )
 
 
+def effective_max_candidates(args: argparse.Namespace) -> int:
+    """Resolve the global candidate bound; an explicit --max-candidates wins.
+
+    Left unset, the bound scales with the number of sessions actually read so
+    removing the per-source cap does not simply move the truncation to a flat
+    global limit. HARD_MAX_TOTAL_CANDIDATES keeps every run bounded.
+    """
+    explicit = getattr(args, "max_candidates", None)
+    if explicit is not None:
+        return int(explicit)
+    sessions = int(getattr(args, "sources_selected", 0) or 0)
+    scaled = max(DEFAULT_MAX_CANDIDATES, sessions * CANDIDATES_PER_SESSION_TARGET)
+    return min(scaled, HARD_MAX_TOTAL_CANDIDATES)
+
+
 def choose_seed_candidates(
     args: argparse.Namespace,
     llm: list[SeedCandidate],
@@ -2064,7 +2493,9 @@ def choose_seed_candidates(
     """Pick report candidates while keeping the public LLM boundary honest."""
     if args.llm == "yes" and deterministic and not llm:
         return [], True
-    return merge_candidate_sets(llm, deterministic, max_candidates=args.max_candidates), False
+    return merge_candidate_sets(
+        llm, deterministic, max_candidates=effective_max_candidates(args),
+    ), False
 
 
 def requested_workstream_key(title: str) -> str:
@@ -3969,6 +4400,7 @@ def render_json(
             for source in sources
         ],
         "llm": args.llm or "no",
+        "coverage": dict(getattr(args, "coverage_plan", {}) or {}),
         "llm_call_estimate": llm_estimate,
         "llm_calls": public_seed_stats(
             dict(getattr(args, "llm_stats", {}) or {})
@@ -5564,13 +5996,16 @@ def main(argv: list[str] | None = None) -> int:
     if args.max_sessions is None or args.max_sessions <= 0:
         print("--last-sessions must be positive.", file=sys.stderr)
         return 2
-    if args.max_candidates <= 0 or args.max_llm_calls < 0:
+    # max_candidates is None when unset — it then scales with sessions read
+    # (effective_max_candidates); only an explicit value is range-checked.
+    if (args.max_candidates is not None and args.max_candidates <= 0) \
+            or args.max_llm_calls < 0:
         print("--max-candidates must be positive and --max-llm-calls non-negative.", file=sys.stderr)
         return 2
-    if args.max_llm_calls > HARD_MAX_LLM_CALLS:
+    if args.max_llm_calls > HARD_MAX_LLM_CALLS_CEILING:
         print(
-            f"--max-llm-calls cannot exceed the hard {HARD_MAX_LLM_CALLS}-call "
-            "initial-KB boundary.",
+            f"--max-llm-calls cannot exceed the hard "
+            f"{HARD_MAX_LLM_CALLS_CEILING}-call initial-KB boundary.",
             file=sys.stderr,
         )
         return 2
@@ -5752,6 +6187,94 @@ def main(argv: list[str] | None = None) -> int:
             args.sources_skipped_unchanged = len(already_applied)
 
         args.sources_selected = len(sources)
+
+        if args.llm == "yes" and sources \
+                and not prepare_llm_budget_storage(args.project):
+            if args.format == "json":
+                print(json.dumps({
+                    "ok": False,
+                    "error": "budget_storage_unavailable",
+                }))
+            return 1
+
+        # Coverage is confirmed against every ELIGIBLE session -- the count
+        # before --last-sessions and --max-llm-calls reduce it. discover_sources
+        # already applied --last-sessions, so measuring against the list it
+        # returned would report "all N in the window" while hiding whatever it
+        # discarded. An answer that raises the session cap or shrinks the window
+        # changes discovery itself, so we re-discover and confirm again instead
+        # of filtering the stale list.
+        coverage_confirmed = False
+        for _ in range(MAX_COVERAGE_RECONFIRMS):
+            stats_now = args.discovery_stats or {}
+            eligible = int(stats_now.get("eligible", len(sources)))
+            omitted = int(stats_now.get("scan_truncated", 0) or 0) + int(
+                stats_now.get("inventory_truncated", 0) or 0
+            )
+            verdict = confirm_llm_budget(args, eligible, args.project, omitted)
+            if verdict == "cancel":
+                emit_seed_cli_failure(
+                    args,
+                    code="llm_budget_cancelled",
+                    message="Seed pass cancelled before any LLM calls.",
+                )
+                return 1
+            if verdict != "rescan":
+                coverage_confirmed = True
+                break
+            try:
+                sources = discover_sources(
+                    source=args.source,
+                    project_path=args.project,
+                    lookback_days=args.lookback_days,
+                    max_sessions=args.max_sessions,
+                    claude_home=args.claude_home,
+                    codex_home=args.codex_home,
+                    cursor_transcripts=args.cursor_transcript,
+                    cursor_session_id=args.cursor_session_id,
+                    cursor_history=args.cursor_history,
+                    cursor_home=args.cursor_home,
+                    cursor_state_db=args.cursor_state_db,
+                    all_projects=args.all_projects,
+                    focus_query=args.new_workstream,
+                    stats=args.discovery_stats,
+                )
+            except cursor_transcript.CursorTranscriptError as e:
+                print(f"Cursor seed source unavailable: {e}", file=sys.stderr)
+                return 2
+            if not args.force_reimport:
+                try:
+                    sources, already_applied = split_applied_sources(
+                        sources,
+                        project_path=args.project,
+                        workstream_scope=scope_key,
+                    )
+                except SeedSourceLedgerError:
+                    emit_seed_cli_failure(
+                        args,
+                        code="seed_source_ledger_unavailable",
+                        message=(
+                            "Seed extraction stopped because the existing "
+                            "source ledger could not be read safely."
+                        ),
+                    )
+                    return 1
+                args.sources_skipped_unchanged = len(already_applied)
+            args.sources_selected = len(sources)
+        if not coverage_confirmed:
+            # Falling out of the loop means every pass asked to re-scan and the
+            # user never accepted a plan. Proceeding here would spend calls on
+            # an un-consented shortfall, so fail closed.
+            emit_seed_cli_failure(
+                args,
+                code="llm_budget_cancelled",
+                message=(
+                    "Seed pass cancelled: coverage was never confirmed after "
+                    f"{MAX_COVERAGE_RECONFIRMS} attempts."
+                ),
+            )
+            return 1
+
         call_sources = (
             planned_llm_sources(sources, max_calls=args.max_llm_calls)
             if args.llm == "yes" else sources
@@ -5762,26 +6285,11 @@ def main(argv: list[str] | None = None) -> int:
             max_llm_calls=args.max_llm_calls,
         ) if args.llm == "yes" else 0
 
-        if args.llm == "yes" and call_sources \
-                and not prepare_llm_budget_storage(args.project):
-            if args.format == "json":
-                print(json.dumps({
-                    "ok": False,
-                    "error": "budget_storage_unavailable",
-                }))
-            return 1
         if not confirm_source_use(args, call_sources):
             emit_seed_cli_failure(
                 args,
                 code="source_consent_cancelled",
                 message="Initial-KB extraction cancelled before any LLM calls.",
-            )
-            return 1
-        if not confirm_llm_budget(args, len(call_sources)):
-            emit_seed_cli_failure(
-                args,
-                code="llm_budget_cancelled",
-                message="Seed pass cancelled before any LLM calls.",
             )
             return 1
 
@@ -5791,7 +6299,7 @@ def main(argv: list[str] | None = None) -> int:
                 call_sources,
                 project_path=args.project,
                 max_calls=args.max_llm_calls,
-                max_candidates=args.max_candidates,
+                max_candidates=effective_max_candidates(args),
                 backend=args.backend,
                 focus_workstream=args.new_workstream,
                 stats=args.llm_stats,
@@ -5834,7 +6342,7 @@ def main(argv: list[str] | None = None) -> int:
             deterministic_sources = sources
             apply_sources = sources
         deterministic = deterministic_candidates(
-            deterministic_sources, max_candidates=args.max_candidates,
+            deterministic_sources, max_candidates=effective_max_candidates(args),
         )
         if args.llm == "yes":
             deterministic = [
@@ -5850,7 +6358,7 @@ def main(argv: list[str] | None = None) -> int:
             candidates,
             new_workstream=args.new_workstream,
             workstream_id=args.workstream_id,
-            max_candidates=args.max_candidates,
+            max_candidates=effective_max_candidates(args),
         )
         args.llm_refinement_empty = bool(
             llm_refinement_empty

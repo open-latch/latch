@@ -205,6 +205,16 @@ def under_cap(
     return state[_count_field(category)] < cap
 
 
+def remaining_nonheal(project_path: str | None) -> int | None:
+    """Calls left today in the non-heal category, or None when unlimited.
+
+    None means today is approved (``/latch-budget-approve``), so the daily
+    budget cannot be the binding constraint. Callers surfacing coverage need
+    this to tell the user which cap actually truncates their run.
+    """
+    return status(project_path)["nonheal"]["remaining"]
+
+
 def record_invocation(
     project_path: str | None,
     *,
