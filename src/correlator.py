@@ -7,6 +7,7 @@ builds a ``gate_outcome-<date>.log`` row capturing:
   ``UNRESOLVED`` — derived from in-window kb_insert / kb_update activity
   and whether new edges link back to the verdict's cited ids.
 * Follow-up counts: ``followup_count_inserts``, ``followup_count_updates``,
+  ``followup_count_file_touches`` (files edited in-window — the shipped-diff signal),
   ``followup_count_reconciliations``, ``followup_count_corrections``.
 * ``cited_ids_touched`` (Gap D signal) — how many of the verdict's cited
   nodes the agent referenced after the verdict, via session_retrievals.
@@ -22,8 +23,13 @@ Spec: KB id=1098. Conventions: KB id=1091 / id=1108. Structural-only
 invariant — no titles, bodies, or raw prompt text in emitted rows.
 
 Idempotent at the same ``correlator_version``: dedup keys on
-``(gate_query_hash, gate_ts, correlator_version)``. Bumping the version
-re-emits rows under the new classification logic without colliding.
+``(gate_call_id, correlator_version)`` when the source gate row carries a
+``gate_call_id`` nonce, falling back to ``(gate_query_hash, gate_ts,
+correlator_version)`` for pre-nonce rows. The nonce is the only exact key:
+repeated identical requests share a ``query_hash``, so a hash+timestamp key
+collapses distinct calls on the single most common flow — a MODIFY followed by
+a retry (KB id=3310). Bumping the version re-emits rows under the new
+classification logic without colliding.
 """
 from __future__ import annotations
 
@@ -34,11 +40,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
+import artifacts   # noqa: E402
 import db          # noqa: E402
 import log_utils   # noqa: E402
 
 
-CORRELATOR_VERSION_DEFAULT = "0.2.0"  # 0.2.0: + correction signals (id=1159)
+CORRELATOR_VERSION_DEFAULT = "0.3.0"  # 0.3.0: + shipped-diff file touches (id=3948 V1)
 WINDOW_SECONDS_DEFAULT = 1800  # 30 minutes
 
 
@@ -67,24 +74,38 @@ def _fmt_db_ts(dt: datetime) -> str:
 
 # ---------- dedup ----------
 
+def _dedup_key(row: dict, *, version_key: str = "correlator_version") -> tuple | None:
+    """Dedup identity for one outcome row, or None when it cannot be keyed.
+
+    Prefers the ``gate_call_id`` nonce, which is unique per gate invocation.
+    Only pre-nonce rows fall back to hash+timestamp, which cannot separate a
+    repeated identical request from its retry (KB id=3310)."""
+    version = row.get(version_key)
+    if version is None:
+        return None
+    call_id = row.get("gate_call_id")
+    if isinstance(call_id, str) and call_id:
+        return ("call", call_id, version)
+    query_hash = row.get("gate_query_hash")
+    gate_ts = row.get("gate_ts")
+    if query_hash is None or gate_ts is None:
+        return None
+    return ("hash", query_hash, gate_ts, version)
+
+
 def _load_existing_keys(
     project_path, start_date: date, end_date: date,
-) -> set[tuple[str, str, str]]:
-    """Walk existing gate_outcome.log rows in the range and build a set of
-    ``(gate_query_hash, gate_ts, correlator_version)`` for dedup. Bounds
-    the range out by a few days on each side to catch session-crossing
+) -> set[tuple]:
+    """Walk existing gate_outcome.log rows in the range and build the dedup set.
+    Bounds the range out by a few days on each side to catch session-crossing
     overlap, but the set is small enough to load fully into memory."""
-    seen: set[tuple[str, str, str]] = set()
+    seen: set[tuple] = set()
     for R in log_utils.read_log_range(
         "gate_outcome", start_date, end_date, project_path,
     ):
-        key = (
-            R.get("gate_query_hash"),
-            R.get("gate_ts"),
-            R.get("correlator_version"),
-        )
-        if all(k is not None for k in key):
-            seen.add(key)  # type: ignore[arg-type]
+        key = _dedup_key(R)
+        if key is not None:
+            seen.add(key)
     return seen
 
 
@@ -271,6 +292,37 @@ def _modify_links_to_cited(
     return conn.execute(sql, params).fetchone() is not None
 
 
+def _count_file_touches(
+    conn: sqlite3.Connection,
+    session_id: str,
+    project_path: str | None,
+    t0: datetime,
+    t_end: datetime,
+) -> int:
+    """Count distinct files this session edited inside [t0, t_end] — the
+    "shipped diff" signal (id=3948 V1). Grounds a verdict's outcome in code that
+    actually moved rather than in a nearby KB write. Failure-isolated: any
+    missing transcript or parse error yields 0, matching this module's posture of
+    never letting observation break a label."""
+    try:
+        row = conn.execute(
+            "SELECT transcript_path FROM sessions WHERE id = ?", [session_id],
+        ).fetchone()
+    except sqlite3.Error:
+        return 0
+    if not row:
+        return 0
+    tpath = row["transcript_path"] if "transcript_path" in row.keys() else row[0]
+    if not tpath:
+        return 0
+    try:
+        return len(artifacts.observe_session_artifacts_in_window(
+            tpath, project_path, t0, t_end,
+        ))
+    except Exception:
+        return 0
+
+
 # ---------- outcome classification ----------
 
 def _classify(
@@ -279,6 +331,8 @@ def _classify(
     session_id: str,
     t0: datetime,
     t_end: datetime,
+    project_path: str | None = None,
+    file_touches: int | None = None,
 ) -> str:
     """Map (verdict, in-window activity) → outcome label. Closed set:
     ACCEPTED / OVERRIDDEN / AMBIGUOUS / UNRESOLVED."""
@@ -288,12 +342,24 @@ def _classify(
     progress_inserts = _count_inserts(
         conn, session_id, t0, t_end, kind="progress",
     )
+    if file_touches is None:
+        file_touches = _count_file_touches(
+            conn, session_id, project_path, t0, t_end,
+        )
 
     if verdict == "PROCEED":
         return "ACCEPTED" if progress_inserts > 0 else "AMBIGUOUS"
 
     if verdict == "MODIFY":
         if inserts_total == 0:
+            # No KB write. Shipped code in-window is still evidence the work
+            # went on without recording the ruling, so it reads as OVERRIDDEN
+            # rather than unknowable. With no code and no write there is
+            # genuinely nothing to infer from, and that stays AMBIGUOUS by
+            # founder ruling (id=3985) — relabelling it UNRESOLVED would have
+            # satisfied the ≤20% bar by renaming rather than by inferring.
+            if file_touches > 0:
+                return "OVERRIDDEN"
             return "AMBIGUOUS"
         if _modify_links_to_cited(conn, session_id, cited_ids, t0, t_end):
             return "ACCEPTED"
@@ -331,6 +397,10 @@ def correlate(
     counts = {
         "rows_emitted": 0,
         "rows_skipped_no_session_id": 0,
+        # Split out from rows_skipped_no_session_id, which was incremented at
+        # two unrelated sites and so could not serve as a clean denominator
+        # component for the coverage metric.
+        "rows_skipped_unparseable_ts": 0,
         "rows_skipped_dedup": 0,
         "rows_skipped_skipped_verdict": 0,
     }
@@ -353,17 +423,21 @@ def correlate(
             if not session_id:
                 counts["rows_skipped_no_session_id"] += 1
                 continue
-            key = (
-                R.get("query_hash"),
-                R.get("ts"),
-                correlator_version,
-            )
-            if all(k is not None for k in key) and key in seen:
+            # Build the dedup identity from the SOURCE gate row, mapped onto the
+            # same field names the emitted outcome row uses, so both sides of
+            # the comparison key on the nonce whenever it exists.
+            key = _dedup_key({
+                "gate_call_id": R.get("gate_call_id"),
+                "gate_query_hash": R.get("query_hash"),
+                "gate_ts": R.get("ts"),
+                "correlator_version": correlator_version,
+            })
+            if key is not None and key in seen:
                 counts["rows_skipped_dedup"] += 1
                 continue
             t0 = _parse_iso_ms(R.get("ts"))
             if t0 is None:
-                counts["rows_skipped_no_session_id"] += 1
+                counts["rows_skipped_unparseable_ts"] += 1
                 continue
             t_end = _compute_window_end(
                 conn, session_id, t0, window_seconds, next_ts_by_idx.get(idx),
@@ -381,19 +455,33 @@ def correlate(
             followup_corrections, cited_corrected = _correction_signals(
                 project_path, session_id, cited_ids, t0, t_end,
             )
-            outcome = _classify(conn, R, session_id, t0, t_end)
+            file_touches = _count_file_touches(
+                conn, session_id, project_path, t0, t_end,
+            )
+            outcome = _classify(
+                conn, R, session_id, t0, t_end,
+                project_path=project_path, file_touches=file_touches,
+            )
 
             log_utils.emit_event(
                 "gate_outcome",
                 {
                     "gate_ts": R.get("ts"),
                     "gate_query_hash": R.get("query_hash"),
+                    # The exact join key (id=3310). query_hash collides across
+                    # a repeated request and its retry; the nonce does not.
+                    "gate_call_id": R.get("gate_call_id"),
                     "verdict": R.get("recommendation"),
                     "outcome_category": outcome,
                     "followup_count_inserts": followup_inserts,
                     "followup_count_updates": followup_updates,
                     "followup_count_reconciliations": followup_recons,
                     "followup_count_corrections": followup_corrections,
+                    # Shipped-diff signal: a COUNT of files edited in-window,
+                    # never the paths. Paths are user content (they leak repo
+                    # layout and project subject matter) and have no place in a
+                    # structural stream.
+                    "followup_count_file_touches": file_touches,
                     "cited_ids_total": len(cited_ids),
                     "cited_ids_touched": cited_touched,
                     "cited_ids_corrected": cited_corrected,

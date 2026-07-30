@@ -2377,14 +2377,35 @@ def _emit_gate_outcome_event(
             except (TypeError, ValueError):
                 continue
         cited_nodes = []
+        seen_ids: set[int] = set()
         for row in evidence:
             node_id = int(row["id"])
+            seen_ids.add(node_id)
             metadata = prompt_metadata.get(node_id) or {}
             cited_nodes.append({
                 "node_id": node_id,
                 "kind": row.get("kind"),
                 "status_at_citation": row.get("status"),
                 "workstream_id_at_event": row.get("workstream_id"),
+                "authority_tier_at_citation": metadata.get("authority_tier"),
+                "via_relation": metadata.get("via_relation"),
+                "roles": roles_by_id.get(node_id, []),
+                "classifier_load_bearing": node_id in load_bearing_ids,
+            })
+        # `evidence` is hydrated from verdict["evidence_nodes"] only, and nothing
+        # guarantees the role id-lists are a subset of it: a classifier can name
+        # an abandoned path it did not also list as evidence. Iterating evidence
+        # alone would drop that id silently — the one role we most need to keep,
+        # since a cited rejection is the whole point of the stream. Record the
+        # leftovers with the metadata we actually have (hydration fields stay
+        # null rather than guessed) so the role survives.
+        for node_id in sorted(set(roles_by_id) - seen_ids):
+            metadata = prompt_metadata.get(node_id) or {}
+            cited_nodes.append({
+                "node_id": node_id,
+                "kind": metadata.get("kind"),
+                "status_at_citation": metadata.get("status"),
+                "workstream_id_at_event": metadata.get("workstream_id"),
                 "authority_tier_at_citation": metadata.get("authority_tier"),
                 "via_relation": metadata.get("via_relation"),
                 "roles": roles_by_id.get(node_id, []),
@@ -2486,6 +2507,15 @@ def _log_invocation(
             "error": verdict.get("error"),
             "evidence_ids": sorted(e["id"] for e in evidence),
             "decision_chain": list(verdict.get("decision_chain") or []),
+            # Remaining verdict id-lists. Same privacy class as decision_chain
+            # above: pure node-id ints, never titles or verdict prose, so the
+            # structural-only invariant (id=1108 §3 / id=3915) still holds.
+            # abandoned_paths is the only one that cannot be recomputed from
+            # anything else, and it is what makes a cited rejection auditable
+            # after the fact.
+            "abandoned_paths": list(verdict.get("abandoned_paths") or []),
+            "active_constraints": list(verdict.get("active_constraints") or []),
+            "current_direction": list(verdict.get("current_direction") or []),
             "seed_count": len(seeds),
             "seed_ids": [s["id"] for s in seeds],
             # Structural lane-contact substrate for lifecycle detection. Never

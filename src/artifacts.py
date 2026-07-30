@@ -37,6 +37,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
 
@@ -308,6 +309,188 @@ def observe_session_artifacts(
             if key not in seen:
                 seen.add(key)
                 out.append({"repo": repo, "path": rel})
+    return out
+
+
+def _parse_transcript_ts(value) -> datetime | None:
+    """Parse a transcript line's ISO-8601 `timestamp` to an aware UTC datetime.
+    Returns None for anything unparseable, so a malformed line is skipped rather
+    than silently counted as in-window."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    raw = value.strip()
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+_CODEX_EDIT_TOOLS = frozenset({"apply_patch"})
+_CODEX_PATCH_MARKERS = ("*** Add File:", "*** Update File:", "*** Delete File:")
+
+
+def _codex_patch_paths(patch_text: str) -> list[str]:
+    """Extract the file paths an `apply_patch` envelope touches.
+
+    Codex writes edits as a single custom_tool_call whose `input` is a
+    ``*** Begin Patch`` envelope naming each file on an Add/Update/Delete
+    header line. Parsing those headers is how a Codex-hosted session's shipped
+    code becomes visible at all — without it the shipped-diff signal is blind on
+    the majority of this project's own gate traffic.
+    """
+    paths: list[str] = []
+    for line in patch_text.splitlines():
+        stripped = line.strip()
+        for marker in _CODEX_PATCH_MARKERS:
+            if stripped.startswith(marker):
+                candidate = stripped[len(marker):].strip()
+                if candidate:
+                    paths.append(candidate)
+                break
+    return paths
+
+
+def _failed_call_ids(objs: list[dict]) -> set[str]:
+    """Ids of tool calls whose result reported failure.
+
+    An attempted edit that errored moved no code, so counting it as a shipped
+    diff would manufacture evidence — the difference between "the ruling was
+    ignored" and "the agent tried something and it failed" is exactly what the
+    outcome label is supposed to capture.
+
+    Claude marks this on the `tool_result` item (`is_error`, joined by
+    `tool_use_id`). Codex carries a `status` on the call itself; anything other
+    than an explicit success is treated as failed, and an absent status is
+    treated as success so a shape change cannot silently zero the signal.
+    """
+    failed: set[str] = set()
+    for obj in objs:
+        msg = obj.get("message")
+        msg = msg if isinstance(msg, dict) else obj
+        content = msg.get("content") if isinstance(msg, dict) else None
+        if isinstance(content, list):
+            for item in content:
+                if not isinstance(item, dict):
+                    continue
+                if item.get("type") != "tool_result":
+                    continue
+                if not item.get("is_error"):
+                    continue
+                call_id = item.get("tool_use_id")
+                if isinstance(call_id, str) and call_id:
+                    failed.add(call_id)
+        payload = obj.get("payload")
+        if isinstance(payload, dict):
+            status = payload.get("status")
+            if isinstance(status, str) and status.strip().lower() not in (
+                "", "completed", "success", "succeeded",
+            ):
+                call_id = payload.get("call_id")
+                if isinstance(call_id, str) and call_id:
+                    failed.add(call_id)
+    return failed
+
+
+def observe_session_artifacts_in_window(
+    transcript_path: str | None,
+    project_cwd: str | None,
+    t0: datetime,
+    t_end: datetime,
+) -> list[dict]:
+    """Like `observe_session_artifacts`, but keeps only edits that (a) are
+    timestamped within [t0, t_end] and (b) actually succeeded.
+
+    This is the "shipped diff" signal for the outcome correlator: evidence that
+    code actually moved after a gate verdict, rather than proximity in time to a
+    KB write. Both host shapes are read — Claude's `tool_use` items and Codex's
+    `apply_patch` envelopes — because a signal that sees only one host would
+    under-report exactly the sessions that do the most work.
+
+    Deliberately reuses the transcript rather than shelling out to git:
+    `project_path` is the vault, not a worktree, and the no-git-command
+    constraint (priority id=1330) holds here as it does in `_repo_root_for`.
+    """
+    if not transcript_path:
+        return []
+    p = Path(transcript_path)
+    if not p.exists():
+        return []
+    objs: list[dict] = []
+    for line in p.read_text(encoding="utf-8", errors="replace").splitlines():
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict):
+            objs.append(obj)
+
+    failed = _failed_call_ids(objs)
+    seen: set[tuple[str, str]] = set()
+    out: list[dict] = []
+
+    def _record(file_path: str) -> None:
+        if not file_path or not str(file_path).strip():
+            return
+        repo, rel = _split_repo_path(str(file_path), project_cwd)
+        if not repo:
+            return
+        key = (repo, rel)
+        if key not in seen:
+            seen.add(key)
+            out.append({"repo": repo, "path": rel})
+
+    for obj in objs:
+        ts = _parse_transcript_ts(obj.get("timestamp"))
+        if ts is None or ts < t0 or ts > t_end:
+            continue
+
+        # Codex: response_item -> custom_tool_call/function_call apply_patch.
+        payload = obj.get("payload")
+        if isinstance(payload, dict):
+            call_id = payload.get("call_id")
+            if isinstance(call_id, str) and call_id in failed:
+                continue
+            if payload.get("name") in _CODEX_EDIT_TOOLS:
+                raw = payload.get("input")
+                if not isinstance(raw, str):
+                    raw = payload.get("arguments")
+                if isinstance(raw, str) and raw:
+                    text = raw
+                    if not text.lstrip().startswith("***"):
+                        # function_call form: the envelope arrives JSON-encoded.
+                        try:
+                            decoded = json.loads(raw)
+                        except json.JSONDecodeError:
+                            decoded = None
+                        if isinstance(decoded, dict):
+                            text = str(
+                                decoded.get("input")
+                                or decoded.get("patch")
+                                or "",
+                            )
+                    for candidate in _codex_patch_paths(text):
+                        _record(candidate)
+
+        # Claude Code: message content -> tool_use with an edit tool.
+        msg = obj.get("message")
+        msg = msg if isinstance(msg, dict) else obj
+        content = msg.get("content") if isinstance(msg, dict) else None
+        if not isinstance(content, list):
+            continue
+        for item in content:
+            if not (isinstance(item, dict) and item.get("type") == "tool_use"):
+                continue
+            if item.get("name") not in _EDIT_TOOLS:
+                continue
+            if item.get("id") in failed:
+                continue
+            inp = item.get("input") or {}
+            _record(inp.get("file_path") or inp.get("notebook_path") or "")
     return out
 
 

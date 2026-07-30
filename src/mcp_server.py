@@ -1744,9 +1744,15 @@ def kb_capture_decision(
         )
         if scope_error is not None:
             return scope_error
+        # Observation capture must not compete with foreground work for the
+        # daily budget: recording what the human decided is instrumentation,
+        # not judgment. use_llm=False takes the deterministic keep_both
+        # near-duplicate path (the same degrade already used on a cap hit)
+        # instead of spending a nonheal unit on arbitration. Raising the
+        # ceiling or auto-approving were both rejected (id=3654).
         result = heal.insert_with_heal(
             conn, kind="decision", title=title, body=body, status=status,
-            session_id=sid, links=edges or None, use_llm=True,
+            session_id=sid, links=edges or None, use_llm=False,
             workstream_id=resolved_workstream_id, project_path=_project_cwd(),
         )
         new_id = result.get("id")
