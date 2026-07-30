@@ -35,7 +35,7 @@ def assemble_gate_report(
     gates = _read("gate", start, end, project_path)
     adversary = _read("adversary", start, end, project_path)
     decisions = _read("decision", start, end, project_path)
-    outcomes = _read("gate_outcome", start, end, project_path)
+    outcomes = _latest_version_only(_read("gate_outcome", start, end, project_path))
 
     evidence_counts = Counter(
         int(node_id)
@@ -76,6 +76,7 @@ def assemble_gate_report(
         "evidence_type_counts": dict(evidence_type_counts),
         "gap_type_counts": dict(gap_type_counts),
     }
+    coverage = _coverage(gates, outcomes)
     used = {
         "gate_rows": len(gates),
         "adversary_rows": len(adversary),
@@ -107,6 +108,7 @@ def assemble_gate_report(
         "used": used,
         "structural_only": True,
         "verdict_counts": verdict_counts,
+        "coverage": coverage,
         "outcome_counts": outcome_counts,
         "outcome_by_verdict_counts": outcome_by_verdict_counts,
         "adversary_delta_counts": adversary_delta_counts,
@@ -150,6 +152,7 @@ def format_text(report: dict[str, Any]) -> str:
     ])
     _append_counts(lines, "Evidence types", claim_signals.get("evidence_type_counts") or {})
     _append_counts(lines, "Gap types", claim_signals.get("gap_type_counts") or {})
+    _append_coverage(lines, report.get("coverage") or {})
 
     _append_nodes(
         lines,
@@ -326,6 +329,129 @@ def _ranked_nodes(
     return ranked
 
 
+def _coverage(
+    gates: list[dict[str, Any]],
+    outcomes: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """How much of the gate record actually carries an outcome label.
+
+    The denominator is ALL gate rows, not just the labelable ones — a coverage
+    number computed over rows that already have a session id would read near
+    100% while ignoring most of the traffic. ``unlabelable_no_session_id`` is
+    published alongside so the gap is visible in the same breath as the rate,
+    and ``coverage_pct_of_labelable`` shows how the machinery performs on the
+    rows it can actually see. Counts are always present; percentages are None
+    rather than 0 on an empty window, so "no data" never reads as "0%".
+    """
+    total = len(gates)
+    labeled = len(outcomes)
+    no_session = sum(1 for row in gates if not row.get("session_id"))
+    # The correlator refuses three row shapes outright, so none of them can ever
+    # be labeled and none belongs in the labelable denominator: a missing
+    # session id, a skipped verdict, and an unparseable timestamp. Counting them
+    # would understate how the machinery performs on the rows it can actually
+    # see — the opposite of the honesty this block exists for. Each is reported
+    # separately so the gap is attributable, not just subtracted.
+    skipped = sum(
+        1 for row in gates if row.get("skipped") and row.get("session_id")
+    )
+    bad_ts = sum(
+        1 for row in gates
+        if row.get("session_id")
+        and not row.get("skipped")
+        and _parse_gate_ts(row.get("ts")) is None
+    )
+    labelable = total - no_session - skipped - bad_ts
+    ambiguous = sum(
+        1 for row in outcomes if row.get("outcome_category") == "AMBIGUOUS"
+    )
+    return {
+        "gate_rows": total,
+        "labeled_rows": labeled,
+        "unlabelable_no_session_id": no_session,
+        "unlabelable_skipped_verdict": skipped,
+        "unlabelable_unparseable_ts": bad_ts,
+        "labelable_rows": labelable,
+        "coverage_pct": round(100 * labeled / total, 1) if total else None,
+        "coverage_pct_of_labelable": (
+            round(100 * labeled / labelable, 1) if labelable > 0 else None
+        ),
+        "ambiguous_rows": ambiguous,
+        "ambiguous_pct": (
+            round(100 * ambiguous / labeled, 1) if labeled else None
+        ),
+    }
+
+
+def _parse_gate_ts(value: Any) -> datetime | None:
+    """Parse a gate row's ISO-8601 ``ts``, mirroring the correlator's parser so
+    the report's unlabelable count matches what the correlator actually skips."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        return datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _gate_call_identity(row: dict[str, Any]) -> tuple[Any, ...] | None:
+    """Which gate call an outcome row belongs to, or None when unknowable.
+
+    Prefers the ``gate_call_id`` nonce. Hash-plus-timestamp is a fallback for
+    pre-nonce rows only: a repeated identical request shares its ``query_hash``,
+    so keying on the hash collapses a MODIFY and its retry into one row and
+    undercounts real gate calls (KB id=3310). This must stay consistent with
+    ``correlator._dedup_key`` — the writer and the reader have to agree on what
+    "one gate call" means, or the report silently disagrees with the log.
+    """
+    call_id = row.get("gate_call_id")
+    if isinstance(call_id, str) and call_id:
+        return ("call", call_id)
+    query_hash = row.get("gate_query_hash")
+    gate_ts = row.get("gate_ts")
+    if query_hash is None or gate_ts is None:
+        return None
+    return ("hash", query_hash, gate_ts)
+
+
+def _latest_version_only(
+    rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Keep one outcome row per gate call — the highest ``correlator_version``.
+
+    A correlator version bump re-emits rows into the SAME daily files under the
+    new classification, and dedup keys on the version, so both generations
+    coexist on disk by design. Reading them all would double-count every
+    outcome and inflate the very numbers this report exists to measure.
+    """
+    best: dict[tuple[Any, ...], dict[str, Any]] = {}
+    unkeyed: list[dict[str, Any]] = []
+    for row in rows:
+        key = _gate_call_identity(row)
+        if key is None:
+            unkeyed.append(row)
+            continue
+        prior = best.get(key)
+        if prior is None or _version_key(
+            row.get("correlator_version"),
+        ) >= _version_key(prior.get("correlator_version")):
+            best[key] = row
+    return list(best.values()) + unkeyed
+
+
+def _version_key(value: Any) -> tuple[int, ...]:
+    """Sortable tuple for a dotted version string; unparseable sorts lowest."""
+    if not isinstance(value, str):
+        return (-1,)
+    parts: list[int] = []
+    for chunk in value.split("."):
+        try:
+            parts.append(int(chunk))
+        except ValueError:
+            return (-1,)
+    return tuple(parts) or (-1,)
+
+
 def _label_counts(labels: Iterable[Any]) -> dict[str, int]:
     counts = Counter(_label(value) for value in labels)
     return {key: counts[key] for key in sorted(counts)}
@@ -365,6 +491,54 @@ def _append_counts(lines: list[str], label: str, counts: dict[str, int]) -> None
         return
     rendered = ", ".join(f"{key}={value}" for key, value in counts.items())
     lines.append(f"{label}: {rendered}")
+
+
+def _append_coverage(lines: list[str], coverage: dict[str, Any]) -> None:
+    """Render the outcome-coverage block in the default text report.
+
+    Kept in the normal report rather than JSON-only: a coverage number that only
+    appears when someone asks for `--json` is a number nobody sees, and the
+    unlabelable breakdown is the part that stops a low rate from being misread
+    as the gate not working."""
+    if not coverage:
+        return
+    total = _int(coverage.get("gate_rows"))
+    if not total:
+        return
+    labeled = _int(coverage.get("labeled_rows"))
+    labelable = _int(coverage.get("labelable_rows"))
+    pct = coverage.get("coverage_pct")
+    pct_labelable = coverage.get("coverage_pct_of_labelable")
+    amb = coverage.get("ambiguous_pct")
+    lines.extend([
+        "",
+        "### Outcome Coverage",
+        f"- Labeled: {labeled} of {total} gate "
+        f"{_plural(total, 'row')}"
+        + (f" ({pct}%)" if pct is not None else ""),
+        f"- Labelable: {labelable} "
+        f"{_plural(labelable, 'row')}"
+        + (f"; {pct_labelable}% of those are labeled"
+           if pct_labelable is not None else ""),
+    ])
+    unlabelable = [
+        ("no session id", _int(coverage.get("unlabelable_no_session_id"))),
+        ("skipped verdict", _int(coverage.get("unlabelable_skipped_verdict"))),
+        ("unparseable timestamp",
+         _int(coverage.get("unlabelable_unparseable_ts"))),
+    ]
+    present = [f"{label}: {count}" for label, count in unlabelable if count]
+    if present:
+        lines.append(f"- Not labelable — {', '.join(present)}")
+    if amb is not None:
+        lines.append(
+            f"- AMBIGUOUS: {_int(coverage.get('ambiguous_rows'))} of "
+            f"{labeled} labeled ({amb}%)"
+        )
+    lines.append(
+        "- A low rate here measures how much gate traffic carries a "
+        "correlatable identity, not whether the gate works."
+    )
 
 
 def _append_nodes(
