@@ -1,0 +1,209 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "provider": {
+      "type": "string",
+      "enum": ["claude", "codex"]
+    },
+    "lane": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 80
+    },
+    "base_sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "head_sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "review_status": {
+      "type": "string",
+      "enum": ["completed", "not_run", "failed"]
+    },
+    "overall_verdict": {
+      "type": "string",
+      "enum": ["pass", "concerns", "block"]
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2000
+    },
+    "findings": {
+      "type": "array",
+      "maxItems": 20,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "finding_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120
+          },
+          "category": {
+            "type": "string",
+            "enum": [
+              "correctness",
+              "security",
+              "performance",
+              "compatibility",
+              "test_gap",
+              "architecture",
+              "complexity",
+              "duplication",
+              "user_experience"
+            ]
+          },
+          "priority": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 3
+          },
+          "confidence_score": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "code_location": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "path": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 500
+              },
+              "start_line": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "end_line": {
+                "type": "integer",
+                "minimum": 1
+              }
+            },
+            "required": ["path", "start_line", "end_line"]
+          },
+          "impact": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000
+          },
+          "evidence": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4000
+          },
+          "reproduction_or_test": {
+            "type": "string",
+            "maxLength": 3000
+          },
+          "remediation": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 3000
+          },
+          "simpler_alternative": {
+            "type": "string",
+            "maxLength": 3000
+          }
+        },
+        "required": [
+          "finding_id",
+          "title",
+          "category",
+          "priority",
+          "confidence_score",
+          "code_location",
+          "impact",
+          "evidence",
+          "reproduction_or_test",
+          "remediation",
+          "simpler_alternative"
+        ]
+      }
+    },
+    "complexity": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "net_complexity_delta": {
+          "type": "string",
+          "enum": ["down", "neutral", "up"]
+        },
+        "complexity_risk": {
+          "type": "string",
+          "enum": ["low", "medium", "high"]
+        },
+        "added_complexity_justified": {
+          "type": "boolean"
+        },
+        "justification": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 3000
+        },
+        "new_structural_surfaces": {
+          "type": "array",
+          "maxItems": 30,
+          "items": {
+            "type": "string",
+            "maxLength": 500
+          }
+        },
+        "consolidation_opportunities": {
+          "type": "array",
+          "maxItems": 30,
+          "items": {
+            "type": "string",
+            "maxLength": 1000
+          }
+        },
+        "simplest_credible_alternative": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4000
+        }
+      },
+      "required": [
+        "net_complexity_delta",
+        "complexity_risk",
+        "added_complexity_justified",
+        "justification",
+        "new_structural_surfaces",
+        "consolidation_opportunities",
+        "simplest_credible_alternative"
+      ]
+    },
+    "coverage_gaps": {
+      "type": "array",
+      "maxItems": 20,
+      "items": {
+        "type": "string",
+        "maxLength": 1000
+      }
+    }
+  },
+  "required": [
+    "provider",
+    "lane",
+    "base_sha",
+    "head_sha",
+    "review_status",
+    "overall_verdict",
+    "summary",
+    "findings",
+    "complexity",
+    "coverage_gaps"
+  ]
+}

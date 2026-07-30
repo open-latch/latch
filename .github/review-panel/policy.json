@@ -1,0 +1,94 @@
+{
+  "version": 1,
+  "lanes": [
+    {
+      "provider": "claude",
+      "id": "correctness-concurrency",
+      "prompt": ".github/review-panel/prompts/claude-correctness-concurrency.md",
+      "when": "always"
+    },
+    {
+      "provider": "claude",
+      "id": "security-abuse",
+      "prompt": ".github/review-panel/prompts/claude-security-abuse.md",
+      "when": "always"
+    },
+    {
+      "provider": "codex",
+      "id": "regression-tests",
+      "prompt": ".github/review-panel/prompts/codex-regression-tests.md",
+      "when": "always"
+    },
+    {
+      "provider": "codex",
+      "id": "architecture-portability",
+      "prompt": ".github/review-panel/prompts/codex-architecture-portability.md",
+      "when": "always"
+    },
+    {
+      "provider": "codex",
+      "id": "simplicity-consolidation",
+      "prompt": ".github/review-panel/prompts/codex-simplicity-consolidation.md",
+      "when": "always"
+    },
+    {
+      "provider": "codex",
+      "id": "artifact-output",
+      "prompt": ".github/review-panel/prompts/codex-artifact-output.md",
+      "when": "user_facing"
+    }
+  ],
+  "user_facing_paths": [
+    "README.md",
+    "docs/**",
+    "install.sh",
+    "install.ps1",
+    "bin/**",
+    "claude_md_snippet.md",
+    "cursor_rule_snippet.mdc",
+    "src/quickstart.py",
+    "src/seed.py",
+    "src/doctor.py",
+    "src/mcp_server.py",
+    "src/*_sync.py",
+    "src/install_*.py",
+    "src/uninstall*.py",
+    "tests/seed_report_review_fixtures.py"
+  ],
+  "artifact_recipes": [
+    {
+      "id": "seed-report",
+      "paths": [
+        "src/seed.py",
+        "src/seed_report_evals.py",
+        "tests/seed_report_review_fixtures.py",
+        "tests/test_seed*.py"
+      ],
+      "command": [
+        "python",
+        "tests/seed_report_review_fixtures.py",
+        "--out-dir",
+        "{output_dir}/seed-report",
+        "--llm",
+        "no"
+      ]
+    },
+    {
+      "id": "agent-contract-footprint",
+      "paths": [
+        "claude_md_snippet.md",
+        "cursor_rule_snippet.mdc",
+        "src/agents_md_sync.py",
+        "src/claude_md_sync.py",
+        "src/cursor_rules_sync.py",
+        "src/managed_doc_sync.py"
+      ],
+      "command": [
+        "python",
+        ".github/scripts/agent_contract_footprint.py",
+        "--base",
+        "{base_sha}"
+      ]
+    }
+  ]
+}

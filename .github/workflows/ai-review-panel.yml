@@ -1,0 +1,475 @@
+name: AI Review Panel
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review]
+  workflow_dispatch:
+    inputs:
+      base_sha:
+        description: Full base commit SHA
+        required: true
+        type: string
+      head_sha:
+        description: Full head commit SHA
+        required: true
+        type: string
+
+concurrency:
+  group: >-
+    ai-review-panel-${{
+      github.event.pull_request.number ||
+      inputs.head_sha ||
+      github.run_id
+    }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    name: Resolve immutable review scope
+    runs-on: ubuntu-latest
+    outputs:
+      base_sha: ${{ steps.scope.outputs.base_sha }}
+      head_sha: ${{ steps.scope.outputs.head_sha }}
+      pr_number: ${{ steps.scope.outputs.pr_number }}
+      should_run: ${{ steps.scope.outputs.should_run }}
+      trigger: ${{ steps.scope.outputs.trigger }}
+      artifact_review_needed: ${{ steps.scope.outputs.artifact_review_needed }}
+      claude_matrix: ${{ steps.scope.outputs.claude_matrix }}
+      codex_matrix: ${{ steps.scope.outputs.codex_matrix }}
+    steps:
+      - name: Check out trusted review controls
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event.pull_request.base.sha || github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Check out reviewed commit
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: >-
+            ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          ref: ${{ github.event.pull_request.head.sha || inputs.head_sha }}
+          path: .review-target
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12"
+
+      - name: Resolve scope and lane matrices
+        id: scope
+        env:
+          REVIEW_PANEL_TARGET_ROOT: ${{ github.workspace }}/.review-target
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_PATH: ${{ github.event_path }}
+          INPUT_BASE_SHA: ${{ inputs.base_sha }}
+          INPUT_HEAD_SHA: ${{ inputs.head_sha }}
+        run: |
+          python .github/scripts/review_panel.py scope \
+            --event-name "$EVENT_NAME" \
+            --event-path "$EVENT_PATH" \
+            --input-base "$INPUT_BASE_SHA" \
+            --input-head "$INPUT_HEAD_SHA" \
+            --github-output "$GITHUB_OUTPUT"
+
+  artifacts:
+    name: Generate credential-free artifact evidence
+    needs: prepare
+    if: ${{ needs.prepare.outputs.should_run == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out trusted review controls
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event.pull_request.base.sha || github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Check out reviewed commit
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: >-
+            ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          ref: ${{ needs.prepare.outputs.head_sha }}
+          path: .review-target
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12"
+
+      - name: Build evidence packet
+        env:
+          REVIEW_PANEL_TARGET_ROOT: ${{ github.workspace }}/.review-target
+          BASE_SHA: ${{ needs.prepare.outputs.base_sha }}
+          HEAD_SHA: ${{ needs.prepare.outputs.head_sha }}
+        run: |
+          python .github/scripts/review_panel.py artifacts \
+            --base-sha "$BASE_SHA" \
+            --head-sha "$HEAD_SHA" \
+            --output .review-panel-artifacts
+
+      - name: Upload evidence packet
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: review-panel-artifact-packet
+          path: .review-panel-artifacts
+          if-no-files-found: warn
+          include-hidden-files: true
+          retention-days: 14
+
+  claude:
+    name: Claude / ${{ matrix.id }}
+    needs: prepare
+    if: ${{ needs.prepare.outputs.should_run == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.claude_matrix) }}
+    env:
+      HAS_ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY != '' }}
+      CLAUDE_REVIEW_MODEL: ${{ vars.CLAUDE_REVIEW_MODEL }}
+    steps:
+      - name: Check out trusted review controls
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event.pull_request.base.sha || github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Check out reviewed commit
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: >-
+            ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          ref: ${{ needs.prepare.outputs.head_sha }}
+          path: .review-target
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12"
+
+      - name: Build trusted lane prompt
+        env:
+          BASE_SHA: ${{ needs.prepare.outputs.base_sha }}
+          HEAD_SHA: ${{ needs.prepare.outputs.head_sha }}
+          LANE: ${{ matrix.id }}
+        run: |
+          python .github/scripts/review_panel.py build-prompt \
+            --provider claude \
+            --lane "$LANE" \
+            --base-sha "$BASE_SHA" \
+            --head-sha "$HEAD_SHA" \
+            --review-directory .review-target \
+            --output ".review-panel-work/claude-$LANE.md"
+
+      - name: Build restricted Claude arguments
+        id: claude_args
+        env:
+          MODEL: ${{ env.CLAUDE_REVIEW_MODEL }}
+        run: |
+          python .github/scripts/review_panel.py claude-args \
+            --model "$MODEL" \
+            --review-directory .review-target \
+            --github-output "$GITHUB_OUTPUT"
+
+      - name: Run adversarial Claude reviewer
+        id: claude_review
+        if: ${{ env.HAS_ANTHROPIC_API_KEY == 'true' }}
+        continue-on-error: true
+        uses: anthropics/claude-code-action@be7b93b1907a4abad570368f3c74b6fe3807510b # v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ github.token }}
+          prompt: >-
+            Read and follow .review-panel-work/claude-${{ matrix.id }}.md.
+            Return only the structured result required by that prompt.
+          claude_args: ${{ steps.claude_args.outputs.claude_args }}
+          track_progress: false
+          use_sticky_comment: false
+          classify_inline_comments: false
+          include_fix_links: false
+          display_report: false
+          show_full_output: false
+
+      - name: Normalize Claude receipt
+        if: ${{ always() }}
+        env:
+          ACTION_OUTCOME: ${{ steps.claude_review.outcome || 'skipped' }}
+          BASE_SHA: ${{ needs.prepare.outputs.base_sha }}
+          HEAD_SHA: ${{ needs.prepare.outputs.head_sha }}
+          LANE: ${{ matrix.id }}
+          LANE_APPLICABLE: "true"
+          STRUCTURED_OUTPUT: ${{ steps.claude_review.outputs.structured_output }}
+        run: |
+          python .github/scripts/review_panel.py normalize \
+            --provider claude \
+            --lane "$LANE" \
+            --base-sha "$BASE_SHA" \
+            --head-sha "$HEAD_SHA" \
+            --source-env STRUCTURED_OUTPUT \
+            --output "review-panel-results/claude-$LANE.json" \
+            --action-outcome "$ACTION_OUTCOME" \
+            --credential-available "$HAS_ANTHROPIC_API_KEY" \
+            --lane-applicable "$LANE_APPLICABLE"
+
+      - name: Upload Claude receipt
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: review-panel-result-claude-${{ matrix.id }}
+          path: review-panel-results/claude-${{ matrix.id }}.json
+          if-no-files-found: warn
+          retention-days: 14
+
+  codex:
+    name: Codex / ${{ matrix.id }}
+    needs: [prepare, artifacts]
+    if: >-
+      ${{
+        always() &&
+        needs.prepare.result == 'success' &&
+        needs.prepare.outputs.should_run == 'true'
+      }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.codex_matrix) }}
+    env:
+      HAS_OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY != '' }}
+    steps:
+      - name: Check out trusted review controls
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event.pull_request.base.sha || github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Check out reviewed commit
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: >-
+            ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          ref: ${{ needs.prepare.outputs.head_sha }}
+          path: .review-target
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12"
+
+      - name: Download credential-free artifact evidence
+        if: ${{ matrix.when == 'user_facing' }}
+        continue-on-error: true
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: review-panel-artifact-packet
+          path: .review-target/.review-panel-artifacts
+
+      - name: Build trusted lane prompt
+        env:
+          BASE_SHA: ${{ needs.prepare.outputs.base_sha }}
+          HEAD_SHA: ${{ needs.prepare.outputs.head_sha }}
+          LANE: ${{ matrix.id }}
+        run: |
+          python .github/scripts/review_panel.py build-prompt \
+            --provider codex \
+            --lane "$LANE" \
+            --base-sha "$BASE_SHA" \
+            --head-sha "$HEAD_SHA" \
+            --review-directory . \
+            --output ".review-panel-work/codex-$LANE.md"
+
+      - name: Run adversarial Codex reviewer
+        id: codex_review
+        if: >-
+          ${{
+            env.HAS_OPENAI_API_KEY == 'true' &&
+            (matrix.when == 'always' ||
+             needs.prepare.outputs.artifact_review_needed == 'true')
+          }}
+        continue-on-error: true
+        uses: openai/codex-action@52fe01ec70a42f454c9d2ebd47598f9fd6893d56 # v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          prompt-file: >-
+            ${{ github.workspace }}/.review-panel-work/codex-${{ matrix.id }}.md
+          output-schema-file: >-
+            ${{ github.workspace }}/.github/review-panel/review.schema.json
+          output-file: >-
+            ${{ github.workspace }}/.review-panel-work/raw-codex-${{ matrix.id }}.json
+          working-directory: ${{ github.workspace }}/.review-target
+          permission-profile: ":read-only"
+          safety-strategy: drop-sudo
+          codex-args: '["--ephemeral"]'
+          codex-version: ${{ vars.CODEX_REVIEW_CLI_VERSION || '0.145.0' }}
+          model: ${{ vars.CODEX_REVIEW_MODEL }}
+          effort: ${{ vars.CODEX_REVIEW_EFFORT || 'high' }}
+
+      - name: Normalize Codex receipt
+        if: ${{ always() }}
+        env:
+          ACTION_OUTCOME: ${{ steps.codex_review.outcome || 'skipped' }}
+          ARTIFACT_REVIEW_NEEDED: ${{ needs.prepare.outputs.artifact_review_needed }}
+          BASE_SHA: ${{ needs.prepare.outputs.base_sha }}
+          HEAD_SHA: ${{ needs.prepare.outputs.head_sha }}
+          LANE: ${{ matrix.id }}
+          LANE_WHEN: ${{ matrix.when }}
+        run: |
+          lane_applicable=true
+          if [ "$LANE_WHEN" = "user_facing" ] &&
+             [ "$ARTIFACT_REVIEW_NEEDED" != "true" ]; then
+            lane_applicable=false
+          fi
+          python .github/scripts/review_panel.py normalize \
+            --provider codex \
+            --lane "$LANE" \
+            --base-sha "$BASE_SHA" \
+            --head-sha "$HEAD_SHA" \
+            --source ".review-panel-work/raw-codex-$LANE.json" \
+            --output "review-panel-results/codex-$LANE.json" \
+            --action-outcome "$ACTION_OUTCOME" \
+            --credential-available "$HAS_OPENAI_API_KEY" \
+            --lane-applicable "$lane_applicable"
+
+      - name: Upload Codex receipt
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: review-panel-result-codex-${{ matrix.id }}
+          path: review-panel-results/codex-${{ matrix.id }}.json
+          if-no-files-found: warn
+          retention-days: 14
+
+  aggregate:
+    name: panel-policy
+    needs: [prepare, artifacts, claude, codex]
+    if: >-
+      ${{
+        always() &&
+        needs.prepare.result == 'success' &&
+        needs.prepare.outputs.should_run == 'true'
+      }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+    steps:
+      - name: Check out trusted review controls
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event.pull_request.base.sha || github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12"
+
+      - name: Download normalized receipts
+        continue-on-error: true
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: review-panel-result-*
+          path: review-panel-results
+          merge-multiple: true
+
+      - name: Aggregate panel verdict
+        env:
+          ARTIFACT_REVIEW_NEEDED: ${{ needs.prepare.outputs.artifact_review_needed }}
+          BASE_SHA: ${{ needs.prepare.outputs.base_sha }}
+          HEAD_SHA: ${{ needs.prepare.outputs.head_sha }}
+          ENFORCEMENT: ${{ vars.REVIEW_PANEL_ENFORCEMENT || 'advisory' }}
+          REQUIRE_ALL: ${{ vars.REVIEW_PANEL_REQUIRE_ALL_LANES || 'false' }}
+        run: |
+          python .github/scripts/review_panel.py aggregate \
+            --input-dir review-panel-results \
+            --base-sha "$BASE_SHA" \
+            --head-sha "$HEAD_SHA" \
+            --artifact-review-needed "$ARTIFACT_REVIEW_NEEDED" \
+            --enforcement "$ENFORCEMENT" \
+            --require-all "$REQUIRE_ALL" \
+            --output-report review-panel-report.md \
+            --output-summary review-panel-summary.json
+          cat review-panel-report.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload full panel report
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: review-panel-report
+          path: |
+            review-panel-report.md
+            review-panel-summary.json
+            review-panel-results
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Update pull-request panel comment
+        if: ${{ needs.prepare.outputs.pr_number != '' }}
+        continue-on-error: true
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
+        env:
+          PR_NUMBER: ${{ needs.prepare.outputs.pr_number }}
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const fs = require("fs");
+            const marker = "<!-- ai-review-panel-report -->";
+            const body = fs.readFileSync("review-panel-report.md", "utf8");
+            const issue_number = Number(process.env.PR_NUMBER);
+            const comments = await github.paginate(
+              github.rest.issues.listComments,
+              {
+                ...context.repo,
+                issue_number,
+                per_page: 100,
+              },
+            );
+            const previous = comments.find(
+              (comment) =>
+                comment.user?.login === "github-actions[bot]" &&
+                comment.body?.includes(marker),
+            );
+            if (previous) {
+              await github.rest.issues.updateComment({
+                ...context.repo,
+                comment_id: previous.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                ...context.repo,
+                issue_number,
+                body,
+              });
+            }
+
+      - name: Apply configured merge policy
+        run: >-
+          python .github/scripts/review_panel.py check
+          --summary review-panel-summary.json
