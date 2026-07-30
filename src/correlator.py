@@ -40,9 +40,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-import artifacts   # noqa: E402
-import db          # noqa: E402
-import log_utils   # noqa: E402
+import artifacts          # noqa: E402
+import codex_attribution  # noqa: E402
+import db                 # noqa: E402
+import log_utils          # noqa: E402
 
 
 CORRELATOR_VERSION_DEFAULT = "0.3.0"  # 0.3.0: + shipped-diff file touches (id=3948 V1)
@@ -298,21 +299,30 @@ def _count_file_touches(
     project_path: str | None,
     t0: datetime,
     t_end: datetime,
+    transcript_path: str | None = None,
 ) -> int:
     """Count distinct files this session edited inside [t0, t_end] — the
     "shipped diff" signal (id=3948 V1). Grounds a verdict's outcome in code that
     actually moved rather than in a nearby KB write. Failure-isolated: any
     missing transcript or parse error yields 0, matching this module's posture of
-    never letting observation break a label."""
-    try:
-        row = conn.execute(
-            "SELECT transcript_path FROM sessions WHERE id = ?", [session_id],
-        ).fetchone()
-    except sqlite3.Error:
-        return 0
-    if not row:
-        return 0
-    tpath = row["transcript_path"] if "transcript_path" in row.keys() else row[0]
+    never letting observation break a label.
+
+    `transcript_path` lets a caller supply the transcript directly. Attribution
+    recovered from a Codex rollout already knows the file, and most Codex threads
+    have no `sessions` row to look it up in — the only Codex row-creator is a
+    manual `/latch-compact`. Without this the signal would stay blind on exactly
+    the sessions attribution just recovered."""
+    tpath = transcript_path
+    if not tpath:
+        try:
+            row = conn.execute(
+                "SELECT transcript_path FROM sessions WHERE id = ?", [session_id],
+            ).fetchone()
+        except sqlite3.Error:
+            return 0
+        if not row:
+            return 0
+        tpath = row["transcript_path"] if "transcript_path" in row.keys() else row[0]
     if not tpath:
         return 0
     try:
@@ -401,12 +411,33 @@ def correlate(
         # two unrelated sites and so could not serve as a clean denominator
         # component for the coverage metric.
         "rows_skipped_unparseable_ts": 0,
+        # Rows the host left session-less that were recovered from a Codex
+        # rollout by content join. Reported separately so coverage can always
+        # be split into host-supplied vs recovered identity.
+        "rows_attributed_from_transcript": 0,
         "rows_skipped_dedup": 0,
         "rows_skipped_skipped_verdict": 0,
     }
     conn = db.connect(project_path or "")
     try:
         seen = _load_existing_keys(project_path, start_date, end_date)
+
+        # Built at most once per run, and only if a session-less row actually
+        # turns up: the rollout directory holds hundreds of multi-megabyte files,
+        # so an unconditional scan would tax every correlation of an
+        # all-attributed range. Bounded to the correlated dates.
+        attribution_index: dict | None = None
+
+        def _attribution() -> dict:
+            nonlocal attribution_index
+            if attribution_index is None:
+                try:
+                    attribution_index = codex_attribution.build_index(
+                        None, start_date, end_date,
+                    )
+                except Exception:
+                    attribution_index = {"by_nonce": {}, "by_hash": {}}
+            return attribution_index
 
         all_rows = list(log_utils.read_log_range(
             "gate", start_date, end_date, project_path,
@@ -420,9 +451,21 @@ def correlate(
                 counts["rows_skipped_skipped_verdict"] += 1
                 continue
             session_id = R.get("session_id")
+            session_source = "host_supplied"
+            transcript_path = None
             if not session_id:
-                counts["rows_skipped_no_session_id"] += 1
-                continue
+                # The host gave no identity. Recover it from its own transcript
+                # by content join rather than writing the row off — otherwise
+                # every measured number is silently single-host (id=4018).
+                # Declines on an ambiguous match; see codex_attribution.
+                hit = codex_attribution.attribute(R, _attribution())
+                if hit is None:
+                    counts["rows_skipped_no_session_id"] += 1
+                    continue
+                session_id = hit["session_id"]
+                transcript_path = hit["transcript_path"]
+                session_source = hit["source"]
+                counts["rows_attributed_from_transcript"] += 1
             # Build the dedup identity from the SOURCE gate row, mapped onto the
             # same field names the emitted outcome row uses, so both sides of
             # the comparison key on the nonce whenever it exists.
@@ -457,6 +500,7 @@ def correlate(
             )
             file_touches = _count_file_touches(
                 conn, session_id, project_path, t0, t_end,
+                transcript_path=transcript_path,
             )
             outcome = _classify(
                 conn, R, session_id, t0, t_end,
@@ -471,6 +515,10 @@ def correlate(
                     # The exact join key (id=3310). query_hash collides across
                     # a repeated request and its retry; the nonce does not.
                     "gate_call_id": R.get("gate_call_id"),
+                    # Closed-set label: host_supplied / codex_transcript_nonce /
+                    # codex_transcript_hash. Makes a coverage number splittable
+                    # by identity provenance instead of blended.
+                    "session_source": session_source,
                     "verdict": R.get("recommendation"),
                     "outcome_category": outcome,
                     "followup_count_inserts": followup_inserts,

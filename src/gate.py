@@ -2270,6 +2270,11 @@ def run_gate(
 
     return {
         "request": request,
+        # Returned so a host that records tool results (Codex rollouts do)
+        # captures the nonce, which lets an offline pass attribute the call to a
+        # real thread by exact identity instead of a request-text hash. Purely
+        # structural: an opaque per-call id, no KB content.
+        "gate_call_id": gate_call_id,
         "verdict": verdict,
         "findings": format_gate_findings(verdict, evidence),
         "chains": chain_assembly,

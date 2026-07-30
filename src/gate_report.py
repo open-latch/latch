@@ -380,6 +380,13 @@ def _coverage(
         "ambiguous_pct": (
             round(100 * ambiguous / labeled, 1) if labeled else None
         ),
+        # Identity provenance of the labeled rows. Rows recovered from a host
+        # transcript are real thread ids joined by content, not guesses — but
+        # they are a different confidence class from host-supplied identity, so
+        # a coverage number must be splittable rather than blended (id=4018).
+        "labeled_by_session_source": _label_counts(
+            row.get("session_source") for row in outcomes
+        ),
     }
 
 
@@ -534,6 +541,14 @@ def _append_coverage(lines: list[str], coverage: dict[str, Any]) -> None:
         lines.append(
             f"- AMBIGUOUS: {_int(coverage.get('ambiguous_rows'))} of "
             f"{labeled} labeled ({amb}%)"
+        )
+    by_source = coverage.get("labeled_by_session_source") or {}
+    recovered = {k: v for k, v in by_source.items() if k != "host_supplied"}
+    if recovered:
+        rendered = ", ".join(f"{k}={v}" for k, v in sorted(recovered.items()))
+        lines.append(
+            f"- Identity: {_int(by_source.get('host_supplied'))} host-supplied, "
+            f"recovered from transcript — {rendered}"
         )
     lines.append(
         "- A low rate here measures how much gate traffic carries a "

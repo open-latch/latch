@@ -1641,6 +1641,10 @@ def kb_gate(request: str, max_chains: int = 5, verbose: bool = False) -> dict:
     gate_status = _gate_status(verdict)
     return {
         "request": full.get("request", request),
+        # Carried into the compact payload too: hosts that record tool results
+        # (Codex rollouts) then hold the nonce, which is what lets an offline
+        # pass attribute a session-less gate row to a real thread exactly.
+        "gate_call_id": full.get("gate_call_id"),
         "gate_status": gate_status,
         "verdict": verdict,
         "findings": gate.format_gate_findings(
