@@ -32,15 +32,16 @@ jobs:
   prepare:
     name: Resolve immutable review scope
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     outputs:
       base_sha: ${{ steps.scope.outputs.base_sha }}
       head_sha: ${{ steps.scope.outputs.head_sha }}
       pr_number: ${{ steps.scope.outputs.pr_number }}
-      should_run: ${{ steps.scope.outputs.should_run }}
-      trigger: ${{ steps.scope.outputs.trigger }}
+      head_repository: ${{ steps.scope.outputs.head_repository }}
       artifact_review_needed: ${{ steps.scope.outputs.artifact_review_needed }}
       claude_matrix: ${{ steps.scope.outputs.claude_matrix }}
       codex_matrix: ${{ steps.scope.outputs.codex_matrix }}
+      codex_artifact_matrix: ${{ steps.scope.outputs.codex_artifact_matrix }}
     steps:
       - name: Check out trusted review controls
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -49,20 +50,26 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
-      - name: Check out reviewed commit
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with:
-          repository: >-
-            ${{ github.event.pull_request.head.repo.full_name || github.repository }}
-          ref: ${{ github.event.pull_request.head.sha || inputs.head_sha }}
-          path: .review-target
-          fetch-depth: 0
-          persist-credentials: false
-
       - name: Set up Python
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
-          python-version: "3.12"
+          python-version: "3.11"
+
+      - name: Fetch immutable review history without checkout
+        env:
+          BASE_REPOSITORY: ${{ github.repository }}
+          HEAD_REPOSITORY: >-
+            ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || inputs.base_sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || inputs.head_sha }}
+        run: |
+          python .github/scripts/review_panel.py prepare-repository \
+            --base-repository "$BASE_REPOSITORY" \
+            --head-repository "$HEAD_REPOSITORY" \
+            --base-sha "$BASE_SHA" \
+            --head-sha "$HEAD_SHA" \
+            --output .review-target \
+            --fetch-history
 
       - name: Resolve scope and lane matrices
         id: scope
@@ -80,12 +87,20 @@ jobs:
             --input-head "$INPUT_HEAD_SHA" \
             --github-output "$GITHUB_OUTPUT"
 
-  artifacts:
-    name: Generate credential-free artifact evidence
+  artifact_packet:
+    name: Verify isolated artifact evidence
     needs: prepare
-    if: ${{ needs.prepare.outputs.should_run == 'true' }}
+    if: >-
+      ${{
+        needs.prepare.outputs.artifact_review_needed == 'true' &&
+        github.event_name == 'pull_request_target'
+      }}
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      available: ${{ steps.verify.outputs.available }}
     permissions:
+      actions: read
       contents: read
     steps:
       - name: Check out trusted review controls
@@ -95,47 +110,96 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
-      - name: Check out reviewed commit
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with:
-          repository: >-
-            ${{ github.event.pull_request.head.repo.full_name || github.repository }}
-          ref: ${{ needs.prepare.outputs.head_sha }}
-          path: .review-target
-          fetch-depth: 0
-          persist-credentials: false
-
       - name: Set up Python
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
-          python-version: "3.12"
+          python-version: "3.11"
 
-      - name: Build evidence packet
+      - name: Find exact-head unprivileged evidence run
+        id: evidence
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
         env:
-          REVIEW_PANEL_TARGET_ROOT: ${{ github.workspace }}/.review-target
+          HEAD_SHA: ${{ needs.prepare.outputs.head_sha }}
+          HEAD_REPOSITORY: ${{ needs.prepare.outputs.head_repository }}
+          PR_NUMBER: ${{ needs.prepare.outputs.pr_number }}
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const head_sha = process.env.HEAD_SHA;
+            const headRepository = process.env.HEAD_REPOSITORY.toLowerCase();
+            const prNumber = Number(process.env.PR_NUMBER);
+            for (let attempt = 0; attempt < 72; attempt += 1) {
+              const response = await github.rest.actions.listWorkflowRuns({
+                ...context.repo,
+                workflow_id: "ai-review-artifacts.yml",
+                event: "pull_request",
+                head_sha,
+                per_page: 50,
+              });
+              const run = response.data.workflow_runs.find((candidate) => {
+                const prs = candidate.pull_requests || [];
+                return candidate.head_sha === head_sha &&
+                  candidate.head_repository?.full_name?.toLowerCase() ===
+                    headRepository &&
+                  prs.some((pr) => pr.number === prNumber);
+              });
+              if (run?.status === "completed") {
+                if (run.conclusion === "success") {
+                  core.setOutput("run_id", String(run.id));
+                }
+                return;
+              }
+              await new Promise((resolve) => setTimeout(resolve, 10000));
+            }
+            core.setOutput("run_id", "");
+
+      - name: Download exact-head evidence packet as untrusted data
+        if: ${{ steps.evidence.outputs.run_id != '' }}
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: >-
+            review-panel-evidence-${{
+              needs.prepare.outputs.pr_number
+            }}-${{ needs.prepare.outputs.head_sha }}
+          path: ${{ runner.temp }}/review-panel-evidence
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.evidence.outputs.run_id }}
+
+      - name: Validate packet scope, paths, and size
+        id: verify
+        if: ${{ steps.evidence.outputs.run_id != '' }}
+        continue-on-error: true
+        env:
           BASE_SHA: ${{ needs.prepare.outputs.base_sha }}
           HEAD_SHA: ${{ needs.prepare.outputs.head_sha }}
+          HEAD_REPOSITORY: ${{ needs.prepare.outputs.head_repository }}
+          PACKET_ROOT: ${{ runner.temp }}/review-panel-evidence
+          PR_NUMBER: ${{ needs.prepare.outputs.pr_number }}
         run: |
-          python .github/scripts/review_panel.py artifacts \
+          python .github/scripts/review_panel.py verify-artifacts \
+            --input "$PACKET_ROOT" \
             --base-sha "$BASE_SHA" \
             --head-sha "$HEAD_SHA" \
-            --output .review-panel-artifacts
+            --pr-number "$PR_NUMBER" \
+            --head-repository "$HEAD_REPOSITORY" \
+            --github-output "$GITHUB_OUTPUT"
 
-      - name: Upload evidence packet
-        if: ${{ always() }}
+      - name: Re-publish verified packet for the artifact reviewer
+        if: ${{ steps.verify.outcome == 'success' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: review-panel-artifact-packet
-          path: .review-panel-artifacts
-          if-no-files-found: warn
+          name: review-panel-verified-artifact-packet
+          path: ${{ runner.temp }}/review-panel-evidence
+          if-no-files-found: error
           include-hidden-files: true
           retention-days: 14
 
   claude:
     name: Claude / ${{ matrix.id }}
     needs: prepare
-    if: ${{ needs.prepare.outputs.should_run == 'true' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
       pull-requests: read
@@ -162,7 +226,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
-          python-version: "3.12"
+          python-version: "3.11"
 
       - name: Fetch reviewed objects without checkout
         env:
@@ -180,6 +244,7 @@ jobs:
             --output .review-target
 
       - name: Build trusted lane prompt
+        id: prompt
         env:
           BASE_SHA: ${{ needs.prepare.outputs.base_sha }}
           HEAD_SHA: ${{ needs.prepare.outputs.head_sha }}
@@ -191,7 +256,8 @@ jobs:
             --base-sha "$BASE_SHA" \
             --head-sha "$HEAD_SHA" \
             --review-directory .review-target \
-            --output ".review-panel-work/claude-$LANE.md"
+            --output ".review-panel-work/claude-$LANE.md" \
+            --github-output "$GITHUB_OUTPUT"
 
       - name: Build restricted Claude arguments
         id: claude_args
@@ -200,7 +266,6 @@ jobs:
         run: |
           python .github/scripts/review_panel.py claude-args \
             --model "$MODEL" \
-            --review-directory .review-target \
             --github-output "$GITHUB_OUTPUT"
 
       - name: Run adversarial Claude reviewer
@@ -211,9 +276,8 @@ jobs:
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           github_token: ${{ github.token }}
-          prompt: >-
-            Read and follow .review-panel-work/claude-${{ matrix.id }}.md.
-            Return only the structured result required by that prompt.
+          # build-prompt caps this UTF-8 value below Linux's per-env-string limit.
+          prompt: ${{ steps.prompt.outputs.prompt }}
           claude_args: ${{ steps.claude_args.outputs.claude_args }}
           track_progress: false
           use_sticky_comment: false
@@ -238,6 +302,7 @@ jobs:
             --base-sha "$BASE_SHA" \
             --head-sha "$HEAD_SHA" \
             --source-env STRUCTURED_OUTPUT \
+            --raw-output "review-panel-results/raw-claude-$LANE.txt" \
             --output "review-panel-results/claude-$LANE.json" \
             --action-outcome "$ACTION_OUTCOME" \
             --credential-available "$HAS_ANTHROPIC_API_KEY" \
@@ -248,20 +313,17 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: review-panel-result-claude-${{ matrix.id }}
-          path: review-panel-results/claude-${{ matrix.id }}.json
+          path: |
+            review-panel-results/claude-${{ matrix.id }}.json
+            review-panel-results/raw-claude-${{ matrix.id }}.txt
           if-no-files-found: warn
           retention-days: 14
 
   codex:
     name: Codex / ${{ matrix.id }}
-    needs: [prepare, artifacts]
-    if: >-
-      ${{
-        always() &&
-        needs.prepare.result == 'success' &&
-        needs.prepare.outputs.should_run == 'true'
-      }}
+    needs: prepare
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
     strategy:
@@ -285,7 +347,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
-          python-version: "3.12"
+          python-version: "3.11"
 
       - name: Fetch reviewed objects without checkout
         env:
@@ -302,14 +364,6 @@ jobs:
             --head-sha "$HEAD_SHA" \
             --output .review-target
 
-      - name: Download credential-free artifact evidence
-        if: ${{ matrix.when == 'user_facing' }}
-        continue-on-error: true
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          name: review-panel-artifact-packet
-          path: .review-target/.review-panel-artifacts
-
       - name: Build trusted lane prompt
         env:
           BASE_SHA: ${{ needs.prepare.outputs.base_sha }}
@@ -324,14 +378,14 @@ jobs:
             --review-directory .review-target \
             --output ".review-panel-work/codex-$LANE.md"
 
+      - name: Disable Codex tools for prompt-only review
+        run: >-
+          python .github/scripts/review_panel.py codex-config
+          --output .review-panel-codex-home/config.toml
+
       - name: Run adversarial Codex reviewer
         id: codex_review
-        if: >-
-          ${{
-            env.HAS_OPENAI_API_KEY == 'true' &&
-            (matrix.when == 'always' ||
-             needs.prepare.outputs.artifact_review_needed == 'true')
-          }}
+        if: ${{ env.HAS_OPENAI_API_KEY == 'true' }}
         continue-on-error: true
         uses: openai/codex-action@52fe01ec70a42f454c9d2ebd47598f9fd6893d56 # v1
         with:
@@ -342,7 +396,8 @@ jobs:
             ${{ github.workspace }}/.github/review-panel/review.schema.json
           output-file: >-
             ${{ github.workspace }}/.review-panel-work/raw-codex-${{ matrix.id }}.json
-          working-directory: ${{ github.workspace }}
+          working-directory: ${{ github.workspace }}/.review-panel-work
+          codex-home: ${{ github.workspace }}/.review-panel-codex-home
           permission-profile: ":read-only"
           safety-strategy: drop-sudo
           codex-args: '["--ephemeral"]'
@@ -354,47 +409,179 @@ jobs:
         if: ${{ always() }}
         env:
           ACTION_OUTCOME: ${{ steps.codex_review.outcome || 'skipped' }}
-          ARTIFACT_REVIEW_NEEDED: ${{ needs.prepare.outputs.artifact_review_needed }}
           BASE_SHA: ${{ needs.prepare.outputs.base_sha }}
           HEAD_SHA: ${{ needs.prepare.outputs.head_sha }}
           LANE: ${{ matrix.id }}
-          LANE_WHEN: ${{ matrix.when }}
         run: |
-          lane_applicable=true
-          if [ "$LANE_WHEN" = "user_facing" ] &&
-             [ "$ARTIFACT_REVIEW_NEEDED" != "true" ]; then
-            lane_applicable=false
-          fi
           python .github/scripts/review_panel.py normalize \
             --provider codex \
             --lane "$LANE" \
             --base-sha "$BASE_SHA" \
             --head-sha "$HEAD_SHA" \
             --source ".review-panel-work/raw-codex-$LANE.json" \
+            --raw-output "review-panel-results/raw-codex-$LANE.txt" \
             --output "review-panel-results/codex-$LANE.json" \
             --action-outcome "$ACTION_OUTCOME" \
             --credential-available "$HAS_OPENAI_API_KEY" \
-            --lane-applicable "$lane_applicable"
+            --lane-applicable true
 
       - name: Upload Codex receipt
         if: ${{ always() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: review-panel-result-codex-${{ matrix.id }}
-          path: review-panel-results/codex-${{ matrix.id }}.json
+          path: |
+            review-panel-results/codex-${{ matrix.id }}.json
+            review-panel-results/raw-codex-${{ matrix.id }}.txt
+          if-no-files-found: warn
+          retention-days: 14
+
+  codex_artifact:
+    name: Codex / ${{ matrix.id }}
+    needs: [prepare, artifact_packet]
+    if: >-
+      ${{
+        always() &&
+        needs.prepare.result == 'success' &&
+        needs.prepare.outputs.artifact_review_needed == 'true'
+      }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.codex_artifact_matrix) }}
+    env:
+      EVIDENCE_AVAILABLE: ${{ needs.artifact_packet.outputs.available == 'true' }}
+      HAS_OPENAI_API_KEY: >-
+        ${{
+          (github.event_name == 'workflow_dispatch' ||
+           github.event.pull_request.head.repo.full_name == github.repository) &&
+          secrets.OPENAI_API_KEY != ''
+        }}
+    steps:
+      - name: Check out trusted review controls
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event.pull_request.base.sha || github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.11"
+
+      - name: Fetch reviewed objects without checkout
+        env:
+          BASE_REPOSITORY: ${{ github.repository }}
+          HEAD_REPOSITORY: >-
+            ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          BASE_SHA: ${{ needs.prepare.outputs.base_sha }}
+          HEAD_SHA: ${{ needs.prepare.outputs.head_sha }}
+        run: |
+          python .github/scripts/review_panel.py prepare-repository \
+            --base-repository "$BASE_REPOSITORY" \
+            --head-repository "$HEAD_REPOSITORY" \
+            --base-sha "$BASE_SHA" \
+            --head-sha "$HEAD_SHA" \
+            --output .review-target
+
+      - name: Download verified artifact evidence
+        if: ${{ env.EVIDENCE_AVAILABLE == 'true' }}
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: review-panel-verified-artifact-packet
+          path: .review-panel-artifacts
+
+      - name: Build trusted artifact-review prompt
+        env:
+          BASE_SHA: ${{ needs.prepare.outputs.base_sha }}
+          HEAD_SHA: ${{ needs.prepare.outputs.head_sha }}
+          LANE: ${{ matrix.id }}
+        run: |
+          python .github/scripts/review_panel.py build-prompt \
+            --provider codex \
+            --lane "$LANE" \
+            --base-sha "$BASE_SHA" \
+            --head-sha "$HEAD_SHA" \
+            --review-directory .review-target \
+            --output ".review-panel-work/codex-$LANE.md"
+
+      - name: Disable Codex tools for prompt-only review
+        run: >-
+          python .github/scripts/review_panel.py codex-config
+          --output .review-panel-codex-home/config.toml
+
+      - name: Run adversarial Codex artifact reviewer
+        id: codex_review
+        if: >-
+          ${{
+            env.HAS_OPENAI_API_KEY == 'true' &&
+            env.EVIDENCE_AVAILABLE == 'true'
+          }}
+        continue-on-error: true
+        uses: openai/codex-action@52fe01ec70a42f454c9d2ebd47598f9fd6893d56 # v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          prompt-file: >-
+            ${{ github.workspace }}/.review-panel-work/codex-${{ matrix.id }}.md
+          output-schema-file: >-
+            ${{ github.workspace }}/.github/review-panel/review.schema.json
+          output-file: >-
+            ${{ github.workspace }}/.review-panel-work/raw-codex-${{ matrix.id }}.json
+          working-directory: ${{ github.workspace }}/.review-panel-work
+          codex-home: ${{ github.workspace }}/.review-panel-codex-home
+          permission-profile: ":read-only"
+          safety-strategy: drop-sudo
+          codex-args: '["--ephemeral"]'
+          codex-version: ${{ vars.CODEX_REVIEW_CLI_VERSION || '0.145.0' }}
+          model: ${{ vars.CODEX_REVIEW_MODEL }}
+          effort: ${{ vars.CODEX_REVIEW_EFFORT || 'high' }}
+
+      - name: Normalize Codex artifact receipt
+        if: ${{ always() }}
+        env:
+          ACTION_OUTCOME: ${{ steps.codex_review.outcome || 'skipped' }}
+          BASE_SHA: ${{ needs.prepare.outputs.base_sha }}
+          HEAD_SHA: ${{ needs.prepare.outputs.head_sha }}
+          LANE: ${{ matrix.id }}
+        run: |
+          python .github/scripts/review_panel.py normalize \
+            --provider codex \
+            --lane "$LANE" \
+            --base-sha "$BASE_SHA" \
+            --head-sha "$HEAD_SHA" \
+            --source ".review-panel-work/raw-codex-$LANE.json" \
+            --raw-output "review-panel-results/raw-codex-$LANE.txt" \
+            --output "review-panel-results/codex-$LANE.json" \
+            --action-outcome "$ACTION_OUTCOME" \
+            --credential-available "$HAS_OPENAI_API_KEY" \
+            --evidence-available "$EVIDENCE_AVAILABLE" \
+            --lane-applicable true
+
+      - name: Upload Codex artifact receipt
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: review-panel-result-codex-${{ matrix.id }}
+          path: |
+            review-panel-results/codex-${{ matrix.id }}.json
+            review-panel-results/raw-codex-${{ matrix.id }}.txt
           if-no-files-found: warn
           retention-days: 14
 
   aggregate:
     name: panel-policy
-    needs: [prepare, artifacts, claude, codex]
+    needs: [prepare, claude, codex, codex_artifact]
     if: >-
       ${{
         always() &&
-        needs.prepare.result == 'success' &&
-        needs.prepare.outputs.should_run == 'true'
+        needs.prepare.result == 'success'
       }}
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
       pull-requests: write
@@ -410,7 +597,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
-          python-version: "3.12"
+          python-version: "3.11"
 
       - name: Download normalized receipts
         continue-on-error: true
