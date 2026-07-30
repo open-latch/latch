@@ -1,8 +1,6 @@
-"""Structural-only RL log streams for the adversarial-gate + decision-capture
-pipeline (scope: KB id=1343; builds id=1303 self-improvement loop / id=1279
-decision-capture stream).
+"""Structural-only RL log streams for the gate + decision-capture pipeline.
 
-Two daily JSONL streams, both following the locked logging conventions
+Daily JSONL streams follow the locked logging conventions
 (id=1108 / id=1091): one file per concern, common header prepended by
 ``log_utils.emit_event``, the structural-only invariant (NO node titles,
 bodies, raw prompt text, objection text, or fork-question text — ids,
@@ -28,20 +26,33 @@ post-hoc correlation.
   is correlator-derived from the existing correction/supersede streams (mirrors
   ``cited_ids_corrected``).
 
-Structural-only is enforced *by construction*: the emit helpers accept only
-typed scalar / id / list-of-id params — there is no ``**kwargs`` passthrough
-through which body text could leak. ``tests/test_capture_streams.py`` is the
-regression that pins this.
+Structural-only is enforced *by construction*: emit helpers use explicit
+parameters and rebuild nested rows from allowlisted fields — there is no
+``**kwargs`` passthrough through which body text could leak.
 """
 from __future__ import annotations
 
+import hashlib
+import json
+import os
+import stat
+import uuid
 from typing import Sequence
 
 import log_utils
+import paths
 
 
 ADVERSARY_STREAM = "adversary"
 DECISION_STREAM = "decision"
+OUTCOME_STREAM = "outcome_event"
+OUTCOME_EVENTS_VERSION = "1"
+OUTCOME_ROW_KINDS = (
+    "gate_verdict",
+    "capture_action",
+    "decision_capture_link",
+)
+OUTCOME_NODE_SOURCES = ("priority", "lane", "hybrid", "graph", "focus")
 # One row per mission-control assistant turn scanned by the Stop-hook cite
 # detector (Slice 3-B, KB id=1436). Structural-only: counts + a closed-set
 # action + a transcript join hash, never the claim text. Feeds the precision
@@ -71,6 +82,286 @@ ADVERSARY_MODES = ("counter_node", "assumption_hunter")
 # flagged; "nudge_queued" = an uncited code-class claim was found and the
 # advisory next-turn nudge was queued for the UserPromptSubmit hook.
 DETECTION_ACTIONS = ("none", "nudge_queued")
+
+_EMPTY_QUERY_HASH = hashlib.sha1(b"").hexdigest()[:12]
+_OUTCOME_SETTINGS_CACHE: dict[str, tuple[int, int, int, int, bool]] = {}
+_OUTCOME_ROLES = (
+    "decision_chain",
+    "abandoned_path",
+    "active_constraint",
+    "current_direction",
+)
+_OUTCOME_BACKENDS = ("claude", "codex", "cursor")
+_OUTCOME_NODE_KINDS = (
+    "fact",
+    "decision",
+    "progress",
+    "entity",
+    "preference",
+    "open_question",
+    "idea",
+    "workstream",
+    "summary",
+    "priority",
+    "profile",
+)
+_OUTCOME_NODE_STATUSES = ("staging", "canonical", "stale")
+_OUTCOME_AUTHORITY_TIERS = (
+    "foundational",
+    "governing",
+    "lane-local",
+    "decision-evidence",
+)
+_OUTCOME_RELATIONS = (
+    "supersedes",
+    "replaces",
+    "constrains",
+    "motivates",
+    "tested_against",
+    "depends_on",
+    "related_to",
+    "reconciled_by",
+    "merged_into",
+)
+
+
+def new_gate_call_id() -> str:
+    """Return a content-free nonce for exact gate/outcome joins."""
+    return uuid.uuid4().hex[:12]
+
+
+def outcome_events_enabled(project_path: str | None = None) -> bool:
+    """Return the call-time local outcome-recording policy.
+
+    Recording is on for a clean install. Any explicitly set environment value
+    other than ``"1"`` disables it for that process. The vault-local
+    ``runtime_settings.json`` key is the durable daemon-safe control. Invalid
+    configured policy fails closed and never emits output.
+    """
+    raw_env = os.environ.get("LATCH_OUTCOME_EVENTS")
+    if raw_env is not None:
+        return raw_env.strip() == "1"
+    try:
+        settings_path = (
+            paths.project_dir(project_path) / paths.VAULT_RUNTIME_SETTINGS_FILENAME
+        )
+        if settings_path.is_symlink():
+            return False
+        try:
+            info = settings_path.stat()
+        except FileNotFoundError:
+            return True
+        except OSError:
+            return False
+        if not stat.S_ISREG(info.st_mode):
+            return False
+        cache_key = os.path.abspath(os.fspath(settings_path))
+        signature = (
+            info.st_mtime_ns,
+            info.st_ctime_ns,
+            info.st_ino,
+            info.st_size,
+        )
+        cached = _OUTCOME_SETTINGS_CACHE.get(cache_key)
+        if cached is not None and cached[:4] == signature:
+            return cached[4]
+        data = json.loads(settings_path.read_text(encoding="utf-8"))
+        enabled = (
+            isinstance(data, dict)
+            and data.get("outcome_events", True) is True
+        )
+        _OUTCOME_SETTINGS_CACHE[cache_key] = (*signature, enabled)
+        return enabled
+    except Exception:
+        return False
+
+
+def _normalized_hex12(value: str | None) -> str | None:
+    """Keep only a content-free 12-character lowercase hex key."""
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().lower()
+    if len(normalized) != 12 or any(c not in "0123456789abcdef" for c in normalized):
+        return None
+    return normalized
+
+
+def _normalized_query_hash(query_hash: str | None) -> str | None:
+    """Keep a real sha1[:12] join key while dropping the empty-input sentinel."""
+    normalized = _normalized_hex12(query_hash)
+    return None if normalized == _EMPTY_QUERY_HASH else normalized
+
+
+def _closed_label(value, allowed: tuple[str, ...]) -> str | None:
+    return value if isinstance(value, str) and value in allowed else None
+
+
+def _optional_int(value) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _emit_outcome_row(
+    row: dict,
+    *,
+    project_path: str | None,
+    session_id: str | None,
+) -> None:
+    log_utils.emit_event(
+        OUTCOME_STREAM,
+        {"events_version": OUTCOME_EVENTS_VERSION, **row},
+        project_path=project_path,
+        session_id=session_id,
+    )
+
+
+def emit_gate_outcome_event(
+    *,
+    gate_call_id: str,
+    query_hash: str,
+    verdict: str | None,
+    skipped: bool,
+    timed_out: bool,
+    error_present: bool,
+    backend: str | None,
+    adversary: dict | None,
+    assembled_nodes: Sequence[dict],
+    cited_nodes: Sequence[dict],
+    uncovered_claim_count: int,
+    project_path: str | None = None,
+    session_id: str | None = None,
+) -> None:
+    """Emit one allowlisted, structural ``gate_verdict`` outcome row."""
+    try:
+        if not outcome_events_enabled(project_path):
+            return
+        normalized_gate_call_id = _normalized_hex12(gate_call_id)
+        if normalized_gate_call_id is None:
+            return
+        assembled = [
+            {
+                "node_id": int(node["node_id"]),
+                "source": node["source"],
+                "position": int(node["position"]),
+                "cited": bool(node["cited"]),
+            }
+            for node in assembled_nodes
+            if node.get("source") in OUTCOME_NODE_SOURCES
+        ]
+        cited = [
+            {
+                "node_id": int(node["node_id"]),
+                "kind": _closed_label(
+                    node.get("kind"), _OUTCOME_NODE_KINDS,
+                ),
+                "status_at_citation": _closed_label(
+                    node.get("status_at_citation"), _OUTCOME_NODE_STATUSES,
+                ),
+                "workstream_id_at_event": _optional_int(
+                    node.get("workstream_id_at_event")
+                ),
+                "authority_tier_at_citation": _closed_label(
+                    node.get("authority_tier_at_citation"),
+                    _OUTCOME_AUTHORITY_TIERS,
+                ),
+                "via_relation": _closed_label(
+                    node.get("via_relation"), _OUTCOME_RELATIONS,
+                ),
+                "roles": [
+                    role for role in (node.get("roles") or [])
+                    if role in _OUTCOME_ROLES
+                ],
+                "classifier_load_bearing": bool(
+                    node.get("classifier_load_bearing")
+                ),
+            }
+            for node in cited_nodes
+        ]
+        adversary_row = None
+        if isinstance(adversary, dict):
+            adversary_row = {
+                "verdict_delta": (
+                    _closed_label(adversary.get("verdict_delta"), VERDICT_DELTAS)
+                ),
+                "counter_node_id": _optional_int(
+                    adversary.get("counter_node_id")
+                ),
+                "n_forks": int(adversary.get("n_forks") or 0),
+            }
+        _emit_outcome_row(
+            {
+                "row_kind": "gate_verdict",
+                "gate_call_id": normalized_gate_call_id,
+                "query_hash": _normalized_query_hash(query_hash),
+                "verdict": verdict if verdict in VERDICT_LABELS else None,
+                "skipped": bool(skipped),
+                "timed_out": bool(timed_out),
+                "error_present": bool(error_present),
+                "backend": _closed_label(backend, _OUTCOME_BACKENDS),
+                "adversary": adversary_row,
+                "assembled_nodes": assembled,
+                "cited_nodes": cited,
+                "uncovered_claim_count": int(uncovered_claim_count),
+            },
+            project_path=project_path,
+            session_id=session_id,
+        )
+    except Exception:
+        pass
+
+
+def _emit_capture_outcomes(
+    *,
+    node_ids: Sequence[int],
+    confidence_tier: str,
+    provenance: str,
+    was_confirmed: bool,
+    human_action: str | None,
+    query_hash: str | None,
+    project_path: str | None,
+    session_id: str | None,
+) -> None:
+    if not outcome_events_enabled(project_path):
+        return
+    normalized_ids = [int(node_id) for node_id in node_ids]
+    normalized_hash = _normalized_query_hash(query_hash)
+    if human_action in HUMAN_ACTIONS:
+        _emit_outcome_row(
+            {
+                "row_kind": "capture_action",
+                "query_hash": normalized_hash,
+                "human_action": human_action,
+                "confidence_tier": (
+                    confidence_tier
+                    if confidence_tier in CONFIDENCE_TIERS
+                    else None
+                ),
+                "provenance": (
+                    provenance if provenance in DECISION_PROVENANCES else None
+                ),
+                "was_confirmed": bool(was_confirmed),
+                "decision_node_ids": normalized_ids,
+            },
+            project_path=project_path,
+            session_id=session_id,
+        )
+    if normalized_ids:
+        _emit_outcome_row(
+            {
+                "row_kind": "decision_capture_link",
+                "decision_node_ids": normalized_ids,
+                "query_hash": normalized_hash,
+                "provenance": (
+                    provenance if provenance in DECISION_PROVENANCES else None
+                ),
+            },
+            project_path=project_path,
+            session_id=session_id,
+        )
 
 
 def emit_adversary_event(
@@ -205,3 +496,16 @@ def emit_decision_event(
         project_path=project_path,
         session_id=session_id,
     )
+    try:
+        _emit_capture_outcomes(
+            node_ids=node_ids,
+            confidence_tier=confidence_tier,
+            provenance=provenance,
+            was_confirmed=was_confirmed,
+            human_action=human_action,
+            query_hash=query_hash,
+            project_path=project_path,
+            session_id=session_id,
+        )
+    except Exception:
+        pass

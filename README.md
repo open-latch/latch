@@ -301,6 +301,17 @@ never uploads your KB. Data leaves your machine only when you run a model-backed
 compaction, or the nightly heal pass — which may send selected prompts, snippets, and evidence to the
 Claude, Codex, or Cursor backend *you* configured.
 
+**Local outcome records.** latch records structural gate and decision-capture events in
+`outcome_event-YYYY-MM-DD.log` in the selected local vault. Records contain node IDs, closed-set
+labels, timestamps, local project/session identifiers, counts, hashes, and booleans; they do not
+contain requests, prompt text, node titles or bodies, summaries, or decision text. latch does not
+upload these files. When nightly log maintenance runs, it compresses daily files after 30 days and
+deletes them after one year; if that maintenance is disabled, the files remain local until removed.
+
+For the standard shared MCP runtime, opt out by setting `"outcome_events": false` in the
+`runtime_settings.json` vault-policy file printed by quickstart, preserving its other keys. Direct
+CLI processes can instead set the `LATCH_OUTCOME_EVENTS` environment variable to `0`.
+
 **Overhead.** The per-prompt retrieval hook runs locally against the KB —
 roughly 120–150 ms on an Apple Silicon reference machine, inside a 250 ms
 budget — and injects at most five compact KB pointers. A healthy session start

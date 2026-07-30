@@ -1094,6 +1094,7 @@ def _render_chain_for_prompt(
     max_evidence_per_chain: int = GATE_MAX_EVIDENCE_PER_CHAIN,
     max_total_evidence: int = GATE_MAX_TOTAL_EVIDENCE,
     stale_budget: int = GATE_STALE_BUDGET,
+    exposure: list[dict] | None = None,
 ) -> str:
     """Serialize the assemble_gate() output into the human-readable form the
     classifier prompt consumes. Bounded on three axes (KB id=1415): at most
@@ -1140,6 +1141,13 @@ def _render_chain_for_prompt(
                 (seed for seed in lane_seeds if seed.get("kind") == "workstream"),
                 lane_seeds[0],
             )
+            if exposure is not None:
+                exposure.append({
+                    "node_id": lane_id,
+                    "source": "lane",
+                    "authority_tier": None,
+                    "via_relation": None,
+                })
             title = str(lane.get("title") or fallback_seed.get("title") or "workstream")
             header = f"Lane {lane_id}: {title}"
             if lane.get("done_when"):
@@ -1148,6 +1156,13 @@ def _render_chain_for_prompt(
 
         for seed in lane_seeds:
             sid = seed["id"]
+            if exposure is not None:
+                exposure.append({
+                    "node_id": sid,
+                    "source": seed.get("source"),
+                    "authority_tier": seed.get("authority_tier"),
+                    "via_relation": None,
+                })
             authority_suffix = _authority_render_suffix(
                 seed, owning_workstream_id=lane_id, relation=None,
             )
@@ -1171,6 +1186,15 @@ def _render_chain_for_prompt(
                 if shown:
                     lines.append("  evidence:")
                     for ev in shown:
+                        if exposure is not None:
+                            exposure.append({
+                                "node_id": ev["id"],
+                                "source": (
+                                    "focus" if ev.get("focus_derived") else "graph"
+                                ),
+                                "authority_tier": ev.get("authority_tier"),
+                                "via_relation": ev.get("via_relation"),
+                            })
                         ev_authority = _authority_render_suffix(
                             ev,
                             owning_workstream_id=lane_id,
@@ -1220,10 +1244,23 @@ def _authority_render_suffix(
     return f" [authority={tier}]"
 
 
-def build_classifier_prompt(chain_assembly: dict, *, max_chains: int = 5) -> str:
+def build_classifier_prompt(
+    chain_assembly: dict,
+    *,
+    max_chains: int = 5,
+    exposure: list[dict] | None = None,
+) -> str:
     """Compose the full prompt: system + few-shot + actual chain + request."""
     request = chain_assembly.get("query", "").strip() or "(empty request)"
-    rendered = _render_chain_for_prompt(chain_assembly, max_chains=max_chains)
+    if exposure is not None:
+        exposure.extend(_priority_exposure_for_prompt(
+            chain_assembly.get("priorities") or []
+        ))
+    rendered = _render_chain_for_prompt(
+        chain_assembly,
+        max_chains=max_chains,
+        exposure=exposure,
+    )
     prio_block = priorities.render_for_gate(chain_assembly.get("priorities") or [])
     prio_section = (
         f"\n--- ACTIVE PROJECT PRIORITIES ---\n{prio_block}\n" if prio_block else ""
@@ -1589,6 +1626,7 @@ def classify_gate(
     max_chains: int = 5,
     timeout_s: int | None = None,
     backend: str | None = None,
+    outcome_exposure: list[dict] | None = None,
 ) -> dict:
     """Run the classifier LLM call against an assembled chain.
 
@@ -1632,7 +1670,11 @@ def classify_gate(
     if not allowed:
         return {**_classifier_error("daily budget cap hit"), "skipped": True}
 
-    prompt = build_classifier_prompt(chain_assembly, max_chains=max_chains)
+    prompt = build_classifier_prompt(
+        chain_assembly,
+        max_chains=max_chains,
+        exposure=outcome_exposure,
+    )
     prompt_chars = len(prompt)
     raw, err, timed_out = _invoke_classifier_backend_once(
         prompt, backend=resolved_backend, timeout_s=timeout_s,
@@ -2136,6 +2178,15 @@ def run_gate(
             },
             "evidence": [],
         }
+    try:
+        gate_call_id = capture_streams.new_gate_call_id()
+    except Exception:
+        gate_call_id = _query_hash(f"{time.time_ns()}:{os.getpid()}")
+    try:
+        outcome_enabled = capture_streams.outcome_events_enabled(project_path)
+    except Exception:
+        outcome_enabled = False
+    outcome_exposure: list[dict] | None = [] if outcome_enabled else None
     t0 = time.perf_counter()
     chain_assembly = assemble_gate(
         conn, request,
@@ -2153,6 +2204,7 @@ def run_gate(
         project_path=project_path,
         use_llm=use_llm,
         max_chains=max_chains,
+        outcome_exposure=outcome_exposure,
     )
 
     cited = set(verdict.get("evidence_nodes") or [])
@@ -2178,6 +2230,7 @@ def run_gate(
         chain_assembly=chain_assembly,
         evidence=evidence,
         elapsed_ms=elapsed_ms,
+        gate_call_id=gate_call_id,
     )
 
     # Adversarial verdict layer (scope KB id=1343). PROCEED-only, default-off.
@@ -2204,6 +2257,16 @@ def run_gate(
             verdict_before=verdict.get("recommendation"), adv=adv,
             elapsed_ms=adv_ms, mode=adv_mode,
         )
+
+    _emit_gate_outcome_event(
+        project_path=project_path,
+        session_id=session_id,
+        request=request,
+        gate_call_id=gate_call_id,
+        verdict=verdict,
+        exposure=outcome_exposure,
+        evidence=evidence,
+    )
 
     return {
         "request": request,
@@ -2257,6 +2320,139 @@ def _record_gate_contacts(
         pass
 
 
+def _emit_gate_outcome_event(
+    *,
+    project_path: str | None,
+    session_id: str | None,
+    request: str,
+    gate_call_id: str,
+    verdict: dict,
+    exposure: list[dict] | None,
+    evidence: list[dict],
+) -> None:
+    """Emit the final structural outcome snapshot without changing the gate."""
+    try:
+        if exposure is None:
+            return
+        cited_ids: set[int] = set()
+        for raw_id in verdict.get("evidence_nodes") or []:
+            try:
+                cited_ids.add(int(raw_id))
+            except (TypeError, ValueError):
+                continue
+        assembled_nodes = [
+            {
+                "node_id": int(node["node_id"]),
+                "source": node.get("source"),
+                "position": position,
+                "cited": int(node["node_id"]) in cited_ids,
+            }
+            for position, node in enumerate(exposure)
+        ]
+        prompt_metadata: dict[int, dict] = {}
+        for node in exposure:
+            try:
+                prompt_metadata.setdefault(int(node["node_id"]), node)
+            except (KeyError, TypeError, ValueError):
+                continue
+        role_fields = (
+            ("decision_chain", "decision_chain"),
+            ("abandoned_path", "abandoned_paths"),
+            ("active_constraint", "active_constraints"),
+            ("current_direction", "current_direction"),
+        )
+        roles_by_id: dict[int, list[str]] = {}
+        for role, field in role_fields:
+            for raw_id in verdict.get(field) or []:
+                try:
+                    roles_by_id.setdefault(int(raw_id), []).append(role)
+                except (TypeError, ValueError):
+                    continue
+        load_bearing_ids: set[int] = set()
+        for claim in verdict.get("load_bearing_claims") or []:
+            if not isinstance(claim, dict) or claim.get("evidence_type") != "kb_node":
+                continue
+            try:
+                load_bearing_ids.add(int(claim.get("evidence_ref")))
+            except (TypeError, ValueError):
+                continue
+        cited_nodes = []
+        for row in evidence:
+            node_id = int(row["id"])
+            metadata = prompt_metadata.get(node_id) or {}
+            cited_nodes.append({
+                "node_id": node_id,
+                "kind": row.get("kind"),
+                "status_at_citation": row.get("status"),
+                "workstream_id_at_event": row.get("workstream_id"),
+                "authority_tier_at_citation": metadata.get("authority_tier"),
+                "via_relation": metadata.get("via_relation"),
+                "roles": roles_by_id.get(node_id, []),
+                "classifier_load_bearing": node_id in load_bearing_ids,
+            })
+        adversary = verdict.get("adversary")
+        adversary_row = None
+        if isinstance(adversary, dict):
+            adversary_row = {
+                "verdict_delta": adversary.get("verdict_delta"),
+                "counter_node_id": adversary.get("counter_node_id"),
+                "n_forks": len(adversary.get("design_decision_questions") or []),
+            }
+        capture_streams.emit_gate_outcome_event(
+            gate_call_id=gate_call_id,
+            query_hash=_query_hash(request),
+            verdict=verdict.get("recommendation"),
+            skipped=bool(verdict.get("skipped", False)),
+            timed_out=bool(verdict.get("timed_out", False)),
+            error_present=bool(verdict.get("error")),
+            backend=verdict.get("backend"),
+            adversary=adversary_row,
+            assembled_nodes=assembled_nodes,
+            cited_nodes=cited_nodes,
+            uncovered_claim_count=len(verdict.get("uncovered_claims") or []),
+            project_path=project_path,
+            session_id=session_id,
+        )
+    except Exception:
+        pass
+
+
+def _priority_exposure_for_prompt(items: list[dict]) -> list[dict]:
+    """Return priority node occurrences in ``render_for_gate`` order."""
+    overall = [item for item in items if item.get("workstream_id") is None]
+    scoped = [item for item in items if item.get("workstream_id") is not None]
+    grouped: dict[int, list[dict]] = {}
+    for item in scoped:
+        try:
+            workstream_id = int(item["workstream_id"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        grouped.setdefault(workstream_id, []).append(item)
+    out = [
+        {
+            "node_id": item["id"],
+            "source": "priority",
+            "authority_tier": None,
+            "via_relation": None,
+        }
+        for item in overall
+    ]
+    for workstream_id, rows in grouped.items():
+        out.append({
+            "node_id": workstream_id,
+            "source": "lane",
+            "authority_tier": None,
+            "via_relation": None,
+        })
+        out.extend({
+            "node_id": item["id"],
+            "source": "priority",
+            "authority_tier": None,
+            "via_relation": None,
+        } for item in rows)
+    return out
+
+
 # ---------- invocation telemetry (gate.log) ----------
 
 def _log_invocation(
@@ -2268,6 +2464,7 @@ def _log_invocation(
     chain_assembly: dict,
     evidence: list[dict],
     elapsed_ms: float,
+    gate_call_id: str | None = None,
 ) -> None:
     """Append one JSONL line per run_gate() call to the daily gate log
     (KB id=1091 conventions). Best-effort: any error is swallowed so
@@ -2281,6 +2478,7 @@ def _log_invocation(
     try:
         seeds = chain_assembly.get("seeds") or []
         entry = {
+            "gate_call_id": gate_call_id,
             "query_hash": _query_hash(request),
             "query_chars": len(request),
             "recommendation": verdict.get("recommendation"),
@@ -2392,8 +2590,9 @@ def _query_hash(request: str) -> str:
     """sha1[:12] of the request — the correlation key shared by gate.log and
     adversary.log so the offline correlator can join an adversary row back to
     its originating gate verdict/prompt. Structural-only (a hash, never text)."""
+    normalized = "" if not request.strip() else request
     return hashlib.sha1(
-        request.encode("utf-8", errors="replace")
+        normalized.encode("utf-8", errors="replace")
     ).hexdigest()[:12]
 
 

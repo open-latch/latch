@@ -158,6 +158,11 @@ def _runtime_key() -> str:
         root / "mcp_daemon.py",
         root / "mcp_server.py",
         root / "mcp_runtime.py",
+        # Gate/capture behavior executes inside the long-lived owner. Include
+        # both so an update performs the normal blue/green transition instead
+        # of reconnecting new proxies to an owner with stale outcome behavior.
+        root / "gate.py",
+        root / "capture_streams.py",
         paths.KB_ROOT / "vendor" / "config.json",
         paths.KB_ROOT / "vendor" / "tokenizer.json",
         paths.KB_ROOT / "vendor" / "tokenizer_config.json",
