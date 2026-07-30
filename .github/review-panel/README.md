@@ -9,6 +9,13 @@ credential-free job.
 Pull requests run on open, reopen, every synchronized head commit, and the
 ready-for-review transition, including while the pull request is a draft.
 
+The pull-request trigger is `pull_request_target`, so GitHub loads the workflow
+definition from the trusted target branch rather than from the reviewed head.
+The pull request that first installs this panel is therefore intentionally
+dormant: the panel becomes active for subsequent pull requests after the
+installation PR merges. Do not add a fallback that executes the control script
+from the reviewed head.
+
 ## Lanes
 
 - Claude: correctness/concurrency and security/abuse
@@ -28,6 +35,11 @@ The repeated jobs are intentional security boundaries:
 
 - orchestration, prompts, schemas, and aggregation run from the trusted base
   commit while the reviewed head lives in `.review-target`
+- credentialed provider jobs keep `.review-target` as a bare Git object store,
+  not a checked-out PR worktree; reviewers inspect immutable diffs and blobs
+  with read-only Git commands
+- reviewed files are inspected statically; credentialed reviewer jobs do not
+  execute project code, tests, scripts, build tools, or package managers
 - provider jobs have read-only repository permissions and cannot publish their
   own comments or edits
 - artifact simulation runs without provider credentials
@@ -43,9 +55,11 @@ Add these Actions secrets:
 - `OPENAI_API_KEY`
 - `ANTHROPIC_API_KEY`
 
-Fork pull requests do not receive these secrets. Their workflow still starts
-and records unavailable lanes without exposing credentials. A maintainer can
-review the fork and run the panel manually against trusted commits.
+Provider steps are deliberately disabled when the reviewed head belongs to a
+fork, even though `pull_request_target` can access target-repository secrets.
+The workflow still starts and records unavailable lanes without passing
+provider credentials to those steps. A maintainer can review the fork and run
+the panel manually against trusted commits.
 
 Optional Actions variables:
 

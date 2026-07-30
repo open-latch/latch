@@ -1,7 +1,9 @@
 name: AI Review Panel
 
 on:
-  pull_request:
+  # Keep the workflow definition and all credentialed orchestration on the
+  # trusted target branch. Reviewed code is checked out separately as data.
+  pull_request_target:
     types: [opened, reopened, synchronize, ready_for_review]
   workflow_dispatch:
     inputs:
@@ -142,7 +144,12 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.prepare.outputs.claude_matrix) }}
     env:
-      HAS_ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY != '' }}
+      HAS_ANTHROPIC_API_KEY: >-
+        ${{
+          (github.event_name == 'workflow_dispatch' ||
+           github.event.pull_request.head.repo.full_name == github.repository) &&
+          secrets.ANTHROPIC_API_KEY != ''
+        }}
       CLAUDE_REVIEW_MODEL: ${{ vars.CLAUDE_REVIEW_MODEL }}
     steps:
       - name: Check out trusted review controls
@@ -152,20 +159,25 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
-      - name: Check out reviewed commit
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with:
-          repository: >-
-            ${{ github.event.pull_request.head.repo.full_name || github.repository }}
-          ref: ${{ needs.prepare.outputs.head_sha }}
-          path: .review-target
-          fetch-depth: 0
-          persist-credentials: false
-
       - name: Set up Python
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.12"
+
+      - name: Fetch reviewed objects without checkout
+        env:
+          BASE_REPOSITORY: ${{ github.repository }}
+          HEAD_REPOSITORY: >-
+            ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          BASE_SHA: ${{ needs.prepare.outputs.base_sha }}
+          HEAD_SHA: ${{ needs.prepare.outputs.head_sha }}
+        run: |
+          python .github/scripts/review_panel.py prepare-repository \
+            --base-repository "$BASE_REPOSITORY" \
+            --head-repository "$HEAD_REPOSITORY" \
+            --base-sha "$BASE_SHA" \
+            --head-sha "$HEAD_SHA" \
+            --output .review-target
 
       - name: Build trusted lane prompt
         env:
@@ -256,7 +268,12 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.prepare.outputs.codex_matrix) }}
     env:
-      HAS_OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY != '' }}
+      HAS_OPENAI_API_KEY: >-
+        ${{
+          (github.event_name == 'workflow_dispatch' ||
+           github.event.pull_request.head.repo.full_name == github.repository) &&
+          secrets.OPENAI_API_KEY != ''
+        }}
     steps:
       - name: Check out trusted review controls
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -265,20 +282,25 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
-      - name: Check out reviewed commit
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with:
-          repository: >-
-            ${{ github.event.pull_request.head.repo.full_name || github.repository }}
-          ref: ${{ needs.prepare.outputs.head_sha }}
-          path: .review-target
-          fetch-depth: 0
-          persist-credentials: false
-
       - name: Set up Python
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.12"
+
+      - name: Fetch reviewed objects without checkout
+        env:
+          BASE_REPOSITORY: ${{ github.repository }}
+          HEAD_REPOSITORY: >-
+            ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          BASE_SHA: ${{ needs.prepare.outputs.base_sha }}
+          HEAD_SHA: ${{ needs.prepare.outputs.head_sha }}
+        run: |
+          python .github/scripts/review_panel.py prepare-repository \
+            --base-repository "$BASE_REPOSITORY" \
+            --head-repository "$HEAD_REPOSITORY" \
+            --base-sha "$BASE_SHA" \
+            --head-sha "$HEAD_SHA" \
+            --output .review-target
 
       - name: Download credential-free artifact evidence
         if: ${{ matrix.when == 'user_facing' }}
@@ -299,7 +321,7 @@ jobs:
             --lane "$LANE" \
             --base-sha "$BASE_SHA" \
             --head-sha "$HEAD_SHA" \
-            --review-directory . \
+            --review-directory .review-target \
             --output ".review-panel-work/codex-$LANE.md"
 
       - name: Run adversarial Codex reviewer
@@ -320,7 +342,7 @@ jobs:
             ${{ github.workspace }}/.github/review-panel/review.schema.json
           output-file: >-
             ${{ github.workspace }}/.review-panel-work/raw-codex-${{ matrix.id }}.json
-          working-directory: ${{ github.workspace }}/.review-target
+          working-directory: ${{ github.workspace }}
           permission-profile: ":read-only"
           safety-strategy: drop-sudo
           codex-args: '["--ephemeral"]'

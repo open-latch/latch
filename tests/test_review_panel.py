@@ -230,7 +230,7 @@ def test_scope_runs_draft_prs_and_marks_user_facing_changes(
         [
             "scope",
             "--event-name",
-            "pull_request",
+            "pull_request_target",
             "--event-path",
             str(event_path),
             "--github-output",
@@ -247,6 +247,44 @@ def test_scope_runs_draft_prs_and_marks_user_facing_changes(
     assert values["artifact_review_needed"] == "true"
     assert json.loads(values["claude_matrix"])["include"]
     assert json.loads(values["codex_matrix"])["include"]
+
+
+def test_prepare_repository_uses_bare_immutable_refs(
+    tmp_path: Path,
+    monkeypatch,
+):
+    fetched = []
+
+    def fake_fetch(target, repository, sha, ref):
+        fetched.append((target, repository, sha, ref))
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(review_panel, "_fetch_ref", fake_fetch)
+    result = review_panel.main(
+        [
+            "prepare-repository",
+            "--base-repository",
+            "open-latch/latch",
+            "--head-repository",
+            "contributor/latch",
+            "--base-sha",
+            BASE_SHA,
+            "--head-sha",
+            HEAD_SHA,
+            "--output",
+            ".review-target",
+        ]
+    )
+    assert result == 0
+    target = tmp_path / ".review-target"
+    assert (target / "config").is_file()
+    assert (target / "HEAD").read_text(encoding="utf-8").strip() == (
+        "ref: refs/review/head"
+    )
+    assert fetched == [
+        (target, "open-latch/latch", BASE_SHA, "refs/review/base"),
+        (target, "contributor/latch", HEAD_SHA, "refs/review/head"),
+    ]
 
 
 def test_cross_provider_p1s_correlate():
@@ -308,11 +346,12 @@ def test_enforced_panel_requires_each_provider_and_the_simplicity_lane(
 
 def test_workflow_is_pr_and_manual_triggered_with_trusted_control_checkout():
     workflow = WORKFLOW.read_text(encoding="utf-8")
-    assert "pull_request:" in workflow
+    assert "\n  pull_request_target:\n" in workflow
+    assert "\n  pull_request:\n" not in workflow
     assert "workflow_dispatch:" in workflow
-    assert "pull_request_target" not in workflow
     assert "github.event.pull_request.base.sha || github.sha" in workflow
     assert "path: .review-target" in workflow
+    assert "python .review-target/" not in workflow
     assert "persist-credentials: false" in workflow
     assert "permission-profile: \":read-only\"" in workflow
     assert "safety-strategy: drop-sudo" in workflow
@@ -321,6 +360,28 @@ def test_workflow_is_pr_and_manual_triggered_with_trusted_control_checkout():
     assert "review-panel-result-*" in workflow
     assert "ai-review-panel-report" in workflow
     assert "include-hidden-files: true" in workflow
+    assert "github.event.pull_request.head.repo.full_name == github.repository" in workflow
+    assert workflow.count("prepare-repository") == 2
+    assert "working-directory: ${{ github.workspace }}" in workflow
+
+    claude_job = workflow.split("\n  claude:\n", 1)[1].split("\n  codex:\n", 1)[0]
+    codex_job = workflow.split("\n  codex:\n", 1)[1].split("\n  aggregate:\n", 1)[0]
+    assert "Check out reviewed commit" not in claude_job
+    assert "Check out reviewed commit" not in codex_job
+    assert "Fetch reviewed objects without checkout" in claude_job
+    assert "Fetch reviewed objects without checkout" in codex_job
+
+    readme = (ROOT / ".github" / "review-panel" / "README.md").read_text(
+        encoding="utf-8"
+    )
+    assert "first installs this panel is therefore intentionally" in readme
+    assert "Do not add a fallback" in readme
+
+    common_prompt = (
+        ROOT / ".github" / "review-panel" / "prompts" / "common.md"
+    ).read_text(encoding="utf-8")
+    assert "Use static inspection only." in common_prompt
+    assert "environment variables, credentials" in common_prompt
 
     # These are the dereferenced commits behind the provider v1 tags.
     assert "52fe01ec70a42f454c9d2ebd47598f9fd6893d56" in workflow

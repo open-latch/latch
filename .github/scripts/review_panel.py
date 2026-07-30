@@ -33,6 +33,7 @@ COMMON_PROMPT_PATH = (
 )
 SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
 MODEL_RE = re.compile(r"^[A-Za-z0-9._:/-]+$")
+REPOSITORY_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 REPORT_MARKER = "<!-- ai-review-panel-report -->"
 MAX_REPORT_CHARS = 60_000
 
@@ -145,6 +146,83 @@ def _git(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
     )
 
 
+def _fetch_ref(
+    target: Path,
+    repository: str,
+    sha: str,
+    ref: str,
+) -> None:
+    if not REPOSITORY_RE.fullmatch(repository):
+        raise ValueError(f"invalid GitHub repository name: {repository!r}")
+    url = f"https://github.com/{repository}.git"
+    subprocess.run(
+        [
+            "git",
+            "--git-dir",
+            str(target),
+            "fetch",
+            "--no-tags",
+            "--depth=1",
+            url,
+            sha,
+        ],
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    resolved = subprocess.run(
+        ["git", "--git-dir", str(target), "rev-parse", "FETCH_HEAD^{commit}"],
+        text=True,
+        capture_output=True,
+        check=True,
+    ).stdout.strip().lower()
+    if resolved != sha:
+        raise ValueError(
+            f"fetched {repository} at {resolved}, expected immutable commit {sha}"
+        )
+    subprocess.run(
+        ["git", "--git-dir", str(target), "update-ref", ref, sha],
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+
+
+def command_prepare_repository(args: argparse.Namespace) -> int:
+    base_sha = _validate_sha(args.base_sha, "base SHA")
+    head_sha = _validate_sha(args.head_sha, "head SHA")
+    output_value = args.output.strip()
+    if not _safe_repo_path(output_value) or output_value == ".":
+        raise ValueError("object-store output must be a safe relative path")
+    cwd = Path.cwd().resolve()
+    target = (cwd / output_value).resolve()
+    if not target.is_relative_to(cwd) or target == cwd:
+        raise ValueError("object-store output must stay inside the workspace")
+    if target.exists():
+        if target.is_symlink() or not target.is_dir():
+            raise ValueError("object-store output already exists and is not a directory")
+        shutil.rmtree(target)
+    subprocess.run(
+        ["git", "init", "--bare", str(target)],
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    _fetch_ref(target, args.base_repository, base_sha, "refs/review/base")
+    _fetch_ref(target, args.head_repository, head_sha, "refs/review/head")
+    subprocess.run(
+        ["git", "--git-dir", str(target), "symbolic-ref", "HEAD", "refs/review/head"],
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    print(
+        f"Prepared bare review object store {output_value} for "
+        f"{base_sha[:12]}..{head_sha[:12]}"
+    )
+    return 0
+
+
 def _require_commit(sha: str) -> None:
     result = _git("cat-file", "-e", f"{sha}^{{commit}}", check=False)
     if result.returncode != 0:
@@ -186,7 +264,7 @@ def command_scope(args: argparse.Namespace) -> int:
     policy = load_policy(Path(args.policy))
     event = json.loads(Path(args.event_path).read_text(encoding="utf-8"))
     event_name = args.event_name
-    if event_name == "pull_request":
+    if event_name in {"pull_request", "pull_request_target"}:
         pr = event.get("pull_request") or {}
         base_sha = _validate_sha(str((pr.get("base") or {}).get("sha") or ""), "base SHA")
         head_sha = _validate_sha(str((pr.get("head") or {}).get("sha") or ""), "head SHA")
@@ -1061,6 +1139,17 @@ def build_parser() -> argparse.ArgumentParser:
     scope.add_argument("--github-output", required=True)
     scope.add_argument("--policy", default=str(POLICY_PATH))
     scope.set_defaults(func=command_scope)
+
+    prepare = sub.add_parser(
+        "prepare-repository",
+        help="fetch immutable base/head objects without checking out reviewed code",
+    )
+    prepare.add_argument("--base-repository", required=True)
+    prepare.add_argument("--head-repository", required=True)
+    prepare.add_argument("--base-sha", required=True)
+    prepare.add_argument("--head-sha", required=True)
+    prepare.add_argument("--output", default=".review-target")
+    prepare.set_defaults(func=command_prepare_repository)
 
     prompt = sub.add_parser("build-prompt", help="compose common and lane prompts")
     prompt.add_argument("--provider", required=True, choices=("claude", "codex"))
