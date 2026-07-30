@@ -46,7 +46,7 @@ import db                 # noqa: E402
 import log_utils          # noqa: E402
 
 
-CORRELATOR_VERSION_DEFAULT = "0.3.0"  # 0.3.0: + shipped-diff file touches (id=3948 V1)
+CORRELATOR_VERSION_DEFAULT = "0.4.0"  # 0.4.0: + session_source, transcript-recovered attribution
 WINDOW_SECONDS_DEFAULT = 1800  # 30 minutes
 
 
@@ -442,29 +442,75 @@ def correlate(
         all_rows = list(log_utils.read_log_range(
             "gate", start_date, end_date, project_path,
         ))
+
+        # Resolve identity for EVERY row before building the next-gate map.
+        # The map truncates a verdict's window at the next gate in the same
+        # session; keying it on the raw row would leave every recovered row
+        # session-less at map-build time, so two consecutive recovered gates in
+        # one thread would both get a full 30-minute window and the earlier
+        # verdict would absorb the later one's activity — misclassifying it.
+        resolved: dict[int, dict] = {}
+        for idx, R in enumerate(all_rows):
+            if R.get("skipped"):
+                continue
+            if R.get("session_id"):
+                resolved[idx] = {
+                    "session_id": R["session_id"],
+                    "session_source": "host_supplied",
+                    "transcript_path": None,
+                }
+                continue
+            # The host gave no identity. Recover it from its own transcript by
+            # content join rather than writing the row off — otherwise every
+            # measured number is silently single-host (id=4018). Declines on an
+            # ambiguous match; see codex_attribution.
+            hit = codex_attribution.attribute(R, _attribution(), project=R.get("project"))
+            if hit is None:
+                continue
+            resolved[idx] = {
+                "session_id": hit["session_id"],
+                "session_source": hit["source"],
+                "transcript_path": hit["transcript_path"],
+            }
+
+        # Session-less rows attribution DECLINED on. They belong to some Codex
+        # thread — we just cannot say which — so any of them could be the next
+        # gate in a recovered row's thread. Left out, a recovered verdict's
+        # window runs straight through them and absorbs the next gate's
+        # activity, which is the exact failure truncation exists to prevent
+        # (reproduced: a DO_NOT_PROCEED reported OVERRIDDEN by the following
+        # gate's write). Treated as boundaries for recovered rows only, and
+        # only within the same project: truncating too early merely shortens a
+        # window, while truncating too late mislabels a verdict.
+        # Skipped rows are included: they are still gate calls, they already
+        # bound host-supplied windows via the raw session id, and leaving them
+        # out here would make a recovered window wider than a host one for the
+        # same event sequence — which would corrupt the very session_source
+        # comparison this change exists to enable.
+        undetermined: list[tuple[str | None, datetime]] = []
+        for idx, R in enumerate(all_rows):
+            if R.get("session_id") or idx in resolved:
+                continue
+            ts = _parse_iso_ms(R.get("ts"))
+            if ts is not None:
+                undetermined.append((R.get("project"), ts))
+
         next_ts_by_idx: dict[int, datetime | None] = _build_next_in_session_map(
-            all_rows,
+            all_rows, resolved, undetermined,
         )
 
         for idx, R in enumerate(all_rows):
             if R.get("skipped"):
                 counts["rows_skipped_skipped_verdict"] += 1
                 continue
-            session_id = R.get("session_id")
-            session_source = "host_supplied"
-            transcript_path = None
-            if not session_id:
-                # The host gave no identity. Recover it from its own transcript
-                # by content join rather than writing the row off — otherwise
-                # every measured number is silently single-host (id=4018).
-                # Declines on an ambiguous match; see codex_attribution.
-                hit = codex_attribution.attribute(R, _attribution())
-                if hit is None:
-                    counts["rows_skipped_no_session_id"] += 1
-                    continue
-                session_id = hit["session_id"]
-                transcript_path = hit["transcript_path"]
-                session_source = hit["source"]
+            hit = resolved.get(idx)
+            if hit is None:
+                counts["rows_skipped_no_session_id"] += 1
+                continue
+            session_id = hit["session_id"]
+            session_source = hit["session_source"]
+            transcript_path = hit["transcript_path"]
+            if session_source != "host_supplied":
                 counts["rows_attributed_from_transcript"] += 1
             # Build the dedup identity from the SOURCE gate row, mapped onto the
             # same field names the emitted outcome row uses, so both sides of
@@ -549,14 +595,30 @@ def correlate(
 
 def _build_next_in_session_map(
     gate_rows: list[dict],
+    resolved: dict[int, dict] | None = None,
+    undetermined: list[tuple] | None = None,
 ) -> dict[int, datetime | None]:
     """For each gate row index, look up the timestamp of the NEXT gate
     in the same session (or None if it's the session's last gate in the
     scan window). Used to truncate the attribution window so a later
-    gate's outcome isn't attributed to the earlier verdict."""
+    gate's outcome isn't attributed to the earlier verdict.
+
+    `undetermined` is `[(project, ts), ...]` for session-less rows attribution
+    declined on. They belong to SOME Codex thread, so each one bounds the window
+    of any recovered row in the same project — otherwise a recovered verdict
+    runs past it and absorbs the next gate's activity.
+
+    `resolved` supplies the session id for rows the host left blank and
+    attribution recovered. It must be passed whenever attribution is in play:
+    keying on the raw row would treat every recovered row as session-less, so
+    consecutive recovered gates in one thread would each get a full window and
+    the earlier verdict would absorb the later one's activity."""
     by_session: dict[str, list[tuple[int, datetime]]] = {}
     for idx, R in enumerate(gate_rows):
         sid = R.get("session_id")
+        if not sid and resolved:
+            hit = resolved.get(idx)
+            sid = hit.get("session_id") if hit else None
         if not sid:
             continue
         ts = _parse_iso_ms(R.get("ts"))
@@ -569,4 +631,29 @@ def _build_next_in_session_map(
         rows.sort(key=lambda pair: pair[1])
         for i, (idx, _) in enumerate(rows):
             next_ts[idx] = rows[i + 1][1] if i + 1 < len(rows) else None
+
+    if undetermined:
+        # A gate whose thread could not be determined may belong to a recovered
+        # row's thread, so it bounds that row's window. Applied to recovered
+        # rows only — a host-supplied session id is authoritative and needs no
+        # conservative guess — and scoped to the same project.
+        by_project: dict[str | None, list[datetime]] = {}
+        for project, ts in undetermined:
+            by_project.setdefault(project, []).append(ts)
+        for stamps in by_project.values():
+            stamps.sort()
+        for idx, R in enumerate(gate_rows):
+            hit = (resolved or {}).get(idx)
+            if not hit or hit.get("session_source") == "host_supplied":
+                continue
+            ts = _parse_iso_ms(R.get("ts"))
+            if ts is None:
+                continue
+            for candidate in by_project.get(R.get("project")) or []:
+                if candidate <= ts:
+                    continue
+                current = next_ts.get(idx)
+                if current is None or candidate < current:
+                    next_ts[idx] = candidate
+                break
     return next_ts

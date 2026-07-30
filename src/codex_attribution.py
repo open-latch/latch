@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sys
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -36,6 +37,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 import codex_transcript  # noqa: E402
+import paths            # noqa: E402
 
 
 GATE_TOOL_NAMES = frozenset({"latch_gate", "kb_gate"})
@@ -45,6 +47,12 @@ GATE_TOOL_NAMES = frozenset({"latch_gate", "kb_gate"})
 # purpose: the two clocks are the same machine, and the hash already carries the
 # identifying weight — this only rejects a same-text call from a different day.
 HASH_JOIN_TOLERANCE_SECONDS = 900
+
+# gate_call_id as it appears inside a host-wrapped tool result. Anchored to the
+# nonce's shape — sha1[:12], lowercase hex — so prose mentioning the key cannot
+# be read as a value.
+_NONCE_RE = re.compile(r'\\?"gate_call_id\\?"\s*:\s*\\?"([0-9a-f]{12})\\?"')
+_NONCE_SHAPE_RE = re.compile(r'[0-9a-f]{12}')
 
 
 def query_hash(request: str) -> str:
@@ -104,6 +112,38 @@ def _rollout_paths(
             paths.extend(sorted(d.glob("rollout-*.jsonl")))
         day += timedelta(days=1)
     return paths
+
+
+def _transcript_project(path: Path) -> str | None:
+    """The sanitized project key of the workspace a rollout belongs to.
+
+    Read from the ``session_meta`` line's ``cwd`` and sanitized with the same
+    function the gate log uses for its own ``project`` field, so the two are
+    directly comparable. Without this, a rollout from an unrelated repo could
+    satisfy a hash match — every Codex thread on the machine lives in one global
+    CODEX_HOME, so the index is machine-wide unless it is scoped.
+    """
+    try:
+        with path.open(encoding="utf-8", errors="replace") as fh:
+            for _ in range(20):
+                line = fh.readline()
+                if not line:
+                    break
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(obj, dict):
+                    continue
+                payload = obj.get("payload")
+                if not isinstance(payload, dict):
+                    continue
+                cwd = payload.get("cwd") or obj.get("cwd")
+                if isinstance(cwd, str) and cwd.strip():
+                    return paths.sanitize_cwd(cwd.strip())
+    except OSError:
+        return None
+    return None
 
 
 def _gate_calls_in_transcript(path: Path) -> list[dict]:
@@ -175,38 +215,65 @@ def _gate_calls_in_transcript(path: Path) -> list[dict]:
     return out
 
 
-def _gate_call_id_in_output(output) -> str | None:
-    """Pull ``gate_call_id`` out of a recorded tool result, whatever shape the
-    host wrapped it in. Returns None when absent — which is the normal case for
-    calls made before the gate began returning it."""
-    texts: list[str] = []
+def _iter_output_texts(output, depth: int = 0):
+    """Yield every string buried in a recorded tool result, unwrapping as it goes.
+
+    Real Codex outputs are triple-wrapped and the shape is not obvious from the
+    schema: a plain string ``"Wall time: 22.2 seconds\\nOutput:\\n"`` followed by
+    a JSON array, whose ``text`` field is *itself* a JSON document with escaped
+    quotes. A parser written against the documented shape sees none of it —
+    which is exactly how the first attempt at this matched 0 of 261 real
+    outputs while its hand-written fixture passed.
+
+    Depth-limited so a pathological nesting cannot spin.
+    """
+    if depth > 4:
+        return
     if isinstance(output, str):
-        texts.append(output)
-    elif isinstance(output, list):
+        yield output
+        # A host prefix before the payload: keep only what follows the marker.
+        marker = "Output:\n"
+        idx = output.find(marker)
+        candidate = output[idx + len(marker):] if idx >= 0 else output
+        candidate = candidate.strip()
+        if candidate[:1] in ("[", "{"):
+            try:
+                decoded = json.loads(candidate)
+            except json.JSONDecodeError:
+                return
+            yield from _iter_output_texts(decoded, depth + 1)
+        return
+    if isinstance(output, list):
         for item in output:
-            if isinstance(item, dict):
-                for key in ("text", "content", "output"):
-                    value = item.get(key)
-                    if isinstance(value, str):
-                        texts.append(value)
-            elif isinstance(item, str):
-                texts.append(item)
-    elif isinstance(output, dict):
+            yield from _iter_output_texts(item, depth + 1)
+        return
+    if isinstance(output, dict):
         for key in ("text", "content", "output"):
             value = output.get(key)
-            if isinstance(value, str):
-                texts.append(value)
-    for text in texts:
+            if value is not None:
+                yield from _iter_output_texts(value, depth + 1)
+        nonce = output.get("gate_call_id")
+        if isinstance(nonce, str):
+            yield nonce
+
+
+def _gate_call_id_in_output(output) -> str | None:
+    """Pull ``gate_call_id`` out of a recorded tool result, whatever shape the
+    host wrapped it in. Returns None when absent — the normal case for calls
+    made before the gate began returning it."""
+    for text in _iter_output_texts(output):
+        if not isinstance(text, str):
+            continue
+        if _NONCE_SHAPE_RE.fullmatch(text):
+            # Already the bare value, surfaced by the structured unwrap.
+            return text
         if "gate_call_id" not in text:
             continue
-        try:
-            decoded = json.loads(text)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(decoded, dict):
-            nonce = decoded.get("gate_call_id")
-            if isinstance(nonce, str) and nonce:
-                return nonce
+        # Escape-tolerant: the innermost payload arrives with its quotes
+        # backslashed because it is JSON inside a JSON string.
+        match = _NONCE_RE.search(text)
+        if match:
+            return match.group(1)
     return None
 
 
@@ -217,33 +284,59 @@ def build_index(
 ) -> dict:
     """Index gate calls recorded in Codex rollouts, bounded to a date range.
 
-    Returns ``{"by_nonce": {...}, "by_hash": {...}}`` where a ``by_nonce`` value
-    is a single candidate and a ``by_hash`` value is a LIST of candidates —
-    because a hash can legitimately repeat and the caller must be able to see
-    that and decline. Each candidate is
+    Returns ``{"by_nonce": {...}, "by_hash": {...}}``. BOTH map to a LIST of
+    candidates: a hash repeats legitimately, and a nonce can repeat across a
+    replayed or resumed thread, so in either case the caller must be able to see
+    the ambiguity and decline rather than take the last one written. Each candidate is
     ``{session_id, transcript_path, ts, gate_call_id}``.
     """
-    by_nonce: dict[str, dict] = {}
+    by_nonce: dict[str, list[dict]] = {}
     by_hash: dict[str, list[dict]] = {}
     for path in _rollout_paths(home, start_date, end_date):
         session_id = codex_transcript.transcript_session_id(path)
         if not session_id:
             continue
+        project = _transcript_project(path)
         for call in _gate_calls_in_transcript(path):
             candidate = {
                 "session_id": session_id,
                 "transcript_path": str(path),
                 "ts": call["ts"],
                 "gate_call_id": call["gate_call_id"],
+                "project": project,
             }
             nonce = call["gate_call_id"]
             if nonce:
-                by_nonce[nonce] = candidate
+                # A LIST, not a single value. A replayed or resumed thread can
+                # record the same call_id twice; last-write-wins would hand back
+                # whichever rollout was scanned last and label it exact. The
+                # ambiguity has to survive to the caller so it can decline.
+                by_nonce.setdefault(nonce, []).append(candidate)
             by_hash.setdefault(call["query_hash"], []).append(candidate)
     return {"by_nonce": by_nonce, "by_hash": by_hash}
 
 
-def attribute(gate_row: dict, index: dict) -> dict | None:
+def _project_ok(candidate: dict, project: str | None) -> bool:
+    """Whether a candidate may be matched against a gate row from `project`.
+
+    Rejects a cross-project match outright. CODEX_HOME is machine-wide, so
+    without this an identical request issued in another repo is a valid hash
+    match — and the failure is silent and plausible-looking. A candidate whose
+    own project could not be read is also rejected: unknown provenance is not
+    the same as matching provenance.
+    """
+    if project is None:
+        # The gate row itself has no project key; nothing to scope against, so
+        # fall back to the unscoped behavior rather than rejecting everything.
+        return True
+    return candidate.get("project") == project
+
+
+def attribute(
+    gate_row: dict,
+    index: dict,
+    project: str | None = None,
+) -> dict | None:
     """Attribute one session-less gate row to a Codex thread, or None.
 
     Nonce first — that is an exact identity. Hash second, and only when exactly
@@ -252,20 +345,33 @@ def attribute(gate_row: dict, index: dict) -> dict | None:
     followed by a retry, KB id=3310), so guessing there would corrupt precisely
     the rows the measurement cares most about.
 
+    `project` is the gate row's sanitized project key. Matching is scoped to it:
+    CODEX_HOME is machine-wide, so an identical request from an unrelated repo
+    would otherwise be a valid hash match.
+
     On success returns ``{session_id, transcript_path, source}`` where source is
     ``codex_transcript_nonce`` or ``codex_transcript_hash``.
     """
     nonce = gate_row.get("gate_call_id")
     if isinstance(nonce, str) and nonce:
-        hit = (index.get("by_nonce") or {}).get(nonce)
-        if hit:
+        nonce_hits = [
+            c for c in ((index.get("by_nonce") or {}).get(nonce) or [])
+            if _project_ok(c, project)
+        ]
+        # Same unique-match rule as the hash path: a nonce seen in two threads
+        # is not an exact identity, whatever its name suggests.
+        if len({c["session_id"] for c in nonce_hits}) == 1:
+            hit = nonce_hits[0]
             return {
                 "session_id": hit["session_id"],
                 "transcript_path": hit["transcript_path"],
                 "source": "codex_transcript_nonce",
             }
 
-    candidates = (index.get("by_hash") or {}).get(gate_row.get("query_hash")) or []
+    candidates = [
+        c for c in ((index.get("by_hash") or {}).get(gate_row.get("query_hash")) or [])
+        if _project_ok(c, project)
+    ]
     if not candidates:
         return None
     gate_ts = _parse_ts(gate_row.get("ts"))

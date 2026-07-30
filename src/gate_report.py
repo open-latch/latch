@@ -345,22 +345,45 @@ def _coverage(
     """
     total = len(gates)
     labeled = len(outcomes)
-    no_session = sum(1 for row in gates if not row.get("session_id"))
-    # The correlator refuses three row shapes outright, so none of them can ever
-    # be labeled and none belongs in the labelable denominator: a missing
-    # session id, a skipped verdict, and an unparseable timestamp. Counting them
-    # would understate how the machinery performs on the rows it can actually
-    # see — the opposite of the honesty this block exists for. Each is reported
-    # separately so the gap is attributable, not just subtracted.
-    skipped = sum(
-        1 for row in gates if row.get("skipped") and row.get("session_id")
-    )
-    bad_ts = sum(
-        1 for row in gates
-        if row.get("session_id")
-        and not row.get("skipped")
-        and _parse_gate_ts(row.get("ts")) is None
-    )
+    # A gate row the host left session-less may still have been labeled, via
+    # attribution recovered from the host's transcript. Counting those as
+    # unlabelable would shrink the labelable denominator below the labeled
+    # count and print an impossible rate — "200% of labelable rows are
+    # labeled" — in the one block whose whole job is to be honest about
+    # coverage. Identify the rows that actually produced an outcome and take
+    # them out of every unlabelable bucket.
+    labeled_ids = {
+        key for key in (_gate_call_identity(row) for row in outcomes)
+        if key is not None
+    }
+
+    def _was_labeled(row: dict[str, Any]) -> bool:
+        key = _gate_call_identity({
+            "gate_call_id": row.get("gate_call_id"),
+            "gate_query_hash": row.get("query_hash"),
+            "gate_ts": row.get("ts"),
+        })
+        return key is not None and key in labeled_ids
+
+    # Classify each UNLABELED row into exactly one unlabelable bucket. The
+    # buckets must be disjoint: a row that is both skipped and session-less
+    # would otherwise be subtracted twice, which can drive `labelable` negative
+    # and render a rate above 100% — in the one block whose whole job is to be
+    # honest about coverage. Labeled rows are labelable by definition and are
+    # never bucketed, which is what keeps a transcript-recovered row from being
+    # counted as unlabelable.
+    no_session = 0
+    skipped = 0
+    bad_ts = 0
+    for row in gates:
+        if _was_labeled(row):
+            continue
+        if row.get("skipped"):
+            skipped += 1
+        elif not row.get("session_id"):
+            no_session += 1
+        elif _parse_gate_ts(row.get("ts")) is None:
+            bad_ts += 1
     labelable = total - no_session - skipped - bad_ts
     ambiguous = sum(
         1 for row in outcomes if row.get("outcome_category") == "AMBIGUOUS"
@@ -543,13 +566,28 @@ def _append_coverage(lines: list[str], coverage: dict[str, Any]) -> None:
             f"{labeled} labeled ({amb}%)"
         )
     by_source = coverage.get("labeled_by_session_source") or {}
-    recovered = {k: v for k, v in by_source.items() if k != "host_supplied"}
-    if recovered:
-        rendered = ", ".join(f"{k}={v}" for k, v in sorted(recovered.items()))
-        lines.append(
-            f"- Identity: {_int(by_source.get('host_supplied'))} host-supplied, "
-            f"recovered from transcript — {rendered}"
-        )
+    # UNKNOWN is what _label_counts renders for a row with no session_source —
+    # i.e. one written before this field existed. Those are almost certainly
+    # host-supplied, but the row does not say so, and lumping them under
+    # "recovered from transcript" made a vault where recovery never ran report
+    # itself as 100% recovered. Unknown provenance is its own line.
+    unknown = _int(by_source.get("UNKNOWN"))
+    recovered = {
+        k: v for k, v in by_source.items()
+        if k not in ("host_supplied", "UNKNOWN")
+    }
+    if recovered or unknown:
+        parts = [f"{_int(by_source.get('host_supplied'))} host-supplied"]
+        if recovered:
+            parts.append(
+                "recovered from transcript — "
+                + ", ".join(f"{k}={v}" for k, v in sorted(recovered.items()))
+            )
+        if unknown:
+            parts.append(
+                f"{unknown} unknown provenance (written before this was recorded)"
+            )
+        lines.append("- Identity: " + "; ".join(parts))
     lines.append(
         "- A low rate here measures how much gate traffic carries a "
         "correlatable identity, not whether the gate works."

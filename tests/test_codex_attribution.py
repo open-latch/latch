@@ -37,7 +37,8 @@ THREAD_A = "019fb2f6-1388-7980-8e6d-5e9f4c96f1e2"
 THREAD_B = "019fae1c-f3ae-77f3-b8c1-1a9b7348bb36"
 
 
-def _make_home(threads: dict[str, list[tuple[str, str, str | None]]]) -> str:
+def _make_home(threads: dict[str, list[tuple[str, str, str | None]]],
+               cwd: str = "/repo") -> str:
     """Build a throwaway CODEX_HOME. `threads` maps thread id ->
     [(iso_ts, request, gate_call_id_or_None), ...]."""
     tmp = tempfile.mkdtemp(prefix="codex_attr_test_")
@@ -48,7 +49,7 @@ def _make_home(threads: dict[str, list[tuple[str, str, str | None]]]) -> str:
         lines = [json.dumps({
             "timestamp": "2026-07-30T05:18:19.000Z",
             "type": "session_meta",
-            "payload": {"id": thread, "cwd": "/repo"},
+            "payload": {"id": thread, "cwd": cwd},
         })]
         for i, (ts, request, nonce) in enumerate(calls):
             call_id = f"call_{thread[:6]}_{i}"
@@ -106,13 +107,13 @@ def test_nonce_join_is_exact_and_beats_an_ambiguous_hash():
     """Two threads issue the SAME request text, so the hash is ambiguous — but
     one carries the nonce, which identifies it outright."""
     home = _make_home({
-        THREAD_A: [("2026-07-30T05:20:00.000Z", "same request", "nonce-aaa")],
-        THREAD_B: [("2026-07-30T05:20:05.000Z", "same request", "nonce-bbb")],
+        THREAD_A: [("2026-07-30T05:20:00.000Z", "same request", "aaaaaaaaaaaa")],
+        THREAD_B: [("2026-07-30T05:20:05.000Z", "same request", "bbbbbbbbbbbb")],
     })
     try:
         idx = codex_attribution.build_index(Path(home))
         hit = codex_attribution.attribute(
-            _gate_row("same request", "2026-07-30T05:20:00.000Z", "nonce-bbb"), idx)
+            _gate_row("same request", "2026-07-30T05:20:00.000Z", "bbbbbbbbbbbb"), idx)
         _assert(hit is not None, "nonce should resolve despite hash ambiguity")
         _assert(hit["session_id"] == THREAD_B, hit)
         _assert(hit["source"] == "codex_transcript_nonce", hit)
@@ -308,6 +309,254 @@ def test_coverage_splits_labeled_rows_by_identity_source():
     print("PASS coverage_splits_labeled_rows_by_identity_source")
 
 
+# ---------- PR #73 review regressions ----------
+
+def test_nonce_parses_out_of_a_host_wrapped_output():
+    """PR #73 review P1. Real Codex outputs are wrapped ("Script completed /
+    Wall time / Output:"), so decoding the whole string as JSON returns None and
+    exact nonce attribution silently never fires."""
+    wrapped = ('Script completed\nWall time 0.2 seconds\nOutput:\n'
+               '{"request":"x","gate_call_id":"e28e30e9888f","gate_status":"OK"}')
+    got = codex_attribution._gate_call_id_in_output(
+        [{"type": "input_text", "text": wrapped}])
+    _assert(got == "e28e30e9888f", f"wrapped output must yield the nonce: {got}")
+    _assert(codex_attribution._gate_call_id_in_output(
+        "the gate_call_id field was missing") is None,
+        "prose mentioning the key is not a value")
+    _assert(codex_attribution._gate_call_id_in_output(
+        '{"gate_call_id":"NOTHEXVALUE"}') is None,
+        "a wrong-shaped value must be rejected on both paths")
+    print("PASS nonce_parses_out_of_a_host_wrapped_output")
+
+
+def test_attribution_is_scoped_to_the_project():
+    """PR #73 review P1. CODEX_HOME is machine-wide, so an identical request in
+    another repo is otherwise a valid hash match."""
+    home = _make_home({
+        THREAD_A: [("2026-07-30T05:20:00.000Z", "shared request", None)],
+    }, cwd="/other/repo")
+    try:
+        idx = codex_attribution.build_index(Path(home))
+        row = _gate_row("shared request", "2026-07-30T05:20:01.000Z")
+        _assert(codex_attribution.attribute(row, idx, project="-my-repo") is None,
+                "a rollout from another project must not match")
+        _assert(codex_attribution.attribute(row, idx) is not None,
+                "unscoped callers keep the previous behavior")
+        print("PASS attribution_is_scoped_to_the_project")
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_recovered_gates_truncate_at_the_next_gate_in_their_thread():
+    """PR #73 review P1. The next-gate map was built before attribution, so two
+    consecutive recovered gates in one thread each got a full 30-minute window
+    and the earlier verdict absorbed the later one's activity."""
+    rows = [
+        {"ts": "2026-07-30T05:00:00.000Z", "session_id": None,
+         "query_hash": "h1"},
+        {"ts": "2026-07-30T05:10:00.000Z", "session_id": None,
+         "query_hash": "h2"},
+    ]
+    resolved = {
+        0: {"session_id": THREAD_A, "session_source": "codex_transcript_hash",
+            "transcript_path": None},
+        1: {"session_id": THREAD_A, "session_source": "codex_transcript_hash",
+            "transcript_path": None},
+    }
+    without = correlator._build_next_in_session_map(rows)
+    _assert(without == {}, f"pre-fix behavior: no truncation at all: {without}")
+    with_resolved = correlator._build_next_in_session_map(rows, resolved)
+    _assert(with_resolved.get(0) is not None,
+            f"first recovered gate must truncate at the second: {with_resolved}")
+    _assert(with_resolved.get(1) is None,
+            "last gate in the thread has no successor")
+    print("PASS recovered_gates_truncate_at_the_next_gate_in_their_thread")
+
+
+def test_coverage_never_counts_a_recovered_row_as_unlabelable():
+    """PR #73 review P1. Recovered rows stayed in the unlabelable bucket, so the
+    labelable denominator could drop below the labeled count and print an
+    impossible rate."""
+    import gate_report
+    gates = [
+        {"session_id": None, "ts": "2026-07-30T05:00:00.000Z",
+         "query_hash": "h1", "gate_call_id": "aaaaaaaaaaaa"},
+        {"session_id": None, "ts": "2026-07-30T05:10:00.000Z",
+         "query_hash": "h2", "gate_call_id": "bbbbbbbbbbbb"},
+    ]
+    outcomes = [
+        {"outcome_category": "ACCEPTED", "gate_call_id": "aaaaaaaaaaaa",
+         "gate_query_hash": "h1", "gate_ts": "2026-07-30T05:00:00.000Z",
+         "session_source": "codex_transcript_hash"},
+        {"outcome_category": "AMBIGUOUS", "gate_call_id": "bbbbbbbbbbbb",
+         "gate_query_hash": "h2", "gate_ts": "2026-07-30T05:10:00.000Z",
+         "session_source": "codex_transcript_hash"},
+    ]
+    cov = gate_report._coverage(gates, outcomes)
+    _assert(cov["unlabelable_no_session_id"] == 0,
+            f"labeled rows are not unlabelable: {cov}")
+    _assert(cov["labelable_rows"] == 2, cov)
+    _assert(cov["coverage_pct_of_labelable"] == 100.0,
+            f"rate must not exceed 100%: {cov}")
+    _assert(cov["coverage_pct"] == 100.0, cov)
+    print("PASS coverage_never_counts_a_recovered_row_as_unlabelable")
+
+
+def test_correlator_version_bumped_for_the_schema_change():
+    """PR #73 review P2. session_source is a new field; without a bump, existing
+    0.3.0 rows dedup and never gain it, and reports read them as UNKNOWN."""
+    _assert(correlator.CORRELATOR_VERSION_DEFAULT == "0.4.0",
+            f"expected 0.4.0, got {correlator.CORRELATOR_VERSION_DEFAULT}")
+    print("PASS correlator_version_bumped_for_the_schema_change")
+
+
+# ---------- verification-round regressions ----------
+
+def test_nonce_parses_the_real_double_encoded_codex_shape():
+    """The shape that actually ships. A hand-written fixture passed while this
+    matched 0 of 261 real outputs: the payload is JSON inside a JSON string
+    inside a host prefix, so its quotes arrive backslashed."""
+    inner = json.dumps({"request": "x", "gate_call_id": "e28e30e9888f",
+                        "gate_status": "OK"})
+    real = "Wall time: 22.2 seconds\nOutput:\n" + json.dumps(
+        [{"type": "text", "text": inner}])
+    got = codex_attribution._gate_call_id_in_output(real)
+    _assert(got == "e28e30e9888f", f"real shape must yield the nonce: {got!r}")
+    print("PASS nonce_parses_the_real_double_encoded_codex_shape")
+
+
+def test_ambiguous_nonce_never_claims_an_exact_match():
+    """A replayed or resumed thread can record one call_id twice. Last-write-wins
+    would hand back whichever rollout was scanned last and stamp it
+    `codex_transcript_nonce` — a confident wrong label. The nonce must decline;
+    falling through to the hash is fine when the hash is itself unique, because
+    that is independent evidence."""
+    home = _make_home({
+        THREAD_A: [("2026-07-30T05:20:00.000Z", "req one", "cccccccccccc")],
+        THREAD_B: [("2026-07-30T05:21:00.000Z", "req two", "cccccccccccc")],
+    })
+    try:
+        idx = codex_attribution.build_index(Path(home))
+        hit = codex_attribution.attribute(
+            _gate_row("req one", "2026-07-30T05:20:01.000Z", "cccccccccccc"), idx)
+        _assert(hit is None or hit["source"] != "codex_transcript_nonce",
+                f"an ambiguous nonce must not be labeled exact: {hit}")
+        if hit:
+            _assert(hit["session_id"] == THREAD_A,
+                    f"the hash fallback must still be right: {hit}")
+        print("PASS ambiguous_nonce_never_claims_an_exact_match")
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_ambiguous_nonce_and_ambiguous_hash_decline_entirely():
+    """Both signals ambiguous: nothing left to be confident about."""
+    home = _make_home({
+        THREAD_A: [("2026-07-30T05:20:00.000Z", "same text", "cccccccccccc")],
+        THREAD_B: [("2026-07-30T05:20:30.000Z", "same text", "cccccccccccc")],
+    })
+    try:
+        idx = codex_attribution.build_index(Path(home))
+        hit = codex_attribution.attribute(
+            _gate_row("same text", "2026-07-30T05:20:10.000Z", "cccccccccccc"), idx)
+        _assert(hit is None, f"both signals ambiguous must decline: {hit}")
+        print("PASS ambiguous_nonce_and_ambiguous_hash_decline_entirely")
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_matching_project_still_attributes():
+    """Positive case for the scope check. Without it, deleting the scoping
+    entirely leaves the suite green — the other tests only prove it rejects."""
+    home = _make_home({
+        THREAD_A: [("2026-07-30T05:20:00.000Z", "scoped request", None)],
+    }, cwd="/Users/someone/myrepo")
+    try:
+        import paths as _paths
+        idx = codex_attribution.build_index(Path(home))
+        proj = _paths.sanitize_cwd("/Users/someone/myrepo")
+        hit = codex_attribution.attribute(
+            _gate_row("scoped request", "2026-07-30T05:20:02.000Z"), idx,
+            project=proj)
+        _assert(hit is not None,
+                f"a matching project must still attribute (project={proj})")
+        _assert(hit["session_id"] == THREAD_A, hit)
+        print("PASS matching_project_still_attributes")
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_declined_rows_bound_a_recovered_window():
+    """A session-less row attribution declined on still belongs to SOME thread,
+    so it must bound a recovered row's window. Without this a DO_NOT_PROCEED was
+    reported OVERRIDDEN by the next gate's writes."""
+    rows = [
+        {"ts": "2026-07-30T05:00:00.000Z", "session_id": None,
+         "query_hash": "h1", "project": "-p"},
+        {"ts": "2026-07-30T05:10:00.000Z", "session_id": None,
+         "query_hash": "h2", "project": "-p"},
+    ]
+    resolved = {0: {"session_id": THREAD_A,
+                    "session_source": "codex_transcript_hash",
+                    "transcript_path": None}}
+    undetermined = [("-p", datetime(2026, 7, 30, 5, 10, tzinfo=timezone.utc))]
+    without = correlator._build_next_in_session_map(rows, resolved)
+    _assert(without.get(0) is None, f"pre-fix: no boundary: {without}")
+    with_undet = correlator._build_next_in_session_map(
+        rows, resolved, undetermined)
+    _assert(with_undet.get(0) is not None,
+            f"declined row must bound the recovered window: {with_undet}")
+    print("PASS declined_rows_bound_a_recovered_window")
+
+
+def test_declined_row_in_another_project_does_not_bound():
+    rows = [{"ts": "2026-07-30T05:00:00.000Z", "session_id": None,
+             "query_hash": "h1", "project": "-p"}]
+    resolved = {0: {"session_id": THREAD_A,
+                    "session_source": "codex_transcript_hash",
+                    "transcript_path": None}}
+    other = [("-other", datetime(2026, 7, 30, 5, 10, tzinfo=timezone.utc))]
+    got = correlator._build_next_in_session_map(rows, resolved, other)
+    _assert(got.get(0) is None, f"cross-project row must not bound: {got}")
+    print("PASS declined_row_in_another_project_does_not_bound")
+
+
+def test_coverage_buckets_are_disjoint():
+    """Regression I introduced while fixing coverage: a row that is BOTH
+    skipped and session-less was subtracted twice, driving labelable negative
+    and rendering rates above 100% in the honesty block itself."""
+    import gate_report
+    gates = [{"session_id": None, "skipped": True,
+              "ts": f"2026-07-30T05:0{i}:00.000Z", "query_hash": f"h{i}"}
+             for i in range(5)]
+    cov = gate_report._coverage(gates, [])
+    buckets = (cov["unlabelable_no_session_id"]
+               + cov["unlabelable_skipped_verdict"]
+               + cov["unlabelable_unparseable_ts"])
+    _assert(buckets + cov["labelable_rows"] == cov["gate_rows"],
+            f"buckets must partition the rows exactly: {cov}")
+    _assert(cov["labelable_rows"] >= 0, f"labelable cannot go negative: {cov}")
+    _assert(cov["coverage_pct"] == 0.0, cov)
+    print("PASS coverage_buckets_are_disjoint")
+
+
+def test_unknown_provenance_is_not_reported_as_recovered():
+    """A vault where recovery never ran reported itself as 100% recovered,
+    because rows written before session_source existed render as UNKNOWN."""
+    import gate_report
+    gates = [{"session_id": "a", "ts": "2026-07-30T05:00:00.000Z"}]
+    outcomes = [{"outcome_category": "ACCEPTED"}]  # legacy row, no session_source
+    cov = gate_report._coverage(gates, outcomes)
+    lines: list[str] = []
+    gate_report._append_coverage(lines, cov)
+    text = "\n".join(lines)
+    _assert("unknown provenance" in text,
+            f"legacy rows must read as unknown, not recovered: {text}")
+    _assert("recovered from transcript" not in text,
+            f"nothing was recovered here: {text}")
+    print("PASS unknown_provenance_is_not_reported_as_recovered")
+
+
 if __name__ == "__main__":
     test_query_hash_matches_the_gate_implementation()
     test_nonce_join_is_exact_and_beats_an_ambiguous_hash()
@@ -321,4 +570,17 @@ if __name__ == "__main__":
     test_gate_returns_gate_call_id_so_future_rows_join_exactly()
     test_file_touches_accepts_a_supplied_transcript_path()
     test_coverage_splits_labeled_rows_by_identity_source()
+    test_nonce_parses_out_of_a_host_wrapped_output()
+    test_attribution_is_scoped_to_the_project()
+    test_recovered_gates_truncate_at_the_next_gate_in_their_thread()
+    test_coverage_never_counts_a_recovered_row_as_unlabelable()
+    test_correlator_version_bumped_for_the_schema_change()
+    test_nonce_parses_the_real_double_encoded_codex_shape()
+    test_ambiguous_nonce_never_claims_an_exact_match()
+    test_ambiguous_nonce_and_ambiguous_hash_decline_entirely()
+    test_matching_project_still_attributes()
+    test_declined_rows_bound_a_recovered_window()
+    test_declined_row_in_another_project_does_not_bound()
+    test_coverage_buckets_are_disjoint()
+    test_unknown_provenance_is_not_reported_as_recovered()
     print("ALL CODEX ATTRIBUTION TESTS PASSED")

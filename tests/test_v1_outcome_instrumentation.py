@@ -450,8 +450,15 @@ def test_file_touches_is_zero_when_session_has_no_transcript():
 
 
 def test_correlator_version_bumped_past_prior_release():
-    _assert(correlator.CORRELATOR_VERSION_DEFAULT == "0.3.0",
-            f"version should be 0.3.0, got "
+    """Pins that the version moved past the pre-V1 release, not an exact
+    string: every classification or schema change bumps it again, and an
+    exact-match assertion would just be re-edited each time instead of
+    checking the thing that matters."""
+    parts = tuple(
+        int(x) for x in correlator.CORRELATOR_VERSION_DEFAULT.split(".")
+    )
+    _assert(parts > (0, 2, 0),
+            f"version must be past 0.2.0, got "
             f"{correlator.CORRELATOR_VERSION_DEFAULT}")
     print("PASS correlator_version_bumped_past_prior_release")
 

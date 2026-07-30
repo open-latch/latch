@@ -6,7 +6,7 @@ Usage:
                              --start YYYY-MM-DD
                              --end   YYYY-MM-DD
                              [--window 1800]
-                             [--version 0.1.0]
+                             [--version <semver>]
 
 Emits a single JSON counts dict (rows_emitted, rows_skipped_*) to stdout.
 Exit 0 on success, 2 on argv error. Spec: KB id=1098 clarification #8.
@@ -45,7 +45,7 @@ def main(argv: list[str]) -> int:
                    help="attribution window in seconds (default: 1800)")
     p.add_argument("--version", dest="correlator_version",
                    default=correlator.CORRELATOR_VERSION_DEFAULT,
-                   help="correlator semver tag (default: 0.1.0)")
+                   help=f"correlator semver tag (default: {correlator.CORRELATOR_VERSION_DEFAULT})")
     try:
         ns = p.parse_args(argv[1:])
     except SystemExit as e:
