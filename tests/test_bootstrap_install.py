@@ -67,9 +67,32 @@ payload = {
     "latch_home": os.environ.get("LATCH_HOME"),
     "latch_python": os.environ.get("LATCH_PYTHON"),
 }
+config_file = os.environ.get("FAKE_CONFIG_FILE")
+if config_file:
+    path = Path(config_file)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("configured\\n", encoding="utf-8")
 with Path(os.environ["FAKE_QUICKSTART_LOG"]).open("a", encoding="utf-8") as fh:
     fh.write(json.dumps(payload) + "\\n")
 raise SystemExit(int(os.environ.get("FAKE_QUICKSTART_FAIL", "0")))
+""",
+        encoding="utf-8",
+    )
+    (origin / "src" / "doctor.py").write_text(
+        """import os
+
+OK = "OK"
+_VEC_PROBE = "existing sqlite-vec probe"
+
+
+def _run_probe(code, ok_token, timeout, arch_hint):
+    assert code == _VEC_PROBE
+    assert ok_token == "VEC_OK"
+    assert timeout == 30
+    assert arch_hint is True
+    if os.environ.get("FAKE_VEC_PROBE_FAIL"):
+        return "FAIL", "RuntimeError: SQLite extension loading is disabled"
+    return OK, ""
 """,
         encoding="utf-8",
     )
@@ -266,6 +289,42 @@ def test_posix_bootstrap_runtime_failure_is_recoverable_without_config_writes(tm
     )
     assert repaired.returncode == 0, repaired.stdout + repaired.stderr
     assert Path(env["FAKE_QUICKSTART_LOG"]).is_file()
+
+
+def test_posix_sqlite_vec_preflight_blocks_before_configuration_writes(tmp_path: Path):
+    origin = make_origin(tmp_path)
+    fake_uv = make_fake_uv(tmp_path)
+    config_file = tmp_path / "home" / ".codex" / "config.toml"
+    failed, app, _, env = invoke_installer(
+        tmp_path=tmp_path,
+        origin=origin,
+        fake_uv=fake_uv,
+        extra=("--agents", "codex", "--no-seed"),
+        env_extra={
+            "FAKE_CONFIG_FILE": str(config_file),
+            "FAKE_VEC_PROBE_FAIL": "1",
+        },
+    )
+
+    assert failed.returncode != 0
+    assert "sqlite-vec capability preflight failed" in failed.stderr
+    assert "without SQLite extension loading support" in failed.stderr
+    assert str(app / ".venv" / "bin" / "python") in failed.stderr
+    assert "No project or agent configuration was written" in failed.stderr
+    assert (app / ".git").is_dir()
+    assert not (app / "src" / "__pycache__").exists()
+    assert not config_file.exists()
+    assert not Path(env["FAKE_QUICKSTART_LOG"]).exists()
+
+    repaired, _, _, _ = invoke_installer(
+        tmp_path=tmp_path,
+        origin=origin,
+        fake_uv=fake_uv,
+        extra=("--agents", "codex", "--no-seed"),
+        env_extra={"FAKE_CONFIG_FILE": str(config_file)},
+    )
+    assert repaired.returncode == 0, repaired.stdout + repaired.stderr
+    assert config_file.read_text(encoding="utf-8") == "configured\n"
 
 
 def test_posix_uv_bootstrap_noise_does_not_pollute_executable_path(tmp_path: Path):
@@ -529,6 +588,7 @@ def test_bootstrap_script_contracts_and_syntax():
         assert "https://astral.sh/uv/" in text
         assert "0.11.28" in text
         assert "quickstart.py" in text
+        assert "from doctor import OK, _VEC_PROBE, _run_probe" in text
         assert "upgrade refused because the install checkout is dirty" in text
         assert "production KB" in text
         assert "requirements.lock" in text
@@ -560,6 +620,10 @@ def test_bootstrap_script_contracts_and_syntax():
     assert (
         "tests/test_bootstrap_install.py::"
         "test_posix_bootstrap_zero_quickstart_args_on_stock_macos_bash"
+    ) in workflow
+    assert (
+        "tests/test_bootstrap_install.py::"
+        "test_posix_sqlite_vec_preflight_blocks_before_configuration_writes"
     ) in workflow
     assert "uv==0.11.28" in workflow
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
@@ -711,6 +775,19 @@ exit /b 43
     uv_calls = Path(env["FAKE_UV_LOG"]).read_text(encoding="utf-8").splitlines()
     assert sum(line.startswith("venv ") for line in uv_calls) == 1
     assert sum(line.startswith("pip install ") for line in uv_calls) == 2
+
+    blocked_config = tmp_path / "blocked-config.json"
+    env["FAKE_CONFIG_FILE"] = str(blocked_config)
+    env["FAKE_VEC_PROBE_FAIL"] = "1"
+    blocked = invoke_powershell()
+    blocked_output = blocked.stdout + blocked.stderr
+    assert blocked.returncode != 0
+    assert "sqlite-vec capability preflight failed" in blocked_output
+    assert "without SQLite extension loading support" in blocked_output
+    assert not blocked_config.exists()
+    assert len(read_json_lines(Path(env["FAKE_QUICKSTART_LOG"]))) == 2
+    env.pop("FAKE_CONFIG_FILE")
+    env.pop("FAKE_VEC_PROBE_FAIL")
 
     refused = invoke_powershell(ref="different-ref")
     assert refused.returncode != 0

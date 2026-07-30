@@ -154,6 +154,19 @@ function Get-RuntimePython([string]$App) {
   return $null
 }
 
+function Test-SqliteVecCapability([string]$App, [string]$Python) {
+  $probe = @'
+import sys
+sys.path.insert(0, sys.argv[1])
+from doctor import OK, _VEC_PROBE, _run_probe
+level, _ = _run_probe(_VEC_PROBE, "VEC_OK", 30, arch_hint=True)
+if level != OK:
+    raise SystemExit(1)
+'@
+  & $Python -B -c $probe (Join-Path $App "src")
+  return ($LASTEXITCODE -eq 0)
+}
+
 function Prepare-Runtime([string]$App, [string]$Uv) {
   $python = Get-RuntimePython $App
   $previousNoConfig = $env:UV_NO_CONFIG
@@ -303,6 +316,13 @@ try {
 
 $PythonPath = Get-RuntimePython $InstallDir
 if (-not $PythonPath) { Fail("Latch runtime is missing after setup: $InstallDir\.venv") }
+if (-not (Test-SqliteVecCapability $InstallDir $PythonPath)) {
+  Fail(
+    "sqlite-vec capability preflight failed for $PythonPath. The resolved interpreter may be " +
+    "built without SQLite extension loading support. Rebuild or replace the interpreter or " +
+    "$InstallDir\.venv, then rerun. No project or agent configuration was written; no app files were removed."
+  )
+}
 $Commit = (Invoke-Git -Arguments @("-C", $InstallDir, "rev-parse", "--short=12", "HEAD") | Select-Object -Last 1).Trim()
 $Version = (Get-Content -LiteralPath (Join-Path $InstallDir "VERSION") -Raw).Trim()
 
