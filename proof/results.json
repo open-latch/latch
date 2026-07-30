@@ -1,8 +1,8 @@
 {
   "live_demo": {
-    "backend": "codex",
-    "better_next_action": "Keep SQLite and, if cross-machine data movement is needed, implement explicit export/import with documented limitations as allowed by id=1.",
-    "captured_at_utc": "2026-07-29T01:36:00Z",
+    "backend": "claude",
+    "better_next_action": "Keep the SQLite datastore and, if the real need is moving data between machines, implement the sanctioned explicit export/import step with its limits documented (id=1); if genuine concurrent multi-user accounts are now a hard requirement, raise that with the user as a change to decision id=1 before touching the storage layer.",
+    "captured_at_utc": "2026-07-30T03:17:03Z",
     "demo_kind": "synthetic_no_history_fixture",
     "evidence_nodes": [
       {
@@ -30,13 +30,13 @@
     "observed": true,
     "recommendation": "DO_NOT_PROCEED",
     "request": "Add multi-user accounts by moving the datastore from local SQLite to a hosted Postgres service.",
-    "risk_if_proceed": "The app would violate its local-first, no-hosted-database architecture and introduce a previously rejected client-server dependency.",
-    "source_commit": "a07e53d8d701b1be27e6eb4f9b051390f2e52832",
-    "summary": "The canonical decision explicitly requires the demo app to remain local-first on a single embedded SQLite file and rejects moving to hosted Postgres for multi-user accounts or sync (id=1). The request directly repeats that ruled-out path."
+    "risk_if_proceed": "The app loses its local-first guarantee and takes on a hosted-service dependency that the canonical decision was made specifically to avoid.",
+    "source_commit": "e681633ae641e977de093eaf97384ded3255920c",
+    "summary": "The request is the exact path node id=1 rules out: it names moving the datastore to a hosted or client-server database (explicitly 'a managed Postgres service') to add multi-user accounts or sync as the rejected path, and keeping a single embedded SQLite file local-first as the canonical decision. The allowed alternative is already specified \u2014 stay on SQLite and add an explicit export/import step with documented limits. Implementing the hosted-Postgres migration would directly unwind a canonical decision rather than extend it."
   },
   "reproduction": {
     "check_packet": "bash bin/latch_proof_packet.sh --check",
-    "recapture_live_demo": "bash bin/latch_proof_packet.sh --capture-live --backend codex",
+    "recapture_live_demo": "bash bin/latch_proof_packet.sh --capture-live --backend claude",
     "seed_report_eval": "bash bin/latch_seed_report_eval.sh",
     "wedge_eval": "bash bin/latch_eval.sh"
   },
@@ -64,8 +64,8 @@
       "filtered": 4
     }
   },
-  "source_commit": "a07e53d8d701b1be27e6eb4f9b051390f2e52832",
-  "tested_runtime_manifest_sha256": "3d6188bd6c9b122a81ee2f6fe3defdec1b13e9bae905b691021be34c0ea0f9e6",
+  "source_commit": "e681633ae641e977de093eaf97384ded3255920c",
+  "tested_runtime_manifest_sha256": "1fbdc515badef8e20704e04f902f8806175f0dcc40894a0e82454e944db21e03",
   "thesis": "Latch preserves project judgment and can surface a rejected path before an agent changes files.",
   "wedge_v1": {
     "baseline_boundary": "memory_like is an internal active-search-only ablation. It is not a benchmark of any third-party memory product.",
