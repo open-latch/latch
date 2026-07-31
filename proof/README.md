@@ -14,14 +14,14 @@ This packet combines one observed live gate receipt with two small, deterministi
 
 ## Observed live gate
 
-Captured with the `claude` backend on commit `e681633ae641e977de093eaf97384ded3255920c`. This is a synthetic no-history fixture and used no personal conversation history.
+Captured with the `claude` backend on commit `eadbc2d0e3c33cc03f99a64b5ac1b42386b4c0a9`. This is a synthetic no-history fixture and used no personal conversation history.
 
 ```text
 Request: Add multi-user accounts by moving the datastore from local SQLite to a hosted Postgres service.
 Recommendation: DO_NOT_PROCEED
-Summary: The request is the exact path node id=1 rules out: it names moving the datastore to a hosted or client-server database (explicitly 'a managed Postgres service') to add multi-user accounts or sync as the rejected path, and keeping a single embedded SQLite file local-first as the canonical decision. The allowed alternative is already specified — stay on SQLite and add an explicit export/import step with documented limits. Implementing the hosted-Postgres migration would directly unwind a canonical decision rather than extend it.
-Risk if proceed: The app loses its local-first guarantee and takes on a hosted-service dependency that the canonical decision was made specifically to avoid.
-Better next action: Keep the SQLite datastore and, if the real need is moving data between machines, implement the sanctioned explicit export/import step with its limits documented (id=1); if genuine concurrent multi-user accounts are now a hard requirement, raise that with the user as a change to decision id=1 before touching the storage layer.
+Summary: The seed decision (id=1) is a canonical decision that explicitly names this exact request as the rejected path: moving the datastore to a hosted or client-server database (e.g. managed Postgres) to add multi-user accounts or sync. The allowed path is to stay on local SQLite and, if data must move between machines, add an explicit export/import step with documented limits. Implementing the Postgres migration would directly unwind that decision, so the request is ruled out as stated rather than merely in need of adjustment.
+Risk if proceed: The local-first architecture is abandoned and a hosted-database dependency is introduced against an explicit standing decision.
+Better next action: If data needs to reach another machine, implement the allowed path from id=1 — an explicit export/import step with documented limits — and take the multi-user-accounts requirement back to the user as a decision to revisit id=1.
 Cited evidence:
 - id=1 decision status=canonical: Keep the demo app local-first on SQLite — no hosted database
 Worktree changed before/after gate: no
@@ -63,7 +63,7 @@ This deterministic fixture eval grades seed-report capture and filtering; it is 
 
 ## Reproduce
 
-The deterministic results were generated from commit `e681633ae641e977de093eaf97384ded3255920c`.
+The deterministic results were generated from commit `eadbc2d0e3c33cc03f99a64b5ac1b42386b4c0a9`.
 
 ```bash
 bash bin/latch_eval.sh
