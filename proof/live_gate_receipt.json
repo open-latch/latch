@@ -1,8 +1,8 @@
 {
   "backend": "codex",
-  "better_next_action": "Keep SQLite and, if cross-machine data movement is needed, implement explicit export/import with documented limitations as allowed by id=1.",
+  "better_next_action": "Keep SQLite and, if cross-machine data movement is needed, implement explicit export/import and document its limitations as allowed by id=1.",
   "capture_command": "bash bin/latch_proof_packet.sh --capture-live --backend codex",
-  "captured_at_utc": "2026-07-31T14:58:51Z",
+  "captured_at_utc": "2026-07-31T16:42:28Z",
   "demo_kind": "synthetic_no_history_fixture",
   "evidence_nodes": [
     {
@@ -32,8 +32,8 @@
   "request": "Add multi-user accounts by moving the datastore from local SQLite to a hosted Postgres service.",
   "risk_if_proceed": "The implementation would violate the established local-first, no-hosted-database architecture.",
   "schema_version": 2,
-  "source_commit": "1f7f46cfa07dba3dfc04f5988aa19166c81c7081",
-  "summary": "The canonical decision explicitly keeps the demo app local-first on embedded SQLite and rejects moving to hosted Postgres for multi-user accounts or synchronization (id=1). The request directly repeats that ruled-out architecture.",
+  "source_commit": "f779d5ad8606267df6be4511eeb2e4f1aec10535",
+  "summary": "The canonical decision (id=1) explicitly keeps the demo app local-first on embedded SQLite and rejects moving to hosted Postgres for multi-user accounts or sync. The request directly repeats that ruled-out path.",
   "tested_runtime_git_blobs": {
     ".gitattributes": "dfdb8b771ce07609491fa2e83698969fd917a135",
     "benchmarks/fixtures/wedge_v1.jsonl": "f32c5544a247c43490b5b84a6c4c4a057e91716b",
@@ -89,7 +89,7 @@
     "src/hooks/user_prompt_submit.py": "8f65764c36acc99d30dc91b8b114df0933d46615",
     "src/hooks/vscode_session_start.py": "9a1b158edd1ff4a39e59dd95e4648097cc18663b",
     "src/install_claude_desktop.py": "37795eb3695cea94e468b44ac52e5522b99482ed",
-    "src/install_codex.py": "80bc28b8c1c2cb641ba17d204837cb4ad85a2f60",
+    "src/install_codex.py": "7f9c39b2375517d73a4b53aad25abf069dae12d6",
     "src/install_cursor.py": "ceec15d93fd5f6fe8f45c12a4bd0f0cdab48a387",
     "src/install_engine.py": "867e2beab7d6efcf8b4969612338cfdbfc2005b3",
     "src/install_vscode.py": "4d3a1212de3efc01984876631a98230c9423250c",

@@ -1,8 +1,8 @@
 {
   "live_demo": {
     "backend": "codex",
-    "better_next_action": "Keep SQLite and, if cross-machine data movement is needed, implement explicit export/import with documented limitations as allowed by id=1.",
-    "captured_at_utc": "2026-07-31T14:58:51Z",
+    "better_next_action": "Keep SQLite and, if cross-machine data movement is needed, implement explicit export/import and document its limitations as allowed by id=1.",
+    "captured_at_utc": "2026-07-31T16:42:28Z",
     "demo_kind": "synthetic_no_history_fixture",
     "evidence_nodes": [
       {
@@ -31,8 +31,8 @@
     "recommendation": "DO_NOT_PROCEED",
     "request": "Add multi-user accounts by moving the datastore from local SQLite to a hosted Postgres service.",
     "risk_if_proceed": "The implementation would violate the established local-first, no-hosted-database architecture.",
-    "source_commit": "1f7f46cfa07dba3dfc04f5988aa19166c81c7081",
-    "summary": "The canonical decision explicitly keeps the demo app local-first on embedded SQLite and rejects moving to hosted Postgres for multi-user accounts or synchronization (id=1). The request directly repeats that ruled-out architecture."
+    "source_commit": "f779d5ad8606267df6be4511eeb2e4f1aec10535",
+    "summary": "The canonical decision (id=1) explicitly keeps the demo app local-first on embedded SQLite and rejects moving to hosted Postgres for multi-user accounts or sync. The request directly repeats that ruled-out path."
   },
   "reproduction": {
     "check_packet": "bash bin/latch_proof_packet.sh --check",
@@ -64,8 +64,8 @@
       "filtered": 4
     }
   },
-  "source_commit": "1f7f46cfa07dba3dfc04f5988aa19166c81c7081",
-  "tested_runtime_manifest_sha256": "5901ea3b4c994a6b0d4041cbd52976e09f3e4a2a589bfb39723d534dec7c940e",
+  "source_commit": "f779d5ad8606267df6be4511eeb2e4f1aec10535",
+  "tested_runtime_manifest_sha256": "3c621a905406c4387e52fe05575e68954e51124dd965bd734e0871c4dc701704",
   "thesis": "Latch preserves project judgment and can surface a rejected path before an agent changes files.",
   "wedge_v1": {
     "baseline_boundary": "memory_like is an internal active-search-only ablation. It is not a benchmark of any third-party memory product.",
