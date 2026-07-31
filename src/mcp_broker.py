@@ -936,6 +936,19 @@ def _windows_venv_site_packages(explicit: str | None = None) -> str | None:
     return str(candidate)
 
 
+def _windows_venv_site_packages_handoff(
+    explicit: str | None = None,
+) -> str | None:
+    """Prefer explicit/local venv state; consult the launcher marker last."""
+    resolved = _windows_venv_site_packages(explicit)
+    if resolved is not None:
+        return resolved
+    inherited = os.environ.get(mcp_runtime.WINDOWS_VENV_SITE_PACKAGES_ENV)
+    if not inherited:
+        return None
+    return _windows_venv_site_packages(inherited)
+
+
 def _windows_base_command(
     env: dict[str, str],
     *,
@@ -950,11 +963,11 @@ def _windows_base_command(
         (str(Path(value)) for value in candidates if value and Path(value).is_file()),
         sys.executable,
     )
+    resolved_site_packages = _windows_venv_site_packages_handoff(site_packages)
     # Never append an inherited loader path. The only permitted Python path is
     # the exact venv site-packages directory computed by the original proxy.
     env.pop("PYTHONPATH", None)
     env.pop(mcp_runtime.WINDOWS_VENV_SITE_PACKAGES_ENV, None)
-    resolved_site_packages = _windows_venv_site_packages(site_packages)
     if resolved_site_packages is not None:
         env["PYTHONPATH"] = resolved_site_packages
         env[mcp_runtime.WINDOWS_VENV_SITE_PACKAGES_ENV] = resolved_site_packages

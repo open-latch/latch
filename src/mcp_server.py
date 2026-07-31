@@ -52,6 +52,20 @@ if __name__ == "__main__":
         from mcp_proxy import main as _proxy_main  # noqa: E402
 
         raise SystemExit(_proxy_main())
+    if os.name == "nt":
+        import mcp_broker  # noqa: E402
+        import mcp_runtime  # noqa: E402
+
+        try:
+            _site_packages = mcp_broker._windows_venv_site_packages_handoff()
+            if _site_packages is not None:
+                mcp_runtime.activate_windows_venv_site_packages(_site_packages)
+        except (mcp_broker.BrokerError, ValueError):
+            sys.stderr.write(
+                "[latch] Invalid Windows venv handoff. Reinstall Latch and "
+                "start a fresh task.\n"
+            )
+            raise SystemExit(1)
 
 from mcp.server.fastmcp import FastMCP  # noqa: E402
 
