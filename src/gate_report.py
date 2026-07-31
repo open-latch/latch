@@ -410,6 +410,13 @@ def _coverage(
         "labeled_by_session_source": _label_counts(
             row.get("session_source") for row in outcomes
         ),
+        # Rows whose window contained a gate that could not be attributed, so
+        # the boundary was unknowable. Surfaced as a count because a quality
+        # rate computed over these is measuring a degraded window, not the
+        # thing it claims to measure.
+        "uncertain_boundary_rows": sum(
+            1 for row in outcomes if row.get("window_boundary_uncertain")
+        ),
     }
 
 
@@ -588,6 +595,13 @@ def _append_coverage(lines: list[str], coverage: dict[str, Any]) -> None:
                 f"{unknown} unknown provenance (written before this was recorded)"
             )
         lines.append("- Identity: " + "; ".join(parts))
+    uncertain = _int(coverage.get("uncertain_boundary_rows"))
+    if uncertain:
+        lines.append(
+            f"- Degraded windows: {uncertain} labeled "
+            f"{_plural(uncertain, 'row')} had an unattributable gate inside the "
+            "window, so the boundary is unknown; exclude these from quality rates"
+        )
     lines.append(
         "- A low rate here measures how much gate traffic carries a "
         "correlatable identity, not whether the gate works."

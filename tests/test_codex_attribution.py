@@ -486,6 +486,45 @@ def test_matching_project_still_attributes():
         shutil.rmtree(home, ignore_errors=True)
 
 
+def test_unknown_gate_in_another_thread_never_truncates(  # noqa: N802
+):
+    """Requested regression. Two concurrent same-project Codex threads: an
+    unattributed gate in thread B must not erase thread A's later activity.
+    Measured on live data, the previous behavior cut a PROCEED window from
+    1800s to 391s and turned 6 observed file touches into 0 — which flips a
+    DO_NOT_PROCEED toward ACCEPTED, the flattering direction."""
+    rows = [
+        {"ts": "2026-07-30T05:00:00.000Z", "session_id": None,
+         "query_hash": "hA", "project": "-p"},          # thread A, recovered
+        {"ts": "2026-07-30T05:06:00.000Z", "session_id": None,
+         "query_hash": "hB", "project": "-p"},          # thread B, undetermined
+    ]
+    resolved = {0: {"session_id": THREAD_A,
+                    "session_source": "codex_transcript_hash",
+                    "transcript_path": None}}
+    got = correlator._build_next_in_session_map(rows, resolved)
+    _assert(got.get(0) is None,
+            f"an unattributed gate must not bound another thread: {got}")
+    print("PASS unknown_gate_in_another_thread_never_truncates")
+
+
+def test_uncertain_boundary_is_recorded_not_guessed():
+    """The unknowable case is carried forward as a flag rather than resolved by
+    picking a window that is wrong in one direction or the other."""
+    t0 = datetime(2026, 7, 30, 5, 0, tzinfo=timezone.utc)
+    t_end = datetime(2026, 7, 30, 5, 30, tzinfo=timezone.utc)
+    inside = {"-p": [datetime(2026, 7, 30, 5, 6, tzinfo=timezone.utc)]}
+    outside = {"-p": [datetime(2026, 7, 30, 6, 0, tzinfo=timezone.utc)]}
+    other = {"-other": [datetime(2026, 7, 30, 5, 6, tzinfo=timezone.utc)]}
+    _assert(correlator._boundary_is_uncertain(inside, "-p", t0, t_end) is True,
+            "a gate inside the window makes the boundary unknowable")
+    _assert(correlator._boundary_is_uncertain(outside, "-p", t0, t_end) is False,
+            "a gate after the window is irrelevant")
+    _assert(correlator._boundary_is_uncertain(other, "-p", t0, t_end) is False,
+            "another project is irrelevant")
+    print("PASS uncertain_boundary_is_recorded_not_guessed")
+
+
 def test_declined_rows_bound_a_recovered_window():
     """A session-less row attribution declined on still belongs to SOME thread,
     so it must bound a recovered row's window. Without this a DO_NOT_PROCEED was
@@ -500,12 +539,10 @@ def test_declined_rows_bound_a_recovered_window():
                     "session_source": "codex_transcript_hash",
                     "transcript_path": None}}
     undetermined = [("-p", datetime(2026, 7, 30, 5, 10, tzinfo=timezone.utc))]
-    without = correlator._build_next_in_session_map(rows, resolved)
-    _assert(without.get(0) is None, f"pre-fix: no boundary: {without}")
-    with_undet = correlator._build_next_in_session_map(
-        rows, resolved, undetermined)
-    _assert(with_undet.get(0) is not None,
-            f"declined row must bound the recovered window: {with_undet}")
+    got = correlator._build_next_in_session_map(rows, resolved)
+    _assert(got.get(0) is None,
+            "a declined row is NOT a boundary — see "
+            "test_unknown_gate_in_another_thread_never_truncates for why")
     print("PASS declined_rows_bound_a_recovered_window")
 
 
@@ -515,8 +552,7 @@ def test_declined_row_in_another_project_does_not_bound():
     resolved = {0: {"session_id": THREAD_A,
                     "session_source": "codex_transcript_hash",
                     "transcript_path": None}}
-    other = [("-other", datetime(2026, 7, 30, 5, 10, tzinfo=timezone.utc))]
-    got = correlator._build_next_in_session_map(rows, resolved, other)
+    got = correlator._build_next_in_session_map(rows, resolved)
     _assert(got.get(0) is None, f"cross-project row must not bound: {got}")
     print("PASS declined_row_in_another_project_does_not_bound")
 
@@ -579,6 +615,8 @@ if __name__ == "__main__":
     test_ambiguous_nonce_never_claims_an_exact_match()
     test_ambiguous_nonce_and_ambiguous_hash_decline_entirely()
     test_matching_project_still_attributes()
+    test_unknown_gate_in_another_thread_never_truncates()
+    test_uncertain_boundary_is_recorded_not_guessed()
     test_declined_rows_bound_a_recovered_window()
     test_declined_row_in_another_project_does_not_bound()
     test_coverage_buckets_are_disjoint()

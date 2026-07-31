@@ -333,6 +333,26 @@ def _count_file_touches(
         return 0
 
 
+def _boundary_is_uncertain(
+    undetermined_by_project: dict,
+    project: str | None,
+    t0: datetime,
+    t_end: datetime,
+) -> bool:
+    """Whether an unattributed gate sits inside this row's window.
+
+    When one does, the window is unknowable in BOTH directions: that gate may
+    belong to this thread (so the window should have been truncated and is now
+    too long, absorbing the next gate's activity), or to a concurrent thread (so
+    truncating would delete real activity). Neither guess is safe, so the row
+    carries the uncertainty forward instead of pretending to a clean boundary.
+    """
+    for ts in undetermined_by_project.get(project) or []:
+        if t0 < ts <= t_end:
+            return True
+    return False
+
+
 # ---------- outcome classification ----------
 
 def _classify(
@@ -415,6 +435,10 @@ def correlate(
         # rollout by content join. Reported separately so coverage can always
         # be split into host-supplied vs recovered identity.
         "rows_attributed_from_transcript": 0,
+        # Emitted rows whose window contained an unattributable gate. Reported
+        # so a degraded window is visible as a count, never silently folded into
+        # a clean-looking rate.
+        "rows_with_uncertain_boundary": 0,
         "rows_skipped_dedup": 0,
         "rows_skipped_skipped_verdict": 0,
     }
@@ -482,21 +506,23 @@ def correlate(
         # gate's write). Treated as boundaries for recovered rows only, and
         # only within the same project: truncating too early merely shortens a
         # window, while truncating too late mislabels a verdict.
-        # Skipped rows are included: they are still gate calls, they already
-        # bound host-supplied windows via the raw session id, and leaving them
-        # out here would make a recovered window wider than a host one for the
-        # same event sequence — which would corrupt the very session_source
-        # comparison this change exists to enable.
-        undetermined: list[tuple[str | None, datetime]] = []
+        # Gates whose thread could not be determined. These are NOT used as
+        # boundaries — same-project is not same-session. They are recorded so a
+        # recovered row whose window contains one can be flagged: the boundary
+        # is genuinely unknowable there, and the honest move is to say so rather
+        # than pick a window that is wrong in one direction or the other.
+        undetermined_by_project: dict[str | None, list[datetime]] = {}
         for idx, R in enumerate(all_rows):
             if R.get("session_id") or idx in resolved:
                 continue
             ts = _parse_iso_ms(R.get("ts"))
             if ts is not None:
-                undetermined.append((R.get("project"), ts))
+                undetermined_by_project.setdefault(R.get("project"), []).append(ts)
+        for stamps in undetermined_by_project.values():
+            stamps.sort()
 
         next_ts_by_idx: dict[int, datetime | None] = _build_next_in_session_map(
-            all_rows, resolved, undetermined,
+            all_rows, resolved,
         )
 
         for idx, R in enumerate(all_rows):
@@ -544,6 +570,12 @@ def correlate(
             followup_corrections, cited_corrected = _correction_signals(
                 project_path, session_id, cited_ids, t0, t_end,
             )
+            boundary_uncertain = _boundary_is_uncertain(
+                undetermined_by_project, R.get("project"), t0, t_end,
+            )
+            if boundary_uncertain:
+                counts["rows_with_uncertain_boundary"] += 1
+
             file_touches = _count_file_touches(
                 conn, session_id, project_path, t0, t_end,
                 transcript_path=transcript_path,
@@ -565,6 +597,12 @@ def correlate(
                     # codex_transcript_hash. Makes a coverage number splittable
                     # by identity provenance instead of blended.
                     "session_source": session_source,
+                    # True when an unattributed gate falls inside this window,
+                    # so the boundary could not be established either way. The
+                    # label still ships — dropping it would cost coverage — but
+                    # a consumer computing a quality rate should exclude these
+                    # rather than treat them as cleanly measured.
+                    "window_boundary_uncertain": boundary_uncertain,
                     "verdict": R.get("recommendation"),
                     "outcome_category": outcome,
                     "followup_count_inserts": followup_inserts,
@@ -596,17 +634,19 @@ def correlate(
 def _build_next_in_session_map(
     gate_rows: list[dict],
     resolved: dict[int, dict] | None = None,
-    undetermined: list[tuple] | None = None,
 ) -> dict[int, datetime | None]:
     """For each gate row index, look up the timestamp of the NEXT gate
     in the same session (or None if it's the session's last gate in the
     scan window). Used to truncate the attribution window so a later
     gate's outcome isn't attributed to the earlier verdict.
 
-    `undetermined` is `[(project, ts), ...]` for session-less rows attribution
-    declined on. They belong to SOME Codex thread, so each one bounds the window
-    of any recovered row in the same project — otherwise a recovered verdict
-    runs past it and absorbs the next gate's activity.
+    ONLY a gate known to be in the same session truncates. An unattributed gate
+    is NOT a boundary: same-project is not same-session, concurrent Codex threads
+    are normal, and truncating on one deletes real observed activity — measured
+    on live data it cut a PROCEED window from 1800s to 391s and turned 6 observed
+    file touches into 0. Where the boundary is genuinely unknowable the row is
+    flagged `window_boundary_uncertain` rather than silently given a wrong
+    window; see `_uncertain_boundary_projects`.
 
     `resolved` supplies the session id for rows the host left blank and
     attribution recovered. It must be passed whenever attribution is in play:
@@ -632,28 +672,4 @@ def _build_next_in_session_map(
         for i, (idx, _) in enumerate(rows):
             next_ts[idx] = rows[i + 1][1] if i + 1 < len(rows) else None
 
-    if undetermined:
-        # A gate whose thread could not be determined may belong to a recovered
-        # row's thread, so it bounds that row's window. Applied to recovered
-        # rows only — a host-supplied session id is authoritative and needs no
-        # conservative guess — and scoped to the same project.
-        by_project: dict[str | None, list[datetime]] = {}
-        for project, ts in undetermined:
-            by_project.setdefault(project, []).append(ts)
-        for stamps in by_project.values():
-            stamps.sort()
-        for idx, R in enumerate(gate_rows):
-            hit = (resolved or {}).get(idx)
-            if not hit or hit.get("session_source") == "host_supplied":
-                continue
-            ts = _parse_iso_ms(R.get("ts"))
-            if ts is None:
-                continue
-            for candidate in by_project.get(R.get("project")) or []:
-                if candidate <= ts:
-                    continue
-                current = next_ts.get(idx)
-                if current is None or candidate < current:
-                    next_ts[idx] = candidate
-                break
     return next_ts
