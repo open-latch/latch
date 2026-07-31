@@ -10,11 +10,11 @@ import versioning  # noqa: E402
 
 
 def test_three_version_concepts_are_separate_and_valid():
-    assert versioning.LATCH_VERSION == "1.0.0"
+    assert versioning.LATCH_VERSION == "1.0.1"
     assert versioning.KB_SCHEMA_VERSION == 3
     assert versioning.WIRING_VERSION == 5
-    assert versioning.check_tag("v1.0.0")[0]
-    assert not versioning.check_tag("v1.0.1")[0]
+    assert versioning.check_tag("v1.0.1")[0]
+    assert not versioning.check_tag("v1.0.2")[0]
 
 
 def test_stable_release_check_rejects_prerelease_or_build_version(monkeypatch):
@@ -26,7 +26,7 @@ def test_stable_release_check_rejects_prerelease_or_build_version(monkeypatch):
 
 def test_version_payload_has_support_coordinates():
     data = versioning.payload()
-    assert data["latch_version"] == "1.0.0"
+    assert data["latch_version"] == "1.0.1"
     assert data["kb_schema_version"] == 3
     assert data["wiring_version"] == 5
     assert data["install_root"] == str(ROOT)

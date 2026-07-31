@@ -133,9 +133,9 @@ def test_update_refuses_kb_newer_than_target_before_backup_or_source_change(tmp_
             return "main"
         if args[:2] == ("status", "--porcelain"):
             return ""
-        if args[:2] == ("show", "v1.0.0:VERSION"):
-            return "1.0.0"
-        if args[:2] == ("show", "v1.0.0:KB_SCHEMA_VERSION"):
+        if args[:2] == ("show", "v1.0.1:VERSION"):
+            return "1.0.1"
+        if args[:2] == ("show", "v1.0.1:KB_SCHEMA_VERSION"):
             return "3"
         return ""
 
@@ -149,7 +149,7 @@ def test_update_refuses_kb_newer_than_target_before_backup_or_source_change(tmp_
     )
 
     with pytest.raises(update_latch.UpdateError, match="already uses newer schema 4"):
-        update_latch.apply_update("v1.0.0", dry_run=False)
+        update_latch.apply_update("v1.0.1", dry_run=False)
     assert not any(call and call[0] == "switch" for call in git_calls)
     assert kb.read_bytes() == before
     assert list(tmp_path.glob("*.bak.*")) == []
