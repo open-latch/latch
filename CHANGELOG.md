@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.0.1 - 2026-07-31
+## 1.1.0 - 2026-07-31
 
 - Replace startup briefs and intensity tiers with healthy-silent session
   bootstrap, bounded hook retrieval, and on-demand project-direction reports.
@@ -11,12 +11,13 @@
   limits, and evidence provenance visible instead of silently truncating
   history.
 - Narrow Latch gating to material implementation changes and add local
-  structural outcome events, coverage reporting, and shipped-edit correlation.
+  structural outcome events, coverage reporting, and in-session edit
+  correlation.
 - Fix Windows Codex shared and forced-legacy MCP startup through base Python by
   securely forwarding the validated Latch venv and surfacing invalid handoffs
   immediately.
-- Add a security-hardened, read-only Claude and Codex pull-request review panel
-  with immutable review scope and isolated artifact evidence.
+- Add a security-hardened pull-request review panel with read-only Claude and
+  Codex reviewer lanes, immutable review scope, and isolated artifact evidence.
 - Refresh onboarding, release-pinned install examples, proof language, and
   public documentation for the current workflow.
 

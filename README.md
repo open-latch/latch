@@ -435,14 +435,14 @@ curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/open-lat
 
 **Inspect or pin before you run.** To inspect either installer first, download the script and read it
 locally. The piped command follows `main`; for a stable build, pin both the script and the checkout
-ref to the latest tagged release (currently `v1.0.1`) so the install cannot drift back to `main`:
+ref to the latest tagged release (currently `v1.1.0`) so the install cannot drift back to `main`:
 
 ```bash
-curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/open-latch/latch/v1.0.1/install.sh | LATCH_INSTALL_REF=v1.0.1 bash
+curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/open-latch/latch/v1.1.0/install.sh | LATCH_INSTALL_REF=v1.1.0 bash
 ```
 
 ```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/open-latch/latch/v1.0.1/install.ps1))) -Ref v1.0.1
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/open-latch/latch/v1.1.0/install.ps1))) -Ref v1.1.0
 ```
 
 ### Automatic retrieval and catch-up
