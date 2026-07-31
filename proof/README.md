@@ -14,14 +14,14 @@ This packet combines one observed live gate receipt with two small, deterministi
 
 ## Observed live gate
 
-Captured with the `claude` backend on commit `eadbc2d0e3c33cc03f99a64b5ac1b42386b4c0a9`. This is a synthetic no-history fixture and used no personal conversation history.
+Captured with the `codex` backend on commit `cef624eef8aaab634c61452e782243692ae1ef7d`. This is a synthetic no-history fixture and used no personal conversation history.
 
 ```text
 Request: Add multi-user accounts by moving the datastore from local SQLite to a hosted Postgres service.
 Recommendation: DO_NOT_PROCEED
-Summary: The seed decision (id=1) is a canonical decision that explicitly names this exact request as the rejected path: moving the datastore to a hosted or client-server database (e.g. managed Postgres) to add multi-user accounts or sync. The allowed path is to stay on local SQLite and, if data must move between machines, add an explicit export/import step with documented limits. Implementing the Postgres migration would directly unwind that decision, so the request is ruled out as stated rather than merely in need of adjustment.
-Risk if proceed: The local-first architecture is abandoned and a hosted-database dependency is introduced against an explicit standing decision.
-Better next action: If data needs to reach another machine, implement the allowed path from id=1 — an explicit export/import step with documented limits — and take the multi-user-accounts requirement back to the user as a decision to revisit id=1.
+Summary: The canonical decision explicitly keeps the demo app local-first on embedded SQLite and rejects moving to hosted Postgres for multi-user accounts or sync (id=1). The request directly repeats that ruled-out architecture.
+Risk if proceed: The implementation would violate the project’s local-first, no-hosted-database architectural direction.
+Better next action: Keep SQLite and, if portability is needed, implement an explicit export/import workflow with documented limitations as allowed by id=1.
 Cited evidence:
 - id=1 decision status=canonical: Keep the demo app local-first on SQLite — no hosted database
 Worktree changed before/after gate: no
@@ -63,7 +63,7 @@ This deterministic fixture eval grades seed-report capture and filtering; it is 
 
 ## Reproduce
 
-The deterministic results were generated from commit `eadbc2d0e3c33cc03f99a64b5ac1b42386b4c0a9`.
+The deterministic results were generated from commit `cef624eef8aaab634c61452e782243692ae1ef7d`.
 
 ```bash
 bash bin/latch_eval.sh
@@ -81,7 +81,7 @@ bash bin/latch_proof_packet.sh --check
 Recapturing the live receipt spends a model call and replaces the observed receipt only after it passes the proof checks:
 
 ```bash
-bash bin/latch_proof_packet.sh --capture-live --backend claude
+bash bin/latch_proof_packet.sh --capture-live --backend codex
 ```
 
 The machine-readable summary is in [`results.json`](./results.json), and the observed receipt is in [`live_gate_receipt.json`](./live_gate_receipt.json).

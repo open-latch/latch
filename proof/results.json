@@ -1,8 +1,8 @@
 {
   "live_demo": {
-    "backend": "claude",
-    "better_next_action": "If data needs to reach another machine, implement the allowed path from id=1 \u2014 an explicit export/import step with documented limits \u2014 and take the multi-user-accounts requirement back to the user as a decision to revisit id=1.",
-    "captured_at_utc": "2026-07-31T07:57:58Z",
+    "backend": "codex",
+    "better_next_action": "Keep SQLite and, if portability is needed, implement an explicit export/import workflow with documented limitations as allowed by id=1.",
+    "captured_at_utc": "2026-07-31T14:13:37Z",
     "demo_kind": "synthetic_no_history_fixture",
     "evidence_nodes": [
       {
@@ -30,13 +30,13 @@
     "observed": true,
     "recommendation": "DO_NOT_PROCEED",
     "request": "Add multi-user accounts by moving the datastore from local SQLite to a hosted Postgres service.",
-    "risk_if_proceed": "The local-first architecture is abandoned and a hosted-database dependency is introduced against an explicit standing decision.",
-    "source_commit": "eadbc2d0e3c33cc03f99a64b5ac1b42386b4c0a9",
-    "summary": "The seed decision (id=1) is a canonical decision that explicitly names this exact request as the rejected path: moving the datastore to a hosted or client-server database (e.g. managed Postgres) to add multi-user accounts or sync. The allowed path is to stay on local SQLite and, if data must move between machines, add an explicit export/import step with documented limits. Implementing the Postgres migration would directly unwind that decision, so the request is ruled out as stated rather than merely in need of adjustment."
+    "risk_if_proceed": "The implementation would violate the project\u2019s local-first, no-hosted-database architectural direction.",
+    "source_commit": "cef624eef8aaab634c61452e782243692ae1ef7d",
+    "summary": "The canonical decision explicitly keeps the demo app local-first on embedded SQLite and rejects moving to hosted Postgres for multi-user accounts or sync (id=1). The request directly repeats that ruled-out architecture."
   },
   "reproduction": {
     "check_packet": "bash bin/latch_proof_packet.sh --check",
-    "recapture_live_demo": "bash bin/latch_proof_packet.sh --capture-live --backend claude",
+    "recapture_live_demo": "bash bin/latch_proof_packet.sh --capture-live --backend codex",
     "seed_report_eval": "bash bin/latch_seed_report_eval.sh",
     "wedge_eval": "bash bin/latch_eval.sh"
   },
@@ -64,7 +64,7 @@
       "filtered": 4
     }
   },
-  "source_commit": "eadbc2d0e3c33cc03f99a64b5ac1b42386b4c0a9",
+  "source_commit": "cef624eef8aaab634c61452e782243692ae1ef7d",
   "tested_runtime_manifest_sha256": "5901ea3b4c994a6b0d4041cbd52976e09f3e4a2a589bfb39723d534dec7c940e",
   "thesis": "Latch preserves project judgment and can surface a rejected path before an agent changes files.",
   "wedge_v1": {
