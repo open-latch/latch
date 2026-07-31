@@ -53,16 +53,41 @@ if (
         raise SystemExit(0)
 
 import mcp_broker  # noqa: E402
-
-if os.name == "nt":
-    # The windowless launcher and broker deliberately run the daemon under the
-    # base interpreter. Rehydrate the private venv here so its .pth additions
-    # (including pywin32's win32/lib paths) are active before heavy imports.
-    mcp_broker._activate_windows_venv_site_packages()
-
+import mcp_runtime  # noqa: E402
 
 _OWNER_FENCE = None
 _REQUESTED_RUNTIME_KEY = os.environ.get("LATCH_MCP_RUNTIME_KEY") or mcp_broker.RUNTIME_KEY
+
+
+def _activate_windows_venv_site_packages() -> str | None:
+    """Activate only broker-validated state and publish invalid handoffs."""
+    try:
+        resolved = mcp_broker._windows_venv_site_packages_handoff()
+        if resolved is None:
+            return None
+        return mcp_runtime.activate_windows_venv_site_packages(resolved)
+    except (mcp_broker.BrokerError, ValueError) as exc:
+        message = (
+            "Latch received an invalid Windows venv handoff. Reinstall Latch "
+            "and start a fresh task."
+        )
+        try:
+            mcp_broker.publish_start_failure(_REQUESTED_RUNTIME_KEY, message)
+        except Exception:
+            pass
+        mcp_broker.emit_lifecycle("daemon_start_failed", reason=message)
+        raise mcp_broker.BrokerError(message) from exc
+
+
+if os.name == "nt" and __name__ == "__main__":
+    # The windowless launcher and broker deliberately run the daemon under the
+    # base interpreter. Rehydrate the private venv here so its .pth additions
+    # (including pywin32's win32/lib paths) are active before heavy imports.
+    try:
+        _activate_windows_venv_site_packages()
+    except mcp_broker.BrokerError as exc:
+        sys.stderr.write(f"[latch] {exc}\n")
+        raise SystemExit(1)
 
 
 def _requested_protocol_version() -> int:
@@ -203,7 +228,6 @@ import mcp.types as mcp_types  # noqa: E402
 from anyio.abc import SocketAttribute, SocketStream  # noqa: E402
 from mcp.shared.message import SessionMessage  # noqa: E402
 
-import mcp_runtime  # noqa: E402
 import paths  # noqa: E402
 import mcp_server  # noqa: E402
 import selfheal  # noqa: E402

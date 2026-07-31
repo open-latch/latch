@@ -29,6 +29,9 @@ def test_windows_daemon_creation_flags_suppress_console_without_detaching():
 
 
 def test_windows_base_command_bypasses_venv_redirector(monkeypatch, tmp_path):
+    monkeypatch.delenv(
+        mcp_runtime.WINDOWS_VENV_SITE_PACKAGES_ENV, raising=False
+    )
     base_dir = tmp_path / "base"
     base_dir.mkdir()
     base_python = base_dir / "python.exe"
@@ -49,6 +52,39 @@ def test_windows_base_command_bypasses_venv_redirector(monkeypatch, tmp_path):
     env = {"PYTHONPATH": "/poison"}
     assert mcp_broker._windows_base_command(env) == str(base_python)
     assert env["PYTHONPATH"] == str(site_packages)
+
+
+@pytest.mark.parametrize("stale_exists", [False, True])
+def test_windows_base_command_prefers_live_venv_over_stale_handoff(
+    monkeypatch, tmp_path, stale_exists
+):
+    base_dir = tmp_path / "base"
+    base_dir.mkdir()
+    base_python = base_dir / "python.exe"
+    base_python.write_bytes(b"")
+    venv_dir = tmp_path / "venv"
+    site_packages = venv_dir / "Lib" / "site-packages"
+    site_packages.mkdir(parents=True)
+    stale = tmp_path / "missing-site-packages"
+    if stale_exists:
+        stale.mkdir()
+
+    monkeypatch.setattr(
+        mcp_broker.sys, "_base_executable", str(base_python), raising=False
+    )
+    monkeypatch.setattr(mcp_broker.sys, "base_prefix", str(base_dir))
+    monkeypatch.setattr(mcp_broker.sys, "prefix", str(venv_dir))
+    monkeypatch.setenv(
+        mcp_runtime.WINDOWS_VENV_SITE_PACKAGES_ENV, str(stale)
+    )
+
+    env = {}
+    assert mcp_broker._windows_base_command(env) == str(base_python)
+    assert env["PYTHONPATH"] == str(site_packages)
+    assert (
+        env[mcp_runtime.WINDOWS_VENV_SITE_PACKAGES_ENV]
+        == str(site_packages)
+    )
 
 
 def test_windows_base_helper_reinjects_explicit_venv_site_packages(
@@ -80,24 +116,42 @@ def test_windows_base_helper_reinjects_explicit_venv_site_packages(
         )
 
 
-def test_windows_launcher_handoff_survives_base_proxy_hop(monkeypatch, tmp_path):
-    base_dir = tmp_path / "base"
-    base_dir.mkdir()
-    base_python = base_dir / "python.exe"
-    base_python.write_bytes(b"")
+def test_windows_launcher_exports_private_venv_site_packages(monkeypatch, tmp_path):
     venv_dir = tmp_path / "venv"
     site_packages = venv_dir / "Lib" / "site-packages"
     site_packages.mkdir(parents=True)
 
     monkeypatch.setattr(mcp_launcher_win.sys, "prefix", str(venv_dir))
-    child_env = mcp_launcher_win._child_environment(
-        {"PYTHONPATH": "/caller/poison"}
-    )
+    child_env = mcp_launcher_win._child_environment({
+        "PYTHONPATH": "/caller/poison",
+        mcp_runtime.WINDOWS_VENV_SITE_PACKAGES_ENV: "/stale/handoff",
+    })
     assert child_env["PYTHONPATH"].split(os.pathsep)[0] == str(site_packages)
     assert (
         child_env[mcp_runtime.WINDOWS_VENV_SITE_PACKAGES_ENV]
         == str(site_packages)
     )
+
+
+def test_windows_launcher_drops_stale_handoff_without_live_venv(monkeypatch):
+    monkeypatch.setattr(mcp_launcher_win, "_venv_site_packages", lambda: None)
+    child_env = mcp_launcher_win._child_environment({
+        "PYTHONPATH": "/caller/path",
+        mcp_runtime.WINDOWS_VENV_SITE_PACKAGES_ENV: "/stale/handoff",
+    })
+    assert child_env["PYTHONPATH"] == "/caller/path"
+    assert mcp_runtime.WINDOWS_VENV_SITE_PACKAGES_ENV not in child_env
+
+
+def test_windows_base_proxy_handoff_reaches_daemon_environment(
+    monkeypatch, tmp_path
+):
+    base_dir = tmp_path / "base"
+    base_dir.mkdir()
+    base_python = base_dir / "python.exe"
+    base_python.write_bytes(b"")
+    site_packages = tmp_path / "venv" / "Lib" / "site-packages"
+    site_packages.mkdir(parents=True)
 
     monkeypatch.setattr(
         mcp_broker.sys, "_base_executable", str(base_python), raising=False
@@ -130,19 +184,154 @@ def test_windows_daemon_processes_private_venv_pth_before_anyio(
 
     monkeypatch.setattr(site, "addsitedir", activated.append)
     assert (
-        mcp_broker._activate_windows_venv_site_packages()
+        mcp_runtime.activate_windows_venv_site_packages(str(site_packages))
         == str(site_packages)
     )
     assert activated == [str(site_packages)]
 
     source = (ROOT / "src" / "mcp_daemon.py").read_text(encoding="utf-8")
-    assert source.index("_activate_windows_venv_site_packages") < source.index(
-        "import anyio"
+    windows_main = source.index(
+        'if os.name == "nt" and __name__ == "__main__":'
     )
+    activation_call = source.index(
+        "        _activate_windows_venv_site_packages()", windows_main
+    )
+    assert windows_main < activation_call < source.index("import anyio")
     legacy_source = (ROOT / "src" / "mcp_server.py").read_text(encoding="utf-8")
-    assert legacy_source.index(
-        "_activate_windows_venv_site_packages"
-    ) < legacy_source.index("from mcp.server.fastmcp")
+    legacy_guard = legacy_source.index('    if os.name == "nt":')
+    legacy_call = legacy_source.index(
+        "mcp_runtime.activate_windows_venv_site_packages", legacy_guard
+    )
+    assert legacy_guard < legacy_call < legacy_source.index(
+        "from mcp.server.fastmcp"
+    )
+
+
+def test_windows_activation_rejects_unvalidated_handoff(
+    monkeypatch, tmp_path
+):
+    stale = tmp_path / "missing-site-packages"
+    activated = []
+    import site
+
+    monkeypatch.setattr(site, "addsitedir", activated.append)
+    with pytest.raises(ValueError, match="invalid Windows venv"):
+        mcp_runtime.activate_windows_venv_site_packages(str(stale))
+    assert activated == []
+
+
+def test_windows_daemon_invalid_handoff_publishes_start_failure(
+    monkeypatch, tmp_path
+):
+    base_dir = tmp_path / "base"
+    base_dir.mkdir()
+    stale = tmp_path / "missing-site-packages"
+    monkeypatch.setattr(mcp_broker.sys, "base_prefix", str(base_dir))
+    monkeypatch.setattr(mcp_broker.sys, "prefix", str(base_dir))
+    monkeypatch.setenv(
+        mcp_runtime.WINDOWS_VENV_SITE_PACKAGES_ENV, str(stale)
+    )
+    published = []
+    events = []
+    monkeypatch.setattr(
+        mcp_daemon.mcp_broker,
+        "publish_start_failure",
+        lambda runtime_key, message: published.append((runtime_key, message)),
+    )
+    monkeypatch.setattr(
+        mcp_daemon.mcp_broker,
+        "emit_lifecycle",
+        lambda event, **fields: events.append((event, fields)),
+    )
+
+    with pytest.raises(
+        mcp_broker.BrokerError,
+        match="invalid Windows venv handoff",
+    ):
+        mcp_daemon._activate_windows_venv_site_packages()
+    assert published == [(
+        mcp_daemon._REQUESTED_RUNTIME_KEY,
+        "Latch received an invalid Windows venv handoff. Reinstall Latch "
+        "and start a fresh task.",
+    )]
+    assert events == [(
+        "daemon_start_failed",
+        {"reason": published[0][1]},
+    )]
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows import contract")
+def test_windows_plain_daemon_import_ignores_stale_handoff(tmp_path):
+    env = os.environ.copy()
+    env.pop("LATCH_MCP_DAEMONIZE", None)
+    env[mcp_runtime.WINDOWS_VENV_SITE_PACKAGES_ENV] = str(
+        tmp_path / "missing-site-packages"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", "import mcp_daemon"],
+        cwd=str(ROOT / "src"),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows startup contract")
+def test_windows_daemon_execution_publishes_invalid_handoff(tmp_path):
+    base_python = Path(
+        getattr(sys, "_base_executable", "") or sys.base_prefix
+    )
+    if base_python.is_dir():
+        base_python /= "python.exe"
+    assert base_python.is_file()
+    test_root = mcp_broker.paths.validated_test_root()
+    assert test_root is not None
+    vault = (
+        test_root
+        / "vaults"
+        / f"invalid-handoff-{os.getpid()}-{time.time_ns()}"
+    )
+    vault.mkdir(parents=True)
+    runtime_key = "invalid-handoff-test"
+    env = os.environ.copy()
+    env.pop("LATCH_MCP_DAEMONIZE", None)
+    env["LATCH_HOME"] = str(ROOT)
+    env["LATCH_KB_DIR"] = str(vault)
+    env["PYTHONPATH"] = str(ROOT / "src")
+    env["LATCH_MCP_RUNTIME_KEY"] = runtime_key
+    env[mcp_runtime.WINDOWS_VENV_SITE_PACKAGES_ENV] = str(
+        tmp_path / "missing-site-packages"
+    )
+
+    started = time.monotonic()
+    proc = subprocess.run(
+        [str(base_python), str(ROOT / "src" / "mcp_daemon.py")],
+        cwd=str(ROOT / "src"),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    elapsed = time.monotonic() - started
+    assert proc.returncode != 0
+    assert elapsed < 5
+    message = (
+        "Latch received an invalid Windows venv handoff. Reinstall Latch "
+        "and start a fresh task."
+    )
+    assert message in proc.stderr
+    receipt = (
+        vault
+        / "runtime"
+        / mcp_broker.RUNTIME_REGISTRY_DIR
+        / runtime_key
+        / mcp_broker.DISCOVERY_FILE
+    )
+    assert json.loads(receipt.read_text(encoding="utf-8"))["error"] == message
 
 
 def test_windows_site_packages_cli_handoff_reaches_ensure_daemon(

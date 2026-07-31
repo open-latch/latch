@@ -197,6 +197,7 @@ def _resolve_child_python() -> str:
 def _child_environment(source: dict[str, str] | None = None) -> dict[str, str]:
     """Build the base proxy environment with an explicit venv handoff."""
     child_env = dict(os.environ if source is None else source)
+    child_env.pop(mcp_runtime.WINDOWS_VENV_SITE_PACKAGES_ENV, None)
     site = _venv_site_packages()
     if site:
         # Base interpreter direct-launch: expose venv deps via PYTHONPATH so the
