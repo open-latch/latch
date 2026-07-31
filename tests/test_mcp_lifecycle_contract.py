@@ -16,6 +16,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 import mcp_broker  # noqa: E402
 import mcp_daemon  # noqa: E402
+import mcp_launcher_win  # noqa: E402
 import mcp_proxy  # noqa: E402
 import mcp_runtime  # noqa: E402
 
@@ -77,6 +78,71 @@ def test_windows_base_helper_reinjects_explicit_venv_site_packages(
         mcp_broker._windows_base_command(
             {}, site_packages=str(tmp_path / "missing")
         )
+
+
+def test_windows_launcher_handoff_survives_base_proxy_hop(monkeypatch, tmp_path):
+    base_dir = tmp_path / "base"
+    base_dir.mkdir()
+    base_python = base_dir / "python.exe"
+    base_python.write_bytes(b"")
+    venv_dir = tmp_path / "venv"
+    site_packages = venv_dir / "Lib" / "site-packages"
+    site_packages.mkdir(parents=True)
+
+    monkeypatch.setattr(mcp_launcher_win.sys, "prefix", str(venv_dir))
+    child_env = mcp_launcher_win._child_environment(
+        {"PYTHONPATH": "/caller/poison"}
+    )
+    assert child_env["PYTHONPATH"].split(os.pathsep)[0] == str(site_packages)
+    assert (
+        child_env[mcp_runtime.WINDOWS_VENV_SITE_PACKAGES_ENV]
+        == str(site_packages)
+    )
+
+    monkeypatch.setattr(
+        mcp_broker.sys, "_base_executable", str(base_python), raising=False
+    )
+    monkeypatch.setattr(mcp_broker.sys, "base_prefix", str(base_dir))
+    monkeypatch.setattr(mcp_broker.sys, "prefix", str(base_dir))
+    monkeypatch.setattr(mcp_broker.sys, "executable", str(base_python))
+    monkeypatch.setenv(
+        mcp_runtime.WINDOWS_VENV_SITE_PACKAGES_ENV, str(site_packages)
+    )
+    daemon_env = {"PYTHONPATH": "/proxy/poison"}
+    assert mcp_broker._windows_base_command(daemon_env) == str(base_python)
+    assert daemon_env["PYTHONPATH"] == str(site_packages)
+    assert (
+        daemon_env[mcp_runtime.WINDOWS_VENV_SITE_PACKAGES_ENV]
+        == str(site_packages)
+    )
+
+
+def test_windows_daemon_processes_private_venv_pth_before_anyio(
+    monkeypatch, tmp_path
+):
+    site_packages = tmp_path / "venv" / "Lib" / "site-packages"
+    site_packages.mkdir(parents=True)
+    monkeypatch.setenv(
+        mcp_runtime.WINDOWS_VENV_SITE_PACKAGES_ENV, str(site_packages)
+    )
+    activated = []
+    import site
+
+    monkeypatch.setattr(site, "addsitedir", activated.append)
+    assert (
+        mcp_broker._activate_windows_venv_site_packages()
+        == str(site_packages)
+    )
+    assert activated == [str(site_packages)]
+
+    source = (ROOT / "src" / "mcp_daemon.py").read_text(encoding="utf-8")
+    assert source.index("_activate_windows_venv_site_packages") < source.index(
+        "import anyio"
+    )
+    legacy_source = (ROOT / "src" / "mcp_server.py").read_text(encoding="utf-8")
+    assert legacy_source.index(
+        "_activate_windows_venv_site_packages"
+    ) < legacy_source.index("from mcp.server.fastmcp")
 
 
 def test_windows_site_packages_cli_handoff_reaches_ensure_daemon(

@@ -29,6 +29,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import mcp_runtime
+
 CREATE_NO_WINDOW = 0x08000000
 
 _STD_INPUT_HANDLE = -10
@@ -192,6 +194,24 @@ def _resolve_child_python() -> str:
     return sys.executable
 
 
+def _child_environment(source: dict[str, str] | None = None) -> dict[str, str]:
+    """Build the base proxy environment with an explicit venv handoff."""
+    child_env = dict(os.environ if source is None else source)
+    site = _venv_site_packages()
+    if site:
+        # Base interpreter direct-launch: expose venv deps via PYTHONPATH so the
+        # child's sys.executable stays base python (keeps the cold-start daemon
+        # windowless too). The explicit marker survives after the broker drops
+        # inherited loader paths and lets it rebuild the daemon environment
+        # from this launcher-owned directory.
+        existing = child_env.get("PYTHONPATH", "")
+        child_env["PYTHONPATH"] = site + (
+            os.pathsep + existing if existing else ""
+        )
+        child_env[mcp_runtime.WINDOWS_VENV_SITE_PACKAGES_ENV] = site
+    return child_env
+
+
 def main() -> int:
     global _JOB_HANDLE
     if os.name != "nt":
@@ -201,15 +221,7 @@ def main() -> int:
 
     server_py = Path(__file__).resolve().parent / "mcp_server.py"
     child_python = _resolve_child_python()
-    child_env = os.environ.copy()
-    site = _venv_site_packages()
-    if site:
-        # Base interpreter direct-launch: expose venv deps via PYTHONPATH so the
-        # child's sys.executable stays base python (keeps the cold-start daemon
-        # windowless too). __PYVENV_LAUNCHER__ would instead point sys.executable
-        # at the console-flashing venv redirector.
-        existing = child_env.get("PYTHONPATH", "")
-        child_env["PYTHONPATH"] = site + (os.pathsep + existing if existing else "")
+    child_env = _child_environment()
 
     stdin_fd = _dup_std_fd(_STD_INPUT_HANDLE, os.O_RDONLY)
     stdout_fd = _dup_std_fd(_STD_OUTPUT_HANDLE, os.O_WRONLY)

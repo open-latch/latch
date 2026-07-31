@@ -954,11 +954,26 @@ def _windows_base_command(
     # the exact venv site-packages directory computed by the original proxy.
     env.pop("PYTHONPATH", None)
     env.pop(mcp_runtime.WINDOWS_VENV_SITE_PACKAGES_ENV, None)
-    resolved_site_packages = _windows_venv_site_packages(site_packages)
+    handoff = site_packages
+    if handoff is None:
+        handoff = os.environ.get(mcp_runtime.WINDOWS_VENV_SITE_PACKAGES_ENV)
+    resolved_site_packages = _windows_venv_site_packages(handoff)
     if resolved_site_packages is not None:
         env["PYTHONPATH"] = resolved_site_packages
         env[mcp_runtime.WINDOWS_VENV_SITE_PACKAGES_ENV] = resolved_site_packages
     return executable
+
+
+def _activate_windows_venv_site_packages() -> str | None:
+    """Process the private venv's ``.pth`` files before daemon imports."""
+    raw = os.environ.get(mcp_runtime.WINDOWS_VENV_SITE_PACKAGES_ENV)
+    if not raw:
+        return None
+    resolved = _windows_venv_site_packages(raw)
+    import site
+
+    site.addsitedir(resolved)
+    return resolved
 
 
 def _daemon_environment(

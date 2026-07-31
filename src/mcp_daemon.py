@@ -54,6 +54,12 @@ if (
 
 import mcp_broker  # noqa: E402
 
+if os.name == "nt":
+    # The windowless launcher and broker deliberately run the daemon under the
+    # base interpreter. Rehydrate the private venv here so its .pth additions
+    # (including pywin32's win32/lib paths) are active before heavy imports.
+    mcp_broker._activate_windows_venv_site_packages()
+
 
 _OWNER_FENCE = None
 _REQUESTED_RUNTIME_KEY = os.environ.get("LATCH_MCP_RUNTIME_KEY") or mcp_broker.RUNTIME_KEY

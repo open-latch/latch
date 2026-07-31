@@ -52,6 +52,12 @@ if __name__ == "__main__":
         from mcp_proxy import main as _proxy_main  # noqa: E402
 
         raise SystemExit(_proxy_main())
+    if os.name == "nt":
+        from mcp_broker import (  # noqa: E402
+            _activate_windows_venv_site_packages,
+        )
+
+        _activate_windows_venv_site_packages()
 
 from mcp.server.fastmcp import FastMCP  # noqa: E402
 
