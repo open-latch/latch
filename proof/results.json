@@ -1,8 +1,8 @@
 {
   "live_demo": {
     "backend": "claude",
-    "better_next_action": "Keep the SQLite datastore and, if the real need is moving data between machines, implement the sanctioned explicit export/import step with its limits documented (id=1); if genuine concurrent multi-user accounts are now a hard requirement, raise that with the user as a change to decision id=1 before touching the storage layer.",
-    "captured_at_utc": "2026-07-30T03:17:03Z",
+    "better_next_action": "If the real need is moving data between machines, implement the allowed path from id=1 \u2014 an explicit export/import step with its limits documented; if genuine multi-user accounts are now required, raise that as a reversal of id=1 with the user before writing code.",
+    "captured_at_utc": "2026-07-31T02:35:32Z",
     "demo_kind": "synthetic_no_history_fixture",
     "evidence_nodes": [
       {
@@ -30,9 +30,9 @@
     "observed": true,
     "recommendation": "DO_NOT_PROCEED",
     "request": "Add multi-user accounts by moving the datastore from local SQLite to a hosted Postgres service.",
-    "risk_if_proceed": "The app loses its local-first guarantee and takes on a hosted-service dependency that the canonical decision was made specifically to avoid.",
-    "source_commit": "e681633ae641e977de093eaf97384ded3255920c",
-    "summary": "The request is the exact path node id=1 rules out: it names moving the datastore to a hosted or client-server database (explicitly 'a managed Postgres service') to add multi-user accounts or sync as the rejected path, and keeping a single embedded SQLite file local-first as the canonical decision. The allowed alternative is already specified \u2014 stay on SQLite and add an explicit export/import step with documented limits. Implementing the hosted-Postgres migration would directly unwind a canonical decision rather than extend it."
+    "risk_if_proceed": "The deliberate local-first architecture is unwound and the app acquires a hosted-database dependency the decision explicitly rejected.",
+    "source_commit": "ec79e16546d2fb54fd0d14d312e61c76d7ad1cb5",
+    "summary": "The request is the exact rejected path named in the seed decision (id=1): moving the datastore to a hosted or client-server database (managed Postgres is the explicit example) in order to add multi-user accounts or sync. The canonical decision is to keep the demo app local-first on a single embedded SQLite file, with export/import as the sanctioned escape hatch when data must cross machines. Implementing this request would directly reverse that decision rather than extend it. The chain contains no superseding or competing node, so the decision stands as the live direction."
   },
   "reproduction": {
     "check_packet": "bash bin/latch_proof_packet.sh --check",
@@ -64,8 +64,8 @@
       "filtered": 4
     }
   },
-  "source_commit": "e681633ae641e977de093eaf97384ded3255920c",
-  "tested_runtime_manifest_sha256": "1fbdc515badef8e20704e04f902f8806175f0dcc40894a0e82454e944db21e03",
+  "source_commit": "ec79e16546d2fb54fd0d14d312e61c76d7ad1cb5",
+  "tested_runtime_manifest_sha256": "5c8cb71dea33e5596ed9434b77261de561f895f9ea9aef3dfe88bf2e737b0202",
   "thesis": "Latch preserves project judgment and can surface a rejected path before an agent changes files.",
   "wedge_v1": {
     "baseline_boundary": "memory_like is an internal active-search-only ablation. It is not a benchmark of any third-party memory product.",
