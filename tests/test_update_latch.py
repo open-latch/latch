@@ -52,23 +52,23 @@ def test_clean_release_checkout_updates_to_exact_tag(tmp_path, monkeypatch):
     _git(work, "tag", "v1.0.0")
     _git(work, "remote", "add", "origin", str(remote))
     _git(work, "push", "-u", "origin", "main", "--tags")
-    (work / "VERSION").write_text("1.0.1\n", encoding="utf-8")
+    (work / "VERSION").write_text("1.1.0\n", encoding="utf-8")
     _git(work, "add", "VERSION")
-    _git(work, "commit", "-m", "v1.0.1")
-    _git(work, "tag", "v1.0.1")
+    _git(work, "commit", "-m", "v1.1.0")
+    _git(work, "tag", "v1.1.0")
     _git(work, "push", "origin", "main", "--tags")
     subprocess.run(["git", "clone", "--branch", "v1.0.0", str(remote), str(clone)], check=True, stdout=subprocess.DEVNULL)
 
     monkeypatch.setattr(update_latch, "ROOT", clone)
     monkeypatch.setattr(update_latch, "official_remote", lambda _url: True)
-    monkeypatch.setattr(update_latch, "published_release_tag", lambda tag=None: tag or "v1.0.1")
+    monkeypatch.setattr(update_latch, "published_release_tag", lambda tag=None: tag or "v1.1.0")
     monkeypatch.setattr(update_latch, "_dependency_command", lambda: ["true"])
     monkeypatch.setattr(update_latch, "_refresh_claude_commands_if_installed", lambda: False)
     info = update_latch.inspect()
-    assert info["latest_tag"] == "v1.0.1"
-    result = update_latch.apply_update("v1.0.1", dry_run=False)
-    assert result["to_version"] == "1.0.1"
-    assert _git(clone, "describe", "--tags", "--exact-match", "HEAD") == "v1.0.1"
+    assert info["latest_tag"] == "v1.1.0"
+    result = update_latch.apply_update("v1.1.0", dry_run=False)
+    assert result["to_version"] == "1.1.0"
+    assert _git(clone, "describe", "--tags", "--exact-match", "HEAD") == "v1.1.0"
 
 
 def test_update_refuses_dirty_or_developer_branch(tmp_path, monkeypatch):
@@ -133,9 +133,9 @@ def test_update_refuses_kb_newer_than_target_before_backup_or_source_change(tmp_
             return "main"
         if args[:2] == ("status", "--porcelain"):
             return ""
-        if args[:2] == ("show", "v1.0.0:VERSION"):
-            return "1.0.0"
-        if args[:2] == ("show", "v1.0.0:KB_SCHEMA_VERSION"):
+        if args[:2] == ("show", "v1.1.0:VERSION"):
+            return "1.1.0"
+        if args[:2] == ("show", "v1.1.0:KB_SCHEMA_VERSION"):
             return "3"
         return ""
 
@@ -149,7 +149,7 @@ def test_update_refuses_kb_newer_than_target_before_backup_or_source_change(tmp_
     )
 
     with pytest.raises(update_latch.UpdateError, match="already uses newer schema 4"):
-        update_latch.apply_update("v1.0.0", dry_run=False)
+        update_latch.apply_update("v1.1.0", dry_run=False)
     assert not any(call and call[0] == "switch" for call in git_calls)
     assert kb.read_bytes() == before
     assert list(tmp_path.glob("*.bak.*")) == []

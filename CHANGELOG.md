@@ -1,12 +1,25 @@
 # Changelog
 
-## Unreleased
+## 1.1.0 - 2026-07-31
 
-- Add explicit, default-off Cursor IDE history seeding that verifies each
-  conversation against Cursor's local project membership and non-subagent
-  metadata, binds the opt-in into cached preview/apply receipts, and lets
-  aggregate `--source all` runs continue when the Cursor-history leg is
-  unavailable while keeping Cursor-only runs fail-closed.
+- Replace startup briefs and intensity tiers with healthy-silent session
+  bootstrap, bounded hook retrieval, and on-demand project-direction reports.
+- Harden vault durability with immutable production and test identities,
+  verified external backups and restore tooling, fail-closed maintenance, and
+  uninstall paths that never delete a production KB.
+- Add explicit, project-scoped Cursor IDE history seeding and make coverage,
+  limits, and evidence provenance visible instead of silently truncating
+  history.
+- Narrow Latch gating to material implementation changes and add local
+  structural outcome events, coverage reporting, and in-session edit
+  correlation.
+- Fix Windows Codex shared and forced-legacy MCP startup through base Python by
+  securely forwarding the validated Latch venv and surfacing invalid handoffs
+  immediately.
+- Add a security-hardened pull-request review panel with read-only Claude and
+  Codex reviewer lanes, immutable review scope, and isolated artifact evidence.
+- Refresh onboarding, release-pinned install examples, proof language, and
+  public documentation for the current workflow.
 
 ## 1.0.0 - 2026-07-23
 
