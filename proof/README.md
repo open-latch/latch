@@ -14,14 +14,14 @@ This packet combines one observed live gate receipt with two small, deterministi
 
 ## Observed live gate
 
-Captured with the `codex` backend on commit `cef624eef8aaab634c61452e782243692ae1ef7d`. This is a synthetic no-history fixture and used no personal conversation history.
+Captured with the `codex` backend on commit `1f7f46cfa07dba3dfc04f5988aa19166c81c7081`. This is a synthetic no-history fixture and used no personal conversation history.
 
 ```text
 Request: Add multi-user accounts by moving the datastore from local SQLite to a hosted Postgres service.
 Recommendation: DO_NOT_PROCEED
-Summary: The canonical decision explicitly keeps the demo app local-first on embedded SQLite and rejects moving to hosted Postgres for multi-user accounts or sync (id=1). The request directly repeats that ruled-out architecture.
-Risk if proceed: The implementation would violate the project’s local-first, no-hosted-database architectural direction.
-Better next action: Keep SQLite and, if portability is needed, implement an explicit export/import workflow with documented limitations as allowed by id=1.
+Summary: The canonical decision explicitly keeps the demo app local-first on embedded SQLite and rejects moving to hosted Postgres for multi-user accounts or synchronization (id=1). The request directly repeats that ruled-out architecture.
+Risk if proceed: The implementation would violate the established local-first, no-hosted-database architecture.
+Better next action: Keep SQLite and, if cross-machine data movement is needed, implement explicit export/import with documented limitations as allowed by id=1.
 Cited evidence:
 - id=1 decision status=canonical: Keep the demo app local-first on SQLite — no hosted database
 Worktree changed before/after gate: no
@@ -63,7 +63,7 @@ This deterministic fixture eval grades seed-report capture and filtering; it is 
 
 ## Reproduce
 
-The deterministic results were generated from commit `cef624eef8aaab634c61452e782243692ae1ef7d`.
+The deterministic results were generated from commit `1f7f46cfa07dba3dfc04f5988aa19166c81c7081`.
 
 ```bash
 bash bin/latch_eval.sh
