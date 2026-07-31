@@ -221,6 +221,7 @@ def render_mcp_block(python_path: str, server_py: str) -> str:
         f"command = {_toml_string(py)}",
         f"args = [{_toml_string(server)}]",
         "startup_timeout_sec = 120",
+        "required = true",
         f"tool_timeout_sec = {CODEX_TOOL_TIMEOUT_SEC}",
         'default_tools_approval_mode = "approve"',
         f"[mcp_servers.{SERVER_NAME}.env]",

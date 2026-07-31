@@ -25,6 +25,10 @@ def test_render_mcp_block_uses_codex_shape():
     _assert("[mcp_servers.latch]" in out, "Codex MCP table missing")
     _assert('command = "/PY"' in out, "python command missing")
     _assert('args = ["/repo/src/mcp_server.py"]' in out, "server args missing")
+    _assert("required = true" in out,
+            "Codex must not silently start without the Latch MCP tools")
+    _assert(tomllib.loads(out)["mcp_servers"]["latch"]["required"] is True,
+            "required must be a TOML boolean, not a string")
     _assert("tool_timeout_sec = 300" in out, "Codex gate needs room for backend calls")
     _assert('default_tools_approval_mode = "approve"' in out,
             "approval mode should be server-level")

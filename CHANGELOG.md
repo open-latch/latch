@@ -15,7 +15,8 @@
   correlation.
 - Fix Windows Codex shared and forced-legacy MCP startup through base Python by
   securely forwarding the validated Latch venv and surfacing invalid handoffs
-  immediately.
+  immediately; require successful Codex MCP initialization so a cold session
+  cannot silently start without Latch tools.
 - Add a security-hardened pull-request review panel with read-only Claude and
   Codex reviewer lanes, immutable review scope, and isolated artifact evidence.
 - Refresh onboarding, release-pinned install examples, proof language, and
