@@ -112,6 +112,7 @@ def test_shell_backed_codex_skills_do_not_treat_project_root_as_latch_home():
         "latch-gate",
         "latch-gate-report",
         "latch-heal",
+        "latch-review",
         "latch-tree",
         "unlatch",
     }
@@ -126,6 +127,12 @@ def test_shell_backed_codex_skills_do_not_treat_project_root_as_latch_home():
         ).read_text(encoding="utf-8")
 
         assert "CLAUDE_KB_HOME" in text
+        if command == "latch-review":
+            assert "<KB_HOME>" in text
+            assert "rerun bin/install_codex" in text
+            assert "AGENTS.md" not in text
+            assert "src/mcp_server.py" not in text
+            continue
         assert "AGENTS.md" in text
         assert "src/mcp_server.py" in text
         assert "Could not find latch checkout" in text

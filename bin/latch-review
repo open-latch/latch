@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+LATCH_REVIEW_HOME="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+if [ -n "${LATCH_PYTHON:-}" ]; then
+  LATCH_REVIEW_PYTHON="$LATCH_PYTHON"
+elif [ -n "${CLAUDE_KB_PYTHON:-}" ]; then
+  LATCH_REVIEW_PYTHON="$CLAUDE_KB_PYTHON"
+elif [ -x "${LATCH_REVIEW_HOME}/.venv/bin/python" ]; then
+  LATCH_REVIEW_PYTHON="${LATCH_REVIEW_HOME}/.venv/bin/python"
+elif command -v python3 >/dev/null 2>&1; then
+  LATCH_REVIEW_PYTHON="$(command -v python3)"
+else
+  echo "latch-review: no Python found; set LATCH_PYTHON and retry." >&2
+  exit 2
+fi
+
+exec "$LATCH_REVIEW_PYTHON" "${LATCH_REVIEW_HOME}/src/local_review.py" "$@"

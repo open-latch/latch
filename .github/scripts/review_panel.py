@@ -1,16 +1,13 @@
 #!/usr/bin/env python3
-"""Prepare, normalize, and aggregate the multi-provider PR review panel.
+"""Prepare, normalize, and aggregate the multi-provider review panel.
 
-The provider actions are deliberately thin. This module owns the deterministic
-parts of the contract: immutable scope resolution, lane policy, artifact
-recipes, receipt validation, finding correlation, and merge-policy output.
-It uses only the Python standard library so the aggregation path does not need
-to install or execute dependencies from the reviewed pull request.
+The local orchestrator is deliberately thin. This module owns the deterministic
+parts of the contract: bounded evidence prompts, receipt validation, finding
+correlation, and policy output. It uses only the Python standard library.
 """
 from __future__ import annotations
 
 import argparse
-import fnmatch
 import json
 import math
 import os
@@ -18,35 +15,23 @@ from pathlib import Path, PurePosixPath
 import re
 import secrets
 import shlex
-import shutil
 import subprocess
 import sys
 import threading
-from typing import Any, Iterable, NamedTuple
+from typing import Any, NamedTuple
 
 
 CONTROL_ROOT = Path(__file__).resolve().parents[2]
-TARGET_ROOT = Path(
-    os.environ.get("REVIEW_PANEL_TARGET_ROOT", str(CONTROL_ROOT))
-).resolve()
 POLICY_PATH = CONTROL_ROOT / ".github" / "review-panel" / "policy.json"
 SCHEMA_PATH = CONTROL_ROOT / ".github" / "review-panel" / "review.schema.json"
 COMMON_PROMPT_PATH = (
     CONTROL_ROOT / ".github" / "review-panel" / "prompts" / "common.md"
 )
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
-MODEL_RE = re.compile(r"^[A-Za-z0-9._:/-]+$")
-REPOSITORY_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
 REPORT_MARKER = "<!-- ai-review-panel-report -->"
 MAX_REPORT_CHARS = 60_000
-MAX_ARTIFACT_FILES = 500
-MAX_ARTIFACT_FILE_BYTES = 5 * 1024 * 1024
-MAX_ARTIFACT_TOTAL_BYTES = 25 * 1024 * 1024
 MAX_REVIEW_PROMPT_BYTES = 225_000
-# claude-code-action maps its prompt input to one Linux environment string.
-# Stay comfortably below Linux's 128 KiB per-string execve ceiling, measured
-# after UTF-8 encoding rather than in Python characters.
-MAX_CLAUDE_ACTION_PROMPT_BYTES = 96 * 1024
 MAX_EVIDENCE_BLOB_BYTES = 120_000
 MAX_GIT_STDERR_BYTES = 256 * 1024
 MAX_GIT_PATH_OUTPUT_BYTES = 2 * 1024 * 1024
@@ -87,28 +72,9 @@ def load_policy(path: Path = POLICY_PATH) -> dict[str, Any]:
     return policy
 
 
-def _json_dump(value: Any) -> str:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"))
-
-
 def _write_json(path: Path, value: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-
-
-def _append_github_output(path: Path, key: str, value: str) -> None:
-    if "\n" in value or "\r" in value:
-        raise ValueError(f"GitHub output {key} must be one line")
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(f"{key}={value}\n")
-
-
-def _append_multiline_github_output(path: Path, key: str, value: str) -> None:
-    delimiter = f"REVIEW_PANEL_{secrets.token_hex(16)}"
-    while delimiter in value:
-        delimiter = f"REVIEW_PANEL_{secrets.token_hex(16)}"
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(f"{key}<<{delimiter}\n{value}\n{delimiter}\n")
 
 
 def _bool(value: str | bool | None) -> bool:
@@ -124,207 +90,11 @@ def _validate_sha(value: str, label: str) -> str:
     return value
 
 
-def _git(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ["git", *args],
-        cwd=TARGET_ROOT,
-        text=True,
-        capture_output=True,
-        check=check,
-    )
-
-
-def _fetch_ref(
-    target: Path,
-    repository: str,
-    sha: str,
-    ref: str,
-    *,
-    fetch_history: bool = False,
-) -> None:
-    if not REPOSITORY_RE.fullmatch(repository):
-        raise ValueError(f"invalid GitHub repository name: {repository!r}")
-    url = f"https://github.com/{repository}.git"
-    command = ["git", "--git-dir", str(target), "fetch", "--no-tags"]
-    if not fetch_history:
-        command.append("--depth=1")
-    command.extend([url, sha])
-    subprocess.run(
-        command,
-        text=True,
-        capture_output=True,
-        check=True,
-    )
-    resolved = subprocess.run(
-        ["git", "--git-dir", str(target), "rev-parse", "FETCH_HEAD^{commit}"],
-        text=True,
-        capture_output=True,
-        check=True,
-    ).stdout.strip().lower()
-    if resolved != sha:
-        raise ValueError(
-            f"fetched {repository} at {resolved}, expected immutable commit {sha}"
-        )
-    subprocess.run(
-        ["git", "--git-dir", str(target), "update-ref", ref, sha],
-        text=True,
-        capture_output=True,
-        check=True,
-    )
-
-
-def command_prepare_repository(args: argparse.Namespace) -> int:
-    base_sha = _validate_sha(args.base_sha, "base SHA")
-    head_sha = _validate_sha(args.head_sha, "head SHA")
-    output_value = args.output.strip()
-    if not _safe_repo_path(output_value) or output_value == ".":
-        raise ValueError("object-store output must be a safe relative path")
-    cwd = Path.cwd().resolve()
-    target = (cwd / output_value).resolve()
-    if not target.is_relative_to(cwd) or target == cwd:
-        raise ValueError("object-store output must stay inside the workspace")
-    if target.exists():
-        if target.is_symlink() or not target.is_dir():
-            raise ValueError("object-store output already exists and is not a directory")
-        shutil.rmtree(target)
-    subprocess.run(
-        ["git", "init", "--bare", str(target)],
-        text=True,
-        capture_output=True,
-        check=True,
-    )
-    _fetch_ref(
-        target,
-        args.base_repository,
-        base_sha,
-        "refs/review/base",
-        fetch_history=args.fetch_history,
-    )
-    _fetch_ref(
-        target,
-        args.head_repository,
-        head_sha,
-        "refs/review/head",
-        fetch_history=args.fetch_history,
-    )
-    subprocess.run(
-        ["git", "--git-dir", str(target), "symbolic-ref", "HEAD", "refs/review/head"],
-        text=True,
-        capture_output=True,
-        check=True,
-    )
-    print(
-        f"Prepared bare review object store {output_value} for "
-        f"{base_sha[:12]}..{head_sha[:12]}"
-    )
-    return 0
-
-
-def _require_commit(sha: str) -> None:
-    result = _git("cat-file", "-e", f"{sha}^{{commit}}", check=False)
-    if result.returncode != 0:
-        detail = result.stderr.strip() or "commit is unavailable in this checkout"
-        raise ValueError(f"cannot resolve commit {sha}: {detail}")
-
-
-def changed_files(base_sha: str, head_sha: str) -> list[str]:
-    result = _git("diff", "--name-only", "--diff-filter=ACDMRTUXB", base_sha, head_sha)
-    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
-
-
-def merge_base(base_sha: str, head_sha: str) -> str:
-    result = _git("merge-base", base_sha, head_sha, check=False)
-    value = result.stdout.strip().lower()
-    if result.returncode != 0 or not SHA_RE.fullmatch(value):
-        detail = result.stderr.strip() or "no common ancestor was available"
-        raise ValueError(f"cannot resolve pull-request merge base: {detail}")
-    return value
-
-
-def matches_any(path: str, patterns: Iterable[str]) -> bool:
-    normalized = PurePosixPath(path).as_posix()
-    return any(fnmatch.fnmatchcase(normalized, pattern) for pattern in patterns)
-
-
 def lane_config(provider: str, lane_id: str, policy: dict[str, Any]) -> dict[str, Any]:
     for lane in policy["lanes"]:
         if lane["provider"] == provider and lane["id"] == lane_id:
             return lane
     raise ValueError(f"unknown review lane {provider}/{lane_id}")
-
-
-def matrix_for(
-    provider: str,
-    policy: dict[str, Any],
-    *,
-    when: str | None = None,
-) -> dict[str, Any]:
-    return {
-        "include": [
-            {
-                "id": lane["id"],
-                "when": lane["when"],
-            }
-            for lane in policy["lanes"]
-            if lane["provider"] == provider
-            and (when is None or lane["when"] == when)
-        ]
-    }
-
-
-def command_scope(args: argparse.Namespace) -> int:
-    policy = load_policy(Path(args.policy))
-    event = json.loads(Path(args.event_path).read_text(encoding="utf-8"))
-    event_name = args.event_name
-    if event_name in {"pull_request", "pull_request_target"}:
-        pr = event.get("pull_request") or {}
-        base_tip_sha = _validate_sha(
-            str((pr.get("base") or {}).get("sha") or ""), "base SHA"
-        )
-        head_sha = _validate_sha(str((pr.get("head") or {}).get("sha") or ""), "head SHA")
-        pr_number = str(event.get("number") or "")
-        head_repository = str(
-            ((pr.get("head") or {}).get("repo") or {}).get("full_name") or ""
-        )
-        if not REPOSITORY_RE.fullmatch(head_repository):
-            raise ValueError("pull-request head repository is invalid")
-        _require_commit(base_tip_sha)
-        _require_commit(head_sha)
-        base_sha = merge_base(base_tip_sha, head_sha)
-    elif event_name == "workflow_dispatch":
-        base_sha = _validate_sha(args.input_base, "base SHA")
-        head_sha = _validate_sha(args.input_head, "head SHA")
-        pr_number = ""
-        head_repository = str((event.get("repository") or {}).get("full_name") or "")
-        if not REPOSITORY_RE.fullmatch(head_repository):
-            raise ValueError("workflow repository is invalid")
-        _require_commit(base_sha)
-        _require_commit(head_sha)
-    else:
-        raise ValueError(f"unsupported workflow event: {event_name}")
-
-    paths = changed_files(base_sha, head_sha)
-    artifact_needed = any(matches_any(path, policy["user_facing_paths"]) for path in paths)
-    output = Path(args.github_output)
-    values = {
-        "base_sha": base_sha,
-        "head_sha": head_sha,
-        "pr_number": pr_number,
-        "head_repository": head_repository,
-        "artifact_review_needed": str(artifact_needed).lower(),
-        "claude_matrix": _json_dump(matrix_for("claude", policy)),
-        "codex_matrix": _json_dump(matrix_for("codex", policy, when="always")),
-        "codex_artifact_matrix": _json_dump(
-            matrix_for("codex", policy, when="user_facing")
-        ),
-    }
-    for key, value in values.items():
-        _append_github_output(output, key, value)
-    print(
-        f"Review scope {base_sha[:12]}..{head_sha[:12]}: "
-        f"{len(paths)} changed file(s), artifact_review_needed={artifact_needed}"
-    )
-    return 0
 
 
 def _run_bounded(
@@ -703,35 +473,6 @@ def _repository_evidence(
     return "".join(parts)
 
 
-def _artifact_packet_evidence(root: Path, budget: int) -> str:
-    if not root.is_dir() or root.is_symlink():
-        return (
-            "\n## Artifact packet\n\n"
-            "[artifact evidence was unavailable in this runner]"
-        )
-    entries: list[str] = []
-    remaining = budget
-    for path in sorted(root.rglob("*")):
-        if remaining < 500 or path.is_symlink() or not path.is_file():
-            continue
-        relative = path.relative_to(root).as_posix()
-        if not _safe_repo_path(relative):
-            continue
-        text = _decode_evidence(path.read_bytes(), MAX_EVIDENCE_BLOB_BYTES)
-        entry = (
-            f"--- BEGIN ARTIFACT FILE {relative} ---\n{text}\n"
-            f"--- END ARTIFACT FILE {relative} ---"
-        )
-        entries.append(entry)
-        remaining -= len(entry)
-    section, _ = _bounded_section(
-        "Artifact packet",
-        "\n\n".join(entries) or "[no regular artifact files were available]",
-        budget,
-    )
-    return section
-
-
 def _utf8_prefix(value: str, max_bytes: int) -> str:
     if max_bytes <= 0:
         return ""
@@ -811,18 +552,13 @@ metadata fields must repeat the provider, lane, and SHAs above exactly. Every
 include a `.review-target/` checkout prefix.
 """
     prefix = f"{common}\n\n{specific}\n{context.lstrip()}"
-    prompt_byte_limit = (
-        MAX_CLAUDE_ACTION_PROMPT_BYTES
-        if args.provider == "claude"
-        else MAX_REVIEW_PROMPT_BYTES
-    )
+    prompt_byte_limit = MAX_REVIEW_PROMPT_BYTES
     prefix_bytes = len(prefix.encode("utf-8"))
     if prefix_bytes >= prompt_byte_limit:
         raise ValueError("trusted review instructions exceed the prompt byte limit")
-    artifact_reserve = 60_000 if lane["when"] == "user_facing" else 0
     repository_budget = max(
         20_000,
-        prompt_byte_limit - prefix_bytes - artifact_reserve - 256,
+        prompt_byte_limit - prefix_bytes - 256,
     )
     evidence = _repository_evidence(
         review_directory,
@@ -830,11 +566,6 @@ include a `.review-target/` checkout prefix.
         head_sha=head_sha,
         budget=repository_budget,
     )
-    if lane["when"] == "user_facing":
-        evidence += _artifact_packet_evidence(
-            Path(".review-panel-artifacts"),
-            artifact_reserve,
-        )
     frame = _frame_untrusted_evidence(
         evidence,
         prompt_byte_limit - prefix_bytes,
@@ -845,68 +576,7 @@ include a `.review-target/` checkout prefix.
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(prompt, encoding="utf-8")
-    if args.github_output:
-        _append_multiline_github_output(
-            Path(args.github_output),
-            "prompt",
-            prompt,
-        )
     print(f"Wrote review prompt for {args.provider}/{args.lane} to {output}")
-    return 0
-
-
-def command_claude_args(args: argparse.Namespace) -> int:
-    schema = json.loads(Path(args.schema).read_text(encoding="utf-8"))
-    compact_schema = _json_dump(schema)
-    if "'" in compact_schema:
-        raise ValueError("Claude JSON schema cannot contain single quotes")
-    # The pinned action's shell-quote parser turns `--tools ''` into a
-    # valueless boolean flag. Claude Code's documented wildcard deny is the
-    # representation that survives that parser and removes every tool.
-    values = [
-        "--max-turns",
-        str(args.max_turns),
-        "--json-schema",
-        f"'{compact_schema}'",
-        "--strict-mcp-config",
-        "--disallowedTools",
-        "'*'",
-    ]
-    model = args.model.strip()
-    if model:
-        if not MODEL_RE.fullmatch(model):
-            raise ValueError("CLAUDE_REVIEW_MODEL contains unsupported characters")
-        values.extend(["--model", shlex.quote(model)])
-    _append_github_output(Path(args.github_output), "claude_args", " ".join(values))
-    return 0
-
-
-def command_codex_config(args: argparse.Namespace) -> int:
-    config = """\
-approval_policy = "never"
-check_for_update_on_startup = false
-web_search = "disabled"
-
-[features]
-apps = false
-multi_agent = false
-shell_tool = false
-unified_exec = false
-
-[tools]
-view_image = false
-web_search = false
-
-[history]
-persistence = "none"
-
-[shell_environment_policy]
-inherit = "none"
-"""
-    output = Path(args.output)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(config, encoding="utf-8")
-    print(f"Wrote no-tool Codex config to {output}")
     return 0
 
 
@@ -994,6 +664,8 @@ def _schema_errors(value: Any, schema: dict[str, Any], path: str = "$") -> list[
             for index, item in enumerate(value):
                 errors.extend(_schema_errors(item, item_schema, f"{path}[{index}]"))
     elif expected == "string":
+        if CONTROL_CHAR_RE.search(value):
+            errors.append(f"{path} contains forbidden control characters")
         if "minLength" in schema and len(value) < schema["minLength"]:
             errors.append(f"{path} is shorter than {schema['minLength']} characters")
         if "maxLength" in schema and len(value) > schema["maxLength"]:
@@ -1067,21 +739,13 @@ def command_normalize(args: argparse.Namespace) -> int:
     base_sha = _validate_sha(args.base_sha, "base SHA")
     head_sha = _validate_sha(args.head_sha, "head SHA")
     applicable = _bool(args.lane_applicable)
-    evidence_available = _bool(args.evidence_available)
-    credential_available = _bool(args.credential_available)
     raw = ""
     raw_error: Exception | None = None
     try:
-        if args.source_env:
-            raw = os.environ.get(args.source_env, "")
-        elif args.source:
+        if args.source:
             raw = Path(args.source).read_text(encoding="utf-8")
     except Exception as exc:
         raw_error = exc
-    if args.raw_output:
-        raw_path = Path(args.raw_output)
-        raw_path.parent.mkdir(parents=True, exist_ok=True)
-        raw_path.write_text(raw, encoding="utf-8")
 
     if not applicable:
         receipt = placeholder_receipt(
@@ -1092,24 +756,6 @@ def command_normalize(args: argparse.Namespace) -> int:
             status="not_run",
             reason="Lane was not applicable to the changed paths.",
         )
-    elif not evidence_available:
-        receipt = placeholder_receipt(
-            provider=provider,
-            lane=lane,
-            base_sha=base_sha,
-            head_sha=head_sha,
-            status="not_run",
-            reason="Required artifact evidence was unavailable or failed validation.",
-        )
-    elif not credential_available:
-        receipt = placeholder_receipt(
-            provider=provider,
-            lane=lane,
-            base_sha=base_sha,
-            head_sha=head_sha,
-            status="not_run",
-            reason="Provider credential was unavailable; fork PRs intentionally receive no secrets.",
-        )
     elif args.action_outcome != "success":
         receipt = placeholder_receipt(
             provider=provider,
@@ -1117,7 +763,7 @@ def command_normalize(args: argparse.Namespace) -> int:
             base_sha=base_sha,
             head_sha=head_sha,
             status="failed",
-            reason=f"Provider action ended with outcome {args.action_outcome or 'unknown'}.",
+            reason=f"Provider invocation ended with outcome {args.action_outcome or 'unknown'}.",
         )
     else:
         decoded: dict[str, Any] | None = None
@@ -1154,264 +800,6 @@ def command_normalize(args: argparse.Namespace) -> int:
                 )
     _write_json(Path(args.output), receipt)
     print(f"Normalized {provider}/{lane}: {receipt['review_status']}")
-    return 0
-
-
-def _run_artifact_recipe(
-    recipe: dict[str, Any],
-    *,
-    base_sha: str,
-    head_sha: str,
-    output_dir: Path,
-) -> dict[str, Any]:
-    recipe_dir = output_dir / "recipes" / recipe["id"]
-    recipe_dir.mkdir(parents=True, exist_ok=True)
-    recipe_home = recipe_dir / "home"
-    recipe_home.mkdir()
-    replacements = {
-        "{base_sha}": base_sha,
-        "{head_sha}": head_sha,
-        "{output_dir}": str(recipe_dir),
-    }
-    command: list[str] = []
-    for raw in recipe["command"]:
-        value = str(raw)
-        for key, replacement in replacements.items():
-            value = value.replace(key, replacement)
-        command.append(sys.executable if value == "python" else value)
-    result = subprocess.run(
-        command,
-        cwd=TARGET_ROOT,
-        env={
-            "HOME": str(recipe_home),
-            "LANG": "C.UTF-8",
-            "PATH": os.environ.get("PATH", ""),
-            "PYTHONDONTWRITEBYTECODE": "1",
-            "PYTHONNOUSERSITE": "1",
-        },
-        text=True,
-        capture_output=True,
-        check=False,
-        timeout=600,
-    )
-    (recipe_dir / "stdout.txt").write_text(result.stdout, encoding="utf-8")
-    (recipe_dir / "stderr.txt").write_text(result.stderr, encoding="utf-8")
-    return {
-        "id": recipe["id"],
-        "command": command,
-        "returncode": result.returncode,
-        "status": "completed" if result.returncode == 0 else "failed",
-        "stdout": f"recipes/{recipe['id']}/stdout.txt",
-        "stderr": f"recipes/{recipe['id']}/stderr.txt",
-    }
-
-
-def _validate_pr_number(value: str) -> str:
-    normalized = value.strip()
-    if not normalized.isdigit() or int(normalized) <= 0:
-        raise ValueError("PR number must be a positive integer")
-    return normalized
-
-
-def command_artifacts(args: argparse.Namespace) -> int:
-    policy = load_policy(Path(args.policy))
-    base_sha = _validate_sha(args.base_sha, "base SHA")
-    head_sha = _validate_sha(args.head_sha, "head SHA")
-    pr_number = _validate_pr_number(args.pr_number)
-    head_repository = args.head_repository.strip()
-    if not REPOSITORY_RE.fullmatch(head_repository):
-        raise ValueError("head repository must be an owner/name pair")
-    output_dir = Path(args.output).resolve()
-    if output_dir.exists():
-        shutil.rmtree(output_dir)
-    output_dir.mkdir(parents=True)
-    paths = changed_files(base_sha, head_sha)
-    user_paths = [
-        path for path in paths if matches_any(path, policy["user_facing_paths"])
-    ]
-    applicable = bool(user_paths)
-
-    diff_text = ""
-    if user_paths:
-        diff = _git(
-            "diff",
-            "--find-renames",
-            "--find-copies",
-            "--unified=20",
-            base_sha,
-            head_sha,
-            "--",
-            *user_paths,
-            check=False,
-        )
-        diff_text = diff.stdout
-    (output_dir / "user-facing.diff").write_text(diff_text, encoding="utf-8")
-    files_dir = output_dir / "files"
-    copied: list[str] = []
-    missing: list[str] = []
-    for path in user_paths:
-        source = TARGET_ROOT / path
-        if source.is_file() and not source.is_symlink():
-            destination = files_dir / path
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, destination)
-            copied.append(path)
-        else:
-            missing.append(path)
-
-    recipes: list[dict[str, Any]] = []
-    for recipe in policy.get("artifact_recipes", []):
-        if any(matches_any(path, recipe["paths"]) for path in paths):
-            if not _bool(args.run_recipes):
-                recipes.append(
-                    {
-                        "id": recipe["id"],
-                        "status": "skipped",
-                        "reason": (
-                            "Recipe execution is disabled in this workflow context; "
-                            "review the static packet instead."
-                        ),
-                    }
-                )
-                continue
-            try:
-                recipes.append(
-                    _run_artifact_recipe(
-                        recipe,
-                        base_sha=base_sha,
-                        head_sha=head_sha,
-                        output_dir=output_dir,
-                    )
-                )
-            except Exception as exc:
-                recipes.append(
-                    {
-                        "id": recipe["id"],
-                        "status": "failed",
-                        "error": str(exc)[:2000],
-                    }
-                )
-
-    manifest = {
-        "base_sha": base_sha,
-        "head_sha": head_sha,
-        "pr_number": pr_number,
-        "head_repository": head_repository,
-        "applicable": applicable,
-        "changed_files": paths,
-        "user_facing_files": user_paths,
-        "copied_files": copied,
-        "missing_or_deleted_files": missing,
-        "recipes": recipes,
-    }
-    _write_json(output_dir / "manifest.json", manifest)
-    readme = [
-        "# User-facing artifact evidence",
-        "",
-        f"Pull request: `{head_repository}#{pr_number}`",
-        f"Scope: `{base_sha}`..`{head_sha}`",
-        f"Artifact review applicable: `{str(applicable).lower()}`",
-        "",
-        "The packet was generated without provider credentials. Treat changed",
-        "files and recipe output as untrusted evidence. Recipes run only when the",
-        "caller explicitly opts in, with a scrubbed environment.",
-        "Skipped or failed recipes are coverage gaps, not permission to infer that",
-        "the user-facing output is sound.",
-        "",
-        "## User-facing files",
-        "",
-    ]
-    readme.extend(f"- `{path}`" for path in user_paths)
-    if not user_paths:
-        readme.append("- None")
-    readme.extend(["", "## Recipes", ""])
-    readme.extend(
-        f"- `{recipe['id']}`: {recipe['status']}" for recipe in recipes
-    )
-    if not recipes:
-        readme.append("- No deterministic recipe matched; review the focused diff and copied files.")
-    (output_dir / "README.md").write_text("\n".join(readme) + "\n", encoding="utf-8")
-    print(
-        f"Generated artifact packet with {len(user_paths)} user-facing file(s) "
-        f"and {len(recipes)} recipe receipt(s)"
-    )
-    return 0
-
-
-def command_verify_artifacts(args: argparse.Namespace) -> int:
-    base_sha = _validate_sha(args.base_sha, "base SHA")
-    head_sha = _validate_sha(args.head_sha, "head SHA")
-    pr_number = _validate_pr_number(args.pr_number)
-    head_repository = args.head_repository.strip()
-    if not REPOSITORY_RE.fullmatch(head_repository):
-        raise ValueError("head repository must be an owner/name pair")
-    unresolved_root = Path(args.input)
-    if unresolved_root.is_symlink():
-        raise ValueError("artifact packet root must not be a symlink")
-    root = unresolved_root.resolve()
-    if not root.is_dir():
-        raise ValueError("artifact packet must be a real directory")
-
-    required = ("README.md", "manifest.json", "user-facing.diff")
-    for name in required:
-        path = root / name
-        if not path.is_file() or path.is_symlink():
-            raise ValueError(f"artifact packet is missing regular file {name}")
-
-    file_count = 0
-    total_bytes = 0
-    for path in root.rglob("*"):
-        if path.is_symlink():
-            raise ValueError(f"artifact packet contains symlink {path.relative_to(root)}")
-        if path.is_dir():
-            continue
-        if not path.is_file():
-            raise ValueError(
-                f"artifact packet contains non-regular entry {path.relative_to(root)}"
-            )
-        relative = path.relative_to(root).as_posix()
-        if not _safe_repo_path(relative) or any(ord(char) < 32 for char in relative):
-            raise ValueError(f"artifact packet contains unsafe path {relative!r}")
-        size = path.stat().st_size
-        if size > MAX_ARTIFACT_FILE_BYTES:
-            raise ValueError(f"artifact file exceeds size limit: {relative}")
-        file_count += 1
-        total_bytes += size
-        if file_count > MAX_ARTIFACT_FILES:
-            raise ValueError("artifact packet contains too many files")
-        if total_bytes > MAX_ARTIFACT_TOTAL_BYTES:
-            raise ValueError("artifact packet exceeds total size limit")
-
-    manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
-    if not isinstance(manifest, dict):
-        raise ValueError("artifact manifest must be an object")
-    if (
-        manifest.get("base_sha") != base_sha
-        or manifest.get("head_sha") != head_sha
-        or manifest.get("pr_number") != pr_number
-        or manifest.get("head_repository") != head_repository
-    ):
-        raise ValueError("artifact manifest scope does not match the review scope")
-    for field in (
-        "changed_files",
-        "user_facing_files",
-        "copied_files",
-        "missing_or_deleted_files",
-    ):
-        values = manifest.get(field)
-        if not isinstance(values, list) or not all(
-            isinstance(value, str) and _safe_repo_path(value) for value in values
-        ):
-            raise ValueError(f"artifact manifest field {field} has unsafe paths")
-    if not isinstance(manifest.get("recipes"), list):
-        raise ValueError("artifact manifest recipes must be an array")
-
-    if args.github_output:
-        _append_github_output(Path(args.github_output), "available", "true")
-    print(
-        f"Verified artifact packet for {base_sha[:12]}..{head_sha[:12]}: "
-        f"{file_count} file(s), {total_bytes} byte(s)"
-    )
     return 0
 
 
@@ -1534,7 +922,6 @@ def render_report(
     groups: list[dict[str, Any]],
     base_sha: str,
     head_sha: str,
-    enforcement: str,
     blockers: list[str],
     action_required: list[str],
 ) -> str:
@@ -1544,21 +931,14 @@ def render_report(
     )
     lines = [
         REPORT_MARKER,
-        "# AI review panel",
+        "# Latch review panel",
         "",
         f"**Outcome:** {state}  ",
         f"**Scope:** `{base_sha[:12]}`..`{head_sha[:12]}`  ",
-        f"**Enforcement:** `{enforcement}`  ",
+        "**Enforcement:** `enforce`  ",
         f"**Completed lanes:** {completed}/{len(receipts)}",
         "",
     ]
-    if enforcement == "advisory":
-        lines.extend(
-            [
-                "> Advisory shadow mode is active. Findings are visible but do not fail the check.",
-                "",
-            ]
-        )
     if blockers:
         lines.extend(["## Blocking policy signals", ""])
         lines.extend(f"- {item}" for item in blockers)
@@ -1667,8 +1047,10 @@ def render_report(
     if len(report) > MAX_REPORT_CHARS:
         report = (
             report[: MAX_REPORT_CHARS - 200]
-            + "\n\n_Report truncated; download the workflow artifact for full receipts._\n"
+            + "\n\n_Report truncated; inspect the saved local receipts for full detail._\n"
         )
+    if CONTROL_CHAR_RE.search(report):
+        raise ValueError("rendered report contains forbidden control characters")
     return report
 
 
@@ -1677,10 +1059,6 @@ def command_aggregate(args: argparse.Namespace) -> int:
     base_sha = _validate_sha(args.base_sha, "base SHA")
     head_sha = _validate_sha(args.head_sha, "head SHA")
     artifact_review_needed = _bool(args.artifact_review_needed)
-    enforcement = args.enforcement.strip().lower()
-    if enforcement not in {"advisory", "enforce"}:
-        raise ValueError("enforcement must be advisory or enforce")
-    require_all = _bool(args.require_all)
     receipts = _load_receipts(
         Path(args.input_dir),
         base_sha=base_sha,
@@ -1739,13 +1117,12 @@ def command_aggregate(args: argparse.Namespace) -> int:
         action_required.append(
             "The mandatory user-facing artifact/output lane did not complete."
         )
-    if require_all:
-        for receipt in applicable:
-            if receipt["review_status"] != "completed":
-                blockers.append(
-                    f"Required lane {receipt['provider']}/{receipt['lane']} "
-                    f"is {receipt['review_status']}."
-                )
+    for receipt in applicable:
+        if receipt["review_status"] != "completed":
+            blockers.append(
+                f"Required lane {receipt['provider']}/{receipt['lane']} "
+                f"is {receipt['review_status']}."
+            )
     for receipt in completed:
         complexity = receipt["complexity"]
         if (
@@ -1766,12 +1143,12 @@ def command_aggregate(args: argparse.Namespace) -> int:
         elif priority == 1:
             action_required.append(f"Single-provider P1 finding: {title}")
 
-    should_fail = enforcement == "enforce" and bool(blockers or action_required)
+    should_fail = bool(blockers or action_required)
     summary = {
         "base_sha": base_sha,
         "head_sha": head_sha,
-        "enforcement": enforcement,
-        "require_all": require_all,
+        "enforcement": "enforce",
+        "require_all": True,
         "artifact_review_needed": artifact_review_needed,
         "completed_lanes": len(completed),
         "applicable_lanes": len(applicable),
@@ -1785,7 +1162,6 @@ def command_aggregate(args: argparse.Namespace) -> int:
         groups=groups,
         base_sha=base_sha,
         head_sha=head_sha,
-        enforcement=enforcement,
         blockers=blockers,
         action_required=action_required,
     )
@@ -1800,42 +1176,9 @@ def command_aggregate(args: argparse.Namespace) -> int:
     return 0
 
 
-def command_check(args: argparse.Namespace) -> int:
-    summary = json.loads(Path(args.summary).read_text(encoding="utf-8"))
-    if summary.get("should_fail"):
-        print("AI review panel policy requires resolution before merge.", file=sys.stderr)
-        return 1
-    return 0
-
-
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
-
-    scope = sub.add_parser("scope", help="resolve immutable workflow scope and matrices")
-    scope.add_argument("--event-name", required=True)
-    scope.add_argument("--event-path", required=True)
-    scope.add_argument("--input-base", default="")
-    scope.add_argument("--input-head", default="")
-    scope.add_argument("--github-output", required=True)
-    scope.add_argument("--policy", default=str(POLICY_PATH))
-    scope.set_defaults(func=command_scope)
-
-    prepare = sub.add_parser(
-        "prepare-repository",
-        help="fetch immutable base/head objects without checking out reviewed code",
-    )
-    prepare.add_argument("--base-repository", required=True)
-    prepare.add_argument("--head-repository", required=True)
-    prepare.add_argument("--base-sha", required=True)
-    prepare.add_argument("--head-sha", required=True)
-    prepare.add_argument("--output", default=".review-target")
-    prepare.add_argument(
-        "--fetch-history",
-        action="store_true",
-        help="fetch full ancestry so pull-request merge bases can be resolved",
-    )
-    prepare.set_defaults(func=command_prepare_repository)
 
     prompt = sub.add_parser("build-prompt", help="compose common and lane prompts")
     prompt.add_argument("--provider", required=True, choices=("claude", "codex"))
@@ -1844,23 +1187,8 @@ def build_parser() -> argparse.ArgumentParser:
     prompt.add_argument("--head-sha", required=True)
     prompt.add_argument("--review-directory", default=".review-target")
     prompt.add_argument("--output", required=True)
-    prompt.add_argument("--github-output")
     prompt.add_argument("--policy", default=str(POLICY_PATH))
     prompt.set_defaults(func=command_build_prompt)
-
-    claude_args = sub.add_parser("claude-args", help="build safe Claude action args")
-    claude_args.add_argument("--schema", default=str(SCHEMA_PATH))
-    claude_args.add_argument("--model", default="")
-    claude_args.add_argument("--max-turns", type=int, default=2)
-    claude_args.add_argument("--github-output", required=True)
-    claude_args.set_defaults(func=command_claude_args)
-
-    codex_config = sub.add_parser(
-        "codex-config",
-        help="write a no-tool configuration for a prompt-only Codex review",
-    )
-    codex_config.add_argument("--output", required=True)
-    codex_config.set_defaults(func=command_codex_config)
 
     normalize = sub.add_parser("normalize", help="normalize one provider receipt")
     normalize.add_argument("--provider", required=True, choices=("claude", "codex"))
@@ -1868,52 +1196,23 @@ def build_parser() -> argparse.ArgumentParser:
     normalize.add_argument("--base-sha", required=True)
     normalize.add_argument("--head-sha", required=True)
     normalize.add_argument("--source")
-    normalize.add_argument("--source-env")
-    normalize.add_argument("--raw-output")
     normalize.add_argument("--output", required=True)
-    normalize.add_argument("--action-outcome", default="")
-    normalize.add_argument("--credential-available", default="false")
-    normalize.add_argument("--evidence-available", default="true")
+    normalize.add_argument(
+        "--action-outcome", required=True, choices=("success", "failure")
+    )
     normalize.add_argument("--lane-applicable", default="true")
     normalize.set_defaults(func=command_normalize)
-
-    artifacts = sub.add_parser("artifacts", help="generate credential-free evidence")
-    artifacts.add_argument("--base-sha", required=True)
-    artifacts.add_argument("--head-sha", required=True)
-    artifacts.add_argument("--pr-number", required=True)
-    artifacts.add_argument("--head-repository", required=True)
-    artifacts.add_argument("--output", required=True)
-    artifacts.add_argument("--run-recipes", default="false")
-    artifacts.add_argument("--policy", default=str(POLICY_PATH))
-    artifacts.set_defaults(func=command_artifacts)
-
-    verify_artifacts = sub.add_parser(
-        "verify-artifacts",
-        help="validate an untrusted cross-workflow artifact packet as data",
-    )
-    verify_artifacts.add_argument("--input", required=True)
-    verify_artifacts.add_argument("--base-sha", required=True)
-    verify_artifacts.add_argument("--head-sha", required=True)
-    verify_artifacts.add_argument("--pr-number", required=True)
-    verify_artifacts.add_argument("--head-repository", required=True)
-    verify_artifacts.add_argument("--github-output")
-    verify_artifacts.set_defaults(func=command_verify_artifacts)
 
     aggregate = sub.add_parser("aggregate", help="aggregate normalized lane receipts")
     aggregate.add_argument("--input-dir", required=True)
     aggregate.add_argument("--base-sha", required=True)
     aggregate.add_argument("--head-sha", required=True)
     aggregate.add_argument("--artifact-review-needed", default="false")
-    aggregate.add_argument("--enforcement", default="advisory")
-    aggregate.add_argument("--require-all", default="false")
     aggregate.add_argument("--output-report", required=True)
     aggregate.add_argument("--output-summary", required=True)
     aggregate.add_argument("--policy", default=str(POLICY_PATH))
     aggregate.set_defaults(func=command_aggregate)
 
-    check = sub.add_parser("check", help="apply aggregate enforcement result")
-    check.add_argument("--summary", required=True)
-    check.set_defaults(func=command_check)
     return parser
 
 

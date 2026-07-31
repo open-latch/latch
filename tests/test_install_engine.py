@@ -275,6 +275,21 @@ def test_install_commands_copies_and_substitutes():
         restore()
 
 
+def test_install_review_command_quotes_a_spaced_latch_path():
+    _src, dest, restore = _tmp_commands_env(
+        "/tmp/Latch App",
+        {"latch-review.md": 'bash "<KB_HOME>/bin/latch-review" --pr 73\n'},
+    )
+    try:
+        level, _changes = ie.install_commands(dry_run=False)
+        _assert(level == "OK", f"expected OK, got {level}")
+        body = (dest / "latch-review.md").read_text(encoding="utf-8")
+        _assert('bash "/tmp/Latch App/bin/latch-review" --pr 73' in body, body)
+        print("PASS install_review_command_quotes_a_spaced_latch_path")
+    finally:
+        restore()
+
+
 def test_install_commands_dry_run_writes_nothing():
     _src, dest, restore = _tmp_commands_env("/opt/latch", {"latch-compact.md": "x <KB_HOME>\n"})
     try:
@@ -870,6 +885,7 @@ if __name__ == "__main__":
     test_posttooluse_hook_wired_with_matcher_and_preserves_others()
     test_write_settings_backs_up_existing()
     test_install_commands_copies_and_substitutes()
+    test_install_review_command_quotes_a_spaced_latch_path()
     test_install_commands_dry_run_writes_nothing()
     test_commands_status_missing_then_present_then_unresolved()
     test_install_commands_updates_existing_legacy_aliases()

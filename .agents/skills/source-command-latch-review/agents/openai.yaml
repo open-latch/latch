@@ -1,0 +1,4 @@
+interface:
+  display_name: "Latch Review"
+  short_description: "Run the local adversarial review panel"
+  default_prompt: "Use $source-command-latch-review to review this change locally."

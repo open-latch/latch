@@ -49,6 +49,7 @@ CODEX_SKILL_NAMES = (
     "source-command-latch-gate-report",
     "source-command-latch-heal",
     "source-command-latch-pm",
+    "source-command-latch-review",
     "source-command-latch-tree",
     "source-command-unlatch",
 )
@@ -479,7 +480,9 @@ def _raw_codex_skill(name: str) -> str:
 
 
 def render_codex_skill(name: str) -> str:
-    body = _raw_codex_skill(name)
+    body = _raw_codex_skill(name).replace(
+        "<KB_HOME>", str(KB_HOME).replace("\\", "/")
+    )
     footer = (
         "\n\n---\n\n"
         "Latch Codex user-skill sync metadata. Re-run `bin/install_codex` to "

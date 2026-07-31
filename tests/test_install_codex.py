@@ -474,6 +474,12 @@ def test_codex_skills_sync_status_and_collision():
             / "agents"
             / "openai.yaml"
         ).read_text(encoding="utf-8"), "skill metadata should be installed")
+        review = skills / "source-command-latch-review" / "SKILL.md"
+        review_text = review.read_text(encoding="utf-8")
+        _assert("<KB_HOME>" not in review_text,
+                "installed review skill should embed the Latch app path")
+        _assert(str(ic.KB_HOME).replace("\\", "/") in review_text,
+                "installed review skill should resolve the Latch app path")
         ok, detail = ic.codex_skills_status(skills)
         _assert(ok, detail)
         _assert(ic.sync_codex_skills(skills) == [], "second sync should be idempotent")
