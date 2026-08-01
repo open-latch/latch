@@ -10,6 +10,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import codex_hooks as ch  # noqa: E402
+import versioning  # noqa: E402
 
 
 def _assert(cond, msg):
@@ -47,7 +48,10 @@ def test_merge_hooks_installs_session_start_only_and_preserves_unrelated():
     _assert(changes, "merge should report changes")
     obj = json.loads(new)
     starts = obj["hooks"]["SessionStart"]
-    _assert(starts[0]["hooks"][0]["command"] == "/py /repo/src/hooks/codex_session_start.py",
+    _assert(starts[0]["hooks"][0]["command"] == (
+        "/py /repo/src/hooks/codex_session_start.py "
+        f"--latch-wiring-version {versioning.WIRING_VERSION}"
+    ),
             starts)
     _assert("/user/custom-start" in json.dumps(obj), obj)
     _assert("/user/custom-stop" in json.dumps(obj), obj)

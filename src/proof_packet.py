@@ -35,6 +35,9 @@ RUNTIME_BUNDLE_ROOTS = (
 )
 RUNTIME_BUNDLE_FILES = (
     ".gitattributes",
+    "VERSION",
+    "KB_SCHEMA_VERSION",
+    "WIRING_VERSION",
     "requirements.txt",
     "bin/latch_eval.sh",
     "bin/latch_proof_packet.sh",

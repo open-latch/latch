@@ -15,6 +15,7 @@ import os
 import re
 import sys
 import tomllib
+from collections.abc import Iterable
 from pathlib import Path
 
 import agents_md_sync
@@ -122,13 +123,18 @@ def _parse_config(text: str, *, stage: str) -> dict:
         ) from exc
 
 
-def _validate_supported_config_shape(text: str, parsed: dict) -> None:
+def _validate_supported_config_shape(
+    text: str, parsed: dict, *, manage_hooks: bool = True
+) -> None:
     """Reject valid TOML forms the comment-preserving line merge cannot edit."""
     if _contains_multiline_toml_string(text):
         raise CodexConfigMergeError(
             "Codex config contains a multiline TOML string, which this "
             "comment-preserving installer cannot safely rewrite; no changes were written"
         )
+
+    if not manage_hooks:
+        return
 
     features_headers = [
         header
@@ -148,7 +154,7 @@ def _validate_supported_config_shape(text: str, parsed: dict) -> None:
         )
 
 
-def _unowned_config_projection(parsed: dict) -> dict:
+def _unowned_config_projection(parsed: dict, *, manage_hooks: bool = True) -> dict:
     """Remove only fields this installer owns for before/after comparison."""
     projected = copy.deepcopy(parsed)
     features = projected.get("features")
@@ -156,7 +162,7 @@ def _unowned_config_projection(parsed: dict) -> dict:
         raise CodexConfigMergeError(
             "Codex config features value cannot be safely merged; no changes were written"
         )
-    if isinstance(features, dict):
+    if isinstance(features, dict) and manage_hooks:
         features.pop("hooks", None)
         features.pop("codex_hooks", None)
         if not features:
@@ -176,15 +182,19 @@ def _unowned_config_projection(parsed: dict) -> dict:
     return projected
 
 
-def _validate_merged_config(text: str, *, before: dict, mcp_block: str) -> None:
+def _validate_merged_config(
+    text: str, *, before: dict, mcp_block: str, manage_hooks: bool = True
+) -> None:
     parsed = _parse_config(text, stage="after the proposed merge")
     features = parsed.get("features")
-    if not isinstance(features, dict) or features.get("hooks") is not True:
+    if manage_hooks and (
+        not isinstance(features, dict) or features.get("hooks") is not True
+    ):
         raise CodexConfigMergeError(
             "Codex config merge did not produce [features] hooks = true; "
             "no changes were written"
         )
-    if "codex_hooks" in features:
+    if manage_hooks and isinstance(features, dict) and "codex_hooks" in features:
         raise CodexConfigMergeError(
             "Codex config merge left the deprecated features.codex_hooks alias; "
             "no changes were written"
@@ -205,7 +215,9 @@ def _validate_merged_config(text: str, *, before: dict, mcp_block: str) -> None:
             "Codex config merge left deprecated latch MCP server name(s): "
             f"{', '.join(legacy_names)}; no changes were written"
         )
-    if _unowned_config_projection(parsed) != _unowned_config_projection(before):
+    if _unowned_config_projection(
+        parsed, manage_hooks=manage_hooks
+    ) != _unowned_config_projection(before, manage_hooks=manage_hooks):
         raise CodexConfigMergeError(
             "Codex config merge could not prove preservation of unrelated TOML "
             "settings; no changes were written"
@@ -221,12 +233,15 @@ def render_mcp_block(python_path: str, server_py: str) -> str:
         f"command = {_toml_string(py)}",
         f"args = [{_toml_string(server)}]",
         "startup_timeout_sec = 120",
+        "required = true",
         f"tool_timeout_sec = {CODEX_TOOL_TIMEOUT_SEC}",
         'default_tools_approval_mode = "approve"',
         f"[mcp_servers.{SERVER_NAME}.env]",
         'LATCH_MODEL_BACKEND = "codex"',
         'LATCH_GATE_BACKEND = "codex"',
+        'LATCH_ADAPTER = "codex"',
         'LATCH_TOOL_SURFACE = "latch"',
+        f'LATCH_WIRING_VERSION = "{versioning.WIRING_VERSION}"',
         END_MARK,
     ])
 
@@ -382,9 +397,15 @@ def _canonical_hooks_feature(text: str) -> tuple[bool, str]:
     return True, "Codex lifecycle hooks enabled ([features] hooks = true)"
 
 
-def merge_config(existing: str, python_path: str, server_py: str) -> tuple[str, list[str]]:
+def merge_config(
+    existing: str,
+    python_path: str,
+    server_py: str,
+    *,
+    enable_hooks: bool = True,
+) -> tuple[str, list[str]]:
     parsed = _parse_config(existing, stage="before the proposed merge")
-    _validate_supported_config_shape(existing, parsed)
+    _validate_supported_config_shape(existing, parsed, manage_hooks=enable_hooks)
     changes: list[str] = []
     text, removed_block = _strip_managed_block(existing)
     if removed_block:
@@ -392,12 +413,15 @@ def merge_config(existing: str, python_path: str, server_py: str) -> tuple[str, 
     text, removed_tables = _strip_existing_server_tables(text)
     if removed_tables:
         changes.append("replaced existing latch-owned MCP server table")
-    text, feature_changed = _merge_hooks_feature(text)
-    if feature_changed:
-        changes.append("enabled Codex lifecycle hooks feature")
+    if enable_hooks:
+        text, feature_changed = _merge_hooks_feature(text)
+        if feature_changed:
+            changes.append("enabled Codex lifecycle hooks feature")
     block = render_mcp_block(python_path, server_py)
     new = (text.rstrip("\n") + "\n\n" + block + "\n") if text.strip() else block + "\n"
-    _validate_merged_config(new, before=parsed, mcp_block=block)
+    _validate_merged_config(
+        new, before=parsed, mcp_block=block, manage_hooks=enable_hooks
+    )
     if new == existing:
         return new, []
     if new != existing:
@@ -430,10 +454,15 @@ def config_status(path: Path, python_path: str, server_py: str) -> tuple[bool, s
         return True, f"Codex MCP block installed in {path}; {hooks_detail}"
     normalized_py = python_path.replace("\\", "/")
     normalized_server = server_py.replace("\\", "/")
+    parsed = _parse_config(current, stage="before status inspection")
+    servers = parsed.get("mcp_servers")
     for legacy in LEGACY_SERVER_NAMES:
+        legacy_server = servers.get(legacy) if isinstance(servers, dict) else None
         if (f"[mcp_servers.{legacy}]" in current
                 and normalized_py in current
-                and normalized_server in current):
+                and normalized_server in current
+                and isinstance(legacy_server, dict)
+                and legacy_server.get("required") is True):
             return True, (f"Codex MCP block uses legacy server name {legacy!r} in {path}; "
                           f"still supported, fresh installs use {SERVER_NAME!r}; "
                           f"{hooks_detail}")
@@ -485,11 +514,19 @@ def _read_text(path: Path) -> str:
         return ""
 
 
-def codex_skill_collisions(skills_dir: Path) -> list[Path]:
+def _selected_skill_names(names: Iterable[str] | None) -> tuple[str, ...]:
+    selected = CODEX_SKILL_NAMES if names is None else tuple(dict.fromkeys(names))
+    unknown = [name for name in selected if name not in CODEX_SKILL_NAMES]
+    if unknown:
+        raise ValueError(f"unsupported Codex skill(s): {', '.join(unknown)}")
+    return selected
+
+
+def _codex_skill_collisions(skills_dir: Path, names: Iterable[str]) -> list[Path]:
     if skills_dir.is_symlink() or (skills_dir.exists() and not skills_dir.is_dir()):
         return [skills_dir]
     collisions: list[Path] = []
-    for name in CODEX_SKILL_NAMES:
+    for name in names:
         skill_dir = skills_dir / name
         target = skill_dir / "SKILL.md"
         if skill_dir.is_symlink() or (skill_dir.exists() and not skill_dir.is_dir()):
@@ -524,6 +561,12 @@ def codex_skill_collisions(skills_dir: Path) -> list[Path]:
     return collisions
 
 
+def codex_skill_collisions(
+    skills_dir: Path, *, names: Iterable[str] | None = None
+) -> list[Path]:
+    return _codex_skill_collisions(skills_dir, _selected_skill_names(names))
+
+
 def _raise_skill_collisions(collisions: list[Path]) -> None:
     if not collisions:
         return
@@ -535,11 +578,15 @@ def _raise_skill_collisions(collisions: list[Path]) -> None:
 
 
 def sync_codex_skills(
-    skills_dir: Path = DEFAULT_SKILLS_DIR, *, dry_run: bool = False
+    skills_dir: Path = DEFAULT_SKILLS_DIR,
+    *,
+    dry_run: bool = False,
+    names: Iterable[str] | None = None,
 ) -> list[str]:
-    _raise_skill_collisions(codex_skill_collisions(skills_dir))
+    selected = _selected_skill_names(names)
+    _raise_skill_collisions(codex_skill_collisions(skills_dir, names=selected))
     changes: list[str] = []
-    for name in CODEX_SKILL_NAMES:
+    for name in selected:
         skill_dir = skills_dir / name
         existed = (skill_dir / "SKILL.md").exists()
         changed = False
