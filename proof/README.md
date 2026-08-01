@@ -14,14 +14,14 @@ This packet combines one observed live gate receipt with two small, deterministi
 
 ## Observed live gate
 
-Captured with the `codex` backend on commit `f779d5ad8606267df6be4511eeb2e4f1aec10535`. This is a synthetic no-history fixture and used no personal conversation history.
+Captured with the `codex` backend on commit `f49872e65628d025eb7cc3a310c3aea6f5e96006`. This is a synthetic no-history fixture and used no personal conversation history.
 
 ```text
 Request: Add multi-user accounts by moving the datastore from local SQLite to a hosted Postgres service.
 Recommendation: DO_NOT_PROCEED
-Summary: The canonical decision (id=1) explicitly keeps the demo app local-first on embedded SQLite and rejects moving to hosted Postgres for multi-user accounts or sync. The request directly repeats that ruled-out path.
-Risk if proceed: The implementation would violate the established local-first, no-hosted-database architecture.
-Better next action: Keep SQLite and, if cross-machine data movement is needed, implement explicit export/import and document its limitations as allowed by id=1.
+Summary: The request directly repeats the rejected path in node 1: moving from local SQLite to a hosted/client-server database such as managed Postgres to add multi-user accounts or sync. The canonical decision is to keep the demo app local-first on a single embedded SQLite file and use explicit export/import if data needs to move between machines.
+Risk if proceed: It would violate the explicit local-first SQLite/no-hosted-database decision for the demo app.
+Better next action: Keep SQLite and implement an explicit export/import flow for moving data between machines, with documented limits.
 Cited evidence:
 - id=1 decision status=canonical: Keep the demo app local-first on SQLite — no hosted database
 Worktree changed before/after gate: no
@@ -63,7 +63,7 @@ This deterministic fixture eval grades seed-report capture and filtering; it is 
 
 ## Reproduce
 
-The deterministic results were generated from commit `f779d5ad8606267df6be4511eeb2e4f1aec10535`.
+The deterministic results were generated from commit `f49872e65628d025eb7cc3a310c3aea6f5e96006`.
 
 ```bash
 bash bin/latch_eval.sh
