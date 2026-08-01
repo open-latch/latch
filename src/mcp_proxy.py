@@ -22,12 +22,22 @@ import time
 import uuid
 from collections.abc import Mapping
 from datetime import datetime, timezone
+from enum import Enum, auto
 from pathlib import Path
 from typing import Any
 
 import codex_session
 import mcp_broker
 import mcp_runtime
+
+
+_WINDOWS_EXECVE_UNSAFE = os.name == "nt"
+
+
+class ProxyResult(Enum):
+    """Non-exit control flow returned to the existing MCP entrypoint."""
+
+    RUN_LEGACY_IN_PROCESS = auto()
 
 
 SESSION_ENV_VARS = (
@@ -810,17 +820,27 @@ class ProxyLease:
         )
 
 
-def _exec_legacy_server() -> None:
+def _exec_legacy_server() -> ProxyResult:
+    # CPython implements execve as a process transition on Windows. Under the
+    # windowless base-interpreter launcher that transition can intermittently
+    # fault inside execve before the replacement server starts. The caller is
+    # still mcp_server.py and has not consumed stdin, so let it continue into
+    # its existing legacy FastMCP path in this process instead.
+    if _WINDOWS_EXECVE_UNSAFE:
+        return ProxyResult.RUN_LEGACY_IN_PROCESS
     env = os.environ.copy()
     env["LATCH_MCP_LEGACY"] = "1"
     server = Path(__file__).resolve().parent / "mcp_server.py"
     os.execve(sys.executable, [sys.executable, str(server)], env)
+    raise RuntimeError("legacy exec unexpectedly returned")
 
 
-def main() -> int:
+def main() -> int | ProxyResult:
     if os.environ.get("LATCH_MCP_FORCE_LEGACY"):
         mcp_broker.emit_lifecycle("legacy_fallback", reason="forced_by_env")
-        _exec_legacy_server()
+        outcome = _exec_legacy_server()
+        if outcome is ProxyResult.RUN_LEGACY_IN_PROCESS:
+            return outcome
         return 0
     try:
         metadata = connection_metadata()
@@ -831,8 +851,8 @@ def main() -> int:
         return 2
     try:
         # Establish readiness before consuming stdin.  If startup fails, the
-        # compatibility fallback can exec without losing the host's initialize
-        # request.
+        # compatibility fallback can hand off without losing the host's
+        # initialize request.
         payload = mcp_broker.ensure_daemon(
             metadata["project_cwd"], start_reason="proxy_start"
         )
@@ -845,7 +865,9 @@ def main() -> int:
             sys.stderr.write(
                 f"[latch] shared MCP daemon unavailable; explicit legacy fallback enabled: {exc}\n"
             )
-            _exec_legacy_server()
+            outcome = _exec_legacy_server()
+            if outcome is ProxyResult.RUN_LEGACY_IN_PROCESS:
+                return outcome
         mcp_broker.emit_lifecycle("daemon_start_failed", reason=str(exc))
         sys.stderr.write(
             f"[latch] shared MCP daemon unavailable: {exc}. "
