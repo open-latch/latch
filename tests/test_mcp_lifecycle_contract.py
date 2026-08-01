@@ -1563,6 +1563,62 @@ def test_forced_legacy_precedes_shared_connection_validation(monkeypatch):
     assert events == ["legacy_fallback"]
 
 
+def test_windows_legacy_transition_continues_without_execve(monkeypatch):
+    exec_calls = []
+    monkeypatch.setattr(mcp_proxy, "_WINDOWS_EXECVE_UNSAFE", True)
+    monkeypatch.delenv("LATCH_MCP_LEGACY", raising=False)
+    monkeypatch.setattr(
+        mcp_proxy.os,
+        "execve",
+        lambda *args: exec_calls.append(args),
+    )
+
+    assert (
+        mcp_proxy._exec_legacy_server()
+        is mcp_proxy.ProxyResult.RUN_LEGACY_IN_PROCESS
+    )
+    assert "LATCH_MCP_LEGACY" not in os.environ
+    assert exec_calls == []
+
+
+def test_posix_legacy_transition_preserves_execve(monkeypatch):
+    calls = []
+
+    class ExecCalled(RuntimeError):
+        pass
+
+    def fake_execve(executable, argv, env):
+        calls.append((executable, argv, env))
+        raise ExecCalled()
+
+    monkeypatch.setattr(mcp_proxy, "_WINDOWS_EXECVE_UNSAFE", False)
+    monkeypatch.setattr(mcp_proxy.os, "execve", fake_execve)
+    with pytest.raises(ExecCalled):
+        mcp_proxy._exec_legacy_server()
+    assert len(calls) == 1
+    executable, argv, env = calls[0]
+    assert argv[0] == executable == sys.executable
+    assert argv[1].endswith("mcp_server.py")
+    assert env["LATCH_MCP_LEGACY"] == "1"
+
+
+def test_mcp_entrypoint_falls_through_for_windows_legacy_transition(monkeypatch):
+    import mcp_server
+
+    # Register the key with monkeypatch before production control flow mutates
+    # os.environ so teardown cannot leak legacy mode into later subprocesses.
+    monkeypatch.setenv("LATCH_MCP_LEGACY", "pre-transition")
+    monkeypatch.setattr(
+        mcp_proxy,
+        "main",
+        lambda: mcp_proxy.ProxyResult.RUN_LEGACY_IN_PROCESS,
+    )
+    assert mcp_server._run_proxy_or_continue_legacy() is None
+    assert os.environ["LATCH_MCP_LEGACY"] == "1"
+    monkeypatch.setattr(mcp_proxy, "main", lambda: 7)
+    assert mcp_server._run_proxy_or_continue_legacy() == 7
+
+
 def test_explicit_legacy_fallback_emits_lifecycle_signal(monkeypatch):
     events: list[str] = []
     monkeypatch.setenv("LATCH_MCP_ALLOW_LEGACY_FALLBACK", "1")
@@ -1594,6 +1650,43 @@ def test_explicit_legacy_fallback_emits_lifecycle_signal(monkeypatch):
     except LegacyExec:
         pass
     assert "legacy_fallback" in events
+
+
+def test_windows_explicit_fallback_returns_before_failure_signal(
+    monkeypatch, capsys
+):
+    events: list[str] = []
+    monkeypatch.setenv("LATCH_MCP_ALLOW_LEGACY_FALLBACK", "1")
+    monkeypatch.delenv("LATCH_MCP_FORCE_LEGACY", raising=False)
+    monkeypatch.setattr(
+        mcp_proxy,
+        "connection_metadata",
+        lambda: {"project_cwd": "/synthetic"},
+    )
+    monkeypatch.setattr(
+        mcp_broker,
+        "ensure_daemon",
+        lambda _cwd, **_kwargs: (_ for _ in ()).throw(
+            mcp_broker.BrokerError("synthetic failure")
+        ),
+    )
+    monkeypatch.setattr(
+        mcp_broker,
+        "emit_lifecycle",
+        lambda event, **_kwargs: events.append(event),
+    )
+    monkeypatch.setattr(
+        mcp_proxy,
+        "_exec_legacy_server",
+        lambda: mcp_proxy.ProxyResult.RUN_LEGACY_IN_PROCESS,
+    )
+
+    assert (
+        mcp_proxy.main()
+        is mcp_proxy.ProxyResult.RUN_LEGACY_IN_PROCESS
+    )
+    assert events == ["legacy_fallback"]
+    assert "explicit legacy fallback enabled" in capsys.readouterr().err
 
 
 def test_fastmcp_private_boundary_is_pinned_and_available():

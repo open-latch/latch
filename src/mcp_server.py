@@ -55,6 +55,17 @@ def _repair_codex_wiring_from_mcp_startup() -> None:
         )
 
 
+def _run_proxy_or_continue_legacy() -> int | None:
+    """Run the proxy, or keep this entrypoint alive for Windows legacy mode."""
+    import mcp_proxy
+
+    result = mcp_proxy.main()
+    if result is mcp_proxy.ProxyResult.RUN_LEGACY_IN_PROCESS:
+        os.environ["LATCH_MCP_LEGACY"] = "1"
+        return None
+    return result
+
+
 # Existing installs already launch this path.  Intercept execution before any
 # MCP/NumPy/ONNX imports so each host context stays a small stdio proxy.  Imports
 # of this module (tests and the shared daemon) still expose the tool registry.
@@ -65,9 +76,9 @@ if __name__ == "__main__":
     _repair_cursor_wiring_from_mcp_startup()
     _repair_codex_wiring_from_mcp_startup()
     if not os.environ.get("LATCH_MCP_LEGACY"):
-        from mcp_proxy import main as _proxy_main  # noqa: E402
-
-        raise SystemExit(_proxy_main())
+        _proxy_exit_code = _run_proxy_or_continue_legacy()
+        if _proxy_exit_code is not None:
+            raise SystemExit(_proxy_exit_code)
     if os.name == "nt":
         import mcp_broker  # noqa: E402
         import mcp_runtime  # noqa: E402
