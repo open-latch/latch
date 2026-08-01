@@ -40,6 +40,21 @@ def _repair_cursor_wiring_from_mcp_startup() -> None:
         )
 
 
+def _repair_codex_wiring_from_mcp_startup() -> None:
+    """Repair older managed Codex wiring before either runtime entrypoint."""
+    try:
+        import codex_wiring
+
+        result = codex_wiring.repair_from_mcp_startup()
+        if result.notice:
+            sys.stderr.write("[latch] " + result.notice.strip("_") + "\n")
+    except Exception as exc:
+        sys.stderr.write(
+            "[latch] Codex wiring check failed; session will continue. "
+            f"Rerun bin/install_codex manually ({exc}).\n"
+        )
+
+
 # Existing installs already launch this path.  Intercept execution before any
 # MCP/NumPy/ONNX imports so each host context stays a small stdio proxy.  Imports
 # of this module (tests and the shared daemon) still expose the tool registry.
@@ -48,6 +63,7 @@ if __name__ == "__main__":
 
     ensure_windows_standard_streams()
     _repair_cursor_wiring_from_mcp_startup()
+    _repair_codex_wiring_from_mcp_startup()
     if not os.environ.get("LATCH_MCP_LEGACY"):
         from mcp_proxy import main as _proxy_main  # noqa: E402
 

@@ -143,6 +143,9 @@ def test_runtime_manifest_rejects_drift_without_git_history():
 def test_runtime_manifest_covers_authoritative_bundle():
     paths = set(proof_packet.tested_runtime_paths())
     required = {
+        "VERSION",
+        "KB_SCHEMA_VERSION",
+        "WIRING_VERSION",
         "bin/latch_eval.sh",
         "bin/latch_seed_report_eval.sh",
         "src/codex_transcript.py",
