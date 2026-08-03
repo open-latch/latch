@@ -189,7 +189,16 @@ function Prepare-Runtime([string]$App, [string]$Uv) {
       # Compatibility for pre-runtime-lock releases.
       & $Uv pip install --python $python -r (Join-Path $App "requirements.txt") | Out-Host
     }
-    return ($LASTEXITCODE -eq 0)
+    if ($LASTEXITCODE -ne 0) { return $false }
+    if (-not (Test-SqliteVecCapability $App $python)) {
+      [Console]::Error.WriteLine(
+        "sqlite-vec capability preflight failed for $python. The resolved interpreter may be " +
+        "built without SQLite extension loading support. Rebuild or replace the interpreter or " +
+        "$App\.venv, then rerun. No project or agent configuration was written; no app files were removed."
+      )
+      return $false
+    }
+    return $true
   } finally {
     $env:UV_NO_CONFIG = $previousNoConfig
   }
@@ -316,13 +325,6 @@ try {
 
 $PythonPath = Get-RuntimePython $InstallDir
 if (-not $PythonPath) { Fail("Latch runtime is missing after setup: $InstallDir\.venv") }
-if (-not (Test-SqliteVecCapability $InstallDir $PythonPath)) {
-  Fail(
-    "sqlite-vec capability preflight failed for $PythonPath. The resolved interpreter may be " +
-    "built without SQLite extension loading support. Rebuild or replace the interpreter or " +
-    "$InstallDir\.venv, then rerun. No project or agent configuration was written; no app files were removed."
-  )
-}
 $Commit = (Invoke-Git -Arguments @("-C", $InstallDir, "rev-parse", "--short=12", "HEAD") | Select-Object -Last 1).Trim()
 $Version = (Get-Content -LiteralPath (Join-Path $InstallDir "VERSION") -Raw).Trim()
 

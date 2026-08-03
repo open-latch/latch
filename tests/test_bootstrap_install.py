@@ -80,6 +80,7 @@ raise SystemExit(int(os.environ.get("FAKE_QUICKSTART_FAIL", "0")))
     )
     (origin / "src" / "doctor.py").write_text(
         """import os
+from pathlib import Path
 
 OK = "OK"
 _VEC_PROBE = "existing sqlite-vec probe"
@@ -90,7 +91,11 @@ def _run_probe(code, ok_token, timeout, arch_hint):
     assert ok_token == "VEC_OK"
     assert timeout == 30
     assert arch_hint is True
-    if os.environ.get("FAKE_VEC_PROBE_FAIL"):
+    installed_version = (Path(__file__).resolve().parents[1] / "VERSION").read_text().strip()
+    if (
+        os.environ.get("FAKE_VEC_PROBE_FAIL")
+        or os.environ.get("FAKE_VEC_PROBE_FAIL_VERSION") == installed_version
+    ):
         return "FAIL", "RuntimeError: SQLite extension loading is disabled"
     return OK, ""
 """,
@@ -425,6 +430,44 @@ def test_posix_bootstrap_upgrade_is_explicit_and_dirty_safe(tmp_path: Path):
     assert upgraded.returncode == 0, upgraded.stdout + upgraded.stderr
     assert git(app, "rev-parse", "HEAD") == new_commit
     assert (app / "VERSION").read_text(encoding="utf-8") == "0.2.0\n"
+
+
+def test_posix_failed_upgrade_vec_preflight_restores_checkout_and_runtime(tmp_path: Path):
+    origin = make_origin(tmp_path)
+    fake_uv = make_fake_uv(tmp_path)
+    first, app, _, env = invoke_installer(
+        tmp_path=tmp_path,
+        origin=origin,
+        fake_uv=fake_uv,
+        extra=("--agents", "codex", "--no-seed"),
+    )
+    assert first.returncode == 0, first.stdout + first.stderr
+    old_commit = git(app, "rev-parse", "HEAD")
+
+    (origin / "VERSION").write_text("0.2.0\n", encoding="utf-8")
+    git(origin, "add", "VERSION")
+    git(origin, "commit", "-m", "fixture v2")
+    new_commit = git(origin, "rev-parse", "HEAD")
+    assert new_commit != old_commit
+
+    failed, _, _, failed_env = invoke_installer(
+        tmp_path=tmp_path,
+        origin=origin,
+        fake_uv=fake_uv,
+        extra=("--upgrade", "--ref", "main", "--agents", "codex", "--no-seed"),
+        env_extra={"FAKE_VEC_PROBE_FAIL_VERSION": "0.2.0"},
+    )
+
+    assert failed.returncode != 0
+    assert "sqlite-vec capability preflight failed" in failed.stderr
+    assert "upgrade rolled back; the previous checkout remains installed" in failed.stderr
+    assert git(app, "rev-parse", "HEAD") == old_commit
+    assert (app / "VERSION").read_text(encoding="utf-8") == "0.1.0\n"
+    quickstart_log = Path(env["FAKE_QUICKSTART_LOG"])
+    assert len(quickstart_log.read_text(encoding="utf-8").splitlines()) == 1
+    uv_log = Path(failed_env["FAKE_UV_LOG"])
+    uv_calls = uv_log.read_text(encoding="utf-8").splitlines()
+    assert sum(call.startswith("pip install ") for call in uv_calls) == 3
 
 
 def test_posix_fresh_install_honors_immutable_release_ref(tmp_path: Path):

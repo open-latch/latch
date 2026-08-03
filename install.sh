@@ -288,14 +288,18 @@ runtime_python() {
 
 sqlite_vec_preflight() {
   local app="$1" python_path="$2"
-  "$python_path" -B -c '
+  if ! "$python_path" -B -c '
 import sys
 sys.path.insert(0, sys.argv[1])
 from doctor import OK, _VEC_PROBE, _run_probe
 level, _ = _run_probe(_VEC_PROBE, "VEC_OK", 30, arch_hint=True)
 if level != OK:
     raise SystemExit(1)
-' "$app/src"
+' "$app/src"; then
+    printf 'sqlite-vec capability preflight failed for %s. The resolved interpreter may be built without SQLite extension loading support. Rebuild or replace the interpreter or %s/.venv, then rerun. No project or agent configuration was written; no app files were removed.\n' \
+      "$python_path" "$app" >&2
+    return 1
+  fi
 }
 
 prepare_runtime() {
@@ -318,6 +322,7 @@ prepare_runtime() {
     UV_NO_CONFIG=1 "$UV" pip install --python "$python_path" -r "$requirements" \
       || return
   fi
+  sqlite_vec_preflight "$app" "$python_path"
 }
 
 mkdir -p "$INSTALL_PARENT"
@@ -361,8 +366,6 @@ fi
 
 PYTHON_PATH="$(runtime_python "$INSTALL_DIR")" \
   || die "Latch runtime is missing after setup: $INSTALL_DIR/.venv"
-sqlite_vec_preflight "$INSTALL_DIR" "$PYTHON_PATH" \
-  || die "sqlite-vec capability preflight failed for $PYTHON_PATH. The resolved interpreter may be built without SQLite extension loading support. Rebuild or replace the interpreter or $INSTALL_DIR/.venv, then rerun. No project or agent configuration was written; no app files were removed."
 COMMIT="$(git -C "$INSTALL_DIR" rev-parse --short=12 HEAD)"
 VERSION="$(tr -d '\r\n' < "$INSTALL_DIR/VERSION")"
 
