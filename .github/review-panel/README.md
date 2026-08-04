@@ -32,7 +32,7 @@ report published as a sticky GitHub comment. Otherwise GitHub is read only.
 Claude Code users can run `/latch-review`; Codex users can ask to “send PR 73
 to the Latch review panel.” Both host integrations call the same runner.
 
-## Authentication and billing boundary
+## Authentication and account-usage boundary
 
 The runner requires:
 
@@ -44,10 +44,10 @@ provider API key, alternate auth token, endpoint override, or hosted-provider
 toggle is present. This includes `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,
 `CODEX_API_KEY`, `ANTHROPIC_BASE_URL`, and `OPENAI_BASE_URL`. Those variables
 are also removed from every child-process environment. This prevents ambient
-configuration from silently changing the billing or evidence destination.
+configuration from silently changing the account-usage or evidence destination.
 
 The panel consumes the user's Claude and Codex subscription allowances.
-Subscription auth plus the environment guard prevents API-key billing. The
+Subscription auth plus the environment guard prevents API-key metering. The
 CLIs cannot prove whether account-level extra usage, purchased credits, or
 auto-top-up is enabled. Disable those account settings if you want a hard stop
 at the included allowance; the runner prints this limitation before every

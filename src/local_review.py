@@ -836,7 +836,7 @@ def run_review(args: argparse.Namespace) -> int:
     repo = repository_root()
     auth = preflight_auth(repo)
     print(
-        "Billing guard: provider API-key auth is disabled. Account-level "
+        "Authentication guard: provider API-key auth is disabled. Account-level "
         "usage credits and auto-top-up cannot be inspected locally.",
         file=sys.stderr,
     )

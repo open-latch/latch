@@ -631,7 +631,7 @@ def test_panel_is_local_subscription_only_and_has_no_automatic_workflows():
         encoding="utf-8"
     )
     assert "does not run in GitHub Actions" in readme
-    assert "prevents API-key billing" in readme
+    assert "prevents API-key metering" in readme
     assert "auto-top-up" in readme
     assert "Nothing is posted" not in readme
     assert "`--post-pr`" in readme
