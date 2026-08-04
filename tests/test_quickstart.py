@@ -163,6 +163,31 @@ def test_seed_backend_follows_selected_agent_surface():
     print("PASS seed_backend_follows_selected_agent_surface")
 
 
+def test_maintenance_fallback_requires_explicit_exact_user_order():
+    available = qs.maintenance_backends_for_agents(
+        ("claude", "codex", "cursor"),
+    )
+    _assert(available == ("claude", "codex", "cursor"), available)
+    _assert(
+        qs.parse_maintenance_fallback_order(None, available=available) is None,
+        "omitting the option must leave cross-provider fallback disabled",
+    )
+    _assert(
+        qs.parse_maintenance_fallback_order(
+            "codex,cursor,claude",
+            available=available,
+        ) == ["codex", "cursor", "claude"],
+        "the user's exact order must be preserved",
+    )
+    for invalid in ("codex,codex", "codex,unselected", ",,"):
+        try:
+            qs.parse_maintenance_fallback_order(invalid, available=available)
+        except ValueError:
+            continue
+        raise AssertionError(f"invalid fallback order was accepted: {invalid!r}")
+    print("PASS maintenance_fallback_requires_explicit_exact_user_order")
+
+
 def test_seed_command_includes_project_source_sessions_and_apply():
     project = Path("/tmp/example project")
     args = qs.seed_command_args(
@@ -559,6 +584,75 @@ def test_quickstart_pins_after_preflight_before_wiring():
     print("PASS quickstart_pins_after_preflight_before_wiring")
 
 
+def test_quickstart_persists_only_the_explicit_fallback_order():
+    root = Path(tempfile.mkdtemp(prefix="latch-quickstart-fallback-"))
+    project = root / "project"
+    project.mkdir()
+    original = {
+        "resolve_python": qs.install_engine.resolve_python,
+        "agent_preflight_errors": qs.agent_preflight_errors,
+        "pin_kb_for_quickstart": qs.pin_kb_for_quickstart,
+        "build_install_steps": qs.build_install_steps,
+        "build_doctor_steps": qs.build_doctor_steps,
+        "run_steps": qs.run_steps,
+        "resolve_maintenance_executable": qs.paths.resolve_maintenance_executable,
+        "resolve_maintenance_path": qs.paths.resolve_maintenance_path,
+        "write_maintenance_runner": qs.paths.write_maintenance_runner,
+        "write_fallback": qs.paths.write_approved_maintenance_fallback_policy,
+        "refresh_pinned_dir": qs.paths.refresh_pinned_dir,
+    }
+    events: list[tuple[str, object]] = []
+    try:
+        qs.install_engine.resolve_python = lambda _value: "/py"
+        qs.agent_preflight_errors = lambda *_args, **_kwargs: []
+        qs.paths.resolve_maintenance_executable = lambda backend: f"/bin/{backend}"
+        qs.paths.resolve_maintenance_path = lambda _executable: "/bin"
+        qs.paths.write_maintenance_runner = lambda **kwargs: (
+            events.append(("primary", kwargs["backend"]))
+            or (root / "runtime_settings.json")
+        )
+        qs.paths.write_approved_maintenance_fallback_policy = lambda **kwargs: (
+            events.append(("fallback", (kwargs["order"], kwargs["runners"])))
+            or (root / "runtime_settings.json")
+        )
+        qs.pin_kb_for_quickstart = lambda *_args, **_kwargs: ("OK", "pinned")
+        qs.paths.refresh_pinned_dir = lambda: None
+        qs.build_install_steps = lambda **_kwargs: []
+        qs.build_doctor_steps = lambda **_kwargs: []
+        qs.run_steps = lambda *_args, **_kwargs: 0
+
+        rc = qs.main([
+            "--agents", "all",
+            "--project", str(project),
+            "--maintenance-fallback-order", "codex,cursor,claude",
+            "--skip-doctor",
+            "--no-seed",
+        ])
+        _assert(rc == 0, f"explicit fallback quickstart should complete, got {rc}")
+        _assert(events[0] == ("primary", "codex"), events)
+        label, payload = events[1]
+        order, runners = payload
+        _assert(label == "fallback", events)
+        _assert(order == ["codex", "cursor", "claude"], order)
+        _assert(list(runners) == order, runners)
+    finally:
+        qs.install_engine.resolve_python = original["resolve_python"]
+        qs.agent_preflight_errors = original["agent_preflight_errors"]
+        qs.pin_kb_for_quickstart = original["pin_kb_for_quickstart"]
+        qs.build_install_steps = original["build_install_steps"]
+        qs.build_doctor_steps = original["build_doctor_steps"]
+        qs.run_steps = original["run_steps"]
+        qs.paths.resolve_maintenance_executable = original[
+            "resolve_maintenance_executable"
+        ]
+        qs.paths.resolve_maintenance_path = original["resolve_maintenance_path"]
+        qs.paths.write_maintenance_runner = original["write_maintenance_runner"]
+        qs.paths.write_approved_maintenance_fallback_policy = original["write_fallback"]
+        qs.paths.refresh_pinned_dir = original["refresh_pinned_dir"]
+        shutil.rmtree(root, ignore_errors=True)
+    print("PASS quickstart_persists_only_the_explicit_fallback_order")
+
+
 def test_quickstart_preflight_failure_does_not_pin():
     root = Path(tempfile.mkdtemp(prefix="latch-quickstart-preflight-pin-"))
     project = root / "project"
@@ -635,6 +729,7 @@ if __name__ == "__main__":
     test_build_doctor_steps_cover_cursor_surface()
     test_seed_source_follows_agents_by_default()
     test_seed_backend_follows_selected_agent_surface()
+    test_maintenance_fallback_requires_explicit_exact_user_order()
     test_seed_command_includes_project_source_sessions_and_apply()
     test_seed_command_propagates_cursor_history_only_when_opted_in()
     test_initial_kb_defaults_and_dry_run_plan_are_explicit()
@@ -650,6 +745,7 @@ if __name__ == "__main__":
     test_quickstart_pin_uses_explicit_or_environment_override()
     test_quickstart_persists_transient_env_pin_for_later_processes()
     test_quickstart_pins_after_preflight_before_wiring()
+    test_quickstart_persists_only_the_explicit_fallback_order()
     test_quickstart_preflight_failure_does_not_pin()
     test_quickstart_pin_conflict_stops_before_wiring()
     print("\nAll quickstart tests pass.")

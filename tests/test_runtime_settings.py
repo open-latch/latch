@@ -59,6 +59,9 @@ def test_vault_maintenance_runner_is_absolute_persisted_and_validated(
         "maintenance_executable": str(executable),
         "maintenance_home": str(tmp_path),
         "maintenance_path": os.pathsep.join((str(tmp_path), str(helper_dir))),
+        "maintenance_fallback_approved": False,
+        "maintenance_fallback_order": [],
+        "maintenance_runners": {},
     }
 
 

@@ -36,6 +36,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 import budget  # noqa: E402  (imported for symmetry / future use; heal gates internally)
 import lockfile  # noqa: E402
 import maintenance  # noqa: E402
+import maintenance_receipts  # noqa: E402
 import mcp_runtime  # noqa: E402
 import paths  # noqa: E402
 import vault_backup  # noqa: E402
@@ -310,6 +311,7 @@ def run_selfheal(project_path: str | None) -> dict:
                 ran.append("backup")
 
         blocked: list[str] = []
+        tree_failure: dict | None = None
         if heal_due and backup_failed:
             blocked.append("heal")
             _log(f"heal blocked for {project_path}: required protected backup failed")
@@ -328,11 +330,85 @@ def run_selfheal(project_path: str | None) -> dict:
             _log(f"weekly/tree blocked for {project_path}: required protected backup failed")
         elif weekly_due:
             try:
-                maintenance.run_weekly_maintenance(project_path)
-                maintenance.run_tree_rebuild(project_path)
-                state["last_weekly_at"] = now.isoformat()
-                ran.append("weekly")
+                decay_due = _due(
+                    state,
+                    "last_weekly_decay_at",
+                    WEEKLY_INTERVAL_H,
+                    now,
+                )
+                if decay_due:
+                    decay_result = maintenance.run_weekly_maintenance(project_path)
+                    if not isinstance(decay_result, dict) or not decay_result.get("ok"):
+                        raise RuntimeError("weekly decay did not complete")
+                    state["last_weekly_decay_at"] = now.isoformat()
+                    ran.append("weekly_decay")
+                tree_result = maintenance.run_tree_rebuild(
+                    project_path,
+                    autonomous=True,
+                    already_locked=True,
+                )
+                tree_degraded = isinstance(tree_result, dict) and (
+                    bool(tree_result.get("retry_pending"))
+                    or any(
+                        int(tree_result.get(key) or 0) > 0
+                        for key in (
+                            "budget_blocked",
+                            "llm_failed",
+                            "oversized_skipped",
+                        )
+                    )
+                )
+                if (
+                    not isinstance(tree_result, dict)
+                    or not tree_result.get("ok")
+                    or tree_degraded
+                ):
+                    tree_failure = (
+                        dict(tree_result)
+                        if isinstance(tree_result, dict)
+                        else {
+                            "ok": False,
+                            "reason": "tree_failed",
+                            "failure_kind": "tree_failed",
+                            "backend_attempts": [],
+                            "retry_pending": True,
+                        }
+                    )
+                    if tree_degraded:
+                        tree_failure["ok"] = False
+                        tree_failure.setdefault("reason", "tree_degraded")
+                        tree_failure.setdefault("failure_kind", "tree_degraded")
+                        tree_failure["retry_pending"] = True
+                    blocked.append("weekly")
+                    maintenance_receipts.record_tree_blocker(
+                        project_path,
+                        tree_failure,
+                    )
+                    _log(
+                        f"weekly/tree deferred for {project_path}: "
+                        f"{tree_failure.get('reason', 'tree_failed')}"
+                    )
+                else:
+                    state["last_weekly_at"] = now.isoformat()
+                    ran.append("weekly")
             except Exception as e:
+                if tree_failure is None:
+                    tree_failure = {
+                        "ok": False,
+                        "reason": "tree_failed",
+                        "failure_kind": "internal",
+                        "backend_attempts": [],
+                        "retry_pending": True,
+                    }
+                    if "weekly" not in blocked:
+                        blocked.append("weekly")
+                    try:
+                        maintenance_receipts.record_tree_blocker(
+                            project_path,
+                            tree_failure,
+                        )
+                    except Exception:
+                        pass
                 _log(f"weekly/tree failed for {project_path}: {e}")
 
         # Independent cadence: lifecycle detection must still run on days when
@@ -373,11 +449,27 @@ def run_selfheal(project_path: str | None) -> dict:
             _log(f"workstream automation failed for {project_path}: {e}")
 
     _log(f"pass complete for {project_path}: ran={ran}")
-    result = {"ok": not backup_failed, "ran": ran}
+    result = {"ok": not backup_failed and tree_failure is None, "ran": ran}
     if backup_failed:
         result.update({
             "reason": "backup_failed",
             "blocked": blocked,
+        })
+    elif tree_failure is not None:
+        result.update({
+            "reason": "tree_failed",
+            "blocked": blocked,
+            "tree": {
+                key: tree_failure.get(key)
+                for key in (
+                    "reason",
+                    "failure_kind",
+                    "attempts",
+                    "backend_attempts",
+                    "retry_pending",
+                )
+                if tree_failure.get(key) is not None
+            },
         })
     if automation_result is not None:
         result["workstream_automation"] = {

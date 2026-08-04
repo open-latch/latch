@@ -291,14 +291,82 @@ def configured_maintenance_runner(
     )
 
 
+def configured_maintenance_policy(
+    runtime_settings_file: Path | None = None,
+    *,
+    project_path: str | os.PathLike | None = None,
+) -> dict[str, object]:
+    """Return the vault-owned autonomous backend policy.
+
+    Existing installs have one configured runner and no fallback.  A fallback
+    order is live only when the settings carry the explicit approval bit and a
+    complete validated runner record for every ordered backend.  Invalid policy
+    fails closed; it never falls through to process PATH or an unlisted vendor.
+    """
+    path = runtime_settings_file or (
+        project_dir(project_path) / VAULT_RUNTIME_SETTINGS_FILENAME
+    )
+    primary = configured_maintenance_runner(
+        path,
+        project_path=project_path,
+    )
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"could not read autonomous maintenance settings: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ValueError(f"autonomous maintenance settings in {path} are not an object")
+
+    approved = data.get("maintenance_fallback_approved") is True
+    raw_order = data.get("maintenance_fallback_order")
+    raw_runners = data.get("maintenance_runners")
+    if not approved:
+        return {
+            "fallback_approved": False,
+            "order": [primary[0]],
+            "runners": {primary[0]: primary},
+        }
+    if not isinstance(raw_order, list) or not raw_order:
+        raise ValueError("approved autonomous maintenance fallback order is missing")
+    order: list[str] = []
+    for raw in raw_order:
+        backend = raw.strip().lower() if isinstance(raw, str) else ""
+        if backend not in mcp_runtime.SUPPORTED_MODEL_BACKENDS:
+            raise ValueError(f"unsupported backend in approved fallback order: {raw!r}")
+        if backend in order:
+            raise ValueError("approved autonomous maintenance fallback order has duplicates")
+        order.append(backend)
+    if not isinstance(raw_runners, dict):
+        raise ValueError("approved autonomous maintenance runner map is missing")
+    runners: dict[str, tuple[str, str, str, str]] = {}
+    for backend in order:
+        item = raw_runners.get(backend)
+        if not isinstance(item, dict):
+            raise ValueError(f"approved autonomous {backend} runner is missing")
+        runners[backend] = _validated_maintenance_runner(
+            backend,
+            item.get("executable"),
+            item.get("home"),
+            item.get("path"),
+        )
+    if order[0] != primary[0] or runners[order[0]] != primary:
+        raise ValueError(
+            "approved autonomous maintenance order does not match its primary runner"
+        )
+    return {
+        "fallback_approved": True,
+        "order": order,
+        "runners": runners,
+    }
+
+
 def maintenance_runner_status(
     project_path: str | os.PathLike | None = None,
 ) -> dict[str, object]:
     """Return a path-redacted autonomous-maintenance readiness receipt."""
     try:
-        backend, _executable, _home, _search_path = configured_maintenance_runner(
-            project_path=project_path
-        )
+        policy = configured_maintenance_policy(project_path=project_path)
+        order = list(policy["order"])
     except ValueError as exc:
         return {
             "configured": False,
@@ -308,7 +376,9 @@ def maintenance_runner_status(
         }
     return {
         "configured": True,
-        "backend": backend,
+        "backend": order[0],
+        "fallback_approved": bool(policy["fallback_approved"]),
+        "fallback_order": order,
         "error": None,
         "remedy": None,
     }
@@ -367,7 +437,7 @@ def configured_daemon_idle_ttl(
 
 
 def _write_vault_runtime_settings(
-    updates: dict[str, str | float],
+    updates: dict[str, object],
     runtime_settings_file: Path | None = None,
     *,
     project_path: str | os.PathLike | None = None,
@@ -433,6 +503,69 @@ def write_maintenance_runner(
             "maintenance_executable": resolved_executable,
             "maintenance_home": resolved_home,
             "maintenance_path": resolved_search_path,
+            # The ordinary runner writer carries no cross-provider approval.
+            # Clear any previously persisted policy so rerunning quickstart
+            # without its explicit fallback option reliably returns to the
+            # single-backend behavior.
+            "maintenance_fallback_approved": False,
+            "maintenance_fallback_order": [],
+            "maintenance_runners": {},
+        },
+        runtime_settings_file,
+        project_path=project_path,
+    )
+
+
+def write_approved_maintenance_fallback_policy(
+    *,
+    order: list[str] | tuple[str, ...],
+    runners: dict[str, dict[str, str]],
+    runtime_settings_file: Path | None = None,
+    project_path: str | os.PathLike | None = None,
+) -> Path:
+    """Persist an exact user-approved provider order and runner set.
+
+    Callers must invoke this only from an explicit user action (for example the
+    quickstart ``--maintenance-fallback-order`` option).  Merely detecting
+    installed CLIs is never approval.
+    """
+    normalized_order: list[str] = []
+    validated: dict[str, tuple[str, str, str, str]] = {}
+    for raw in order:
+        backend = str(raw).strip().lower()
+        if backend in normalized_order:
+            raise ValueError("maintenance fallback order contains duplicates")
+        item = runners.get(backend)
+        if not isinstance(item, dict):
+            raise ValueError(f"maintenance runner for {backend!r} is missing")
+        validated[backend] = _validated_maintenance_runner(
+            backend,
+            item.get("executable"),
+            item.get("home"),
+            item.get("path"),
+        )
+        normalized_order.append(backend)
+    if not normalized_order:
+        raise ValueError("maintenance fallback order must not be empty")
+
+    primary = validated[normalized_order[0]]
+    runner_payload = {
+        backend: {
+            "executable": validated[backend][1],
+            "home": validated[backend][2],
+            "path": validated[backend][3],
+        }
+        for backend in normalized_order
+    }
+    return _write_vault_runtime_settings(
+        {
+            "maintenance_backend": primary[0],
+            "maintenance_executable": primary[1],
+            "maintenance_home": primary[2],
+            "maintenance_path": primary[3],
+            "maintenance_fallback_approved": True,
+            "maintenance_fallback_order": normalized_order,
+            "maintenance_runners": runner_payload,
         },
         runtime_settings_file,
         project_path=project_path,

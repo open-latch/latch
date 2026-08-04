@@ -152,7 +152,13 @@ def run_nightly_heal(
         conn.close()
 
 
-def run_tree_rebuild(project_path: str | None = None, *, use_llm: bool = True) -> dict:
+def run_tree_rebuild(
+    project_path: str | None = None,
+    *,
+    use_llm: bool = True,
+    autonomous: bool = False,
+    already_locked: bool = False,
+) -> dict:
     """Full hierarchical rebuild — clusters leaves, promotes landmarks, builds
     one level of summary nodes. LLM calls (one per cluster) consume the budget."""
     if paths.is_unlatched_mode():
@@ -163,13 +169,37 @@ def run_tree_rebuild(project_path: str | None = None, *, use_llm: bool = True) -
         }
     if paths.is_disabled():
         return {"ok": False, "reason": "disabled"}
-    conn = db.connect(project_path)
-    try:
-        result = tree.build_tree(conn, project_path=project_path, use_llm=use_llm)
-        _log(project_path, {"op": "tree_rebuild", **result})
-        return result
-    finally:
-        conn.close()
+    backend_policy = None
+    if autonomous:
+        try:
+            policy = paths.configured_maintenance_policy(project_path=project_path)
+            backend_policy = [
+                policy["runners"][backend]
+                for backend in policy["order"]
+            ]
+        except ValueError:
+            # Deterministic/cache-only rebuilds need no provider.  An empty
+            # policy lets tree planning proceed but fails closed before the
+            # first cache-miss invocation or hierarchy mutation.
+            backend_policy = []
+    lock_context = (
+        contextlib.nullcontext()
+        if already_locked
+        else lockfile.writer_lock(project_path)
+    )
+    with lock_context:
+        conn = db.connect(project_path)
+        try:
+            result = tree.build_tree(
+                conn,
+                project_path=project_path,
+                use_llm=use_llm,
+                backend_policy=backend_policy,
+            )
+            _log(project_path, {"op": "tree_rebuild", **result})
+            return result
+        finally:
+            conn.close()
 
 
 def run_workstream_shadow(
