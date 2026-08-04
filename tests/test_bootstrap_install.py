@@ -39,6 +39,62 @@ def run(*args: str, cwd: Path | None = None, env: dict[str, str] | None = None):
     )
 
 
+def run_with_project_prompt(
+    args: list[str],
+    *,
+    cwd: Path,
+    env: dict[str, str],
+    project: Path,
+) -> tuple[int, str]:
+    import pty
+    import select
+    import signal
+    import time
+
+    pid, master_fd = pty.fork()
+    if pid == 0:
+        os.chdir(cwd)
+        os.execvpe(args[0], args, env)
+
+    output = bytearray()
+    sent_project = False
+    status: int | None = None
+    deadline = time.monotonic() + 30
+    try:
+        while time.monotonic() < deadline:
+            readable, _, _ = select.select([master_fd], [], [], 0.1)
+            if readable:
+                try:
+                    chunk = os.read(master_fd, 4096)
+                except OSError:
+                    chunk = b""
+                if chunk:
+                    output.extend(chunk)
+                    if (
+                        not sent_project
+                        and b"Project directory to wire [" in output
+                    ):
+                        os.write(master_fd, f"{project}\n".encode())
+                        sent_project = True
+
+            finished, status = os.waitpid(pid, os.WNOHANG)
+            if finished:
+                break
+        else:
+            os.kill(pid, signal.SIGKILL)
+            os.waitpid(pid, 0)
+            raise AssertionError(
+                "installer did not finish after the project prompt:\n"
+                + output.decode(errors="replace")
+            )
+    finally:
+        os.close(master_fd)
+
+    assert status is not None
+    assert sent_project, output.decode(errors="replace")
+    return os.waitstatus_to_exitcode(status), output.decode(errors="replace")
+
+
 def git(repo: Path, *args: str) -> str:
     result = run("git", "-C", str(repo), *args)
     assert result.returncode == 0, result.stderr
@@ -221,6 +277,38 @@ def test_posix_bootstrap_zero_quickstart_args_on_stock_macos_bash(tmp_path: Path
         "latch_home": str(app),
         "latch_python": str(app / ".venv" / "bin" / "python"),
     }]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX pseudo-terminal behavior")
+def test_posix_bootstrap_prompts_for_and_uses_project_target(tmp_path: Path):
+    origin = make_origin(tmp_path)
+    fake_uv = make_fake_uv(tmp_path)
+    starting_dir = tmp_path / "starting directory"
+    starting_dir.mkdir()
+    selected_project = tmp_path / "selected project"
+    selected_project.mkdir()
+    app = tmp_path / "managed root" / "Latch app"
+    env = installer_env(tmp_path, origin, fake_uv)
+
+    returncode, output = run_with_project_prompt(
+        [
+            "bash",
+            str(INSTALL_SH),
+            "--install-dir",
+            str(app),
+            "--agents",
+            "codex",
+            "--no-seed",
+        ],
+        cwd=starting_dir,
+        env=env,
+        project=selected_project,
+    )
+
+    assert returncode == 0, output
+    assert f"Project selected for wiring: {selected_project}" in output
+    calls = read_json_lines(Path(env["FAKE_QUICKSTART_LOG"]))
+    assert Path(calls[0]["argv"][1]).resolve() == selected_project.resolve()
 
 
 def test_posix_bootstrap_refuses_unowned_existing_directory(tmp_path: Path):
@@ -531,6 +619,8 @@ def test_bootstrap_script_contracts_and_syntax():
         assert "quickstart.py" in text
         assert "upgrade refused because the install checkout is dirty" in text
         assert "production KB" in text
+        assert "Project directory to wire [" in text
+        assert "Project selected for wiring:" in text
         assert "requirements.lock" in text
         assert "requirements-ci.lock" not in text
     assert "UV_UNMANAGED_INSTALL" in shell

@@ -24,6 +24,7 @@ param(
   [string[]]$QuickstartArgs = @()
 )
 
+$ProjectWasExplicit = $PSBoundParameters.ContainsKey("Project")
 $RefWasExplicit = $PSBoundParameters.ContainsKey("Ref")
 $ErrorActionPreference = "Stop"
 $DefaultRepository = "https://github.com/open-latch/latch.git"
@@ -45,6 +46,21 @@ function Fail([string]$Message) {
 function Note([string]$Message) {
   Write-Host ""
   Write-Host "==> $Message"
+}
+
+function Read-ProjectTarget([string]$DefaultProject) {
+  try {
+    if (-not [Environment]::UserInteractive -or [Console]::IsInputRedirected) {
+      return $DefaultProject
+    }
+  } catch {
+    return $DefaultProject
+  }
+  $selected = Read-Host "Project directory to wire [$DefaultProject]"
+  if ([string]::IsNullOrWhiteSpace($selected)) {
+    return $DefaultProject
+  }
+  return $selected
 }
 
 function Normalize-Repository([string]$Value) {
@@ -202,6 +218,9 @@ if (-not $InstallDir) {
   }
   $InstallDir = Join-Path $dataRoot "app"
 }
+if (-not $ProjectWasExplicit -and -not $DryRun) {
+  $Project = Read-ProjectTarget $Project
+}
 if (-not (Test-Path -LiteralPath $Project -PathType Container)) {
   Fail("project directory does not exist: $Project")
 }
@@ -236,6 +255,8 @@ if ($DryRun) {
   }
   return
 }
+
+Note "Project selected for wiring: $Project"
 
 if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
   Fail("Git is required; install Git for Windows and rerun")

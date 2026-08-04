@@ -35,7 +35,7 @@ Usage:
 
 Bootstrap options:
   --install-dir PATH  App checkout (platform data directory by default)
-  --project PATH      Project to wire (the caller's current directory by default)
+  --project PATH      Project to wire (interactive default: current directory)
   --ref REF           Git branch, tag, or commit for a fresh install
   --upgrade           Explicitly update an existing clean checkout to --ref
   --dry-run           Print the bootstrap plan without network or filesystem writes
@@ -69,6 +69,7 @@ default_install_dir() {
 }
 
 PROJECT="$(pwd -P)"
+PROJECT_EXPLICIT=0
 INSTALL_DIR="${LATCH_INSTALL_DIR:-$(default_install_dir)}"
 REPOSITORY="${LATCH_INSTALL_REPOSITORY:-$DEFAULT_REPOSITORY}"
 REF="${LATCH_INSTALL_REF:-$DEFAULT_REF}"
@@ -87,6 +88,7 @@ while [ "$#" -gt 0 ]; do
     --project)
       [ "$#" -ge 2 ] || die '--project needs a path'
       PROJECT="$2"
+      PROJECT_EXPLICIT=1
       shift 2
       ;;
     --ref)
@@ -118,6 +120,24 @@ while [ "$#" -gt 0 ]; do
       ;;
   esac
 done
+
+if [ "$PROJECT_EXPLICIT" -ne 1 ] && [ "$DRY_RUN" -ne 1 ]; then
+  if [ -t 0 ]; then
+    printf '\nProject directory to wire [%s]: ' "$PROJECT" >&2
+    if ! IFS= read -r selected_project; then
+      die 'could not read the project directory'
+    fi
+    [ -z "$selected_project" ] || PROJECT="$selected_project"
+  elif { exec 3<>/dev/tty; } 2>/dev/null; then
+    printf '\nProject directory to wire [%s]: ' "$PROJECT" >&3
+    if ! IFS= read -r selected_project <&3; then
+      exec 3>&-
+      die 'could not read the project directory'
+    fi
+    exec 3>&-
+    [ -z "$selected_project" ] || PROJECT="$selected_project"
+  fi
+fi
 
 [ -d "$PROJECT" ] || die "project directory does not exist: $PROJECT"
 PROJECT="$(cd "$PROJECT" && pwd -P)"
@@ -153,6 +173,8 @@ if [ "$DRY_RUN" -eq 1 ]; then
   fi
   exit 0
 fi
+
+note "Project selected for wiring: $PROJECT"
 
 command -v git >/dev/null 2>&1 || die 'git is required; install Git and rerun'
 
