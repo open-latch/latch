@@ -1,8 +1,8 @@
 {
   "backend": "codex",
-  "better_next_action": "Keep SQLite and, if cross-machine data movement is required, implement an explicit export/import flow with documented limits.",
+  "better_next_action": "Keep SQLite and implement an explicit export/import workflow with documented limitations if cross-machine data movement is required.",
   "capture_command": "bash bin/latch_proof_packet.sh --capture-live --backend codex",
-  "captured_at_utc": "2026-08-01T19:22:19Z",
+  "captured_at_utc": "2026-08-04T13:58:23Z",
   "demo_kind": "synthetic_no_history_fixture",
   "evidence_nodes": [
     {
@@ -30,10 +30,10 @@
   "observed": true,
   "recommendation": "DO_NOT_PROCEED",
   "request": "Add multi-user accounts by moving the datastore from local SQLite to a hosted Postgres service.",
-  "risk_if_proceed": "The implementation would directly reverse the local-first SQLite decision and reintroduce the hosted-database path that was already rejected.",
+  "risk_if_proceed": "It would overturn the local-first demo constraint and repeat an explicitly rejected hosted-database path.",
   "schema_version": 2,
-  "source_commit": "200976150127290709b4fbbed35de3e0f8168b22",
-  "summary": "The KB explicitly decides to keep the demo app local-first on a single embedded SQLite file (id=1). It specifically rejects moving to a hosted or client-server database, including managed Postgres, for multi-user accounts or sync, and names export/import as the allowed data-movement path.",
+  "source_commit": "72018b394e931dae86fb0a2d5b01163f3252db53",
+  "summary": "The request directly contradicts the canonical decision to keep the demo app local-first on a single embedded SQLite file with no hosted database (id=1). The same node explicitly rejects moving to a hosted/client-server database such as managed Postgres for multi-user accounts or sync, and names export/import as the allowed data-movement path.",
   "tested_runtime_git_blobs": {
     ".gitattributes": "dfdb8b771ce07609491fa2e83698969fd917a135",
     "KB_SCHEMA_VERSION": "00750edc07d6415dcc07ae0351e9397b0222b7ba",
@@ -93,7 +93,7 @@
     "src/hooks/user_prompt_submit.py": "8f65764c36acc99d30dc91b8b114df0933d46615",
     "src/hooks/vscode_session_start.py": "9a1b158edd1ff4a39e59dd95e4648097cc18663b",
     "src/install_claude_desktop.py": "37795eb3695cea94e468b44ac52e5522b99482ed",
-    "src/install_codex.py": "60cc190b6ab66513ee73a7ef89d79860d9eec92d",
+    "src/install_codex.py": "18c6fa5c9ca350714db2ea74b99df85f6af965a6",
     "src/install_cursor.py": "ceec15d93fd5f6fe8f45c12a4bd0f0cdab48a387",
     "src/install_engine.py": "867e2beab7d6efcf8b4969612338cfdbfc2005b3",
     "src/install_vscode.py": "4d3a1212de3efc01984876631a98230c9423250c",
@@ -101,6 +101,7 @@
     "src/kb_gate_cli.py": "2b95902df966e4283442a88d5b4596cca94b1c5e",
     "src/lifecycle_receipts.py": "97e5b63f1ce470a48543d0d08cc4cf972fb389d6",
     "src/lifecycle_signals.py": "b50388b55e3a9fd4b9d0f77b53835ed8ff3e8a33",
+    "src/local_review.py": "c3faf7226b2a1afc9d41590f1b6d1df07cea3edf",
     "src/lockfile.py": "8e64b385c11804f8a0bab5c738233401eea4b94b",
     "src/log_utils.py": "92ba2f494dc3e74ba2945afb4c50cd66f3a1192e",
     "src/maintenance.py": "11079e8ab8b16d26d7ccb98d787eb5c2602cb91d",
