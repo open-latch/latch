@@ -14,6 +14,8 @@ import shlex
 from pathlib import Path
 from typing import Any
 
+from versioning import WIRING_VERSION
+
 BEGINNER_HOOK_EVENT = "SessionStart"
 OWNED_HOOK_BASENAMES = {
     "codex_session_start.py",
@@ -40,7 +42,10 @@ def render_session_start_entry(python_path: str, hook_py: str) -> dict[str, Any]
         "hooks": [
             {
                 "type": "command",
-                "command": hook_command(python_path, hook_py),
+                "command": (
+                    hook_command(python_path, hook_py)
+                    + f" --latch-wiring-version {WIRING_VERSION}"
+                ),
             }
         ],
     }

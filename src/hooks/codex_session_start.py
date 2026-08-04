@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Codex SessionStart hook: silent attribution and AGENTS.md sync.
+"""Codex SessionStart hook: silent attribution and managed-wiring repair.
 
 Codex support intentionally does not mirror Claude Code's Stop/SessionEnd
 automatic compaction. Healthy startup emits no model context.
@@ -19,6 +19,7 @@ sys.path.insert(0, str(SRC / "hooks"))
 from _common import hook_field, log, read_hook_input, transcript_path  # noqa: E402
 
 import codex_session  # noqa: E402
+import codex_wiring  # noqa: E402
 from paths import is_disabled, is_in_compact, is_unlatched_mode  # noqa: E402
 from session_start import (  # noqa: E402
     _SESSION_SETUP_NOTICE,
@@ -26,7 +27,6 @@ from session_start import (  # noqa: E402
     _build_unlatched_system_message,
     _emit_session_start_context,
     _join_startup_notices,
-    _managed_doc_wiring_notice,
 )
 
 
@@ -86,16 +86,11 @@ def main() -> int:
         except Exception as e:
             log(f"codex_session_start marker invalidation failed: {e}")
 
-    agents_md_action = _auto_sync_agents_md(cwd)
-    wiring_notice = _managed_doc_wiring_notice(
-        agents_md_action,
-        doc_name="AGENTS.md",
-        manual_command=f"{SRC.parent}/bin/install_agents_md.sh --yes",
-    )
+    wiring_result = _auto_repair_codex_wiring(cwd)
 
     notice = _join_startup_notices(
         _SESSION_SETUP_NOTICE if setup_degraded else None,
-        wiring_notice,
+        wiring_result.notice,
     )
     if notice:
         _emit_session_start_context(notice)
@@ -103,25 +98,22 @@ def main() -> int:
     return 0
 
 
-def _auto_sync_agents_md(cwd: str) -> str | None:
-    """Re-sync this project's AGENTS.md managed region when already wired.
-
-    Mirrors Claude's CLAUDE.md hot-path behavior: ``create=False`` means a
-    fresh or unmanaged project is never auto-wired, but an existing managed
-    region is kept current after latch upgrades. Wrapped so sync failures never
-    break Codex session startup.
-    """
+def _auto_repair_codex_wiring(cwd: str) -> codex_wiring.RepairResult:
+    """Repair an older managed Codex bundle without blocking SessionStart."""
     try:
-        import agents_md_sync
-        target = Path(cwd) / "AGENTS.md"
-        action = agents_md_sync.sync_if_outdated(target)
-        if action == "synced":
-            log(f"agents_md auto-sync: re-synced managed region in {target} "
-                f"(backup: {target}.latchbak)")
-        return action
+        result = codex_wiring.repair_project(cwd)
+        if result.action == "synced":
+            log(f"codex wiring auto-repair: refreshed managed bundle for {cwd}")
+        elif result.action == "error":
+            log(f"codex wiring auto-repair could not complete for {cwd}")
+        return result
     except Exception as e:
-        log(f"agents_md auto-sync skipped: {e}")
-        return "error"
+        log(f"codex wiring auto-repair skipped: {e}")
+        return codex_wiring.RepairResult(
+            "error",
+            "_⚠ Latch could not check Codex project wiring. This task will "
+            "continue; rerun the Latch Codex installer manually._",
+        )
 
 
 if __name__ == "__main__":

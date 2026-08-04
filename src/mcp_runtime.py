@@ -18,6 +18,7 @@ import shutil
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass, field
+from pathlib import Path
 from typing import Any, Iterator, Protocol
 
 
@@ -29,6 +30,20 @@ DEFAULT_PROXY_RETIRE_IDLE_S = 5 * 60.0
 DEFAULT_PROXY_HEARTBEAT_S = 30.0
 DEFAULT_PROXY_STALE_S = 5 * 60.0
 WINDOWS_VENV_SITE_PACKAGES_ENV = "LATCH_MCP_VENV_SITE_PACKAGES"
+
+
+def activate_windows_venv_site_packages(site_packages: str) -> str:
+    """Process ``.pth`` files from one already broker-validated venv path."""
+    candidate = Path(site_packages)
+    if not candidate.is_absolute() or not candidate.is_dir():
+        raise ValueError("invalid Windows venv site-packages activation path")
+    resolved = str(candidate)
+    import site
+
+    site.addsitedir(resolved)
+    return resolved
+
+
 PROCESS_OS_ENV_VARS = (
     "PATH",
     "HOME",

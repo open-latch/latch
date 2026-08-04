@@ -25,6 +25,10 @@ def test_render_mcp_block_uses_codex_shape():
     _assert("[mcp_servers.latch]" in out, "Codex MCP table missing")
     _assert('command = "/PY"' in out, "python command missing")
     _assert('args = ["/repo/src/mcp_server.py"]' in out, "server args missing")
+    _assert("required = true" in out,
+            "Codex must not silently start without the Latch MCP tools")
+    _assert(tomllib.loads(out)["mcp_servers"]["latch"]["required"] is True,
+            "required must be a TOML boolean, not a string")
     _assert("tool_timeout_sec = 300" in out, "Codex gate needs room for backend calls")
     _assert('default_tools_approval_mode = "approve"' in out,
             "approval mode should be server-level")
@@ -33,6 +37,12 @@ def test_render_mcp_block_uses_codex_shape():
             "Codex install must select the generic Codex model backend")
     _assert('LATCH_GATE_BACKEND = "codex"' in out,
             "Codex install must select the Codex gate backend")
+    _assert('LATCH_ADAPTER = "codex"' in out,
+            "Codex MCP startup repair needs an explicit host identity")
+    _assert(
+        f'LATCH_WIRING_VERSION = "{ic.versioning.WIRING_VERSION}"' in out,
+        "managed Codex MCP config must carry the wiring version",
+    )
     print("PASS render_mcp_block_uses_codex_shape")
 
 
@@ -325,11 +335,31 @@ hooks = true
 [mcp_servers.claude-kb]
 command = "/PY"
 args = ["/srv.py"]
+required = true
 """, encoding="utf-8")
         ok, detail = ic.config_status(p, "/PY", "/srv.py")
         _assert(ok, f"legacy Codex config should remain supported: {detail}")
         _assert("legacy server name" in detail, detail)
         print("PASS config_status_accepts_legacy_server_name")
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_config_status_rejects_optional_legacy_server_name():
+    d = Path(tempfile.mkdtemp(prefix="latch-codex-config-"))
+    try:
+        p = d / "config.toml"
+        p.write_text("""[features]
+hooks = true
+
+[mcp_servers.claude-kb]
+command = "/PY"
+args = ["/srv.py"]
+""", encoding="utf-8")
+        ok, detail = ic.config_status(p, "/PY", "/srv.py")
+        _assert(not ok, "optional legacy MCP config must not report healthy")
+        _assert("missing or drifted" in detail, detail)
+        print("PASS config_status_rejects_optional_legacy_server_name")
     finally:
         shutil.rmtree(d, ignore_errors=True)
 
@@ -640,6 +670,7 @@ if __name__ == "__main__":
     test_merge_config_replaces_existing_server_tables()
     test_merge_config_preserves_foreign_tables_inside_managed_block()
     test_config_status_accepts_legacy_server_name()
+    test_config_status_rejects_optional_legacy_server_name()
     test_config_status_rejects_missing_disabled_or_deprecated_hooks_with_legacy_mcp()
     test_merge_config_idempotent()
     test_write_config_backs_up_existing()

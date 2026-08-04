@@ -34,12 +34,16 @@ sys.path.insert(0, str(SRC))
 import paths  # noqa: E402
 
 
-def _env(tmp_path: Path, kb_dir: Path) -> dict:
+def _env(tmp_path: Path, kb_dir: Path, *, force_legacy: bool = False) -> dict:
     env = os.environ.copy()
     env["LATCH_ADAPTER"] = "cursor"
     env["LATCH_PYTHON"] = sys.executable
     env["LATCH_KB_DIR"] = str(kb_dir)
     env["LATCH_MCP_LAUNCHER_LOG"] = str(tmp_path / "launcher.log")
+    if force_legacy:
+        env["LATCH_MCP_FORCE_LEGACY"] = "1"
+    else:
+        env.pop("LATCH_MCP_FORCE_LEGACY", None)
     return env
 
 
@@ -145,11 +149,14 @@ def _result(msg):
     return msg.get("result") or {}
 
 
-def _start_launcher(tmp_path: Path, kb_dir: Path):
+def _start_launcher(
+    tmp_path: Path, kb_dir: Path, *, force_legacy: bool = False
+):
     proc = subprocess.Popen(
         [str(PYTHONW), str(LAUNCHER)],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        cwd=str(tmp_path), env=_env(tmp_path, kb_dir),
+        cwd=str(tmp_path),
+        env=_env(tmp_path, kb_dir, force_legacy=force_legacy),
     )
     out = _Reader(proc.stdout)
     out.start()
@@ -246,3 +253,45 @@ def test_launcher_full_mcp_lifecycle_and_shared_daemon_survival(tmp_path):
                 proc.wait(timeout=10)
         if daemon_pid is not None:
             _terminate_pid(daemon_pid)
+
+
+def test_forced_legacy_repeatedly_initializes_without_windows_execve(tmp_path):
+    assert PYTHONW.is_file(), PYTHONW
+    kb_dir = paths.project_dir(str(tmp_path / "win-launcher-forced-legacy"))
+    assert kb_dir.is_relative_to(paths.validated_test_root() / "vaults")
+
+    for attempt in range(5):
+        proc = None
+        try:
+            proc, out = _start_launcher(
+                tmp_path,
+                kb_dir,
+                force_legacy=True,
+            )
+            _initialize(proc, out, request_id=attempt * 2 + 1)
+            _send(
+                proc,
+                {
+                    "jsonrpc": "2.0",
+                    "id": attempt * 2 + 2,
+                    "method": "tools/list",
+                },
+            )
+            names = {
+                tool.get("name")
+                for tool in _result(out.next_json()).get("tools", [])
+            }
+            assert "latch_recent" in names, names
+            assert _close_launcher(proc) == 0
+            proc = None
+        finally:
+            if proc is not None and proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=10)
+
+    assert not list(kb_dir.rglob("mcp-daemon.json"))
+    lifecycle = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in kb_dir.glob("mcp_lifecycle-*.log")
+    )
+    assert lifecycle.count('"reason": "forced_by_env"') >= 5
