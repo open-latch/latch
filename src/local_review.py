@@ -811,6 +811,30 @@ def _post_report(repo: Path, scope: ReviewScope, report: Path) -> None:
     else:
         endpoint = f"repos/{scope.repository}/issues/{scope.pr_number}/comments"
         method = "POST"
+    current_pr = json.loads(
+        _run(
+            [
+                "gh",
+                "pr",
+                "view",
+                str(scope.pr_number),
+                "--repo",
+                scope.repository,
+                "--json",
+                "headRefOid",
+            ],
+            cwd=repo,
+            environment=environment,
+        ).stdout
+    )
+    current_head = _sha(
+        str(current_pr.get("headRefOid") or ""), "current PR head"
+    )
+    if current_head != scope.head_sha:
+        raise ValueError(
+            f"PR #{scope.pr_number} advanced from {scope.head_sha[:12]} to "
+            f"{current_head[:12]}; local report was not posted"
+        )
     _run(
         ["gh", "api", "--method", method, endpoint, "--input", "-"],
         cwd=repo,

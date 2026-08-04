@@ -440,6 +440,8 @@ def test_post_report_paginates_and_updates_the_existing_marker(
                     ],
                 ]
             )
+        elif command[:3] == ["gh", "pr", "view"]:
+            output = json.dumps({"headRefOid": "b" * 40})
         else:
             output = "{}"
         return subprocess.CompletedProcess(command, 0, output, "")
@@ -454,3 +456,33 @@ def test_post_report_paginates_and_updates_the_existing_marker(
     assert "--slurp" in comments_call
     assert commands[-1][commands[-1].index("--method") + 1] == "PATCH"
     assert "repos/open-latch/latch/issues/comments/321" in commands[-1]
+
+
+def test_post_report_refuses_when_pr_head_advanced(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    report = tmp_path / "report.md"
+    report.write_text(f"{local_review.REPORT_MARKER}\nreport\n", encoding="utf-8")
+    commands: list[list[str]] = []
+
+    def fake_run(command, **_kwargs):
+        commands.append(command)
+        if command[-1] == "user":
+            output = json.dumps({"login": "reviewer"})
+        elif "comments?per_page=100" in command[-1]:
+            output = json.dumps([[]])
+        elif command[:3] == ["gh", "pr", "view"]:
+            output = json.dumps({"headRefOid": "c" * 40})
+        else:
+            raise AssertionError(f"unexpected write command: {command}")
+        return subprocess.CompletedProcess(command, 0, output, "")
+
+    monkeypatch.setattr(local_review, "_run", fake_run)
+    scope = local_review.ReviewScope(
+        "a" * 40, "b" * 40, "open-latch/latch", 73, "fixture"
+    )
+    with pytest.raises(ValueError, match="advanced.*local report was not posted"):
+        local_review._post_report(tmp_path, scope, report)
+
+    assert report.is_file()
+    assert not any("--method" in command for command in commands)

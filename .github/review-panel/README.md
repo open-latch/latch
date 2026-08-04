@@ -27,7 +27,9 @@ normal in-agent use does not depend on a persistent environment variable.
 
 With no scope argument, the runner attempts to detect the current branch's pull
 request. Add `--post-pr` to a PR review only when you want the consolidated
-report published as a sticky GitHub comment. Otherwise GitHub is read only.
+report published as a sticky GitHub comment. Immediately before posting, the
+runner verifies that the PR still points to the reviewed head SHA and refuses
+to replace the comment if the PR advanced. Otherwise GitHub is read only.
 
 Claude Code users can run `/latch-review`; Codex users can ask to “send PR 73
 to the Latch review panel.” Both host integrations call the same runner.
