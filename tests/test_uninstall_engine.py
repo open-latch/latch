@@ -96,6 +96,26 @@ def test_remove_commands_removes_existing_legacy_alias_exact_primary_body():
         restore()
 
 
+def test_remove_commands_recognizes_shell_quoted_review_command():
+    kb_home = "/tmp/Latch $cash $(noop) \"double\" `tick` apostrophe's 雪"
+    source_body = (
+        "bash <LATCH_REVIEW_POSIX_LITERAL> --pr 75\n"
+        "& <LATCH_REVIEW_POWERSHELL_LITERAL> --pr 75\n"
+    )
+    _src, dest, restore = _tmp_commands_env(
+        kb_home, {"latch-review.md": source_body}
+    )
+    try:
+        rendered = ie.render_command_template(source_body, kb_home=kb_home)
+        (dest / "latch-review.md").write_text(rendered, encoding="utf-8")
+        changes = ue.remove_commands(dry_run=False)
+        _assert(not (dest / "latch-review.md").exists(),
+                f"rendered review command should be removed: {changes}")
+        print("PASS remove_commands_recognizes_shell_quoted_review_command")
+    finally:
+        restore()
+
+
 def test_strip_cursor_project_removes_latch_owned_wiring_only():
     root = Path(tempfile.mkdtemp(prefix="latch-uninstall-cursor-"))
     try:
@@ -223,6 +243,7 @@ if __name__ == "__main__":
     test_remove_commands_removes_exact_source_body_without_path_marker()
     test_remove_commands_preserves_user_modified_same_name_command()
     test_remove_commands_removes_existing_legacy_alias_exact_primary_body()
+    test_remove_commands_recognizes_shell_quoted_review_command()
     test_strip_cursor_project_removes_latch_owned_wiring_only()
     test_cursor_only_main_never_calls_global_uninstall()
     print("\nAll uninstall_engine command tests pass.")

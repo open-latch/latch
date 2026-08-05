@@ -304,7 +304,9 @@ the artifact/output lane when user-facing files change. It uses the CLIs'
 subscription logins, refuses provider auth or endpoint overrides, and saves
 its consolidated report inside the target repository's local Git metadata,
 where it cannot be committed. Nothing is posted to GitHub unless you add
-`--post-pr`. If multiple provider CLIs are installed, set an absolute
+`--post-pr`. The GitHub CLI is used only for `--pr`, automatic PR detection,
+and posting; an explicit `--range` or `--commit` review without posting needs
+only Git. If multiple provider CLIs are installed, set an absolute
 `CLAUDE_BIN` or `CODEX_BIN`; the runner pins that executable for the whole run
 and rejects a Codex binary whose offline bundled catalog lacks the configured
 model or effort. The CLIs cannot inspect

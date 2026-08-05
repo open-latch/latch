@@ -231,8 +231,8 @@ def _resolved_source_command_body(name: str) -> str | None:
     if not src.is_file():
         return None
     try:
-        return src.read_text(encoding="utf-8").replace(
-            ie.COMMAND_PLACEHOLDER, ie._resolved_kb_home()
+        return ie.render_command_template(
+            src.read_text(encoding="utf-8"), kb_home=KB_HOME
         )
     except OSError:
         return None
@@ -257,7 +257,7 @@ def remove_commands(dry_run: bool) -> list[str]:
         # so an exact match against the resolved source body is also latch-owned.
         body = ie._read_text(installed)
         source_body = _resolved_source_command_body(name)
-        if body != source_body and not ie._is_latch_command_body(body):
+        if body != source_body and not ie.is_latch_command_body(body):
             changes.append(f"skipped {installed.name} (looks user-owned, not latch-installed)")
             continue
         if dry_run:

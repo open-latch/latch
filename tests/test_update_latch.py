@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 import sqlite3
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -11,6 +13,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
 import update_latch  # noqa: E402
+import install_engine  # noqa: E402
 
 
 def _git(path: Path, *args: str) -> str:
@@ -114,6 +117,35 @@ def test_command_refresh_preserves_same_named_user_file(tmp_path, monkeypatch):
     assert update_latch._refresh_claude_commands_if_installed()
     assert "my unrelated command" == user_owned.read_text(encoding="utf-8").strip()
     assert "<KB_HOME>" not in managed.read_text(encoding="utf-8")
+
+
+def test_command_refresh_shell_quotes_review_path(tmp_path, monkeypatch):
+    if os.name == "nt":
+        pytest.skip("POSIX path-metacharacter fixture")
+    repo = tmp_path / 'Latch $cash $(touch SHOULD_NOT_EXIST) "double" `tick` apostrophe\'s 雪'
+    source_commands = repo / "commands"
+    source_commands.mkdir(parents=True)
+    source = source_commands / "latch-review.md"
+    source.write_text(
+        "bash <LATCH_REVIEW_POSIX_LITERAL> --pr 75\n"
+        "& <LATCH_REVIEW_POWERSHELL_LITERAL> --pr 75\n",
+        encoding="utf-8",
+    )
+    installed_commands = tmp_path / "installed"
+    installed_commands.mkdir()
+    managed = installed_commands / "latch-review.md"
+    managed.write_text("bash /old/bin/latch-review --pr 75\n", encoding="utf-8")
+    monkeypatch.setattr(update_latch, "ROOT", repo)
+    monkeypatch.setenv("CLAUDE_COMMANDS_DIR", str(installed_commands))
+
+    assert update_latch._refresh_claude_commands_if_installed()
+    body = managed.read_text(encoding="utf-8")
+    assert not install_engine.unresolved_command_placeholders(body)
+    normalized = str(repo).replace("\\", "/")
+    assert f"bash {shlex.quote(normalized + '/bin/latch-review')} --pr 75" in body
+    assert (
+        "& '" + (normalized + "/bin/latch-review.ps1").replace("'", "''") + "' --pr 75"
+    ) in body
 
 
 def test_update_refuses_kb_newer_than_target_before_backup_or_source_change(tmp_path, monkeypatch):

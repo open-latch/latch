@@ -2,12 +2,16 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import os
 from pathlib import Path
+import signal
 import stat
 import subprocess
 import sys
+import threading
+import time
 
 import pytest
 
@@ -46,7 +50,9 @@ def _git(repo: Path, *args: str) -> str:
     ).stdout.strip()
 
 
-def _repository(tmp_path: Path) -> tuple[Path, str, str]:
+def _repository(
+    tmp_path: Path, changed_path: str = "source.py"
+) -> tuple[Path, str, str]:
     repo = tmp_path / "repo"
     repo.mkdir()
     _git(repo, "init")
@@ -56,8 +62,10 @@ def _repository(tmp_path: Path) -> tuple[Path, str, str]:
     _git(repo, "add", "base.txt")
     _git(repo, "commit", "-m", "base")
     base = _git(repo, "rev-parse", "HEAD")
-    (repo / "source.py").write_text("answer = 42\n", encoding="utf-8")
-    _git(repo, "add", "source.py")
+    changed = repo / changed_path
+    changed.parent.mkdir(parents=True, exist_ok=True)
+    changed.write_text("answer = 42\n", encoding="utf-8")
+    _git(repo, "add", changed_path)
     _git(repo, "commit", "-m", "head")
     return repo, base, _git(repo, "rev-parse", "HEAD")
 
@@ -81,10 +89,37 @@ def _provider_runtime(
     )
 
 
-def test_preflight_rejects_api_key_before_any_command(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def _write_fake_chatgpt_auth(codex_home: Path) -> None:
+    codex_home.mkdir()
+    token_body = base64.urlsafe_b64encode(
+        json.dumps({"exp": time.time() + 7200}).encode("utf-8")
+    ).decode("ascii").rstrip("=")
+    (codex_home / "auth.json").write_text(
+        json.dumps(
+            {
+                "OPENAI_API_KEY": None,
+                "auth_mode": "chatgpt",
+                "last_refresh": "2026-08-05T00:00:00Z",
+                "tokens": {
+                    "access_token": f"e30.{token_body}.fixture",
+                    "account_id": "fixture-account",
+                    "id_token": "fixture-id-token",
+                    "refresh_token": "must-not-be-copied",
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+@pytest.mark.parametrize("variable", local_review.BLOCKED_PROVIDER_ENV_VARS)
+def test_preflight_rejects_provider_override_before_any_command(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, variable: str
 ):
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "must-not-be-used")
+    for name in local_review.BLOCKED_PROVIDER_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv(variable, "must-not-be-used")
     called = False
 
     def forbidden(*_args, **_kwargs):
@@ -93,24 +128,9 @@ def test_preflight_rejects_api_key_before_any_command(
         raise AssertionError("preflight must stop before a subprocess")
 
     monkeypatch.setattr(local_review, "_run", forbidden)
-    with pytest.raises(ValueError, match="ANTHROPIC_API_KEY"):
+    with pytest.raises(ValueError, match=variable):
         local_review.preflight_auth(tmp_path)
     assert called is False
-
-
-def test_preflight_rejects_provider_endpoint_override_before_any_command(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-):
-    monkeypatch.setenv("OPENAI_BASE_URL", "https://example.invalid")
-    monkeypatch.setattr(
-        local_review,
-        "_run",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("preflight must stop before a subprocess")
-        ),
-    )
-    with pytest.raises(ValueError, match="OPENAI_BASE_URL"):
-        local_review.preflight_auth(tmp_path)
 
 
 def test_preflight_accepts_subscription_logins_and_scrubs_keys(
@@ -120,15 +140,17 @@ def test_preflight_accepts_subscription_logins_and_scrubs_keys(
         monkeypatch.delenv(name, raising=False)
     tools = {
         name: _stub_executable(tmp_path / name)
-        for name in ("claude", "codex", "gh", "git")
+        for name in ("claude", "codex", "git")
     }
     monkeypatch.setenv("CLAUDE_BIN", str(tools["claude"]))
     monkeypatch.setenv("CODEX_BIN", str(tools["codex"]))
-    monkeypatch.setattr(
-        local_review.shutil,
-        "which",
-        lambda name: str(tools[name]) if name in ("gh", "git") else None,
-    )
+    executable_probes: list[str] = []
+
+    def fake_which(name):
+        executable_probes.append(name)
+        return str(tools[name]) if name == "git" else None
+
+    monkeypatch.setattr(local_review.shutil, "which", fake_which)
     environments: list[dict[str, str]] = []
 
     def fake_run(command, *, environment=None, **_kwargs):
@@ -171,7 +193,7 @@ def test_preflight_accepts_subscription_logins_and_scrubs_keys(
         return subprocess.CompletedProcess(command, 0, stdout, "")
 
     monkeypatch.setattr(local_review, "_run", fake_run)
-    runtime = local_review.preflight_auth(tmp_path)
+    runtime = local_review.preflight_auth(tmp_path, require_gh=False)
     assert runtime.authentication == {
         "claude": "claude.ai/max",
         "codex": "ChatGPT",
@@ -180,6 +202,7 @@ def test_preflight_accepts_subscription_logins_and_scrubs_keys(
     assert runtime.claude_version == "2.1.220 (Claude Code)"
     assert runtime.codex_executable == str(tools["codex"].resolve())
     assert runtime.codex_version == "codex-cli 0.146.0-alpha.9.2"
+    assert executable_probes == ["git"]
     assert all(
         name not in environment
         for environment in environments
@@ -188,6 +211,94 @@ def test_preflight_accepts_subscription_logins_and_scrubs_keys(
             *local_review.PROVIDER_EXECUTABLE_ENV_VARS.values(),
         )
     )
+
+
+def test_isolated_codex_runtime_uses_access_only_chatgpt_auth(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    source_home = tmp_path / "source-codex-home"
+    _write_fake_chatgpt_auth(source_home)
+    monkeypatch.setenv("CODEX_HOME", str(source_home))
+    monkeypatch.setenv("CODEX_ACCESS_TOKEN", "ambient-token-must-not-leak")
+    executable = _stub_executable(tmp_path / "codex")
+    runtime = _provider_runtime(tmp_path / "claude", executable)
+    observed_environment: dict[str, str] = {}
+
+    def fake_run(command, *, environment=None, **_kwargs):
+        assert command == [str(executable), "login", "status"]
+        observed_environment.update(environment)
+        return subprocess.CompletedProcess(
+            command, 0, "Logged in using ChatGPT\n", ""
+        )
+
+    monkeypatch.setattr(local_review, "_run", fake_run)
+    provider_root = tmp_path / "provider-runtime"
+    environment = local_review._isolated_codex_environment(
+        provider_root, runtime, tmp_path
+    )
+    isolated_auth = Path(environment["CODEX_HOME"]) / "auth.json"
+    payload = json.loads(isolated_auth.read_text(encoding="utf-8"))
+    assert payload["auth_mode"] == "chatgpt"
+    assert payload["last_refresh"].endswith("Z")
+    assert payload["tokens"]["access_token"]
+    assert payload["tokens"]["account_id"] == "fixture-account"
+    assert payload["tokens"]["id_token"] == "fixture-id-token"
+    assert payload["tokens"]["refresh_token"] == ""
+    assert stat.S_IMODE(isolated_auth.stat().st_mode) == 0o600
+    assert environment == observed_environment
+    assert environment["HOME"].startswith(str(provider_root))
+    assert environment["CODEX_HOME"].startswith(str(provider_root))
+    assert "CODEX_ACCESS_TOKEN" not in environment
+
+
+@pytest.mark.parametrize("missing", ["access_token", "account_id", "id_token"])
+def test_isolated_codex_runtime_rejects_incomplete_token_bundle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, missing: str
+):
+    source_home = tmp_path / "source-codex-home"
+    _write_fake_chatgpt_auth(source_home)
+    source_auth = source_home / "auth.json"
+    payload = json.loads(source_auth.read_text(encoding="utf-8"))
+    del payload["tokens"][missing]
+    source_auth.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+    monkeypatch.setenv("CODEX_HOME", str(source_home))
+    runtime = _provider_runtime(tmp_path / "claude", tmp_path / "codex")
+
+    with pytest.raises(ValueError, match="readable ChatGPT access token"):
+        local_review._isolated_codex_environment(
+            tmp_path / "provider-runtime", runtime, tmp_path
+        )
+
+
+def test_isolated_codex_runtime_rechecks_token_lifetime_after_status(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    source_home = tmp_path / "source-codex-home"
+    _write_fake_chatgpt_auth(source_home)
+    source_auth = source_home / "auth.json"
+    payload = json.loads(source_auth.read_text(encoding="utf-8"))
+    token_body = base64.urlsafe_b64encode(
+        json.dumps({"exp": 3101}).encode("utf-8")
+    ).decode("ascii").rstrip("=")
+    payload["tokens"]["access_token"] = f"e30.{token_body}.fixture"
+    source_auth.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+    monkeypatch.setenv("CODEX_HOME", str(source_home))
+    executable = _stub_executable(tmp_path / "codex")
+    runtime = _provider_runtime(tmp_path / "claude", executable)
+    clock = iter((1000, 1002))
+    monkeypatch.setattr(local_review.time, "time", lambda: next(clock))
+    monkeypatch.setattr(
+        local_review,
+        "_run",
+        lambda command, **_kwargs: subprocess.CompletedProcess(
+            command, 0, "Logged in using ChatGPT\n", ""
+        ),
+    )
+
+    with pytest.raises(ValueError, match="cannot cover the full review window"):
+        local_review._isolated_codex_environment(
+            tmp_path / "provider-runtime", runtime, tmp_path
+        )
 
 
 def test_provider_executable_override_must_be_absolute_and_executable(
@@ -295,6 +406,49 @@ def test_incompatible_codex_stops_before_scope_or_authentication(
     assert commands[-1][1:] == ["debug", "models", "--bundled"]
 
 
+@pytest.mark.parametrize(
+    ("args", "expected"),
+    [
+        (argparse.Namespace(pr=75, range=None, commit=None, post_pr=False), True),
+        (argparse.Namespace(pr=None, range=None, commit=None, post_pr=False), True),
+        (
+            argparse.Namespace(
+                pr=None, range="main...HEAD", commit=None, post_pr=False
+            ),
+            False,
+        ),
+        (
+            argparse.Namespace(pr=None, range=None, commit="HEAD", post_pr=False),
+            False,
+        ),
+        (
+            argparse.Namespace(
+                pr=None, range="main...HEAD", commit=None, post_pr=True
+            ),
+            True,
+        ),
+    ],
+)
+def test_github_cli_requirement_is_scoped_to_github_operations(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    args: argparse.Namespace,
+    expected: bool,
+):
+    args.repo = ""
+    observed: list[bool] = []
+
+    def capture_preflight(_repo, *, require_gh):
+        observed.append(require_gh)
+        raise RuntimeError("preflight captured")
+
+    monkeypatch.setattr(local_review, "repository_root", lambda: tmp_path)
+    monkeypatch.setattr(local_review, "preflight_auth", capture_preflight)
+    with pytest.raises(RuntimeError, match="preflight captured"):
+        local_review.run_review(args)
+    assert observed == [expected]
+
+
 def test_range_and_commit_scope_are_immutable(tmp_path: Path):
     repo, base, head = _repository(tmp_path)
     range_scope = local_review._resolve_range(repo, f"{base}...{head}", "")
@@ -319,12 +473,15 @@ def test_root_commit_uses_the_empty_tree(tmp_path: Path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     git_dir = local_review._prepare_object_store(repo, workspace, scope)
-    assert local_review._artifact_review_needed(
+    changed = local_review._bare_git(
         workspace,
         git_dir,
-        scope,
-        {"user_facing_paths": ["README.md"]},
-    )
+        "diff",
+        "--name-only",
+        scope.base_sha,
+        scope.head_sha,
+    ).stdout.splitlines()
+    assert changed == ["README.md"]
 
 
 def test_commit_scope_fails_closed_when_shallow_clone_lacks_parent(tmp_path: Path):
@@ -424,7 +581,7 @@ def test_pr_scope_uses_fresh_full_ancestry_for_shallow_fork(
     assert changed == ["feature.txt"]
 
 
-def test_provider_commands_pin_models_and_remove_agent_tools(tmp_path: Path):
+def test_provider_commands_pin_models_and_isolate_provider_tools(tmp_path: Path):
     raw = tmp_path / "raw"
     raw.mkdir()
     prompt = tmp_path / "prompt.md"
@@ -435,12 +592,15 @@ def test_provider_commands_pin_models_and_remove_agent_tools(tmp_path: Path):
     runtime = _provider_runtime("/trusted/claude", "/trusted/codex")
     claude_command = local_review._provider_command(claude, tmp_path, runtime)
     assert claude_command[0] == runtime.claude_executable
+    assert claude_command.count("--model") == 1
+    assert claude_command.count("--effort") == 1
     assert local_review.CLAUDE_MODEL in claude_command
     assert claude_command[claude_command.index("--effort") + 1] == "high"
     assert "--safe-mode" in claude_command
-    assert "--tools" in claude_command
+    assert claude_command.count("--tools") == 1
     assert claude_command[claude_command.index("--tools") + 1] == ""
-    assert "*" in claude_command
+    assert "--disallowedTools" not in claude_command
+    assert "--max-turns" not in claude_command
     assert claude_command.count("--mcp-config") == 1
     mcp_config = claude_command[claude_command.index("--mcp-config") + 1]
     assert json.loads(mcp_config) == {"mcpServers": {}}
@@ -455,7 +615,19 @@ def test_provider_commands_pin_models_and_remove_agent_tools(tmp_path: Path):
     codex_command = local_review._provider_command(codex, tmp_path, runtime)
     assert codex_command[0] == runtime.codex_executable
     assert local_review.CODEX_MODEL in codex_command
+    assert codex_command.count("--model") == 1
     assert 'model_reasoning_effort="high"' in codex_command
+    assert 'web_search="disabled"' in codex_command
+    assert "tools.web_search=false" in codex_command
+    assert "tools.view_image=false" in codex_command
+    assert "skills.bundled.enabled=false" in codex_command
+    assert codex_command.count('model_reasoning_effort="high"') == 1
+    assert codex_command.count('web_search="disabled"') == 1
+    assert codex_command.count("tools.web_search=false") == 1
+    assert codex_command.count("tools.view_image=false") == 1
+    assert codex_command.count("skills.bundled.enabled=false") == 1
+    assert "--search" not in codex_command
+    assert "--output-last-message" not in codex_command
     assert "--ignore-user-config" in codex_command
     assert "--skip-git-repo-check" in codex_command
     assert codex_command.count("--output-schema") == 1
@@ -498,22 +670,189 @@ def test_provider_output_is_stopped_at_the_live_capture_limit(
         "claude", "security-abuse", prompt, raw / "result.json", raw
     )
     runtime = _provider_runtime(claude.resolve(), fake_bin / "unused-codex")
-    result = local_review._invoke_lane(lane, tmp_path, runtime)
+    result = local_review._invoke_lane(
+        lane, tmp_path, runtime, local_review.sanitized_environment()
+    )
     assert result.success is False
     assert "stdout exceeded" in result.detail
     assert (raw / "stdout.txt").stat().st_size == 128
 
 
-def test_isolated_git_environment_ignores_extensible_config():
+def test_control_command_output_is_stopped_at_the_live_capture_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    command = tmp_path / "large-output"
+    command.write_text(
+        "#!/usr/bin/env python3\nprint('x' * 4096)\n",
+        encoding="utf-8",
+    )
+    command.chmod(command.stat().st_mode | stat.S_IXUSR)
+    monkeypatch.setattr(local_review, "MAX_CONTROL_OUTPUT_BYTES", 128)
+    with pytest.raises(RuntimeError, match="command stdout exceeded"):
+        local_review._run([str(command)], cwd=tmp_path)
+
+
+def test_control_timeout_includes_a_child_that_never_reads_stdin(tmp_path: Path):
+    command = tmp_path / "ignore-stdin"
+    command.write_text(
+        "#!/usr/bin/env python3\nimport time\ntime.sleep(30)\n",
+        encoding="utf-8",
+    )
+    command.chmod(command.stat().st_mode | stat.S_IXUSR)
+    started = time.monotonic()
+    with pytest.raises(RuntimeError, match="exceeded the 0.2s timeout"):
+        local_review._run(
+            [str(command)],
+            cwd=tmp_path,
+            input_text="x" * (2 * 1024 * 1024),
+            timeout=0.2,
+        )
+    assert time.monotonic() - started < 3
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process-group regression")
+def test_keyboard_interrupt_terminates_the_bounded_child_group(tmp_path: Path):
+    pid_path = tmp_path / "child.pid"
+    command = tmp_path / "long-running"
+    command.write_text(
+        "#!/usr/bin/env python3\n"
+        "import os, pathlib, sys, time\n"
+        "pathlib.Path(sys.argv[1]).write_text(str(os.getpid()))\n"
+        "time.sleep(30)\n",
+        encoding="utf-8",
+    )
+    command.chmod(command.stat().st_mode | stat.S_IXUSR)
+    timer = threading.Timer(0.25, lambda: os.kill(os.getpid(), signal.SIGINT))
+    timer.start()
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            local_review._run([str(command), str(pid_path)], cwd=tmp_path, timeout=30)
+    finally:
+        timer.cancel()
+    pid = int(pid_path.read_text(encoding="utf-8"))
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process-group regression")
+def test_provider_cancellation_terminates_registered_and_late_processes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    executables = {}
+    for name in ("early-provider", "late-provider"):
+        executable = tmp_path / name
+        executable.write_text(
+            "#!/usr/bin/env python3\nimport time\ntime.sleep(30)\n",
+            encoding="utf-8",
+        )
+        executable.chmod(executable.stat().st_mode | stat.S_IXUSR)
+        executables[name] = executable
+
+    real_register = local_review._register_process
+    early_registered = threading.Event()
+    late_before_register = threading.Event()
+    release_late = threading.Event()
+    process_ids: dict[str, int] = {}
+
+    def controlled_register(process, cancellation_event=None):
+        name = Path(process.args[0]).name
+        process_ids[name] = process.pid
+        if name == "late-provider":
+            late_before_register.set()
+            if not release_late.wait(timeout=5):
+                raise RuntimeError("test did not release late provider")
+        accepted = real_register(process, cancellation_event)
+        if name == "early-provider":
+            early_registered.set()
+        return accepted
+
+    monkeypatch.setattr(local_review, "_register_process", controlled_register)
+    local_review._PROVIDER_CANCELLATION.clear()
+    outcomes: dict[str, object] = {}
+
+    def run_provider(name: str) -> None:
+        try:
+            outcomes[name] = local_review._execute_bounded(
+                [str(executables[name])],
+                cwd=tmp_path,
+                environment=local_review.sanitized_environment(),
+                timeout=30,
+                output_limit=1024,
+                stream_label="provider",
+                cancellation_event=local_review._PROVIDER_CANCELLATION,
+            )
+        except BaseException as exc:
+            outcomes[name] = exc
+
+    early_thread = threading.Thread(target=run_provider, args=("early-provider",))
+    late_thread = threading.Thread(target=run_provider, args=("late-provider",))
+    try:
+        early_thread.start()
+        assert early_registered.wait(timeout=5)
+        late_thread.start()
+        assert late_before_register.wait(timeout=5)
+        local_review._cancel_provider_executions()
+        release_late.set()
+        early_thread.join(timeout=5)
+        late_thread.join(timeout=5)
+        assert not early_thread.is_alive()
+        assert not late_thread.is_alive()
+        assert isinstance(outcomes["early-provider"], local_review.BoundedExecution)
+        assert isinstance(outcomes["late-provider"], RuntimeError)
+        assert "cancelled" in str(outcomes["late-provider"])
+        for pid in process_ids.values():
+            with pytest.raises(ProcessLookupError):
+                os.kill(pid, 0)
+    finally:
+        release_late.set()
+        local_review._cancel_provider_executions()
+        if early_thread.ident is not None:
+            early_thread.join(timeout=5)
+        if late_thread.ident is not None:
+            late_thread.join(timeout=5)
+        local_review._PROVIDER_CANCELLATION.clear()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX descriptor inheritance")
+def test_descendant_cannot_hold_control_streams_open_forever(tmp_path: Path):
+    child_pid_path = tmp_path / "descendant.pid"
+    command = tmp_path / "inherited-stream"
+    command.write_text(
+        "#!/usr/bin/env python3\n"
+        "import os, pathlib, sys, time\n"
+        "child = os.fork()\n"
+        "if child == 0:\n"
+        "    pathlib.Path(sys.argv[1]).write_text(str(os.getpid()))\n"
+        "    time.sleep(30)\n"
+        "    raise SystemExit(0)\n"
+        "raise SystemExit(0)\n",
+        encoding="utf-8",
+    )
+    command.chmod(command.stat().st_mode | stat.S_IXUSR)
+    started = time.monotonic()
+    with pytest.raises(RuntimeError, match="descendants kept output streams open"):
+        local_review._run([str(command), str(child_pid_path)], cwd=tmp_path)
+    assert time.monotonic() - started < 8
+    child_pid = int(child_pid_path.read_text(encoding="utf-8"))
+    with pytest.raises(ProcessLookupError):
+        os.kill(child_pid, 0)
+
+
+def test_isolated_git_environment_preserves_required_os_state_only(monkeypatch):
+    monkeypatch.setenv("SystemRoot", "C:/Windows")
+    monkeypatch.setenv("GIT_OBJECT_DIRECTORY", "/attacker/objects")
     environment = local_review._isolated_git_environment()
     assert environment["GIT_CONFIG_GLOBAL"] == os.devnull
     assert environment["GIT_CONFIG_NOSYSTEM"] == "1"
     assert environment["GIT_PAGER"] == "cat"
+    assert environment["SystemRoot"] == "C:/Windows"
+    assert "GIT_OBJECT_DIRECTORY" not in environment
 
 
 def _fake_provider(path: Path, provider: str) -> None:
     body = f"""#!/usr/bin/env python3
 import json
+import os
 from pathlib import Path
 import re
 import sys
@@ -554,8 +893,12 @@ if {provider!r} == "claude":
         raise SystemExit("unexpected Claude model")
     if args[args.index("--effort") + 1] != "high":
         raise SystemExit("unexpected Claude effort")
-    if args[args.index("--tools") + 1] != "" or args[args.index("--disallowedTools") + 1] != "*":
+    if args.count("--tools") != 1 or args[args.index("--tools") + 1] != "":
         raise SystemExit("Claude tools were not disabled")
+    if "--disallowedTools" in args:
+        raise SystemExit("Claude StructuredOutput must not be denied")
+    if "--max-turns" in args:
+        raise SystemExit("Claude StructuredOutput must not have a one-turn ceiling")
 else:
     if args.count("--output-schema") != 1:
         raise SystemExit("Codex must receive exactly one output schema")
@@ -581,10 +924,25 @@ else:
         for token in schema_canary["codex"]["unsupported_pattern_tokens"]
     ):
         raise SystemExit(schema_canary["codex"]["stderr"])
-    if args[args.index("--model") + 1] != "gpt-5.6-sol":
+    isolated_auth = json.loads(
+        (Path(os.environ["CODEX_HOME"]) / "auth.json").read_text(encoding="utf-8")
+    )
+    if not isolated_auth.get("last_refresh"):
+        raise SystemExit("Codex token metadata was incomplete")
+    if isolated_auth.get("tokens", {{}}).get("refresh_token"):
+        raise SystemExit("Codex reusable refresh credentials were copied")
+    if args.count("--model") != 1 or args[args.index("--model") + 1] != "gpt-5.6-sol":
         raise SystemExit("unexpected Codex model")
-    if 'model_reasoning_effort="high"' not in args:
+    if args.count('model_reasoning_effort="high"') != 1:
         raise SystemExit("unexpected Codex effort")
+    if args.count('web_search="disabled"') != 1 or args.count("tools.web_search=false") != 1:
+        raise SystemExit("Codex web search was not explicitly disabled")
+    if args.count("tools.view_image=false") != 1:
+        raise SystemExit("Codex image tools were not explicitly disabled")
+    if args.count("skills.bundled.enabled=false") != 1 or "skill_search" not in args:
+        raise SystemExit("Codex skills were not isolated")
+    if "--search" in args:
+        raise SystemExit("Codex web search was enabled")
 
 prompt = sys.stdin.read()
 def field(name):
@@ -616,8 +974,9 @@ receipt = {{
 if {provider!r} == "claude":
     print(json.dumps({{"structured_output": receipt}}))
 else:
-    output = Path(sys.argv[sys.argv.index("--output-last-message") + 1])
-    output.write_text(json.dumps(receipt), encoding="utf-8")
+    if "--output-last-message" in args:
+        raise SystemExit("Codex result output must stay on bounded stdout")
+    print(json.dumps(receipt))
 """
     path.write_text(body, encoding="utf-8")
     path.chmod(path.stat().st_mode | stat.S_IXUSR)
@@ -653,19 +1012,42 @@ def test_fake_providers_reject_the_live_canary_schema_failures(
     lane = local_review.Lane(provider, "fixture", prompt, raw / "result.json", raw)
     runtime = _provider_runtime(fake, fake)
 
-    result = local_review._invoke_lane(lane, tmp_path, runtime)
+    result = local_review._invoke_lane(
+        lane, tmp_path, runtime, local_review.sanitized_environment()
+    )
     assert result.success is False
     assert expected in result.detail
 
 
-@pytest.mark.parametrize("post_failure", [False, True])
+@pytest.mark.parametrize(
+    (
+        "changed_path",
+        "post_failure",
+        "force_review_failure",
+        "expected_review_failure",
+        "expected_exit",
+        "expected_lanes",
+    ),
+    [
+        ("source.py", False, False, False, 0, 5),
+        ("source.py", True, False, False, 3, 5),
+        ("source.py", True, True, True, 3, 5),
+        ("commands/latch-review.md", False, False, False, 0, 6),
+        ("src/seed.py", False, False, True, 1, 6),
+    ],
+)
 def test_end_to_end_local_panel_with_fake_subscription_clis(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    changed_path: str,
     post_failure: bool,
+    force_review_failure: bool,
+    expected_review_failure: bool,
+    expected_exit: int,
+    expected_lanes: int,
 ):
-    repo, base, head = _repository(tmp_path)
+    repo, base, head = _repository(tmp_path, changed_path)
     fake_bin = tmp_path / "fake-bin"
     fake_bin.mkdir()
     _fake_provider(fake_bin / "claude", "claude")
@@ -673,13 +1055,49 @@ def test_end_to_end_local_panel_with_fake_subscription_clis(
     monkeypatch.setenv("PATH", f"{fake_bin}{os.pathsep}{os.environ['PATH']}")
     monkeypatch.setenv("CLAUDE_BIN", str((fake_bin / "claude").resolve()))
     monkeypatch.setenv("CODEX_BIN", str((fake_bin / "codex").resolve()))
+    codex_home = tmp_path / "codex-home"
+    _write_fake_chatgpt_auth(codex_home)
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
     for name in local_review.BLOCKED_PROVIDER_ENV_VARS:
         monkeypatch.delenv(name, raising=False)
+    launch_order: list[str] = []
+    real_build_lanes = local_review._build_lanes
+    real_isolated_codex_environment = local_review._isolated_codex_environment
+
+    def build_lanes_then_record(*build_args, **build_kwargs):
+        result = real_build_lanes(*build_args, **build_kwargs)
+        launch_order.append("evidence_ready")
+        return result
+
+    def isolate_codex_then_record(*isolation_args, **isolation_kwargs):
+        launch_order.append("codex_auth_checked")
+        return real_isolated_codex_environment(*isolation_args, **isolation_kwargs)
+
+    monkeypatch.setattr(local_review, "_build_lanes", build_lanes_then_record)
+    monkeypatch.setattr(
+        local_review,
+        "_isolated_codex_environment",
+        isolate_codex_then_record,
+    )
     if post_failure:
         def fail_post(*_args, **_kwargs):
             raise RuntimeError("posting unavailable")
 
         monkeypatch.setattr(local_review, "_post_report", fail_post)
+    if force_review_failure:
+        real_aggregate = local_review._aggregate
+
+        def block_after_aggregate(*aggregate_args, **aggregate_kwargs):
+            value = real_aggregate(*aggregate_args, **aggregate_kwargs)
+            value["should_fail"] = True
+            output_dir = aggregate_args[-1]
+            (output_dir / "summary.json").write_text(
+                json.dumps(value, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            return value
+
+        monkeypatch.setattr(local_review, "_aggregate", block_after_aggregate)
     monkeypatch.chdir(repo)
     args = argparse.Namespace(
         pr=None,
@@ -688,7 +1106,8 @@ def test_end_to_end_local_panel_with_fake_subscription_clis(
         repo="",
         post_pr=post_failure,
     )
-    assert local_review.run_review(args) == (2 if post_failure else 0)
+    assert local_review.run_review(args) == expected_exit
+    assert launch_order == ["evidence_ready", "codex_auth_checked"]
     review_root = Path(_git(repo, "rev-parse", "--absolute-git-dir"))
     review_root = review_root / "latch" / "reviews"
     runs = list(review_root.iterdir())
@@ -698,8 +1117,8 @@ def test_end_to_end_local_panel_with_fake_subscription_clis(
         encoding="utf-8"
     )
     summary = json.loads((output / "summary.json").read_text(encoding="utf-8"))
-    assert summary["completed_lanes"] == 5
-    assert summary["should_fail"] is False
+    assert summary["completed_lanes"] == expected_lanes
+    assert summary["should_fail"] is expected_review_failure
     metadata = json.loads((output / "metadata.json").read_text(encoding="utf-8"))
     assert metadata["models"]["claude"] == {
         "model": "claude-opus-5",
@@ -727,10 +1146,16 @@ def test_end_to_end_local_panel_with_fake_subscription_clis(
     assert metadata["post_error"] == (
         "posting unavailable" if post_failure else None
     )
+    assert metadata["review_should_fail"] is expected_review_failure
+    assert metadata["review_exit_code"] == (1 if expected_review_failure else 0)
+    assert metadata["process_exit_code"] == expected_exit
+    assert metadata["runtime_evidence_required"] == (
+        ["seed-report"] if changed_path == "src/seed.py" else []
+    )
     captured = capsys.readouterr()
     assert "# Latch review panel" in captured.out
     assert "Account-level usage credits" in captured.err
-    assert "with 5 parallel lane(s)" in captured.err
+    assert f"with {expected_lanes} parallel lane(s)" in captured.err
     assert "Local review saved to" in captured.err
     if post_failure:
         assert "PR posting failed: posting unavailable" in captured.err

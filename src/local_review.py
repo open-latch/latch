@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -11,17 +13,18 @@ import os
 from pathlib import Path
 import re
 import secrets
+import signal
 import shutil
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 from typing import Any
 
 
 LATCH_HOME = Path(__file__).resolve().parent.parent
 PANEL_SCRIPT = LATCH_HOME / ".github" / "scripts" / "review_panel.py"
-POLICY_PATH = LATCH_HOME / ".github" / "review-panel" / "policy.json"
 SCHEMA_PATH = LATCH_HOME / ".github" / "review-panel" / "review.schema.json"
 REPORT_MARKER = "<!-- ai-review-panel-report -->"
 API_KEY_ENV_VARS = ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "CODEX_API_KEY")
@@ -33,6 +36,7 @@ PROVIDER_OVERRIDE_ENV_VARS = (
     "CLAUDE_CODE_USE_BEDROCK",
     "CLAUDE_CODE_USE_VERTEX",
     "CLAUDE_CODE_USE_FOUNDRY",
+    "CODEX_ACCESS_TOKEN",
     "OPENAI_BASE_URL",
     "OPENAI_API_BASE",
     "AZURE_OPENAI_API_KEY",
@@ -43,6 +47,13 @@ PROVIDER_EXECUTABLE_ENV_VARS = {
     "claude": "CLAUDE_BIN",
     "codex": "CODEX_BIN",
 }
+PROVIDER_ENV_PREFIXES = (
+    "ANTHROPIC_",
+    "AZURE_OPENAI_",
+    "CLAUDE_CODE_",
+    "CODEX_",
+    "OPENAI_",
+)
 CLAUDE_MODEL = "claude-opus-5"
 CLAUDE_EFFORT = "high"
 CODEX_MODEL = "gpt-5.6-sol"
@@ -63,6 +74,7 @@ CODEX_DISABLED_FEATURES = (
     "plugins",
     "shell_tool",
     "skill_mcp_dependency_install",
+    "skill_search",
     "tool_call_mcp_elicitation",
     "tool_suggest",
     "unified_exec",
@@ -72,9 +84,15 @@ SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 REPOSITORY_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 EMPTY_TREE_SHA = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 MAX_MODEL_OUTPUT_BYTES = 10 * 1024 * 1024
+MAX_CONTROL_OUTPUT_BYTES = 4 * 1024 * 1024
 MODEL_TIMEOUT_SECONDS = 30 * 60
 FETCH_TIMEOUT_SECONDS = 5 * 60
 PREFLIGHT_TIMEOUT_SECONDS = 30
+CONTROL_COMMAND_TIMEOUT_SECONDS = 60
+PANEL_TIMEOUT_SECONDS = 10 * 60
+_ACTIVE_PROCESS_LOCK = threading.Lock()
+_ACTIVE_PROCESSES: set[subprocess.Popen[bytes]] = set()
+_PROVIDER_CANCELLATION = threading.Event()
 
 
 @dataclass(frozen=True)
@@ -113,6 +131,249 @@ class ProviderRuntime:
     codex_version: str
 
 
+@dataclass(frozen=True)
+class BoundedExecution:
+    returncode: int
+    stdout: bytes
+    stderr: bytes
+    timed_out: bool
+    failures: tuple[str, ...]
+
+
+def _terminate_process_tree(process: subprocess.Popen[bytes]) -> None:
+    """Best-effort termination of the isolated child process group."""
+    try:
+        if os.name == "posix":
+            os.killpg(process.pid, signal.SIGKILL)
+        elif os.name == "nt":
+            process.send_signal(signal.CTRL_BREAK_EVENT)
+            process.kill()
+        else:
+            process.kill()
+    except (OSError, ProcessLookupError):
+        try:
+            process.kill()
+        except OSError:
+            pass
+
+
+def _register_process(
+    process: subprocess.Popen[bytes],
+    cancellation_event: threading.Event | None = None,
+) -> bool:
+    with _ACTIVE_PROCESS_LOCK:
+        if cancellation_event is not None and cancellation_event.is_set():
+            return False
+        _ACTIVE_PROCESSES.add(process)
+        return True
+
+
+def _unregister_process(process: subprocess.Popen[bytes]) -> None:
+    with _ACTIVE_PROCESS_LOCK:
+        _ACTIVE_PROCESSES.discard(process)
+
+
+def _cancel_provider_executions() -> None:
+    """Atomically block late provider starts and terminate registered children."""
+    with _ACTIVE_PROCESS_LOCK:
+        _PROVIDER_CANCELLATION.set()
+        processes = tuple(_ACTIVE_PROCESSES)
+    for process in processes:
+        _terminate_process_tree(process)
+
+
+def _wait_after_termination(
+    process: subprocess.Popen[bytes], failures: list[str]
+) -> int:
+    try:
+        return process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        failures.append("child process did not exit after termination")
+        return process.returncode if process.returncode is not None else -1
+
+
+def _drain_bounded_stream(
+    stream: Any,
+    process: subprocess.Popen[bytes],
+    failures: list[str],
+    label: str,
+    *,
+    limit: int,
+    chunks: list[bytes] | None = None,
+    destination: Path | None = None,
+) -> None:
+    """Drain one child stream live, killing the child before the limit grows."""
+    written = 0
+    output = None
+    try:
+        if destination is not None:
+            output = destination.open("wb")
+        while chunk := stream.read(64 * 1024):
+            remaining = limit - written
+            accepted = chunk[: max(0, remaining)]
+            if accepted:
+                if output is not None:
+                    output.write(accepted)
+                if chunks is not None:
+                    chunks.append(accepted)
+                written += len(accepted)
+            if len(chunk) > remaining:
+                failures.append(f"{label} exceeded the local safety limit")
+                _terminate_process_tree(process)
+                return
+    except Exception as exc:
+        failures.append(f"could not capture {label}: {exc}")
+        try:
+            _terminate_process_tree(process)
+        except OSError:
+            pass
+    finally:
+        if output is not None:
+            output.close()
+
+
+def _write_process_input(
+    stream: Any,
+    payload: bytes,
+    failures: list[str],
+) -> None:
+    """Write child stdin without putting the wall-clock timeout behind the write."""
+    try:
+        stream.write(payload)
+        stream.close()
+    except BrokenPipeError:
+        pass
+    except Exception as exc:
+        failures.append(f"could not send command stdin: {exc}")
+        try:
+            stream.close()
+        except OSError:
+            pass
+
+
+def _execute_bounded(
+    command: list[str],
+    *,
+    cwd: Path,
+    environment: dict[str, str] | None,
+    timeout: float,
+    output_limit: int,
+    input_text: str | None = None,
+    input_path: Path | None = None,
+    stdout_path: Path | None = None,
+    stderr_path: Path | None = None,
+    stream_label: str = "command",
+    cancellation_event: threading.Event | None = None,
+) -> BoundedExecution:
+    """Own one bounded subprocess lifecycle for control and provider commands."""
+    if input_text is not None and input_path is not None:
+        raise ValueError("a subprocess cannot receive both text and file input")
+    if cancellation_event is not None and cancellation_event.is_set():
+        raise RuntimeError(f"{stream_label} execution was cancelled")
+    input_file = input_path.open("rb") if input_path is not None else None
+    group_options: dict[str, Any]
+    if os.name == "nt":
+        group_options = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+    else:
+        group_options = {"start_new_session": True}
+    try:
+        process = subprocess.Popen(
+            command,
+            cwd=cwd,
+            env=environment,
+            stdin=(
+                input_file
+                if input_file is not None
+                else subprocess.PIPE if input_text is not None else subprocess.DEVNULL
+            ),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            **group_options,
+        )
+    finally:
+        if input_file is not None:
+            input_file.close()
+    if not _register_process(process, cancellation_event):
+        _terminate_process_tree(process)
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+        for stream in (process.stdin, process.stdout, process.stderr):
+            if stream is not None:
+                stream.close()
+        raise RuntimeError(f"{stream_label} execution was cancelled")
+
+    try:
+        assert process.stdout is not None and process.stderr is not None
+        stdout_chunks: list[bytes] = []
+        stderr_chunks: list[bytes] = []
+        failures: list[str] = []
+        drainers = [
+            threading.Thread(
+                target=_drain_bounded_stream,
+                args=(stream, process, failures, label),
+                kwargs={
+                    "limit": output_limit,
+                    "chunks": chunks if destination is None else None,
+                    "destination": destination,
+                },
+                daemon=True,
+            )
+            for stream, chunks, destination, label in (
+                (process.stdout, stdout_chunks, stdout_path, f"{stream_label} stdout"),
+                (process.stderr, stderr_chunks, stderr_path, f"{stream_label} stderr"),
+            )
+        ]
+        for drainer in drainers:
+            drainer.start()
+
+        writer = None
+        if input_text is not None:
+            assert process.stdin is not None
+            writer = threading.Thread(
+                target=_write_process_input,
+                args=(process.stdin, input_text.encode("utf-8"), failures),
+                daemon=True,
+            )
+            writer.start()
+
+        timed_out = False
+        try:
+            returncode = process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            _terminate_process_tree(process)
+            returncode = _wait_after_termination(process, failures)
+        workers = [*drainers, *([writer] if writer is not None else [])]
+        for worker in workers:
+            worker.join(timeout=2)
+        lingering = [worker for worker in workers if worker.is_alive()]
+        if lingering:
+            failures.append("child process descendants kept output streams open")
+            _terminate_process_tree(process)
+            for worker in lingering:
+                worker.join(timeout=2)
+        if any(worker.is_alive() for worker in workers):
+            failures.append("child process streams did not close after termination")
+        return BoundedExecution(
+            returncode=returncode,
+            stdout=b"".join(stdout_chunks),
+            stderr=b"".join(stderr_chunks),
+            timed_out=timed_out,
+            failures=tuple(failures),
+        )
+    except BaseException:
+        _terminate_process_tree(process)
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+        raise
+    finally:
+        _unregister_process(process)
+
+
 def _run(
     command: list[str],
     *,
@@ -120,23 +381,28 @@ def _run(
     environment: dict[str, str] | None = None,
     input_text: str | None = None,
     check: bool = True,
-    timeout: float | None = None,
+    timeout: float = CONTROL_COMMAND_TIMEOUT_SECONDS,
 ) -> subprocess.CompletedProcess[str]:
-    try:
-        result = subprocess.run(
-            command,
-            cwd=cwd,
-            env=environment,
-            input=input_text,
-            text=True,
-            capture_output=True,
-            check=False,
-            timeout=timeout,
-        )
-    except subprocess.TimeoutExpired as exc:
+    execution = _execute_bounded(
+        command,
+        cwd=cwd,
+        environment=environment,
+        timeout=timeout,
+        output_limit=MAX_CONTROL_OUTPUT_BYTES,
+        input_text=input_text,
+    )
+    if execution.timed_out:
         raise RuntimeError(
             f"{command[0]} exceeded the {timeout:g}s timeout"
-        ) from exc
+        )
+    if execution.failures:
+        raise RuntimeError(f"{command[0]}: {'; '.join(execution.failures)}")
+    result = subprocess.CompletedProcess(
+        command,
+        execution.returncode,
+        execution.stdout.decode("utf-8", errors="replace"),
+        execution.stderr.decode("utf-8", errors="replace"),
+    )
     if check and result.returncode != 0:
         detail = (result.stderr or result.stdout).strip()
         raise RuntimeError(
@@ -158,15 +424,34 @@ def _git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProc
 
 
 def _isolated_git_environment() -> dict[str, str]:
-    return {
+    environment = {
+        name: os.environ[name]
+        for name in (
+            "COMSPEC",
+            "HOME",
+            "HOMEDRIVE",
+            "HOMEPATH",
+            "PATHEXT",
+            "SystemRoot",
+            "TEMP",
+            "TMP",
+            "TMPDIR",
+            "USERPROFILE",
+            "WINDIR",
+        )
+        if name in os.environ
+    }
+    environment.update({
         "GIT_CONFIG_GLOBAL": os.devnull,
         "GIT_CONFIG_NOSYSTEM": "1",
         "GIT_OPTIONAL_LOCKS": "0",
         "GIT_PAGER": "cat",
-        "LANG": "C.UTF-8",
-        "LC_ALL": "C.UTF-8",
+        "GIT_TERMINAL_PROMPT": "0",
+        "LANG": "C",
+        "LC_ALL": "C",
         "PATH": os.environ.get("PATH", ""),
-    }
+    })
+    return environment
 
 
 def _bare_git(
@@ -174,6 +459,7 @@ def _bare_git(
     git_dir: Path,
     *args: str,
     check: bool = True,
+    timeout: float = CONTROL_COMMAND_TIMEOUT_SECONDS,
 ) -> subprocess.CompletedProcess[str]:
     return _run(
         [
@@ -188,6 +474,7 @@ def _bare_git(
         cwd=workspace,
         environment=_isolated_git_environment(),
         check=check,
+        timeout=timeout,
     )
 
 
@@ -373,11 +660,143 @@ def resolve_scope(
 
 def sanitized_environment() -> dict[str, str]:
     environment = dict(os.environ)
-    for name in BLOCKED_PROVIDER_ENV_VARS:
-        environment.pop(name, None)
-    for name in PROVIDER_EXECUTABLE_ENV_VARS.values():
-        environment.pop(name, None)
+    for name in list(environment):
+        if (
+            name in BLOCKED_PROVIDER_ENV_VARS
+            or name in PROVIDER_EXECUTABLE_ENV_VARS.values()
+            or name.startswith(PROVIDER_ENV_PREFIXES)
+        ):
+            environment.pop(name, None)
+    environment["GH_PROMPT_DISABLED"] = "1"
+    environment["GIT_TERMINAL_PROMPT"] = "0"
     environment["PYTHONDONTWRITEBYTECODE"] = "1"
+    return environment
+
+
+def _codex_auth_home() -> Path:
+    configured = os.environ.get("CODEX_HOME")
+    return (
+        Path(configured).expanduser().resolve()
+        if configured
+        else (Path.home() / ".codex").resolve()
+    )
+
+
+def _preflight_environment() -> dict[str, str]:
+    environment = sanitized_environment()
+    if os.environ.get("CODEX_HOME"):
+        environment["CODEX_HOME"] = str(_codex_auth_home())
+    return environment
+
+
+def _isolated_codex_environment(
+    provider_root: Path,
+    runtime: ProviderRuntime,
+    repo: Path,
+) -> dict[str, str]:
+    """Bridge only Codex auth into clean runtime state with no ambient skills."""
+    source_auth = _codex_auth_home() / "auth.json"
+    if not source_auth.is_file():
+        raise ValueError(
+            "Codex ChatGPT authentication is not available as CODEX_HOME/auth.json; "
+            "run `codex login` with file-backed credential storage and retry"
+        )
+    codex_home = provider_root / "codex-home"
+    user_home = provider_root / "user-home"
+    config_home = provider_root / "config"
+    data_home = provider_root / "data"
+    for directory in (codex_home, user_home, config_home, data_home):
+        directory.mkdir(mode=0o700, parents=True, exist_ok=False)
+    try:
+        auth_payload = json.loads(source_auth.read_text(encoding="utf-8"))
+        tokens = auth_payload["tokens"]
+        access_token = tokens["access_token"]
+        account_id = tokens["account_id"]
+        id_token = tokens["id_token"]
+        if not all(
+            isinstance(value, str) and value
+            for value in (access_token, account_id, id_token)
+        ):
+            raise TypeError("incomplete ChatGPT token bundle")
+        token_payload = access_token.split(".")[1]
+        token_payload += "=" * (-len(token_payload) % 4)
+        expires_at = float(
+            json.loads(base64.urlsafe_b64decode(token_payload))["exp"]
+        )
+    except (
+        binascii.Error,
+        KeyError,
+        IndexError,
+        TypeError,
+        UnicodeDecodeError,
+        ValueError,
+        json.JSONDecodeError,
+    ) as exc:
+        raise ValueError(
+            "Codex auth.json does not contain a readable ChatGPT access token"
+        ) from exc
+    required_lifetime = MODEL_TIMEOUT_SECONDS + 5 * 60
+    if auth_payload.get("auth_mode") != "chatgpt" or expires_at <= (
+        time.time() + required_lifetime
+    ):
+        raise ValueError(
+            "the current Codex ChatGPT access token cannot cover the full review "
+            "window; refresh the subscription login with `codex login` and retry"
+        )
+    isolated_auth = codex_home / "auth.json"
+    isolated_auth.write_text(
+        json.dumps(
+            {
+                "OPENAI_API_KEY": None,
+                "auth_mode": "chatgpt",
+                "last_refresh": datetime.now(timezone.utc)
+                .isoformat()
+                .replace("+00:00", "Z"),
+                "tokens": {
+                    "access_token": access_token,
+                    "account_id": account_id,
+                    "id_token": id_token,
+                    "refresh_token": "",
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    isolated_auth.chmod(0o600)
+    environment = sanitized_environment()
+    environment.update(
+        {
+            "APPDATA": str(config_home),
+            "CODEX_HOME": str(codex_home),
+            "HOME": str(user_home),
+            "LOCALAPPDATA": str(data_home),
+            "USERPROFILE": str(user_home),
+            "XDG_CONFIG_HOME": str(config_home),
+            "XDG_DATA_HOME": str(data_home),
+        }
+    )
+    status = _run(
+        [runtime.codex_executable, "login", "status"],
+        cwd=repo,
+        environment=environment,
+        check=False,
+        timeout=PREFLIGHT_TIMEOUT_SECONDS,
+    )
+    if (
+        status.returncode != 0
+        or "Logged in using ChatGPT" not in f"{status.stdout}\n{status.stderr}"
+    ):
+        detail = (status.stderr or status.stdout).strip()
+        raise ValueError(
+            "the isolated Codex reviewer could not reuse the verified ChatGPT login: "
+            f"{detail[:500] or 'no diagnostic output'}"
+        )
+    if expires_at <= time.time() + required_lifetime:
+        raise ValueError(
+            "the current Codex ChatGPT access token cannot cover the full review "
+            "window; refresh the subscription login with `codex login` and retry"
+        )
     return environment
 
 
@@ -476,7 +895,7 @@ def _require_codex_model_capability(
         )
 
 
-def preflight_auth(repo: Path) -> ProviderRuntime:
+def preflight_auth(repo: Path, *, require_gh: bool = True) -> ProviderRuntime:
     present = [name for name in BLOCKED_PROVIDER_ENV_VARS if os.environ.get(name)]
     if present:
         raise ValueError(
@@ -486,10 +905,11 @@ def preflight_auth(repo: Path) -> ProviderRuntime:
         )
     claude_executable = _resolve_provider_executable("claude")
     codex_executable = _resolve_provider_executable("codex")
-    for executable in ("gh", "git"):
+    required_executables = ("git", "gh") if require_gh else ("git",)
+    for executable in required_executables:
         if shutil.which(executable) is None:
             raise ValueError(f"required executable is not installed: {executable}")
-    environment = sanitized_environment()
+    environment = _preflight_environment()
     claude_version = _provider_version(claude_executable, repo, environment)
     codex_version = _provider_version(codex_executable, repo, environment)
     _require_codex_model_capability(
@@ -565,7 +985,15 @@ def _prepare_object_store(repo: Path, workspace: Path, scope: ReviewScope) -> Pa
             )
             resolved = _sha(created.stdout, "empty tree")
         else:
-            _bare_git(workspace, target, "fetch", "--no-tags", str(repo), commit)
+            _bare_git(
+                workspace,
+                target,
+                "fetch",
+                "--no-tags",
+                str(repo),
+                commit,
+                timeout=FETCH_TIMEOUT_SECONDS,
+            )
             resolved = _sha(
                 _bare_git(
                     workspace, target, "rev-parse", "FETCH_HEAD^{commit}"
@@ -578,79 +1006,83 @@ def _prepare_object_store(repo: Path, workspace: Path, scope: ReviewScope) -> Pa
     return target
 
 
-def _artifact_review_needed(
-    workspace: Path,
-    git_dir: Path,
-    scope: ReviewScope,
-    policy: dict[str, Any],
-) -> bool:
-    pathspecs = [f":(glob){pattern}" for pattern in policy["user_facing_paths"]]
-    result = _bare_git(
-        workspace,
-        git_dir,
-        "diff",
-        "--quiet",
-        "--no-ext-diff",
-        "--no-textconv",
-        scope.base_sha,
-        scope.head_sha,
-        "--",
-        *pathspecs,
-        check=False,
-    )
-    if result.returncode not in {0, 1}:
-        detail = (result.stderr or result.stdout).strip()
-        raise RuntimeError(f"Git could not classify user-facing paths: {detail}")
-    return result.returncode == 1
-
-
 def _panel(workspace: Path, *args: str) -> None:
     _run(
         [sys.executable, str(PANEL_SCRIPT), *args],
         cwd=workspace,
         environment=sanitized_environment(),
+        timeout=PANEL_TIMEOUT_SECONDS,
     )
 
 
 def _build_lanes(
     workspace: Path,
     scope: ReviewScope,
-    policy: dict[str, Any],
-    artifact_needed: bool,
     raw_root: Path,
-) -> tuple[list[Lane], list[tuple[str, str]]]:
+) -> tuple[list[Lane], list[tuple[str, str]], bool, list[str]]:
     lanes: list[Lane] = []
-    skipped: list[tuple[str, str]] = []
     prompt_root = workspace / "prompts"
-    prompt_root.mkdir()
-    for config in policy["lanes"]:
-        provider, lane = str(config["provider"]), str(config["id"])
-        if config["when"] != "always" and not artifact_needed:
-            skipped.append((provider, lane))
-            continue
-        prompt = prompt_root / f"{provider}-{lane}.md"
-        _panel(
-            workspace,
-            "build-prompt",
-            "--provider",
-            provider,
-            "--lane",
-            lane,
-            "--base-sha",
-            scope.base_sha,
-            "--head-sha",
-            scope.head_sha,
-            "--review-directory",
-            "review-target",
-            "--output",
-            str(prompt),
-        )
+    manifest_path = workspace / "prompt-manifest.json"
+    _panel(
+        workspace,
+        "prepare-prompts",
+        "--base-sha",
+        scope.base_sha,
+        "--head-sha",
+        scope.head_sha,
+        "--review-directory",
+        "review-target",
+        "--output-dir",
+        str(prompt_root),
+        "--manifest",
+        str(manifest_path),
+    )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if (
+        manifest.get("version") != 1
+        or manifest.get("base_sha") != scope.base_sha
+        or manifest.get("head_sha") != scope.head_sha
+    ):
+        raise ValueError("prompt manifest does not match the immutable review scope")
+    manifest_lanes = manifest.get("lanes")
+    if not isinstance(manifest_lanes, list) or not manifest_lanes:
+        raise ValueError("review policy selected no applicable lanes")
+    for config in manifest_lanes:
+        if not isinstance(config, dict):
+            raise ValueError("prompt manifest lane is malformed")
+        provider = str(config.get("provider") or "")
+        lane = str(config.get("lane") or "")
+        filename = str(config.get("prompt") or "")
+        expected = f"{provider}-{lane}.md"
+        if provider not in {"claude", "codex"} or filename != expected:
+            raise ValueError("prompt manifest lane is unsafe")
+        prompt = prompt_root / filename
+        if not prompt.is_file():
+            raise ValueError(f"prompt manifest output is missing: {filename}")
         raw_dir = raw_root / f"{provider}-{lane}"
         raw_dir.mkdir(parents=True)
         lanes.append(
             Lane(provider, lane, prompt, raw_dir / "result.json", raw_dir)
         )
-    return lanes, skipped
+    skipped_rows = manifest.get("skipped")
+    if not isinstance(skipped_rows, list):
+        raise ValueError("prompt manifest skipped-lane list is malformed")
+    skipped = [
+        (str(row.get("provider") or ""), str(row.get("lane") or ""))
+        for row in skipped_rows
+        if isinstance(row, dict)
+    ]
+    if len(skipped) != len(skipped_rows):
+        raise ValueError("prompt manifest skipped lane is malformed")
+    runtime_required = manifest.get("runtime_evidence_required")
+    if not isinstance(runtime_required, list) or not all(
+        isinstance(item, str) for item in runtime_required
+    ):
+        raise ValueError("prompt manifest runtime-evidence list is malformed")
+    artifact_needed = manifest.get("artifact_review_needed")
+    if not isinstance(artifact_needed, bool):
+        raise ValueError("prompt manifest artifact classification is malformed")
+    return lanes, skipped, artifact_needed, runtime_required
 
 
 def _provider_command(
@@ -679,15 +1111,11 @@ def _provider_command(
             CLAUDE_MODEL,
             "--effort",
             CLAUDE_EFFORT,
-            "--max-turns",
-            "1",
             "--strict-mcp-config",
             "--mcp-config",
             json.dumps({"mcpServers": {}}, separators=(",", ":")),
             "--tools",
             "",
-            "--disallowedTools",
-            "*",
         ]
     command = [
         runtime.codex_executable,
@@ -705,6 +1133,14 @@ def _provider_command(
         CODEX_MODEL,
         "--config",
         f'model_reasoning_effort="{CODEX_EFFORT}"',
+        "--config",
+        'web_search="disabled"',
+        "--config",
+        "tools.web_search=false",
+        "--config",
+        "tools.view_image=false",
+        "--config",
+        "skills.bundled.enabled=false",
     ]
     for feature in CODEX_DISABLED_FEATURES:
         command.extend(["--disable", feature])
@@ -712,8 +1148,6 @@ def _provider_command(
         [
             "--output-schema",
             str(SCHEMA_PATH),
-            "--output-last-message",
-            str(lane.result),
             "--color",
             "never",
             "-",
@@ -744,95 +1178,51 @@ def _read_limited_text(path: Path, limit: int = 1_000_000) -> str:
     return path.read_bytes()[:limit].decode("utf-8", errors="replace")
 
 
-def _drain_provider_stream(
-    stream: Any,
-    destination: Path,
-    process: subprocess.Popen[bytes],
-    failures: list[str],
-    label: str,
-) -> None:
-    written = 0
-    try:
-        with destination.open("wb") as output:
-            while chunk := stream.read(64 * 1024):
-                remaining = MAX_MODEL_OUTPUT_BYTES - written
-                if remaining > 0:
-                    output.write(chunk[:remaining])
-                    written += min(len(chunk), remaining)
-                if len(chunk) > remaining:
-                    failures.append(f"{label} exceeded the local safety limit")
-                    process.kill()
-                    return
-    except Exception as exc:
-        failures.append(f"could not capture {label}: {exc}")
-        try:
-            process.kill()
-        except OSError:
-            pass
-
-
 def _invoke_lane(
     lane: Lane,
     workspace: Path,
     runtime: ProviderRuntime,
+    environment: dict[str, str],
 ) -> LaneResult:
     stdout_path, stderr_path = lane.raw_dir / "stdout.txt", lane.raw_dir / "stderr.txt"
     try:
-        with lane.prompt.open("rb") as prompt:
-            process = subprocess.Popen(
-                _provider_command(lane, workspace, runtime),
-                cwd=workspace,
-                env=sanitized_environment(),
-                stdin=prompt,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+        execution = _execute_bounded(
+            _provider_command(lane, workspace, runtime),
+            cwd=workspace,
+            environment=environment,
+            timeout=MODEL_TIMEOUT_SECONDS,
+            output_limit=MAX_MODEL_OUTPUT_BYTES,
+            input_path=lane.prompt,
+            stdout_path=stdout_path,
+            stderr_path=stderr_path,
+            stream_label="provider",
+            cancellation_event=_PROVIDER_CANCELLATION,
+        )
+        if execution.timed_out:
+            return LaneResult(
+                lane.provider, lane.lane, False, lane.result, "timed out"
             )
-            assert process.stdout is not None and process.stderr is not None
-            capture_failures: list[str] = []
-            drainers = [
-                threading.Thread(
-                    target=_drain_provider_stream,
-                    args=(stream, path, process, capture_failures, label),
-                    daemon=True,
-                )
-                for stream, path, label in (
-                    (process.stdout, stdout_path, "provider stdout"),
-                    (process.stderr, stderr_path, "provider stderr"),
-                )
-            ]
-            for drainer in drainers:
-                drainer.start()
-            try:
-                returncode = process.wait(timeout=MODEL_TIMEOUT_SECONDS)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait()
-                for drainer in drainers:
-                    drainer.join()
-                return LaneResult(
-                    lane.provider, lane.lane, False, lane.result, "timed out"
-                )
-            for drainer in drainers:
-                drainer.join()
-            if capture_failures:
-                return LaneResult(
-                    lane.provider,
-                    lane.lane,
-                    False,
-                    lane.result,
-                    "; ".join(capture_failures),
-                )
-        if returncode != 0:
+        if execution.failures:
+            return LaneResult(
+                lane.provider,
+                lane.lane,
+                False,
+                lane.result,
+                "; ".join(execution.failures),
+            )
+        if execution.returncode != 0:
             detail = _read_limited_text(stderr_path).strip()
             return LaneResult(
                 lane.provider,
                 lane.lane,
                 False,
                 lane.result,
-                f"provider exited {returncode}: {detail[:1000]}",
+                f"provider exited {execution.returncode}: {detail[:1000]}",
             )
         if lane.provider == "claude":
             _extract_claude(stdout_path, lane.result)
+        else:
+            shutil.copyfile(stdout_path, lane.result)
         if (
             not lane.result.is_file()
             or lane.result.stat().st_size > MAX_MODEL_OUTPUT_BYTES
@@ -883,11 +1273,11 @@ def _aggregate(
     receipts: Path,
     scope: ReviewScope,
     artifact_needed: bool,
+    runtime_evidence_required: list[str],
     output: Path,
 ) -> dict[str, Any]:
     report, summary = output / "report.md", output / "summary.json"
-    _panel(
-        workspace,
+    command = [
         "aggregate",
         "--input-dir",
         str(receipts),
@@ -901,7 +1291,10 @@ def _aggregate(
         str(report),
         "--output-summary",
         str(summary),
-    )
+    ]
+    for requirement_id in runtime_evidence_required:
+        command.extend(["--runtime-evidence-required", requirement_id])
+    _panel(workspace, *command)
     return json.loads(summary.read_text(encoding="utf-8"))
 
 
@@ -992,7 +1385,12 @@ def _output_dir(repo: Path, head_sha: str) -> Path:
 
 def run_review(args: argparse.Namespace) -> int:
     repo = repository_root()
-    runtime = preflight_auth(repo)
+    require_gh = bool(
+        args.pr is not None
+        or args.post_pr
+        or (not args.range and not args.commit)
+    )
+    runtime = preflight_auth(repo, require_gh=require_gh)
     print(
         "Authentication guard: provider API-key auth is disabled. Account-level "
         "usage credits and auto-top-up cannot be inspected locally.",
@@ -1004,27 +1402,30 @@ def run_review(args: argparse.Namespace) -> int:
         f"({runtime.codex_version}; bundled {CODEX_MODEL}/{CODEX_EFFORT} verified)",
         file=sys.stderr,
     )
-    policy = json.loads(POLICY_PATH.read_text(encoding="utf-8"))
-
-    with tempfile.TemporaryDirectory(prefix="latch-review-") as temporary:
+    with (
+        tempfile.TemporaryDirectory(prefix="latch-review-") as temporary,
+        tempfile.TemporaryDirectory(prefix="latch-review-provider-") as provider_temporary,
+    ):
         workspace = Path(temporary)
+        provider_root = Path(provider_temporary)
         scope = resolve_scope(args, repo, workspace)
         output = _output_dir(repo, scope.head_sha)
         raw_root, receipts = output / "raw", output / "receipts"
         raw_root.mkdir()
         receipts.mkdir()
         prepared_pr_store = workspace / "review-target"
-        git_dir = (
-            prepared_pr_store
-            if prepared_pr_store.is_dir()
-            else _prepare_object_store(repo, workspace, scope)
+        if not prepared_pr_store.is_dir():
+            _prepare_object_store(repo, workspace, scope)
+        lanes, skipped, artifact_needed, runtime_evidence_required = _build_lanes(
+            workspace, scope, raw_root
         )
-        artifact_needed = _artifact_review_needed(
-            workspace, git_dir, scope, policy
-        )
-        lanes, skipped = _build_lanes(
-            workspace, scope, policy, artifact_needed, raw_root
-        )
+        # Validate and bridge the short-lived Codex access token only after all
+        # potentially slow fetch/evidence work.  The lifetime guarantee must
+        # cover lane execution, not repository preparation.
+        provider_environments = {
+            "claude": sanitized_environment(),
+            "codex": _isolated_codex_environment(provider_root, runtime, repo),
+        }
         print(
             f"Latch review: {scope.base_sha[:12]}..{scope.head_sha[:12]} "
             f"with {len(lanes)} parallel lane(s)",
@@ -1036,19 +1437,38 @@ def run_review(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         results: list[LaneResult] = []
-        with ThreadPoolExecutor(max_workers=len(lanes)) as executor:
-            futures = {
-                executor.submit(_invoke_lane, lane, workspace, runtime): lane
-                for lane in lanes
-            }
-            for future in as_completed(futures):
-                result = future.result()
-                results.append(result)
-                print(
-                    f"[{'ok' if result.success else 'failed'}] "
-                    f"{result.provider}/{result.lane}: {result.detail}",
-                    file=sys.stderr,
-                )
+        if not lanes:
+            raise ValueError("review policy selected no applicable lanes")
+        _PROVIDER_CANCELLATION.clear()
+        try:
+            with ThreadPoolExecutor(max_workers=len(lanes)) as executor:
+                futures = {}
+                try:
+                    futures = {
+                        executor.submit(
+                            _invoke_lane,
+                            lane,
+                            workspace,
+                            runtime,
+                            provider_environments[lane.provider],
+                        ): lane
+                        for lane in lanes
+                    }
+                    for future in as_completed(futures):
+                        result = future.result()
+                        results.append(result)
+                        print(
+                            f"[{'ok' if result.success else 'failed'}] "
+                            f"{result.provider}/{result.lane}: {result.detail}",
+                            file=sys.stderr,
+                        )
+                except BaseException:
+                    _cancel_provider_executions()
+                    for future in futures:
+                        future.cancel()
+                    raise
+        finally:
+            _PROVIDER_CANCELLATION.clear()
         for result in results:
             _normalize(
                 workspace,
@@ -1069,7 +1489,14 @@ def run_review(args: argparse.Namespace) -> int:
                 success=False,
                 applicable=False,
             )
-        summary = _aggregate(workspace, receipts, scope, artifact_needed, output)
+        summary = _aggregate(
+            workspace,
+            receipts,
+            scope,
+            artifact_needed,
+            runtime_evidence_required,
+            output,
+        )
 
     report = output / "report.md"
     posted_to_pr = False
@@ -1085,6 +1512,9 @@ def run_review(args: argparse.Namespace) -> int:
         except Exception as exc:
             post_error = str(exc)[:2000]
 
+    review_should_fail = bool(summary.get("should_fail"))
+    review_exit_code = 1 if review_should_fail else 0
+    process_exit_code = 3 if post_error else review_exit_code
     metadata = {
         "scope": {
             "base_sha": scope.base_sha,
@@ -1119,8 +1549,12 @@ def run_review(args: argparse.Namespace) -> int:
             "account_credit_settings": "not_verifiable_by_cli",
         },
         "artifact_review_needed": artifact_needed,
+        "runtime_evidence_required": runtime_evidence_required,
+        "review_should_fail": review_should_fail,
+        "review_exit_code": review_exit_code,
         "posted_to_pr": posted_to_pr,
         "post_error": post_error or None,
+        "process_exit_code": process_exit_code,
     }
     (output / "metadata.json").write_text(
         json.dumps(metadata, indent=2, sort_keys=True) + "\n",
@@ -1130,8 +1564,7 @@ def run_review(args: argparse.Namespace) -> int:
     print(f"Local review saved to {output}", file=sys.stderr)
     if post_error:
         print(f"PR posting failed: {post_error}", file=sys.stderr)
-        return 2
-    return 1 if summary.get("should_fail") else 0
+    return process_exit_code
 
 
 def build_parser() -> argparse.ArgumentParser:

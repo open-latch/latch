@@ -176,14 +176,16 @@ def _refresh_claude_commands_if_installed() -> bool:
             body = target.read_text(encoding="utf-8")
         except OSError as exc:
             raise UpdateError(f"cannot inspect installed Claude command {target}: {exc}") from exc
-        if install_engine._is_latch_command_body(body):
+        if install_engine.is_latch_command_body(body):
             managed.append((source, target))
     if not managed:
         return False
     for source, target in managed:
         try:
             target.write_text(
-                source.read_text(encoding="utf-8").replace("<KB_HOME>", str(ROOT).replace("\\", "/")),
+                install_engine.render_command_template(
+                    source.read_text(encoding="utf-8"), kb_home=ROOT
+                ),
                 encoding="utf-8",
             )
         except OSError as exc:

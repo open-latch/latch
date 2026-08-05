@@ -3,7 +3,11 @@ from __future__ import annotations
 
 import contextlib
 import io
+import os
+import re
+import shlex
 import shutil
+import subprocess
 import sys
 import tempfile
 import tomllib
@@ -516,6 +520,43 @@ def test_codex_skills_sync_status_and_collision():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_render_review_skill_shell_quotes_adversarial_latch_path():
+    root = Path(tempfile.mkdtemp(prefix="latch-codex-review-render-"))
+    latch_home = root / 'Latch Space $cash $(touch SHOULD_NOT_EXIST) "double" `tick` apostrophe\'s 雪'
+    runner = latch_home / "bin" / "latch-review"
+    if os.name != "nt":
+        runner.parent.mkdir(parents=True)
+        runner.write_text('#!/usr/bin/env bash\nprintf "%s\\n" "$@"\n', encoding="utf-8")
+        runner.chmod(0o755)
+    original_home = ic.KB_HOME
+    try:
+        ic.KB_HOME = latch_home
+        body = ic.render_codex_skill("source-command-latch-review")
+        _assert(not ic.install_engine.unresolved_command_placeholders(body), body)
+        normalized_home = str(latch_home).replace("\\", "/")
+        _assert(f"latch_home={shlex.quote(normalized_home)}" in body, body)
+        expected_ps = "'" + (
+            normalized_home + "/bin/latch-review.ps1"
+        ).replace("'", "''") + "'"
+        _assert(f"& {expected_ps}" in body, body)
+
+        if os.name != "nt":
+            match = re.search(r"```bash\n(.*?)\n```", body, re.DOTALL)
+            _assert(match is not None, "missing rendered Bash block")
+            command = match.group(1).replace("<resolved target arguments>", "--commit HEAD")
+            result = subprocess.run(
+                ["bash", "-c", command], cwd=root, capture_output=True, text=True
+            )
+            _assert(result.returncode == 0, result.stderr)
+            _assert(result.stdout.splitlines() == ["--commit", "HEAD"], result.stdout)
+            _assert(not (root / "SHOULD_NOT_EXIST").exists(),
+                    "shell interpolation from the install path must never execute")
+    finally:
+        ic.KB_HOME = original_home
+        shutil.rmtree(root, ignore_errors=True)
+    print("PASS render_review_skill_shell_quotes_adversarial_latch_path")
+
+
 def test_main_installs_and_checks_codex_skills():
     d = Path(tempfile.mkdtemp(prefix="latch-codex-main-skills-"))
     original_pin = ic.install_engine.pin_kb_dir
@@ -682,6 +723,7 @@ if __name__ == "__main__":
     test_write_config_backs_up_existing()
     test_main_refuses_unsupported_config_without_backup_or_write()
     test_codex_skills_sync_status_and_collision()
+    test_render_review_skill_shell_quotes_adversarial_latch_path()
     test_main_installs_and_checks_codex_skills()
     test_no_seed_prompt_prints_seed_handoff_unless_suppressed()
     test_interactive_seed_offer_uses_codex_backend()

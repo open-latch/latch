@@ -480,8 +480,8 @@ def _raw_codex_skill(name: str) -> str:
 
 
 def render_codex_skill(name: str) -> str:
-    body = _raw_codex_skill(name).replace(
-        "<KB_HOME>", str(KB_HOME).replace("\\", "/")
+    body = install_engine.render_command_template(
+        _raw_codex_skill(name), kb_home=KB_HOME
     )
     footer = (
         "\n\n---\n\n"

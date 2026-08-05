@@ -25,6 +25,47 @@ $SrcDir = Join-Path $ScriptDir "..\commands"
 $DestDir = if ($env:CLAUDE_COMMANDS_DIR) { $env:CLAUDE_COMMANDS_DIR } `
            else { Join-Path $HOME ".claude/commands" }
 
+# Reuse the Python installer's shell-literal renderer. Installation paths are
+# passed as argv, so PowerShell never interprets their metacharacters.
+$PythonBin = if ($env:LATCH_PYTHON) { $env:LATCH_PYTHON } `
+             elseif ($env:CLAUDE_KB_PYTHON) { $env:CLAUDE_KB_PYTHON } `
+             else { $null }
+if (-not $PythonBin) {
+    foreach ($candidate in @(
+        (Join-Path $KbHome '.venv/Scripts/python.exe'),
+        (Join-Path $KbHome '.venv/bin/python')
+    )) {
+        if (Test-Path -LiteralPath $candidate) { $PythonBin = $candidate; break }
+    }
+}
+if (-not $PythonBin) {
+    $pythonCommand = Get-Command python3, python -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if ($pythonCommand) { $PythonBin = $pythonCommand.Source }
+}
+if (-not $PythonBin) {
+    throw "Python is required to render command installation paths safely"
+}
+
+$RenderCommandCode = @'
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import install_engine as ie
+body = Path(sys.argv[3]).read_text(encoding="utf-8")
+body = ie.render_command_template(body, kb_home=sys.argv[2])
+if sys.argv[5] == "kb-gate.md":
+    body = body.replace("/bin/run_latch_gate.sh", "/bin/run_kb_gate.sh")
+Path(sys.argv[4]).write_text(body, encoding="utf-8")
+'@
+
+function Write-RenderedCommand($Source, $Target, $Legacy = '__none__') {
+    & $PythonBin -c $RenderCommandCode (Join-Path $KbHome 'src') $KbHome $Source $Target $Legacy
+    if ($LASTEXITCODE -ne 0) {
+        throw "failed to render command template $Source"
+    }
+}
+
 if (-not (Test-Path $SrcDir)) {
     throw "no commands/ directory at $SrcDir"
 }
@@ -36,9 +77,7 @@ $updated = 0
 $removed = 0
 $skipped = 0
 Get-ChildItem -Path $SrcDir -Filter *.md | ForEach-Object {
-    $content = Get-Content $_.FullName -Raw
-    $content = $content -replace [regex]::Escape('<KB_HOME>'), $KbHome
-    Set-Content -Path (Join-Path $DestDir $_.Name) -Value $content -NoNewline
+    Write-RenderedCommand $_.FullName (Join-Path $DestDir $_.Name)
     Write-Host "installed $($_.Name)"
     $script:installed++
 }
@@ -48,8 +87,11 @@ function Test-LatchCommand($Path) {
     $body = Get-Content $Path -Raw
     $normalized = $body -replace '\\', '/'
     if ($body.Contains('<KB_HOME>')) { return $true }
+    if ($body.Contains('<KB_HOME_POSIX_LITERAL>')) { return $true }
+    if ($body.Contains('<LATCH_REVIEW_POSIX_LITERAL>')) { return $true }
+    if ($body.Contains('<LATCH_REVIEW_POWERSHELL_LITERAL>')) { return $true }
     if ($normalized.Contains($KbHome)) { return $true }
-    return ($normalized -match '/bin/(run_kb_gate|run_latch_gate|latch_baseline|unlatch|latch_gate_report|run_compact_now|run_latch_compact_now|run_kb_focus)\.sh|/bin/latch_direction\.sh|/src/(budget|maintenance)\.py|kb_profile_(active|bind)|mission-control verification profile|trust-and-go verification profile')
+    return ($normalized -match '/bin/(run_kb_gate|run_latch_gate|latch_baseline|unlatch|latch_gate_report|run_compact_now|run_latch_compact_now|run_kb_focus)\.sh|/bin/latch_direction\.sh|/bin/latch-review(\.ps1)?|/src/(budget|maintenance)\.py|kb_profile_(active|bind)|mission-control verification profile|trust-and-go verification profile')
 }
 
 function Update-LegacyAlias($Legacy, $Primary) {
@@ -61,12 +103,7 @@ function Update-LegacyAlias($Legacy, $Primary) {
         $script:skipped++
         return
     }
-    $content = Get-Content $primaryPath -Raw
-    $content = $content -replace [regex]::Escape('<KB_HOME>'), $KbHome
-    if ($Legacy -eq "kb-gate.md") {
-        $content = $content -replace '/bin/run_latch_gate\.sh', '/bin/run_kb_gate.sh'
-    }
-    Set-Content -Path $legacyPath -Value $content -NoNewline
+    Write-RenderedCommand $primaryPath $legacyPath $Legacy
     Write-Host "updated legacy alias $Legacy -> $Primary"
     $script:updated++
 }

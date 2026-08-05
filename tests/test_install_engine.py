@@ -16,7 +16,10 @@ import contextlib
 import io
 import json
 import os
+import re
+import shlex
 import shutil
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -275,19 +278,65 @@ def test_install_commands_copies_and_substitutes():
         restore()
 
 
-def test_install_review_command_quotes_a_spaced_latch_path():
+def _adversarial_latch_home(root: Path) -> Path:
+    return root / 'Latch Space $cash $(touch SHOULD_NOT_EXIST) "double" `tick` apostrophe\'s 雪'
+
+
+def _fenced_block(body: str, language: str) -> str:
+    match = re.search(rf"```{language}\n(.*?)\n```", body, re.DOTALL)
+    _assert(match is not None, f"missing {language} command block")
+    return match.group(1)
+
+
+def test_install_review_command_shell_quotes_adversarial_latch_path():
+    root = Path(tempfile.mkdtemp(prefix="latch-review-render-"))
+    latch_home = _adversarial_latch_home(root)
+    runner = latch_home / "bin" / "latch-review"
+    if os.name != "nt":
+        runner.parent.mkdir(parents=True)
+        runner.write_text('#!/usr/bin/env bash\nprintf "%s\\n" "$@"\n', encoding="utf-8")
+    source_body = (ROOT / "commands" / "latch-review.md").read_text(encoding="utf-8")
     _src, dest, restore = _tmp_commands_env(
-        "/tmp/Latch App",
-        {"latch-review.md": 'bash "<KB_HOME>/bin/latch-review" --pr 73\n'},
+        str(latch_home), {"latch-review.md": source_body}
     )
     try:
         level, _changes = ie.install_commands(dry_run=False)
         _assert(level == "OK", f"expected OK, got {level}")
         body = (dest / "latch-review.md").read_text(encoding="utf-8")
-        _assert('bash "/tmp/Latch App/bin/latch-review" --pr 73' in body, body)
-        print("PASS install_review_command_quotes_a_spaced_latch_path")
+        _assert(not ie.unresolved_command_placeholders(body), body)
+        expected_runner = str(runner).replace("\\", "/")
+        _assert(f"bash {shlex.quote(expected_runner)}" in body, body)
+        expected_ps = "'" + (expected_runner + ".ps1").replace("'", "''") + "'"
+        _assert(f"& {expected_ps}" in body, body)
+
+        if os.name != "nt":
+            command = _fenced_block(body, "bash").replace(
+                "<resolved target arguments>", "--pr 73"
+            )
+            result = subprocess.run(
+                ["bash", "-c", command], cwd=root, capture_output=True, text=True
+            )
+            _assert(result.returncode == 0, result.stderr)
+            _assert(result.stdout.splitlines() == ["--pr", "73"], result.stdout)
+            _assert(not (root / "SHOULD_NOT_EXIST").exists(),
+                    "shell interpolation from the install path must never execute")
+        print("PASS install_review_command_shell_quotes_adversarial_latch_path")
     finally:
         restore()
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_command_template_rejects_reserved_tokens_in_install_path():
+    for placeholder in ie.COMMAND_PLACEHOLDERS:
+        try:
+            ie.render_command_template(
+                "run <LATCH_REVIEW_POSIX_LITERAL>",
+                kb_home=Path("/tmp") / placeholder / "latch",
+            )
+        except ValueError as error:
+            _assert("reserved command-template token" in str(error), str(error))
+        else:
+            raise AssertionError(f"reserved install-path token was accepted: {placeholder}")
 
 
 def test_install_commands_dry_run_writes_nothing():
@@ -885,7 +934,8 @@ if __name__ == "__main__":
     test_posttooluse_hook_wired_with_matcher_and_preserves_others()
     test_write_settings_backs_up_existing()
     test_install_commands_copies_and_substitutes()
-    test_install_review_command_quotes_a_spaced_latch_path()
+    test_install_review_command_shell_quotes_adversarial_latch_path()
+    test_command_template_rejects_reserved_tokens_in_install_path()
     test_install_commands_dry_run_writes_nothing()
     test_commands_status_missing_then_present_then_unresolved()
     test_install_commands_updates_existing_legacy_aliases()

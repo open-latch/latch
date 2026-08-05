@@ -123,6 +123,22 @@ def test_commands_unresolved_placeholder_warns():
         restore()
 
 
+def test_commands_unresolved_review_literal_placeholder_warns():
+    _dest, restore = _setup(
+        ["latch-review.md"],
+        dest_bodies={
+            "latch-review.md": "bash <LATCH_REVIEW_POSIX_LITERAL> --pr 75\n"
+        },
+    )
+    try:
+        _name, level, detail = doctor.check_commands_installed()
+        _assert(level == doctor.WARN, f"unresolved review placeholder should WARN: {detail}")
+        _assert("install-path placeholder" in detail, detail)
+        print("PASS commands_unresolved_review_literal_placeholder_warns")
+    finally:
+        restore()
+
+
 def test_commands_stale_legacy_warns():
     _dest, restore = _setup(
         ["latch-gate.md"],
@@ -503,6 +519,7 @@ if __name__ == "__main__":
     test_commands_missing_warns()
     test_commands_present_ok()
     test_commands_unresolved_placeholder_warns()
+    test_commands_unresolved_review_literal_placeholder_warns()
     test_commands_stale_legacy_warns()
     test_pin_via_file_ok()
     test_pin_via_env_ok()

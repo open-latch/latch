@@ -34,6 +34,42 @@ esac
 SRC_DIR="$KB_HOME/commands"
 DEST_DIR="${CLAUDE_COMMANDS_DIR:-$HOME/.claude/commands}"
 
+# Command templates that embed an executable path need shell-specific literals.
+# Reuse install_engine's renderer so every installation path has one quoting
+# contract, including commands-only installs.
+COMMAND_RENDER_PYTHON="${LATCH_PYTHON:-${CLAUDE_KB_PYTHON:-}}"
+if [ -z "$COMMAND_RENDER_PYTHON" ]; then
+  for candidate in "$KB_HOME/.venv/bin/python" "$KB_HOME/.venv/Scripts/python.exe"; do
+    if [ -x "$candidate" ]; then
+      COMMAND_RENDER_PYTHON="$candidate"
+      break
+    fi
+  done
+fi
+if [ -z "$COMMAND_RENDER_PYTHON" ]; then
+  COMMAND_RENDER_PYTHON="$(command -v python3 || command -v python || true)"
+fi
+if [ -z "$COMMAND_RENDER_PYTHON" ]; then
+  echo "error: Python is required to render command installation paths safely" >&2
+  exit 1
+fi
+
+COMMAND_RENDER_CODE='import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import install_engine as ie
+body = Path(sys.argv[3]).read_text(encoding="utf-8")
+body = ie.render_command_template(body, kb_home=sys.argv[2])
+if sys.argv[5] == "kb-gate.md":
+    body = body.replace("/bin/run_latch_gate.sh", "/bin/run_kb_gate.sh")
+Path(sys.argv[4]).write_text(body, encoding="utf-8")'
+
+render_command_file() {
+  local source="$1" target="$2" legacy="${3:-}"
+  "$COMMAND_RENDER_PYTHON" -c "$COMMAND_RENDER_CODE" \
+    "$KB_HOME/src" "$KB_HOME" "$source" "$target" "$legacy"
+}
+
 if [ ! -d "$SRC_DIR" ]; then
   echo "error: no commands/ directory at $SRC_DIR" >&2
   exit 1
@@ -48,7 +84,7 @@ skipped=0
 for f in "$SRC_DIR"/*.md; do
   [ -e "$f" ] || continue
   name="$(basename "$f")"
-  sed "s|<KB_HOME>|$KB_HOME|g" "$f" > "$DEST_DIR/$name"
+  render_command_file "$f" "$DEST_DIR/$name"
   echo "installed $name"
   installed=$((installed + 1))
 done
@@ -57,8 +93,11 @@ is_latch_command() {
   local file="$1"
   [ -f "$file" ] || return 1
   grep -Fq "<KB_HOME>" "$file" && return 0
+  grep -Fq "<KB_HOME_POSIX_LITERAL>" "$file" && return 0
+  grep -Fq "<LATCH_REVIEW_POSIX_LITERAL>" "$file" && return 0
+  grep -Fq "<LATCH_REVIEW_POWERSHELL_LITERAL>" "$file" && return 0
   grep -Fq "$KB_HOME" "$file" && return 0
-  grep -Eq '/bin/(run_kb_gate|run_latch_gate|latch_baseline|unlatch|latch_gate_report|run_compact_now|run_latch_compact_now|run_kb_focus)\.sh|/bin/latch_direction\.sh|/src/(budget|maintenance)\.py|kb_profile_(active|bind)|mission-control verification profile|trust-and-go verification profile' "$file"
+  grep -Eq '/bin/(run_kb_gate|run_latch_gate|latch_baseline|unlatch|latch_gate_report|run_compact_now|run_latch_compact_now|run_kb_focus)\.sh|/bin/latch_direction\.sh|/bin/latch-review(\.ps1)?|/src/(budget|maintenance)\.py|kb_profile_(active|bind)|mission-control verification profile|trust-and-go verification profile' "$file"
 }
 
 update_legacy_alias() {
@@ -73,11 +112,7 @@ update_legacy_alias() {
     skipped=$((skipped + 1))
     return 0
   fi
-  if [ "$legacy" = "kb-gate.md" ]; then
-    sed "s|<KB_HOME>|$KB_HOME|g; s|/bin/run_latch_gate\\.sh|/bin/run_kb_gate.sh|g" "$primary_path" > "$legacy_path"
-  else
-    sed "s|<KB_HOME>|$KB_HOME|g" "$primary_path" > "$legacy_path"
-  fi
+  render_command_file "$primary_path" "$legacy_path" "$legacy"
   echo "updated legacy alias $legacy -> $primary"
   updated=$((updated + 1))
 }

@@ -29,7 +29,9 @@ With no scope argument, the runner attempts to detect the current branch's pull
 request. Add `--post-pr` to a PR review only when you want the consolidated
 report published as a sticky GitHub comment. Immediately before posting, the
 runner verifies that the PR still points to the reviewed head SHA and refuses
-to replace the comment if the PR advanced. Otherwise GitHub is read only.
+to replace the comment if the PR advanced. The GitHub CLI is required only for
+`--pr`, automatic PR detection, and `--post-pr`; an explicit `--range` or
+`--commit` review without posting requires only Git and never invokes `gh`.
 
 Claude Code users can run `/latch-review`; Codex users can ask to “send PR 73
 to the Latch review panel.” Both host integrations call the same runner.
@@ -40,6 +42,9 @@ The runner requires:
 
 - Claude Code authenticated through `claude.ai` with a subscription
 - Codex CLI authenticated with `ChatGPT`
+- Git for every review
+- GitHub CLI authentication only for PR resolution, automatic PR detection, or
+  an explicit `--post-pr`
 
 The runner resolves both provider executables once to absolute real paths and
 uses those exact paths for authentication checks and every review lane. If more
@@ -52,9 +57,18 @@ preflight; the runner never silently downgrades the model or effort.
 Before resolving the review scope or invoking a model, it fails closed if a
 provider API key, alternate auth token, endpoint override, or hosted-provider
 toggle is present. This includes `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,
-`CODEX_API_KEY`, `ANTHROPIC_BASE_URL`, and `OPENAI_BASE_URL`. Those variables
-are also removed from every child-process environment. This prevents ambient
-configuration from silently changing the account-usage or evidence destination.
+`CODEX_API_KEY`, `CODEX_ACCESS_TOKEN`, `ANTHROPIC_BASE_URL`, and
+`OPENAI_BASE_URL`. Those variables are also removed from every child-process
+environment. This prevents ambient configuration from silently changing the
+account-usage or evidence destination.
+
+Codex review lanes run with isolated temporary `HOME` and `CODEX_HOME`
+directories so user, project, and bundled skills cannot enter the reviewer
+prompt. The runner copies the short-lived access/identity token bundle and
+account metadata required by Codex into that directory with mode `0600`; it
+never copies the reusable refresh token. The access token must have at least
+35 minutes remaining immediately before lanes start, and the isolated state is
+deleted when the run ends.
 
 The panel consumes the user's Claude and Codex subscription allowances.
 Subscription auth plus the environment guard prevents API-key metering. The
@@ -86,20 +100,27 @@ The runner:
   the merge-base and exact head; the fetch has a five-minute timeout and never
   writes refs or `FETCH_HEAD` in the user's repository
 - builds bounded prompts containing precomputed diff, blobs, identifier
-  matches, and a path index
+  matches, and a path index once per immutable scope, then reuses that exact
+  evidence frame for every applicable specialist lane
 - runs all applicable lanes in parallel with shell, web, connectors, MCP, and
-  subagents disabled
+  subagents disabled; Codex receives explicit `web_search="disabled"` and
+  `tools.web_search=false` configuration, disables image and skill-search
+  tools, and uses isolated skill-free runtime state; Claude receives an empty
+  tool list plus a strict empty MCP configuration
 - treats changed source and artifact bytes as untrusted prompt evidence
 - never checks out or executes reviewed project code
 - runs the conditional artifact/output lane against the same immutable static
   evidence; conclusions requiring a build or rendered output become coverage
-  gaps because project code and recipes are never executed
+  gaps because project code and recipes are never executed; path-owned runtime
+  evidence requirements become deterministic human-resolution signals
 - validates each receipt with the shared schema and aggregates with the shared
   deterministic policy; the provider-facing schema deliberately uses JSON
   Schema draft-07 and avoids regex lookaround, while trusted post-generation
   validation separately enforces repository-relative finding paths
 - live-caps each provider stdout/stderr stream; very large PR ancestry can still
-  consume temporary disk during the initial Git fetch before evidence caps apply
+  consume temporary disk during the initial Git fetch before evidence caps
+  apply; interrupt, timeout, and output-limit paths terminate the isolated
+  provider process groups
 
 Raw provider output, normalized receipts, `report.md`, `summary.json`, and
 model/auth metadata are saved inside the repository's local Git metadata
@@ -109,7 +130,9 @@ model/auth metadata are saved inside the repository's local Git metadata
 Exit `0` means the panel completed without a policy signal. Exit `1` means the
 report contains a blocker, required human resolution, or an incomplete
 required lane. Exit `2` means scope, authentication, or execution failed before
-a trustworthy result could be produced.
+a trustworthy result could be produced. Exit `3` means a trustworthy local
+report was produced but the explicitly requested GitHub publication failed;
+`metadata.json` preserves both the review result and posting error.
 
 ## GitHub configuration
 

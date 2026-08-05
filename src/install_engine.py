@@ -66,6 +66,7 @@ import argparse
 import json
 import os
 import platform
+import re
 import shlex
 import shutil
 import subprocess
@@ -105,6 +106,18 @@ SNIPPET_PATH = KB_HOME / "settings_snippet.json"
 COMMANDS_SRC = KB_HOME / "commands"
 COMMANDS_DEST = Path(os.environ.get("CLAUDE_COMMANDS_DIR") or (Path.home() / ".claude" / "commands"))
 COMMAND_PLACEHOLDER = "<KB_HOME>"
+KB_HOME_POSIX_LITERAL_PLACEHOLDER = "<KB_HOME_POSIX_LITERAL>"
+LATCH_REVIEW_POSIX_LITERAL_PLACEHOLDER = "<LATCH_REVIEW_POSIX_LITERAL>"
+LATCH_REVIEW_POWERSHELL_LITERAL_PLACEHOLDER = "<LATCH_REVIEW_POWERSHELL_LITERAL>"
+COMMAND_PLACEHOLDERS = (
+    COMMAND_PLACEHOLDER,
+    KB_HOME_POSIX_LITERAL_PLACEHOLDER,
+    LATCH_REVIEW_POSIX_LITERAL_PLACEHOLDER,
+    LATCH_REVIEW_POWERSHELL_LITERAL_PLACEHOLDER,
+)
+COMMAND_PLACEHOLDER_RE = re.compile(
+    "|".join(re.escape(value) for value in sorted(COMMAND_PLACEHOLDERS, key=len, reverse=True))
+)
 LEGACY_COMMAND_ALIASES = {
     "kb-budget-approve.md": "latch-budget-approve.md",
     "kb-compact.md": "latch-compact.md",
@@ -131,6 +144,8 @@ LATCH_COMMAND_MARKERS = (
     "/bin/run_latch_compact_now.sh",
     "/bin/run_kb_focus.sh",
     "/bin/latch_direction.sh",
+    "/bin/latch-review",
+    "/bin/latch-review.ps1",
     "/src/budget.py",
     "/src/maintenance.py",
     "kb_profile_active",
@@ -666,6 +681,47 @@ def _resolved_kb_home() -> str:
     return str(KB_HOME).replace("\\", "/")
 
 
+def _powershell_literal(value: str) -> str:
+    """Return a PowerShell single-quoted literal with no interpolation."""
+    return "'" + value.replace("'", "''") + "'"
+
+
+def render_command_template(body: str, *, kb_home: str | Path | None = None) -> str:
+    """Resolve install-path placeholders without turning paths into shell code.
+
+    ``<KB_HOME>`` retains its historical raw substitution for existing command
+    templates.  The review command uses shell-specific placeholders because it
+    embeds the checkout path in executable snippets: POSIX values are rendered
+    with :func:`shlex.quote`, while PowerShell receives a non-interpolating
+    single-quoted literal.
+    """
+    normalized_home = str(KB_HOME if kb_home is None else kb_home).replace("\\", "/")
+    reserved = [value for value in COMMAND_PLACEHOLDERS if value in normalized_home]
+    if reserved:
+        raise ValueError(
+            "the Latch installation path contains a reserved command-template "
+            f"token: {reserved[0]}"
+        )
+    review_posix = f"{normalized_home}/bin/latch-review"
+    review_powershell = f"{normalized_home}/bin/latch-review.ps1"
+    replacements = {
+        COMMAND_PLACEHOLDER: normalized_home,
+        KB_HOME_POSIX_LITERAL_PLACEHOLDER: shlex.quote(normalized_home),
+        LATCH_REVIEW_POSIX_LITERAL_PLACEHOLDER: shlex.quote(review_posix),
+        LATCH_REVIEW_POWERSHELL_LITERAL_PLACEHOLDER: _powershell_literal(
+            review_powershell
+        ),
+    }
+    return COMMAND_PLACEHOLDER_RE.sub(
+        lambda match: replacements[match.group(0)],
+        body,
+    )
+
+
+def unresolved_command_placeholders(body: str) -> tuple[str, ...]:
+    return tuple(placeholder for placeholder in COMMAND_PLACEHOLDERS if placeholder in body)
+
+
 def _read_text(path: Path) -> str:
     try:
         return path.read_text(encoding="utf-8")
@@ -673,10 +729,10 @@ def _read_text(path: Path) -> str:
         return ""
 
 
-def _is_latch_command_body(body: str) -> bool:
+def is_latch_command_body(body: str) -> bool:
     normalized = body.replace("\\", "/")
     return (
-        COMMAND_PLACEHOLDER in body
+        bool(unresolved_command_placeholders(body))
         or _resolved_kb_home() in normalized
         or any(marker in normalized for marker in LATCH_COMMAND_MARKERS)
     )
@@ -687,7 +743,7 @@ def _write_command(src: Path, dest: Path) -> None:
 
 
 def _command_content(src: Path) -> str:
-    return src.read_text(encoding="utf-8").replace(COMMAND_PLACEHOLDER, _resolved_kb_home())
+    return render_command_template(src.read_text(encoding="utf-8"))
 
 
 def _legacy_alias_content(legacy_name: str, primary: Path) -> str:
@@ -745,7 +801,7 @@ def install_commands(dry_run: bool) -> tuple[str, list[str]]:
         if not legacy.exists() or not primary.exists():
             continue
         body = _read_text(legacy)
-        if not _is_latch_command_body(body):
+        if not is_latch_command_body(body):
             changes.append(f"skipped legacy alias {legacy_name} (looks user-owned)")
             continue
         if dry_run:
@@ -758,7 +814,7 @@ def install_commands(dry_run: bool) -> tuple[str, list[str]]:
         if not stale.exists():
             continue
         body = _read_text(stale)
-        if not _is_latch_command_body(body):
+        if not is_latch_command_body(body):
             changes.append(f"skipped stale legacy command {stale_name} (looks user-owned)")
             continue
         if dry_run:
@@ -782,22 +838,27 @@ def commands_status() -> tuple[bool, str]:
         head = ", ".join(missing[:3]) + ("..." if len(missing) > 3 else "")
         return False, (f"slash commands: {len(missing)}/{len(expected)} not installed in "
                        f"{COMMANDS_DEST} (e.g. {head})")
-    unresolved = [n for n in expected
-                  if COMMAND_PLACEHOLDER in (COMMANDS_DEST / n).read_text(encoding="utf-8")]
+    unresolved = [
+        n
+        for n in expected
+        if unresolved_command_placeholders(
+            (COMMANDS_DEST / n).read_text(encoding="utf-8")
+        )
+    ]
     unresolved.extend(
         n for n in LEGACY_COMMAND_ALIASES
         if (COMMANDS_DEST / n).is_file()
-        and _is_latch_command_body(_read_text(COMMANDS_DEST / n))
-        and COMMAND_PLACEHOLDER in _read_text(COMMANDS_DEST / n)
+        and is_latch_command_body(_read_text(COMMANDS_DEST / n))
+        and unresolved_command_placeholders(_read_text(COMMANDS_DEST / n))
     )
     if unresolved:
         head = ", ".join(unresolved[:3]) + ("..." if len(unresolved) > 3 else "")
-        return False, (f"slash commands: {len(unresolved)} still contain a literal "
-                       f"{COMMAND_PLACEHOLDER} placeholder (e.g. {head})")
+        return False, (f"slash commands: {len(unresolved)} still contain an install-path "
+                       f"placeholder (e.g. {head})")
     stale = [
         n for n in STALE_LEGACY_COMMANDS
         if (COMMANDS_DEST / n).is_file()
-        and _is_latch_command_body(_read_text(COMMANDS_DEST / n))
+        and is_latch_command_body(_read_text(COMMANDS_DEST / n))
     ]
     if stale:
         head = ", ".join(stale[:3]) + ("..." if len(stale) > 3 else "")

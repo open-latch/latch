@@ -128,7 +128,8 @@ def test_shell_backed_codex_skills_do_not_treat_project_root_as_latch_home():
 
         assert "CLAUDE_KB_HOME" in text
         if command == "latch-review":
-            assert "<KB_HOME>" in text
+            assert "<KB_HOME_POSIX_LITERAL>" in text
+            assert "<LATCH_REVIEW_POWERSHELL_LITERAL>" in text
             assert "rerun bin/install_codex" in text
             assert "AGENTS.md" not in text
             assert "src/mcp_server.py" not in text
