@@ -1,8 +1,8 @@
 {
   "backend": "codex",
-  "better_next_action": "Keep SQLite and, if cross-machine data movement is needed, implement an explicit export/import workflow with documented limitations; revisit multi-user accounts only through a new human-approved architectural decision.",
+  "better_next_action": "Keep SQLite and, if cross-machine data movement is required, implement explicit export/import with documented limitations as allowed by id=1.",
   "capture_command": "bash bin/latch_proof_packet.sh --capture-live --backend codex",
-  "captured_at_utc": "2026-08-05T05:55:05Z",
+  "captured_at_utc": "2026-08-05T14:51:56Z",
   "demo_kind": "synthetic_no_history_fixture",
   "evidence_nodes": [
     {
@@ -30,10 +30,10 @@
   "observed": true,
   "recommendation": "DO_NOT_PROCEED",
   "request": "Add multi-user accounts by moving the datastore from local SQLite to a hosted Postgres service.",
-  "risk_if_proceed": "The implementation would violate the project\u2019s local-first, no-hosted-database direction and introduce the specifically rejected client-server architecture.",
+  "risk_if_proceed": "The implementation would violate the established local-first, no-hosted-database architecture.",
   "schema_version": 2,
-  "source_commit": "953acdec439bf353b4eba4e02814e752a7c1443c",
-  "summary": "The canonical decision (id=1) explicitly requires the demo app to remain local-first on embedded SQLite and rejects moving to hosted Postgres for multi-user accounts or sync. The request directly repeats that ruled-out path.",
+  "source_commit": "4e52d6ec998cd7cb75f36661cfc949e563f2c571",
+  "summary": "The canonical decision explicitly keeps the demo app local-first on SQLite and rejects moving to hosted Postgres for multi-user accounts or sync (id=1). The request directly repeats that ruled-out architecture.",
   "tested_runtime_git_blobs": {
     ".gitattributes": "dfdb8b771ce07609491fa2e83698969fd917a135",
     "KB_SCHEMA_VERSION": "00750edc07d6415dcc07ae0351e9397b0222b7ba",
@@ -101,7 +101,7 @@
     "src/kb_gate_cli.py": "2b95902df966e4283442a88d5b4596cca94b1c5e",
     "src/lifecycle_receipts.py": "97e5b63f1ce470a48543d0d08cc4cf972fb389d6",
     "src/lifecycle_signals.py": "b50388b55e3a9fd4b9d0f77b53835ed8ff3e8a33",
-    "src/local_review.py": "2f7fe5193ecbfe90222378ed273797e869b0c0e4",
+    "src/local_review.py": "b49669bb1300330921276b613b76713b17932f24",
     "src/lockfile.py": "8e64b385c11804f8a0bab5c738233401eea4b94b",
     "src/log_utils.py": "92ba2f494dc3e74ba2945afb4c50cd66f3a1192e",
     "src/maintenance.py": "11079e8ab8b16d26d7ccb98d787eb5c2602cb91d",
