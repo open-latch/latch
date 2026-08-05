@@ -133,6 +133,10 @@
         ]
       }
     },
+    "normalization_dropped_findings": {
+      "type": "integer",
+      "minimum": 0
+    },
     "complexity": {
       "type": "object",
       "additionalProperties": false,
@@ -203,6 +207,7 @@
     "overall_verdict",
     "summary",
     "findings",
+    "normalization_dropped_findings",
     "complexity",
     "coverage_gaps"
   ]

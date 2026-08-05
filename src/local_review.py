@@ -58,6 +58,15 @@ CLAUDE_MODEL = "claude-opus-5"
 CLAUDE_EFFORT = "high"
 CODEX_MODEL = "gpt-5.6-sol"
 CODEX_EFFORT = "high"
+CODEX_PERMISSION_PROFILE = "latch-review"
+CODEX_PERMISSION_CONFIG = (
+    f'default_permissions="{CODEX_PERMISSION_PROFILE}"',
+    (
+        f'permissions.{CODEX_PERMISSION_PROFILE}.filesystem='
+        '{":minimal"="read",":workspace_roots"={"."="deny"}}'
+    ),
+    f"permissions.{CODEX_PERMISSION_PROFILE}.network.enabled=false",
+)
 CODEX_DISABLED_FEATURES = (
     "apps",
     "browser_use",
@@ -895,6 +904,94 @@ def _require_codex_model_capability(
         )
 
 
+def _codex_config_arguments() -> list[str]:
+    """Return the one strict, tool-isolated Codex invocation contract."""
+    values = [
+        f'model_reasoning_effort="{CODEX_EFFORT}"',
+        *CODEX_PERMISSION_CONFIG,
+        'web_search="disabled"',
+        "tools.web_search=false",
+        "skills.bundled.enabled=false",
+    ]
+    arguments = [item for value in values for item in ("--config", value)]
+    for feature in CODEX_DISABLED_FEATURES:
+        arguments.extend(["--disable", feature])
+    return arguments
+
+
+def _codex_exec_command(
+    executable: str,
+    workspace: Path,
+    output_schema: Path,
+    prompt_argument: str,
+) -> list[str]:
+    """Build the one Codex exec contract used by preflight and live lanes."""
+    return [
+        executable,
+        "exec",
+        "--ignore-user-config",
+        "--ignore-rules",
+        "--strict-config",
+        "--ephemeral",
+        "--skip-git-repo-check",
+        "--cd",
+        str(workspace),
+        "--model",
+        CODEX_MODEL,
+        *_codex_config_arguments(),
+        "--output-schema",
+        str(output_schema),
+        "--color",
+        "never",
+        prompt_argument,
+    ]
+
+
+def _require_codex_invocation_capability(
+    executable: str,
+    version: str,
+    repo: Path,
+    environment: dict[str, str],
+) -> None:
+    """Fail before inference unless the selected binary accepts our contract.
+
+    An intentionally invalid output schema makes the exact ``codex exec``
+    process stop locally after strict configuration parsing and before a model
+    request. The sentinel diagnostic proves that every preceding flag and
+    override was accepted; any other result fails closed.
+    """
+    with tempfile.TemporaryDirectory(prefix="latch-review-codex-probe-") as value:
+        probe_root = Path(value)
+        probe_home = probe_root / "codex-home"
+        probe_home.mkdir(mode=0o700)
+        invalid_schema = probe_root / "invalid-output-schema.json"
+        invalid_schema.write_text("{", encoding="utf-8")
+        probe_environment = dict(environment)
+        probe_environment["CODEX_HOME"] = str(probe_home)
+        command = _codex_exec_command(
+            executable,
+            probe_root,
+            invalid_schema,
+            "Latch review invocation compatibility probe",
+        )
+        result = _run(
+            command,
+            cwd=repo,
+            environment=probe_environment,
+            check=False,
+            timeout=PREFLIGHT_TIMEOUT_SECONDS,
+        )
+        detail = f"{result.stdout}\n{result.stderr}"
+        expected = f"Output schema file {invalid_schema} is not valid JSON"
+        if result.returncode == 0 or expected not in detail:
+            diagnostic = (result.stderr or result.stdout).strip()
+            raise ValueError(
+                f"Codex executable {executable} ({version}) rejected the strict "
+                "local-review isolation contract before inference: "
+                f"{diagnostic[:500] or 'no diagnostic output'}"
+            )
+
+
 def preflight_auth(repo: Path, *, require_gh: bool = True) -> ProviderRuntime:
     present = [name for name in BLOCKED_PROVIDER_ENV_VARS if os.environ.get(name)]
     if present:
@@ -913,6 +1010,9 @@ def preflight_auth(repo: Path, *, require_gh: bool = True) -> ProviderRuntime:
     claude_version = _provider_version(claude_executable, repo, environment)
     codex_version = _provider_version(codex_executable, repo, environment)
     _require_codex_model_capability(
+        codex_executable, codex_version, repo, environment
+    )
+    _require_codex_invocation_capability(
         codex_executable, codex_version, repo, environment
     )
     claude = _run(
@@ -1019,7 +1119,7 @@ def _build_lanes(
     workspace: Path,
     scope: ReviewScope,
     raw_root: Path,
-) -> tuple[list[Lane], list[tuple[str, str]], bool, list[str]]:
+) -> tuple[list[Lane], list[tuple[str, str]], bool, list[str], int]:
     lanes: list[Lane] = []
     prompt_root = workspace / "prompts"
     manifest_path = workspace / "prompt-manifest.json"
@@ -1082,7 +1182,22 @@ def _build_lanes(
     artifact_needed = manifest.get("artifact_review_needed")
     if not isinstance(artifact_needed, bool):
         raise ValueError("prompt manifest artifact classification is malformed")
-    return lanes, skipped, artifact_needed, runtime_required
+    path_coverage_gap_count = manifest.get(
+        "path_classification_coverage_gap_count"
+    )
+    if (
+        not isinstance(path_coverage_gap_count, int)
+        or isinstance(path_coverage_gap_count, bool)
+        or path_coverage_gap_count < 0
+    ):
+        raise ValueError("prompt manifest path coverage-gap count is malformed")
+    return (
+        lanes,
+        skipped,
+        artifact_needed,
+        runtime_required,
+        path_coverage_gap_count,
+    )
 
 
 def _provider_command(
@@ -1117,43 +1232,12 @@ def _provider_command(
             "--tools",
             "",
         ]
-    command = [
+    return _codex_exec_command(
         runtime.codex_executable,
-        "exec",
-        "--ignore-user-config",
-        "--ignore-rules",
-        "--strict-config",
-        "--ephemeral",
-        "--skip-git-repo-check",
-        "--sandbox",
-        "read-only",
-        "--cd",
-        str(workspace),
-        "--model",
-        CODEX_MODEL,
-        "--config",
-        f'model_reasoning_effort="{CODEX_EFFORT}"',
-        "--config",
-        'web_search="disabled"',
-        "--config",
-        "tools.web_search=false",
-        "--config",
-        "tools.view_image=false",
-        "--config",
-        "skills.bundled.enabled=false",
-    ]
-    for feature in CODEX_DISABLED_FEATURES:
-        command.extend(["--disable", feature])
-    command.extend(
-        [
-            "--output-schema",
-            str(SCHEMA_PATH),
-            "--color",
-            "never",
-            "-",
-        ]
+        workspace,
+        SCHEMA_PATH,
+        "-",
     )
-    return command
 
 
 def _extract_claude(stdout_path: Path, result_path: Path) -> None:
@@ -1274,6 +1358,7 @@ def _aggregate(
     scope: ReviewScope,
     artifact_needed: bool,
     runtime_evidence_required: list[str],
+    path_coverage_gap_count: int,
     output: Path,
 ) -> dict[str, Any]:
     report, summary = output / "report.md", output / "summary.json"
@@ -1287,6 +1372,8 @@ def _aggregate(
         scope.head_sha,
         "--artifact-review-needed",
         "true" if artifact_needed else "false",
+        "--path-classification-coverage-gap-count",
+        str(path_coverage_gap_count),
         "--output-report",
         str(report),
         "--output-summary",
@@ -1416,9 +1503,13 @@ def run_review(args: argparse.Namespace) -> int:
         prepared_pr_store = workspace / "review-target"
         if not prepared_pr_store.is_dir():
             _prepare_object_store(repo, workspace, scope)
-        lanes, skipped, artifact_needed, runtime_evidence_required = _build_lanes(
-            workspace, scope, raw_root
-        )
+        (
+            lanes,
+            skipped,
+            artifact_needed,
+            runtime_evidence_required,
+            path_coverage_gap_count,
+        ) = _build_lanes(workspace, scope, raw_root)
         # Validate and bridge the short-lived Codex access token only after all
         # potentially slow fetch/evidence work.  The lifetime guarantee must
         # cover lane execution, not repository preparation.
@@ -1495,6 +1586,7 @@ def run_review(args: argparse.Namespace) -> int:
             scope,
             artifact_needed,
             runtime_evidence_required,
+            path_coverage_gap_count,
             output,
         )
 
@@ -1540,6 +1632,9 @@ def run_review(args: argparse.Namespace) -> int:
                 "path": runtime.codex_executable,
                 "version": runtime.codex_version,
                 "capability_source": "bundled_model_catalog",
+                "isolation_capability_source": (
+                    "strict_config_invalid_schema_probe"
+                ),
                 "model": CODEX_MODEL,
                 "reasoning_effort": CODEX_EFFORT,
             },
@@ -1549,6 +1644,7 @@ def run_review(args: argparse.Namespace) -> int:
             "account_credit_settings": "not_verifiable_by_cli",
         },
         "artifact_review_needed": artifact_needed,
+        "path_classification_coverage_gap_count": path_coverage_gap_count,
         "runtime_evidence_required": runtime_evidence_required,
         "review_should_fail": review_should_fail,
         "review_exit_code": review_exit_code,

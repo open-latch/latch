@@ -52,7 +52,10 @@ than one CLI is installed, select one explicitly with an absolute `CLAUDE_BIN`
 or `CODEX_BIN`. Before starting any lane, it records both versions and verifies
 from the selected Codex binary's offline `debug models --bundled` catalog that
 `gpt-5.6-sol` supports `high` effort. An incompatible binary fails once during
-preflight; the runner never silently downgrades the model or effort.
+preflight. A second local-only preflight runs the exact strict lane config with
+an intentionally invalid output schema, proving the selected binary accepts the
+permission and tool-isolation contract before any inference can begin. The
+runner never silently downgrades the model or effort.
 
 Before resolving the review scope or invoking a model, it fails closed if a
 provider API key, alternate auth token, endpoint override, or hosted-provider
@@ -104,9 +107,12 @@ The runner:
   evidence frame for every applicable specialist lane
 - runs all applicable lanes in parallel with shell, web, connectors, MCP, and
   subagents disabled; Codex receives explicit `web_search="disabled"` and
-  `tools.web_search=false` configuration, disables image and skill-search
-  tools, and uses isolated skill-free runtime state; Claude receives an empty
-  tool list plus a strict empty MCP configuration
+  `tools.web_search=false` configuration plus a strict custom permission
+  profile that grants only minimal runtime reads, denies tool reads from the
+  generated workspace, and disables network access; this prevents an exposed
+  local-image tool from reading review or user files even on Codex builds that
+  cannot disable that tool by configuration; Claude receives an empty tool
+  list plus a strict empty MCP configuration
 - treats changed source and artifact bytes as untrusted prompt evidence
 - never checks out or executes reviewed project code
 - runs the conditional artifact/output lane against the same immutable static

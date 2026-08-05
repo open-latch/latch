@@ -533,24 +533,49 @@ def test_render_review_skill_shell_quotes_adversarial_latch_path():
         ic.KB_HOME = latch_home
         body = ic.render_codex_skill("source-command-latch-review")
         _assert(not ic.install_engine.unresolved_command_placeholders(body), body)
+        _assert("LATCH_REVIEW_POSIX_LITERAL" not in body, body)
+        _assert("LATCH_REVIEW_POWERSHELL_LITERAL" not in body, body)
+        _assert("latch-review-source-template-guard:start" in body, body)
+        _assert(
+            "Continue below only when both installer tokens have already been rendered"
+            in body,
+            body,
+        )
         normalized_home = str(latch_home).replace("\\", "/")
-        _assert(f"latch_home={shlex.quote(normalized_home)}" in body, body)
+        expected_runner = normalized_home + "/bin/latch-review"
+        _assert(f"latch_runner={shlex.quote(expected_runner)}" in body, body)
+        _assert("${LATCH_HOME" not in body, body)
+        _assert("${CLAUDE_KB_HOME" not in body, body)
         expected_ps = "'" + (
             normalized_home + "/bin/latch-review.ps1"
         ).replace("'", "''") + "'"
-        _assert(f"& {expected_ps}" in body, body)
+        _assert(f"$latchReview = {expected_ps}" in body, body)
+        _assert("& $latchReview <resolved target arguments>" in body, body)
 
         if os.name != "nt":
             match = re.search(r"```bash\n(.*?)\n```", body, re.DOTALL)
             _assert(match is not None, "missing rendered Bash block")
-            command = match.group(1).replace("<resolved target arguments>", "--commit HEAD")
+            command = match.group(1).replace(
+                "<resolved target arguments>", "--commit " + "a" * 40
+            )
             result = subprocess.run(
                 ["bash", "-c", command], cwd=root, capture_output=True, text=True
             )
             _assert(result.returncode == 0, result.stderr)
-            _assert(result.stdout.splitlines() == ["--commit", "HEAD"], result.stdout)
+            _assert(result.stdout.splitlines() == ["--commit", "a" * 40], result.stdout)
             _assert(not (root / "SHOULD_NOT_EXIST").exists(),
                     "shell interpolation from the install path must never execute")
+
+            runner.unlink()
+            missing = subprocess.run(
+                ["bash", "-c", command], cwd=root, capture_output=True, text=True
+            )
+            _assert(missing.returncode == 1, missing.stderr)
+            _assert(
+                "unavailable at the pinned path" in missing.stderr
+                and "rerun bin/install_codex" in missing.stderr,
+                missing.stderr,
+            )
     finally:
         ic.KB_HOME = original_home
         shutil.rmtree(root, ignore_errors=True)

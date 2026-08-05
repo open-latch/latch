@@ -9,31 +9,90 @@ Run the shared five-lane adversarial panel through the user's Claude Code and
 Codex CLI subscription logins. Do not substitute an in-chat review or claim
 cross-provider coverage when a provider lane failed.
 
+## Source-template guard — check first
+
+<!-- latch-review-source-template-guard:start -->
+Before resolving a target or executing any code block, inspect the two
+installer-rendered values in this loaded skill:
+
+- POSIX runner: <LATCH_REVIEW_POSIX_LITERAL>
+- PowerShell runner: <LATCH_REVIEW_POWERSHELL_LITERAL>
+
+If either displayed value remains an angle-bracketed all-caps installer token,
+this is the tracked project source template, not an executable installed skill.
+Stop and delegate the request to the separately installed, unprefixed user skill
+`$source-command-latch-review`, never this project source copy. Do not execute a
+code block from this template, replace
+the token yourself, or derive a runner from the reviewed checkout, current
+repository, `PATH`, `LATCH_HOME`, `CLAUDE_KB_HOME`, or another ambient
+location. If the unprefixed installed user skill is unavailable, stop and ask
+the user to reinstall the Codex skills from their separately trusted Latch
+installation.
+
+Continue below only when both installer tokens have already been rendered to
+concrete absolute paths by the Latch installer.
+<!-- latch-review-source-template-guard:end -->
+
 ## Run
 
-Resolve the Latch checkout, then translate the user's target into exactly one
-of `--pr`, `--range`, or `--commit`. Omit the target to let the runner detect
-the current branch's PR. Add `--post-pr` only when the user explicitly asks to
-publish the consolidated report. `gh` is required only for PR resolution,
-automatic PR detection, or posting; explicit local `--range` and `--commit`
-reviews without posting require only Git.
+### Target argument contract
+
+<!-- latch-review-target-grammar:start -->
+The arguments passed to the runner must match exactly one of these forms:
+
+- zero arguments
+- `--pr N`
+- `--pr N --post-pr`
+- `--range OID...OID`
+- `--range OID..OID`
+- `--commit OID`
+
+Zero arguments are allowed only to let the runner auto-detect the current
+branch's pull request when the user supplies no target or unambiguously asks to
+review the current PR without publication. `N` must match `[1-9][0-9]*`. Each
+final `OID` must match `[0-9a-f]{40}`. Translate a bare PR number to `--pr N`.
+For a user-supplied commit or range endpoint, first require each `REV` to match
+`[A-Za-z0-9][A-Za-z0-9._/@{}~^+-]*`, then resolve it as a commit without an
+evaluation boundary (equivalent argv: `git`, `rev-parse`, `--verify`,
+`--end-of-options`, `REV^{commit}`) and pass only the resulting full OID. A
+range must contain exactly one `...` or `..` separator and two nonempty
+endpoints. Append `--post-pr` only to `--pr N`, and only when the user explicitly
+requests publication.
+
+Never pass user text as a shell fragment. Reject whitespace inside a target,
+shell operators (`;`, `&`, `|`), redirection (`<`, `>`), command substitution
+(`$(` or backticks), quotes, backslashes, leading `-`, any character outside
+the `REV` grammar, or any extra flag. Do not use `eval`, `sh -c`, or an
+equivalent command-string boundary. Empty target text must produce exactly zero
+arguments, never a partial option. If nonempty target text is ambiguous, fails
+validation, cannot be resolved to a commit, or cannot be represented by one of
+the forms above, ask the user for a valid target instead of invoking the runner.
+<!-- latch-review-target-grammar:end -->
+
+Publishing is never implicit. `gh` is required only for PR resolution or
+posting; explicit local `--range` and `--commit` reviews require only Git.
+
+Use only the installer-rendered runner path. Do not consult `LATCH_HOME`,
+`CLAUDE_KB_HOME`, `PATH`, the current repository, or another ambient location
+for a replacement executable.
 
 ```bash
-latch_home=<KB_HOME_POSIX_LITERAL>
-if [ ! -x "$latch_home/bin/latch-review" ]; then
-  latch_home="${LATCH_HOME:-${CLAUDE_KB_HOME:-}}"
-fi
-if [ -z "$latch_home" ] || [ ! -x "$latch_home/bin/latch-review" ]; then
-  echo "Installed Latch review runner is unavailable; rerun bin/install_codex or set LATCH_HOME to a trusted Latch install." >&2
+latch_runner=<LATCH_REVIEW_POSIX_LITERAL>
+if [ ! -x "$latch_runner" ]; then
+  echo "Installed Latch review runner is unavailable at the pinned path; rerun bin/install_codex from the trusted Latch checkout to refresh this skill." >&2
   exit 1
 fi
-bash "$latch_home/bin/latch-review" <resolved target arguments>
+bash "$latch_runner" <resolved target arguments>
 ```
 
-On Windows PowerShell, resolve the same installed Latch directory and run:
+On Windows PowerShell, use only the installer-rendered runner path:
 
 ```powershell
-& <LATCH_REVIEW_POWERSHELL_LITERAL> <resolved target arguments>
+$latchReview = <LATCH_REVIEW_POWERSHELL_LITERAL>
+if (-not (Test-Path -LiteralPath $latchReview -PathType Leaf)) {
+  throw "Installed Latch review runner is unavailable at the pinned path; rerun bin/install_codex from the trusted Latch checkout to refresh this skill."
+}
+& $latchReview <resolved target arguments>
 ```
 
 The runner must abort if a provider API key, alternate auth token, endpoint

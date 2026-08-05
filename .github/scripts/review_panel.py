@@ -56,8 +56,20 @@ class BoundedProcessResult(NamedTuple):
     stderr_truncated: bool
 
 
+class GitPathClassification(NamedTuple):
+    """Git paths policy can classify plus an explicit omitted-path count."""
+
+    paths: list[str]
+    coverage_gap_count: int
+
+
 def _has_path_control(value: str) -> bool:
-    return any(ord(char) < 32 or 127 <= ord(char) <= 159 for char in value)
+    return any(
+        ord(char) < 32
+        or 127 <= ord(char) <= 159
+        or unicodedata.category(char) == "Cf"
+        for char in value
+    )
 
 
 def _validated_path_patterns(value: Any, label: str) -> list[str]:
@@ -79,39 +91,57 @@ def _validated_path_patterns(value: Any, label: str) -> list[str]:
     return patterns
 
 
-def matches_any_path(path: str, patterns: list[str]) -> bool:
-    """Match a trusted Git path against policy-owned POSIX globs."""
-    candidate = PurePosixPath(path)
-    if (
-        not path
-        or candidate.is_absolute()
-        or ".." in candidate.parts
-        or "\\" in path
-        or _has_path_control(path)
-    ):
-        raise ValueError(f"unsafe changed repository path {path!r}")
-    return any(fnmatch.fnmatchcase(path, pattern) for pattern in patterns)
+def _portable_repo_path(value: str) -> bool:
+    """Return whether a path is a portable repository-relative coordinate."""
+    path = PurePosixPath(value)
+    return (
+        bool(value)
+        and not path.is_absolute()
+        and not WINDOWS_DRIVE_RE.match(value)
+        and ".." not in path.parts
+        and "\\" not in value
+        and not _has_path_control(value)
+    )
+
+
+def _path_classification_coverage_gap(count: int) -> str:
+    return (
+        f"Trusted Git path classification omitted {count} changed path(s) that "
+        "could not be represented safely as UTF-8 POSIX policy coordinates; "
+        "artifact review was forced."
+    )
 
 
 def classify_artifact_paths(
-    changed_paths: list[str], policy: dict[str, Any]
+    changed_paths: GitPathClassification,
+    policy: dict[str, Any],
 ) -> dict[str, Any]:
     """Return machine-owned artifact policy facts for an immutable path list."""
-    artifact_review_needed = any(
-        matches_any_path(path, policy["user_facing_paths"])
-        for path in changed_paths
+    unclassifiable_count = changed_paths.coverage_gap_count
+    if (
+        not isinstance(unclassifiable_count, int)
+        or isinstance(unclassifiable_count, bool)
+        or unclassifiable_count < 0
+    ):
+        raise ValueError("unclassifiable Git path count must be a non-negative integer")
+    artifact_review_needed = unclassifiable_count > 0 or any(
+        fnmatch.fnmatchcase(path, pattern)
+        for path in changed_paths.paths
+        for pattern in policy["user_facing_paths"]
     )
     required = sorted(
         requirement["id"]
         for requirement in policy.get("runtime_evidence_requirements", [])
         if any(
-            matches_any_path(path, requirement["paths"])
-            for path in changed_paths
+            fnmatch.fnmatchcase(path, pattern)
+            for path in changed_paths.paths
+            for pattern in requirement["paths"]
         )
     )
     return {
         "artifact_review_needed": artifact_review_needed,
         "runtime_evidence_required": required,
+        "path_classification_coverage_gap_count": unclassifiable_count,
     }
 
 
@@ -301,7 +331,7 @@ def _bare_git(
     stdout_limit: int = MAX_GIT_PATH_OUTPUT_BYTES,
     timeout_seconds: float = GIT_COMMAND_TIMEOUT_SECONDS,
 ) -> BoundedProcessResult:
-    if not _safe_repo_path(review_directory):
+    if not _portable_repo_path(review_directory):
         raise ValueError("review directory must be a safe relative path")
     workspace = Path.cwd().resolve()
     git_dir = (workspace / review_directory).resolve()
@@ -370,29 +400,23 @@ def _decode_evidence(
     return value
 
 
-def _git_paths(data: bytes, *, strict: bool = False) -> list[str]:
+def _git_paths(data: bytes) -> GitPathClassification:
+    """Decode policy-classifiable Git paths and count everything omitted."""
     paths: list[str] = []
+    coverage_gap_count = 0
     for raw in data.split(b"\0"):
         if not raw:
             continue
         try:
             value = raw.decode("utf-8")
         except UnicodeDecodeError:
-            if strict:
-                raise ValueError(
-                    "changed repository path is not valid UTF-8; classification "
-                    "cannot proceed safely"
-                )
+            coverage_gap_count += 1
             continue
-        if not _safe_repo_path(value):
-            if strict:
-                raise ValueError(
-                    f"unsafe changed repository path {value!r}; classification "
-                    "cannot proceed safely"
-                )
+        if not _portable_repo_path(value):
+            coverage_gap_count += 1
             continue
         paths.append(value)
-    return paths
+    return GitPathClassification(paths, coverage_gap_count)
 
 
 def _bounded_section(title: str, body: str, remaining: int) -> tuple[str, int]:
@@ -451,8 +475,10 @@ def _repository_evidence(
         head_sha,
         stdout_limit=MAX_GIT_PATH_OUTPUT_BYTES,
     )
-    changed_paths = _git_paths(changed.stdout)
-    tree_paths = _git_paths(tree.stdout)
+    changed_index = _git_paths(changed.stdout)
+    tree_index = _git_paths(tree.stdout)
+    changed_paths = changed_index.paths
+    tree_paths = tree_index.paths
     diff_text = _decode_evidence(
         diff.stdout,
         already_truncated=diff.stdout_truncated,
@@ -473,6 +499,18 @@ def _repository_evidence(
     if changed_index_truncated:
         parts[0] += (
             "[changed-path index truncated by the trusted evidence builder]\n"
+        )
+    if changed_index.coverage_gap_count:
+        parts[0] += (
+            "[changed-path index omitted "
+            f"{changed_index.coverage_gap_count} path(s) that could not be "
+            "represented safely as UTF-8 POSIX policy coordinates]\n"
+        )
+    if tree_index.coverage_gap_count:
+        parts[0] += (
+            "[head-tree path index omitted "
+            f"{tree_index.coverage_gap_count} path(s) that could not be "
+            "represented safely as UTF-8 POSIX policy coordinates]\n"
         )
     remaining = max(0, budget - len(parts[0]))
     section, remaining = _bounded_section(
@@ -496,7 +534,7 @@ def _repository_evidence(
     for path in [*changed_paths, *nearby_paths]:
         if remaining < 500:
             break
-        if not _safe_repo_path(path):
+        if not _portable_repo_path(path):
             continue
         object_name = f"{head_sha}:{path}"
         size = _bare_git(
@@ -607,7 +645,7 @@ def _changed_paths(
     *,
     base_sha: str,
     head_sha: str,
-) -> list[str]:
+) -> GitPathClassification:
     changed = _bare_git(
         review_directory,
         "diff",
@@ -624,7 +662,7 @@ def _changed_paths(
         raise ValueError(
             "changed-path index exceeded the trusted classification limit"
         )
-    return _git_paths(changed.stdout, strict=True)
+    return _git_paths(changed.stdout)
 
 
 def _utf8_prefix(value: str, max_bytes: int) -> str:
@@ -681,10 +719,19 @@ def _prompt_prefix(
     base_sha: str,
     head_sha: str,
     policy: dict[str, Any],
+    path_coverage_gap_count: int,
 ) -> str:
     lane = lane_config(provider, lane_id, policy)
     common = COMMON_PROMPT_PATH.read_text(encoding="utf-8").rstrip()
     specific = (CONTROL_ROOT / lane["prompt"]).read_text(encoding="utf-8").rstrip()
+    path_coverage_note = ""
+    if path_coverage_gap_count:
+        path_coverage_note = (
+            "\nThe trusted Git path classifier omitted "
+            f"{path_coverage_gap_count} changed path(s) that could not be "
+            "represented safely as UTF-8 POSIX policy coordinates. Artifact "
+            "review is mandatory, and this omission is a coverage gap.\n"
+        )
     context = f"""
 
 # Immutable review scope
@@ -705,6 +752,7 @@ payload length. Report only issues introduced in the supplied range. The JSON
 metadata fields must repeat the provider, lane, and SHAs above exactly. Every
 `code_location.path` must be relative to the reviewed repository root; do not
 include any temporary review-directory or object-store prefix.
+{path_coverage_note}
 """
     return f"{common}\n\n{specific}\n{context.lstrip()}"
 
@@ -723,17 +771,15 @@ def command_prepare_prompts(args: argparse.Namespace) -> int:
     base_sha = _validate_sha(args.base_sha, "base SHA")
     head_sha = _validate_sha(args.head_sha, "head SHA")
     review_directory = args.review_directory.strip()
-    if not _safe_repo_path(review_directory):
+    if not _portable_repo_path(review_directory):
         raise ValueError("review directory must be a safe relative path")
 
-    classification = classify_artifact_paths(
-        _changed_paths(
-            review_directory,
-            base_sha=base_sha,
-            head_sha=head_sha,
-        ),
-        policy,
+    changed_paths = _changed_paths(
+        review_directory,
+        base_sha=base_sha,
+        head_sha=head_sha,
     )
+    classification = classify_artifact_paths(changed_paths, policy)
     applicable = [
         lane
         for lane in policy["lanes"]
@@ -754,6 +800,9 @@ def command_prepare_prompts(args: argparse.Namespace) -> int:
             base_sha=base_sha,
             head_sha=head_sha,
             policy=policy,
+            path_coverage_gap_count=classification[
+                "path_classification_coverage_gap_count"
+            ],
         )
         for lane in applicable
     }
@@ -796,6 +845,9 @@ def command_prepare_prompts(args: argparse.Namespace) -> int:
         "runtime_evidence_required": classification[
             "runtime_evidence_required"
         ],
+        "path_classification_coverage_gap_count": classification[
+            "path_classification_coverage_gap_count"
+        ],
         "lanes": manifest_lanes,
         "skipped": skipped,
     }
@@ -836,21 +888,10 @@ def placeholder_receipt(
         "overall_verdict": "concerns" if status == "failed" else "pass",
         "summary": reason,
         "findings": [],
+        "normalization_dropped_findings": 0,
         "complexity": _empty_complexity(reason),
         "coverage_gaps": [reason],
     }
-
-
-def _safe_repo_path(value: str) -> bool:
-    path = PurePosixPath(value)
-    return (
-        bool(value)
-        and not path.is_absolute()
-        and not WINDOWS_DRIVE_RE.match(value)
-        and ".." not in path.parts
-        and "\\" not in value
-        and not _has_path_control(value)
-    )
 
 
 def _is_integer(value: Any) -> bool:
@@ -883,7 +924,7 @@ def _schema_errors(value: Any, schema: dict[str, Any], path: str = "$") -> list[
         if schema.get("additionalProperties") is False:
             extra = set(value) - set(properties)
             if extra:
-                errors.append(f"{path} has unexpected fields: {sorted(extra)}")
+                errors.append(f"{path} has {len(extra)} unexpected field(s)")
         for key, child in properties.items():
             if key in value:
                 errors.extend(_schema_errors(value[key], child, f"{path}.{key}"))
@@ -899,6 +940,8 @@ def _schema_errors(value: Any, schema: dict[str, Any], path: str = "$") -> list[
     elif expected == "string":
         if CONTROL_CHAR_RE.search(value):
             errors.append(f"{path} contains forbidden control characters")
+        if any(unicodedata.category(char) == "Cf" for char in value):
+            errors.append(f"{path} contains forbidden Unicode format controls")
         if "minLength" in schema and len(value) < schema["minLength"]:
             errors.append(f"{path} is shorter than {schema['minLength']} characters")
         if "maxLength" in schema and len(value) > schema["maxLength"]:
@@ -924,7 +967,7 @@ def _finding_semantic_errors(finding: Any, path: str) -> list[str]:
         return []
     errors: list[str] = []
     location_path = location.get("path")
-    if isinstance(location_path, str) and not _safe_repo_path(location_path):
+    if isinstance(location_path, str) and not _portable_repo_path(location_path):
         errors.append(f"{path}.code_location.path must be repository-relative")
     start = location.get("start_line")
     end = location.get("end_line")
@@ -942,16 +985,59 @@ def validate_receipt(receipt: dict[str, Any]) -> list[str]:
     return errors
 
 
-def _salvage_findings(value: Any) -> list[dict[str, Any]]:
-    if not isinstance(value, list):
-        return []
-    salvaged: list[dict[str, Any]] = []
+def _escape_reviewer_control_values(value: Any) -> Any:
+    """Visibly escape forbidden decoded controls in values, never object keys."""
+    if isinstance(value, str):
+        escaped: list[str] = []
+        for char in value:
+            codepoint = ord(char)
+            if CONTROL_CHAR_RE.fullmatch(char) or unicodedata.category(char) == "Cf":
+                escaped.append(
+                    f"\\u{codepoint:04X}"
+                    if codepoint <= 0xFFFF
+                    else f"\\U{codepoint:08X}"
+                )
+            else:
+                escaped.append(char)
+        return "".join(escaped)
+    if isinstance(value, list):
+        return [_escape_reviewer_control_values(item) for item in value]
+    if isinstance(value, dict):
+        return {
+            key: _escape_reviewer_control_values(item)
+            for key, item in value.items()
+        }
+    return value
+
+
+def _partition_findings(value: list[Any]) -> tuple[list[dict[str, Any]], int]:
+    """Keep independently valid findings and count every omitted item."""
+    valid: list[dict[str, Any]] = []
     maximum = int(RECEIPT_SCHEMA["properties"]["findings"]["maxItems"])
+    dropped = max(0, len(value) - maximum)
     for index, finding in enumerate(value[:maximum]):
         errors = _schema_errors(finding, FINDING_SCHEMA, f"$.findings[{index}]")
         errors.extend(_finding_semantic_errors(finding, f"$.findings[{index}]"))
-        if not errors:
-            salvaged.append(finding)
+        if errors:
+            dropped += 1
+        else:
+            valid.append(finding)
+    return valid, dropped
+
+
+def _record_dropped_findings(
+    receipt: dict[str, Any],
+    dropped: int,
+) -> None:
+    receipt["normalization_dropped_findings"] = dropped
+    if receipt.get("overall_verdict") == "pass":
+        receipt["overall_verdict"] = "concerns"
+
+
+def _salvage_findings(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    salvaged, _dropped = _partition_findings(value)
     return salvaged
 
 
@@ -1003,12 +1089,21 @@ def command_normalize(args: argparse.Namespace) -> int:
         try:
             if raw_error is not None:
                 raise raw_error
-            decoded = _decode_model_json(raw)
+            decoded = _escape_reviewer_control_values(_decode_model_json(raw))
             decoded["provider"] = provider
             decoded["lane"] = lane
             decoded["base_sha"] = base_sha
             decoded["head_sha"] = head_sha
             decoded["review_status"] = "completed"
+            decoded["normalization_dropped_findings"] = 0
+            decoded_findings = decoded.get("findings")
+            if isinstance(decoded_findings, list):
+                valid_findings, dropped_findings = _partition_findings(
+                    decoded_findings
+                )
+                decoded["findings"] = valid_findings
+                if dropped_findings:
+                    _record_dropped_findings(decoded, dropped_findings)
             errors = validate_receipt(decoded)
             if errors:
                 raise ValueError("; ".join(errors))
@@ -1178,6 +1273,7 @@ def render_report(
     head_sha: str,
     blockers: list[str],
     action_required: list[str],
+    trusted_coverage_gaps: list[str] | None = None,
 ) -> str:
     completed = sum(receipt["review_status"] == "completed" for receipt in receipts)
     reviewer_concerns = any(
@@ -1302,6 +1398,9 @@ def render_report(
     lines.extend(alternatives or ["- No lane completed."])
 
     gaps = [
+        f"trusted control plane: {_model_text(gap)}"
+        for gap in (trusted_coverage_gaps or [])
+    ] + [
         f"{receipt['provider']}/{receipt['lane']}: {_model_text(gap)}"
         for receipt in receipts
         for gap in receipt["coverage_gaps"]
@@ -1345,7 +1444,17 @@ def command_aggregate(args: argparse.Namespace) -> int:
     policy = load_policy(Path(args.policy))
     base_sha = _validate_sha(args.base_sha, "base SHA")
     head_sha = _validate_sha(args.head_sha, "head SHA")
-    artifact_review_needed = _bool(args.artifact_review_needed)
+    path_coverage_gap_count = args.path_classification_coverage_gap_count
+    if path_coverage_gap_count < 0:
+        raise ValueError("path-classification coverage-gap count must be non-negative")
+    artifact_review_needed = (
+        _bool(args.artifact_review_needed) or path_coverage_gap_count > 0
+    )
+    trusted_coverage_gaps = (
+        [_path_classification_coverage_gap(path_coverage_gap_count)]
+        if path_coverage_gap_count
+        else []
+    )
     runtime_required = _runtime_evidence_requirements(args, policy)
     receipts = _load_receipts(
         Path(args.input_dir),
@@ -1367,6 +1476,11 @@ def command_aggregate(args: argparse.Namespace) -> int:
     blockers: list[str] = []
     action_required: list[str] = []
 
+    if trusted_coverage_gaps:
+        action_required.append(
+            trusted_coverage_gaps[0]
+            + " Human inspection of the omitted paths is required."
+        )
     if not completed:
         action_required.append("No applicable provider lane completed.")
     else:
@@ -1417,6 +1531,13 @@ def command_aggregate(args: argparse.Namespace) -> int:
                 f"is {receipt['review_status']}."
             )
     for receipt in completed:
+        dropped_findings = receipt.get("normalization_dropped_findings", 0)
+        if dropped_findings:
+            action_required.append(
+                f"{receipt['provider']}/{receipt['lane']} omitted "
+                f"{dropped_findings} malformed reviewer finding(s) during "
+                "trusted normalization."
+            )
         if receipt["overall_verdict"] == "block":
             blockers.append(
                 f"{receipt['provider']}/{receipt['lane']} returned an overall block verdict."
@@ -1448,6 +1569,8 @@ def command_aggregate(args: argparse.Namespace) -> int:
         "require_all": True,
         "artifact_review_needed": artifact_review_needed,
         "runtime_evidence_required": runtime_required,
+        "path_classification_coverage_gap_count": path_coverage_gap_count,
+        "trusted_coverage_gaps": trusted_coverage_gaps,
         "completed_lanes": len(completed),
         "applicable_lanes": len(applicable),
         "correlated_findings": len(groups),
@@ -1462,6 +1585,7 @@ def command_aggregate(args: argparse.Namespace) -> int:
         head_sha=head_sha,
         blockers=blockers,
         action_required=action_required,
+        trusted_coverage_gaps=trusted_coverage_gaps,
     )
     report_path = Path(args.output_report)
     report_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1508,6 +1632,11 @@ def build_parser() -> argparse.ArgumentParser:
     aggregate.add_argument("--base-sha", required=True)
     aggregate.add_argument("--head-sha", required=True)
     aggregate.add_argument("--artifact-review-needed", default="false")
+    aggregate.add_argument(
+        "--path-classification-coverage-gap-count",
+        type=int,
+        default=0,
+    )
     aggregate.add_argument("--runtime-evidence-required", action="append", default=[])
     aggregate.add_argument("--output-report", required=True)
     aggregate.add_argument("--output-summary", required=True)

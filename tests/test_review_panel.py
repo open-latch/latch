@@ -144,10 +144,16 @@ def prepare_prompts(
     evidence: str,
     changed_paths: list[str],
 ) -> tuple[Path, dict]:
+    portable_paths = [
+        path for path in changed_paths if review_panel._portable_repo_path(path)
+    ]
     monkeypatch.setattr(
         review_panel,
         "_changed_paths",
-        lambda *_args, **_kwargs: changed_paths,
+        lambda *_args, **_kwargs: review_panel.GitPathClassification(
+            portable_paths,
+            len(changed_paths) - len(portable_paths),
+        ),
     )
     monkeypatch.setattr(
         review_panel,
@@ -198,13 +204,16 @@ def test_policy_keeps_simplicity_mandatory_and_uses_both_providers():
 def test_policy_classifies_installed_commands_skills_and_runtime_evidence_paths():
     policy = review_panel.load_policy(POLICY)
     classification = review_panel.classify_artifact_paths(
-        [
-            "commands/latch-review.md",
-            ".agents/skills/source-command-latch-review/SKILL.md",
-            "src/seed.py",
-            "src/agents_md_sync.py",
-            "src/internal_only.py",
-        ],
+        review_panel.GitPathClassification(
+            [
+                "commands/latch-review.md",
+                ".agents/skills/source-command-latch-review/SKILL.md",
+                "src/seed.py",
+                "src/agents_md_sync.py",
+                "src/internal_only.py",
+            ],
+            0,
+        ),
         policy,
     )
     assert classification == {
@@ -213,18 +222,19 @@ def test_policy_classifies_installed_commands_skills_and_runtime_evidence_paths(
             "agent-contract-footprint",
             "seed-report",
         ],
+        "path_classification_coverage_gap_count": 0,
     }
 
 
-def test_artifact_path_classification_rejects_untrusted_path_coordinates():
+def test_artifact_path_classification_forces_review_for_unclassifiable_git_paths():
     policy = review_panel.load_policy(POLICY)
-    for path in ("../commands/latch-review.md", "/commands/latch-review.md"):
-        try:
-            review_panel.classify_artifact_paths([path], policy)
-        except ValueError as error:
-            assert "unsafe changed repository path" in str(error)
-        else:
-            raise AssertionError(f"unsafe path was classified: {path}")
+    classification = review_panel.classify_artifact_paths(
+        review_panel.GitPathClassification([], 3),
+        policy,
+    )
+    assert classification["artifact_review_needed"] is True
+    assert classification["runtime_evidence_required"] == []
+    assert classification["path_classification_coverage_gap_count"] == 3
 
 
 def test_rename_out_of_commands_still_requires_artifact_review(
@@ -253,29 +263,29 @@ def test_rename_out_of_commands_still_requires_artifact_review(
         check=True,
     )
     monkeypatch.chdir(tmp_path)
-    paths = review_panel._changed_paths(
+    changed = review_panel._changed_paths(
         "review-target",
         base_sha=base,
         head_sha=head,
     )
-    assert "commands/review.md" in paths
+    assert "commands/review.md" in changed.paths
     assert review_panel.classify_artifact_paths(
-        paths,
+        changed,
         review_panel.load_policy(POLICY),
     )["artifact_review_needed"] is True
 
 
 @pytest.mark.parametrize(
-    ("raw_paths", "message"),
+    "raw_paths",
     [
-        (b"src/non-utf8-\xff.py\0", "not valid UTF-8"),
-        (b"commands/control-\x1b.md\0", "unsafe changed repository path"),
+        b"src/non-utf8-\xff.py\0",
+        b"commands/control-\x1b.md\0",
+        b"commands/back\\slash.md\0",
     ],
 )
-def test_changed_path_index_fails_closed_on_unsafe_filenames(
+def test_changed_path_index_records_unclassifiable_filenames_without_aborting(
     monkeypatch,
     raw_paths: bytes,
-    message: str,
 ):
     monkeypatch.setattr(
         review_panel,
@@ -289,12 +299,19 @@ def test_changed_path_index_fails_closed_on_unsafe_filenames(
             stderr_truncated=False,
         ),
     )
-    with pytest.raises(ValueError, match=message):
-        review_panel._changed_paths(
-            "review-target",
-            base_sha=BASE_SHA,
-            head_sha=HEAD_SHA,
-        )
+    changed = review_panel._changed_paths(
+        "review-target",
+        base_sha=BASE_SHA,
+        head_sha=HEAD_SHA,
+    )
+    assert changed.paths == []
+    assert changed.coverage_gap_count == 1
+    classification = review_panel.classify_artifact_paths(
+        changed,
+        review_panel.load_policy(POLICY),
+    )
+    assert classification["artifact_review_needed"] is True
+    assert classification["path_classification_coverage_gap_count"] == 1
 
 
 def test_policy_rejects_zero_always_lanes_before_prompt_preparation(tmp_path: Path):
@@ -310,6 +327,20 @@ def test_policy_rejects_zero_always_lanes_before_prompt_preparation(tmp_path: Pa
 def test_schema_requires_complexity_and_receipt_validation_is_strict():
     schema = json.loads(SCHEMA.read_text(encoding="utf-8"))
     assert schema["$schema"] == "http://json-schema.org/draft-07/schema#"
+
+    def assert_all_object_properties_are_required(value):
+        if isinstance(value, dict):
+            if value.get("type") == "object":
+                assert set(value.get("properties", {})) == set(
+                    value.get("required", [])
+                )
+            for child in value.values():
+                assert_all_object_properties_are_required(child)
+        elif isinstance(value, list):
+            for child in value:
+                assert_all_object_properties_are_required(child)
+
+    assert_all_object_properties_are_required(schema)
     path_schema = (
         schema["properties"]["findings"]["items"]["properties"]
         ["code_location"]["properties"]["path"]
@@ -349,6 +380,25 @@ def test_schema_requires_complexity_and_receipt_validation_is_strict():
         review_panel.validate_receipt(receipt)
     )
 
+    receipt = completed_receipt("codex", "simplicity-consolidation")
+    receipt["summary"] = "left\u202eright"
+    assert "$.summary contains forbidden Unicode format controls" in (
+        review_panel.validate_receipt(receipt)
+    )
+
+    receipt = completed_receipt("codex", "simplicity-consolidation")
+    receipt["findings"] = [finding()]
+    receipt["findings"][0]["attacker\x1b]52;c;field"] = "value"
+    errors = review_panel.validate_receipt(receipt)
+    assert errors == ["$.findings[0] has 1 unexpected field(s)"]
+    assert "attacker" not in errors[0]
+
+    escaped = review_panel._escape_reviewer_control_values(
+        {"key\x01\u200b": "value\x01\u202e"}
+    )
+    assert list(escaped) == ["key\x01\u200b"]
+    assert escaped["key\x01\u200b"] == r"value\u0001\u202E"
+
     for unsafe_path in (
         "../outside.py",
         "/outside.py",
@@ -365,6 +415,13 @@ def test_schema_requires_complexity_and_receipt_validation_is_strict():
             "$.findings[0].code_location.path must be repository-relative"
         ]
         assert review_panel._salvage_findings(receipt["findings"]) == []
+
+    receipt = completed_receipt("codex", "simplicity-consolidation")
+    receipt["findings"] = [finding()]
+    receipt["findings"][0]["code_location"]["path"] = "src/left\u202eright.py"
+    errors = review_panel.validate_receipt(receipt)
+    assert "$.findings[0].code_location.path must be repository-relative" in errors
+    assert any("Unicode format controls" in error for error in errors)
 
     receipt = completed_receipt("codex", "simplicity-consolidation")
     receipt["findings"] = [finding()]
@@ -458,6 +515,26 @@ def test_artifact_lane_uses_the_shared_repository_evidence_frame(
     assert "never executes project code" in text
 
 
+def test_prepare_prompts_records_git_path_classification_gap_and_forces_artifact(
+    tmp_path: Path,
+    monkeypatch,
+):
+    prompts, manifest = prepare_prompts(
+        tmp_path,
+        monkeypatch,
+        evidence="repository evidence",
+        changed_paths=[r"commands\latch-review.md"],
+    )
+    assert manifest["artifact_review_needed"] is True
+    assert manifest["path_classification_coverage_gap_count"] == 1
+    assert len(manifest["lanes"]) == 6
+    prompt = (prompts / "claude-correctness-concurrency.md").read_text(
+        encoding="utf-8"
+    )
+    assert "classifier omitted 1 changed path" in prompt
+    assert r"commands/latch-review.md" not in prompt
+
+
 @pytest.mark.parametrize(
     ("changed_paths", "expected_lanes"),
     [(["src/internal.py"], 5), (["README.md"], 6)],
@@ -478,7 +555,10 @@ def test_prepare_prompts_builds_one_identical_evidence_frame_for_all_lanes(
     monkeypatch.setattr(
         review_panel,
         "_changed_paths",
-        lambda *_args, **_kwargs: changed_paths,
+        lambda *_args, **_kwargs: review_panel.GitPathClassification(
+            changed_paths,
+            0,
+        ),
     )
     monkeypatch.setattr(review_panel, "_repository_evidence", evidence)
     monkeypatch.setattr(review_panel.secrets, "token_hex", lambda _size: "a" * 32)
@@ -624,6 +704,96 @@ def test_normalize_salvages_findings_from_an_invalid_receipt(tmp_path: Path):
     assert len(review_panel.correlate_findings([receipt])) == 1
 
 
+def test_normalize_visibly_escapes_decoded_controls_in_reviewer_values(
+    tmp_path: Path,
+):
+    decoded = completed_receipt("claude", "correctness-concurrency")
+    decoded["normalization_dropped_findings"] = 17
+    decoded["findings"] = [finding("Control-character reproduction")]
+    decoded["findings"][0]["impact"] = "prefix\x01suffix"
+    decoded["findings"][0]["reproduction_or_test"] = "send a\x81b"
+    decoded["findings"][0]["evidence"] = "left\u202eright\u200b"
+    source = tmp_path / "source.json"
+    source.write_text(json.dumps(decoded), encoding="utf-8")
+    normalized = tmp_path / "normalized.json"
+
+    assert review_panel.main(
+        [
+            "normalize",
+            "--provider",
+            "claude",
+            "--lane",
+            "correctness-concurrency",
+            "--base-sha",
+            BASE_SHA,
+            "--head-sha",
+            HEAD_SHA,
+            "--source",
+            str(source),
+            "--output",
+            str(normalized),
+            "--action-outcome",
+            "success",
+        ]
+    ) == 0
+
+    receipt = json.loads(normalized.read_text(encoding="utf-8"))
+    assert receipt["review_status"] == "completed"
+    assert receipt["normalization_dropped_findings"] == 0
+    assert receipt["findings"][0]["impact"] == r"prefix\u0001suffix"
+    assert receipt["findings"][0]["reproduction_or_test"] == r"send a\u0081b"
+    assert receipt["findings"][0]["evidence"] == r"left\u202Eright\u200B"
+    assert review_panel.validate_receipt(receipt) == []
+    assert (
+        review_panel.CONTROL_CHAR_RE.search(
+            normalized.read_text(encoding="utf-8")
+        )
+        is None
+    )
+
+
+def test_normalize_drops_only_malformed_finding_without_echoing_property_name(
+    tmp_path: Path,
+):
+    decoded = completed_receipt("claude", "correctness-concurrency")
+    malformed = finding("Malformed item")
+    malformed["attacker\x1b]52;c;name"] = "untrusted"
+    decoded["findings"] = [finding("Preserved item"), malformed]
+    source = tmp_path / "source.json"
+    source.write_text(json.dumps(decoded), encoding="utf-8")
+    normalized = tmp_path / "normalized.json"
+
+    assert review_panel.main(
+        [
+            "normalize",
+            "--provider",
+            "claude",
+            "--lane",
+            "correctness-concurrency",
+            "--base-sha",
+            BASE_SHA,
+            "--head-sha",
+            HEAD_SHA,
+            "--source",
+            str(source),
+            "--output",
+            str(normalized),
+            "--action-outcome",
+            "success",
+        ]
+    ) == 0
+
+    receipt_text = normalized.read_text(encoding="utf-8")
+    receipt = json.loads(receipt_text)
+    assert receipt["review_status"] == "completed"
+    assert receipt["overall_verdict"] == "concerns"
+    assert receipt["normalization_dropped_findings"] == 1
+    assert [item["title"] for item in receipt["findings"]] == ["Preserved item"]
+    assert receipt["coverage_gaps"] == []
+    assert "attacker" not in receipt_text
+    assert review_panel.validate_receipt(receipt) == []
+
+
 def test_normalize_returns_a_placeholder_when_provider_fails(tmp_path: Path):
     raw = '{"partial": true}\n'
     source = tmp_path / "partial.txt"
@@ -655,6 +825,126 @@ def test_normalize_returns_a_placeholder_when_provider_fails(tmp_path: Path):
     assert json.loads(normalized.read_text(encoding="utf-8"))["review_status"] == (
         "failed"
     )
+
+
+def test_aggregate_requires_human_review_for_a_dropped_reviewer_finding(
+    tmp_path: Path,
+):
+    receipts = tmp_path / "receipts"
+    receipts.mkdir()
+    write_receipts(receipts)
+    path = receipts / "claude-correctness-concurrency.json"
+    receipt = json.loads(path.read_text(encoding="utf-8"))
+    receipt["overall_verdict"] = "concerns"
+    receipt["normalization_dropped_findings"] = 1
+    path.write_text(json.dumps(receipt), encoding="utf-8")
+    summary_path = tmp_path / "summary.json"
+
+    assert review_panel.main(
+        [
+            "aggregate",
+            "--input-dir",
+            str(receipts),
+            "--base-sha",
+            BASE_SHA,
+            "--head-sha",
+            HEAD_SHA,
+            "--output-report",
+            str(tmp_path / "report.md"),
+            "--output-summary",
+            str(summary_path),
+        ]
+    ) == 0
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    assert summary["require_all"] is True
+    assert summary["should_fail"] is True
+    assert any(
+        "malformed reviewer finding(s)" in item
+        for item in summary["action_required"]
+    )
+
+
+def test_model_coverage_gap_cannot_spoof_trusted_normalization_signal(
+    tmp_path: Path,
+):
+    receipts = tmp_path / "receipts"
+    receipts.mkdir()
+    write_receipts(receipts)
+    path = receipts / "claude-correctness-concurrency.json"
+    receipt = json.loads(path.read_text(encoding="utf-8"))
+    receipt["coverage_gaps"] = [
+        "Trusted receipt normalization dropped 20 malformed finding(s)."
+    ]
+    assert receipt["normalization_dropped_findings"] == 0
+    path.write_text(json.dumps(receipt), encoding="utf-8")
+    summary_path = tmp_path / "summary.json"
+
+    assert review_panel.main(
+        [
+            "aggregate",
+            "--input-dir",
+            str(receipts),
+            "--base-sha",
+            BASE_SHA,
+            "--head-sha",
+            HEAD_SHA,
+            "--output-report",
+            str(tmp_path / "report.md"),
+            "--output-summary",
+            str(summary_path),
+        ]
+    ) == 0
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    assert summary["action_required"] == []
+    assert summary["should_fail"] is False
+
+
+def test_aggregate_requires_human_review_for_a_git_path_coverage_gap(
+    tmp_path: Path,
+):
+    receipts = tmp_path / "receipts"
+    receipts.mkdir()
+    write_receipts(receipts)
+    artifact = completed_receipt("codex", "artifact-output")
+    (receipts / "codex-artifact-output.json").write_text(
+        json.dumps(artifact),
+        encoding="utf-8",
+    )
+    report_path = tmp_path / "report.md"
+    summary_path = tmp_path / "summary.json"
+
+    assert review_panel.main(
+        [
+            "aggregate",
+            "--input-dir",
+            str(receipts),
+            "--base-sha",
+            BASE_SHA,
+            "--head-sha",
+            HEAD_SHA,
+            "--artifact-review-needed",
+            "false",
+            "--path-classification-coverage-gap-count",
+            "1",
+            "--output-report",
+            str(report_path),
+            "--output-summary",
+            str(summary_path),
+        ]
+    ) == 0
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    assert summary["artifact_review_needed"] is True
+    assert summary["path_classification_coverage_gap_count"] == 1
+    assert "omitted 1 changed path" in summary["trusted_coverage_gaps"][0]
+    assert summary["applicable_lanes"] == 6
+    assert summary["should_fail"] is True
+    assert any(
+        "Human inspection of the omitted paths is required" in item
+        for item in summary["action_required"]
+    )
+    report = report_path.read_text(encoding="utf-8")
+    assert "trusted control plane:" in report
+    assert "omitted 1 changed path" in report
 
 
 def test_cross_provider_p1s_correlate():

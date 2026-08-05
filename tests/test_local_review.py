@@ -177,6 +177,19 @@ def test_preflight_accepts_subscription_logins_and_scrubs_keys(
                     ]
                 }
             )
+        elif provider == "codex" and command[1:2] == ["exec"]:
+            schema = Path(command[command.index("--output-schema") + 1])
+            assert schema.read_text(encoding="utf-8") == "{"
+            assert "--strict-config" in command
+            assert "tools.view_image=false" not in command
+            for value in local_review.CODEX_PERMISSION_CONFIG:
+                assert command.count(value) == 1
+            return subprocess.CompletedProcess(
+                command,
+                1,
+                "",
+                f"Output schema file {schema} is not valid JSON: fixture\n",
+            )
         elif provider == "claude" and command[1:4] == ["auth", "status", "--json"]:
             stdout = json.dumps(
                 {
@@ -356,6 +369,62 @@ def test_codex_capability_preflight_fails_closed(
         local_review._require_codex_model_capability(
             str(executable), "codex-cli fixture", tmp_path, {}
         )
+
+
+def test_codex_invocation_preflight_fails_closed_on_strict_config_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    executable = _stub_executable(tmp_path / "codex")
+    commands: list[list[str]] = []
+
+    def reject_config(command, **_kwargs):
+        commands.append(command)
+        return subprocess.CompletedProcess(
+            command,
+            1,
+            "",
+            "Error: unknown configuration field `tools.view_image`\n",
+        )
+
+    monkeypatch.setattr(local_review, "_run", reject_config)
+    with pytest.raises(ValueError, match="strict local-review isolation contract"):
+        local_review._require_codex_invocation_capability(
+            str(executable), "codex-cli fixture", tmp_path, {}
+        )
+    assert len(commands) == 1
+    assert "--strict-config" in commands[0]
+
+
+def test_codex_invocation_preflight_uses_the_live_lane_config_contract(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    executable = _stub_executable(tmp_path / "codex")
+    observed: list[str] = []
+
+    def accept_until_schema(command, *, environment, **_kwargs):
+        observed.extend(command)
+        schema = Path(command[command.index("--output-schema") + 1])
+        assert schema.read_text(encoding="utf-8") == "{"
+        assert Path(environment["CODEX_HOME"]).parent == schema.parent
+        return subprocess.CompletedProcess(
+            command,
+            1,
+            "",
+            f"Output schema file {schema} is not valid JSON: fixture\n",
+        )
+
+    monkeypatch.setattr(local_review, "_run", accept_until_schema)
+    local_review._require_codex_invocation_capability(
+        str(executable), "codex-cli fixture", tmp_path, {}
+    )
+    assert "--sandbox" not in observed
+    assert "tools.view_image=false" not in observed
+    for value in local_review.CODEX_PERMISSION_CONFIG:
+        assert observed.count(value) == 1
+    for feature in local_review.CODEX_DISABLED_FEATURES:
+        assert observed.count(feature) == 1
 
 
 def test_incompatible_codex_stops_before_scope_or_authentication(
@@ -581,6 +650,91 @@ def test_pr_scope_uses_fresh_full_ancestry_for_shallow_fork(
     assert changed == ["feature.txt"]
 
 
+@pytest.mark.parametrize("invalid_count", [None, True, -1, 1.5, "1"])
+def test_build_lanes_rejects_malformed_path_coverage_gap_count(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    invalid_count,
+):
+    workspace = tmp_path / "workspace"
+    raw_root = tmp_path / "raw"
+    workspace.mkdir()
+    raw_root.mkdir()
+    scope = local_review.ReviewScope(
+        "a" * 40,
+        "b" * 40,
+        "",
+        None,
+        "range",
+    )
+
+    def write_manifest(_workspace, *args):
+        prompt_root = Path(args[args.index("--output-dir") + 1])
+        prompt_root.mkdir()
+        prompt_name = "claude-correctness-concurrency.md"
+        (prompt_root / prompt_name).write_text("review", encoding="utf-8")
+        manifest = {
+            "version": 1,
+            "base_sha": scope.base_sha,
+            "head_sha": scope.head_sha,
+            "artifact_review_needed": False,
+            "runtime_evidence_required": [],
+            "path_classification_coverage_gap_count": invalid_count,
+            "lanes": [
+                {
+                    "provider": "claude",
+                    "lane": "correctness-concurrency",
+                    "prompt": prompt_name,
+                }
+            ],
+            "skipped": [],
+        }
+        Path(args[args.index("--manifest") + 1]).write_text(
+            json.dumps(manifest),
+            encoding="utf-8",
+        )
+
+    monkeypatch.setattr(local_review, "_panel", write_manifest)
+    with pytest.raises(ValueError, match="path coverage-gap count"):
+        local_review._build_lanes(workspace, scope, raw_root)
+
+
+def test_aggregate_forwards_trusted_path_coverage_gap_count(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    receipts = tmp_path / "receipts"
+    output = tmp_path / "output"
+    receipts.mkdir()
+    output.mkdir()
+    scope = local_review.ReviewScope(
+        "a" * 40,
+        "b" * 40,
+        "",
+        None,
+        "range",
+    )
+    observed: list[str] = []
+
+    def capture(_workspace, *args):
+        observed.extend(args)
+        summary_path = Path(args[args.index("--output-summary") + 1])
+        summary_path.write_text("{}", encoding="utf-8")
+
+    monkeypatch.setattr(local_review, "_panel", capture)
+    assert local_review._aggregate(
+        tmp_path,
+        receipts,
+        scope,
+        False,
+        [],
+        2,
+        output,
+    ) == {}
+    marker = observed.index("--path-classification-coverage-gap-count")
+    assert observed[marker + 1] == "2"
+
+
 def test_provider_commands_pin_models_and_isolate_provider_tools(tmp_path: Path):
     raw = tmp_path / "raw"
     raw.mkdir()
@@ -617,15 +771,17 @@ def test_provider_commands_pin_models_and_isolate_provider_tools(tmp_path: Path)
     assert local_review.CODEX_MODEL in codex_command
     assert codex_command.count("--model") == 1
     assert 'model_reasoning_effort="high"' in codex_command
+    for value in local_review.CODEX_PERMISSION_CONFIG:
+        assert codex_command.count(value) == 1
     assert 'web_search="disabled"' in codex_command
     assert "tools.web_search=false" in codex_command
-    assert "tools.view_image=false" in codex_command
+    assert "tools.view_image=false" not in codex_command
     assert "skills.bundled.enabled=false" in codex_command
     assert codex_command.count('model_reasoning_effort="high"') == 1
     assert codex_command.count('web_search="disabled"') == 1
     assert codex_command.count("tools.web_search=false") == 1
-    assert codex_command.count("tools.view_image=false") == 1
     assert codex_command.count("skills.bundled.enabled=false") == 1
+    assert "--sandbox" not in codex_command
     assert "--search" not in codex_command
     assert "--output-last-message" not in codex_command
     assert "--ignore-user-config" in codex_command
@@ -900,11 +1056,27 @@ if {provider!r} == "claude":
     if "--max-turns" in args:
         raise SystemExit("Claude StructuredOutput must not have a one-turn ceiling")
 else:
+    if args.count("--strict-config") != 1:
+        raise SystemExit("Codex must use strict configuration")
+    if "tools.view_image=false" in args:
+        raise SystemExit("unknown configuration field `tools.view_image`")
+    permission_config = {local_review.CODEX_PERMISSION_CONFIG!r}
+    if any(args.count(value) != 1 for value in permission_config):
+        raise SystemExit("Codex local-review permission profile is malformed")
+    if "--sandbox" in args:
+        raise SystemExit("Codex must not combine legacy sandbox mode with permissions")
     if args.count("--output-schema") != 1:
         raise SystemExit("Codex must receive exactly one output schema")
+    output_schema = Path(args[args.index("--output-schema") + 1])
+    if output_schema.name == "invalid-output-schema.json":
+        print(
+            f"Output schema file {{output_schema}} is not valid JSON: fixture",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
     try:
         provider_schema = json.loads(
-            Path(args[args.index("--output-schema") + 1]).read_text(encoding="utf-8")
+            output_schema.read_text(encoding="utf-8")
         )
     except (ValueError, IndexError, OSError, json.JSONDecodeError):
         raise SystemExit("malformed Codex output schema")
@@ -918,6 +1090,21 @@ else:
         elif isinstance(value, list):
             for child in value:
                 yield from schema_patterns(child)
+    def strict_object_schema_errors(value, path="$"):
+        if isinstance(value, dict):
+            if value.get("type") == "object":
+                properties = set(value.get("properties", {{}}))
+                required = set(value.get("required", []))
+                if properties != required:
+                    yield f"{{path}} object properties must all be required"
+            for key, child in value.items():
+                yield from strict_object_schema_errors(child, f"{{path}}.{{key}}")
+        elif isinstance(value, list):
+            for index, child in enumerate(value):
+                yield from strict_object_schema_errors(child, f"{{path}}[{{index}}]")
+    strict_errors = list(strict_object_schema_errors(provider_schema))
+    if strict_errors:
+        raise SystemExit("invalid_json_schema: " + strict_errors[0])
     if any(
         token in pattern
         for pattern in schema_patterns(provider_schema)
@@ -937,8 +1124,6 @@ else:
         raise SystemExit("unexpected Codex effort")
     if args.count('web_search="disabled"') != 1 or args.count("tools.web_search=false") != 1:
         raise SystemExit("Codex web search was not explicitly disabled")
-    if args.count("tools.view_image=false") != 1:
-        raise SystemExit("Codex image tools were not explicitly disabled")
     if args.count("skills.bundled.enabled=false") != 1 or "skill_search" not in args:
         raise SystemExit("Codex skills were not isolated")
     if "--search" in args:
@@ -960,6 +1145,7 @@ receipt = {{
     "overall_verdict": "pass",
     "summary": "No actionable finding.",
     "findings": [],
+    "normalization_dropped_findings": 99,
     "complexity": {{
         "net_complexity_delta": "neutral",
         "complexity_risk": "low",
@@ -1017,6 +1203,58 @@ def test_fake_providers_reject_the_live_canary_schema_failures(
     )
     assert result.success is False
     assert expected in result.detail
+
+
+def test_fake_codex_rejects_an_optional_object_property_in_strict_schema(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    schema = json.loads(local_review.SCHEMA_PATH.read_text(encoding="utf-8"))
+    schema["required"].remove("normalization_dropped_findings")
+    schema_path = tmp_path / "review.schema.json"
+    schema_path.write_text(json.dumps(schema), encoding="utf-8")
+    monkeypatch.setattr(local_review, "SCHEMA_PATH", schema_path)
+
+    fake = tmp_path / "codex"
+    _fake_provider(fake, "codex")
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("review", encoding="utf-8")
+    lane = local_review.Lane("codex", "fixture", prompt, raw / "result.json", raw)
+    result = local_review._invoke_lane(
+        lane,
+        tmp_path,
+        _provider_runtime(fake, fake),
+        local_review.sanitized_environment(),
+    )
+    assert result.success is False
+    assert "object properties must all be required" in result.detail
+
+
+def test_fake_codex_reproduces_the_unsupported_view_image_override(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    fake = tmp_path / "codex"
+    _fake_provider(fake, "codex")
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("review", encoding="utf-8")
+    lane = local_review.Lane("codex", "fixture", prompt, raw / "result.json", raw)
+    runtime = _provider_runtime(fake, fake)
+    monkeypatch.setattr(
+        local_review,
+        "CODEX_PERMISSION_CONFIG",
+        (*local_review.CODEX_PERMISSION_CONFIG, "tools.view_image=false"),
+    )
+
+    result = local_review._invoke_lane(
+        lane, tmp_path, runtime, local_review.sanitized_environment()
+    )
+    assert result.success is False
+    assert "unknown configuration field `tools.view_image`" in result.detail
 
 
 @pytest.mark.parametrize(
@@ -1136,6 +1374,7 @@ def test_end_to_end_local_panel_with_fake_subscription_clis(
         "path": str((fake_bin / "codex").resolve()),
         "version": "codex-cli 0.146.0-alpha.9.2",
         "capability_source": "bundled_model_catalog",
+        "isolation_capability_source": "strict_config_invalid_schema_probe",
         "model": "gpt-5.6-sol",
         "reasoning_effort": "high",
     }
@@ -1152,6 +1391,7 @@ def test_end_to_end_local_panel_with_fake_subscription_clis(
     assert metadata["runtime_evidence_required"] == (
         ["seed-report"] if changed_path == "src/seed.py" else []
     )
+    assert metadata["path_classification_coverage_gap_count"] == 0
     captured = capsys.readouterr()
     assert "# Latch review panel" in captured.out
     assert "Account-level usage credits" in captured.err
