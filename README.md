@@ -84,7 +84,7 @@ Read it field by field:
 That last line is the point. The rejected path was caught and cited, and your tree is untouched.
 
 This exact receipt is checked in at [`proof/README.md`](./proof/README.md), captured with the
-`codex` backend. It comes from a synthetic no-history demo, so it proves the gate path — not that
+`claude` backend. It comes from a synthetic no-history demo, so it proves the gate path — not that
 latch read anyone's real history. Seeding your own sessions is what does that.
 
 ## Why a gate, not a rule
