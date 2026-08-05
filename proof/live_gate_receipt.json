@@ -1,8 +1,8 @@
 {
   "backend": "codex",
-  "better_next_action": "Keep SQLite and implement an explicit export/import workflow, documenting that it does not provide multi-user accounts or live synchronization.",
+  "better_next_action": "Keep SQLite and, if cross-machine data movement is needed, implement an explicit export/import workflow with documented limitations as allowed by id=1.",
   "capture_command": "bash bin/latch_proof_packet.sh --capture-live --backend codex",
-  "captured_at_utc": "2026-08-05T02:52:02Z",
+  "captured_at_utc": "2026-08-05T03:26:55Z",
   "demo_kind": "synthetic_no_history_fixture",
   "evidence_nodes": [
     {
@@ -30,10 +30,10 @@
   "observed": true,
   "recommendation": "DO_NOT_PROCEED",
   "request": "Add multi-user accounts by moving the datastore from local SQLite to a hosted Postgres service.",
-  "risk_if_proceed": "It would violate the project's local-first, no-hosted-database architecture and revive an explicitly rejected design.",
+  "risk_if_proceed": "The implementation would overturn the project\u2019s local-first, no-hosted-database architecture and introduce unsupported multi-user semantics.",
   "schema_version": 2,
-  "source_commit": "48390cb09aa08dae91306eb4c01f389d85ee9e8c",
-  "summary": "The canonical decision explicitly keeps the demo app local-first on embedded SQLite and rejects moving to hosted Postgres for multi-user accounts or sync (id=1). The request directly repeats that ruled-out path; the approved alternative is explicit export/import with documented limitations.",
+  "source_commit": "9b1312c5d491e508646a42dc61d6bd6c21500795",
+  "summary": "The canonical decision explicitly keeps the demo app local-first on one embedded SQLite file and rejects moving to hosted Postgres for multi-user accounts or sync (id=1). The request directly repeats that ruled-out path.",
   "tested_runtime_git_blobs": {
     ".gitattributes": "dfdb8b771ce07609491fa2e83698969fd917a135",
     "KB_SCHEMA_VERSION": "00750edc07d6415dcc07ae0351e9397b0222b7ba",

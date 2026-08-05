@@ -14,14 +14,14 @@ This packet combines one observed live gate receipt with two small, deterministi
 
 ## Observed live gate
 
-Captured with the `codex` backend on commit `48390cb09aa08dae91306eb4c01f389d85ee9e8c`. This is a synthetic no-history fixture and used no personal conversation history.
+Captured with the `codex` backend on commit `9b1312c5d491e508646a42dc61d6bd6c21500795`. This is a synthetic no-history fixture and used no personal conversation history.
 
 ```text
 Request: Add multi-user accounts by moving the datastore from local SQLite to a hosted Postgres service.
 Recommendation: DO_NOT_PROCEED
-Summary: The canonical decision explicitly keeps the demo app local-first on embedded SQLite and rejects moving to hosted Postgres for multi-user accounts or sync (id=1). The request directly repeats that ruled-out path; the approved alternative is explicit export/import with documented limitations.
-Risk if proceed: It would violate the project's local-first, no-hosted-database architecture and revive an explicitly rejected design.
-Better next action: Keep SQLite and implement an explicit export/import workflow, documenting that it does not provide multi-user accounts or live synchronization.
+Summary: The canonical decision explicitly keeps the demo app local-first on one embedded SQLite file and rejects moving to hosted Postgres for multi-user accounts or sync (id=1). The request directly repeats that ruled-out path.
+Risk if proceed: The implementation would overturn the project’s local-first, no-hosted-database architecture and introduce unsupported multi-user semantics.
+Better next action: Keep SQLite and, if cross-machine data movement is needed, implement an explicit export/import workflow with documented limitations as allowed by id=1.
 Cited evidence:
 - id=1 decision status=canonical: Keep the demo app local-first on SQLite — no hosted database
 Worktree changed before/after gate: no
@@ -63,7 +63,7 @@ This deterministic fixture eval grades seed-report capture and filtering; it is 
 
 ## Reproduce
 
-The deterministic results were generated from commit `48390cb09aa08dae91306eb4c01f389d85ee9e8c`.
+The deterministic results were generated from commit `9b1312c5d491e508646a42dc61d6bd6c21500795`.
 
 ```bash
 bash bin/latch_eval.sh
