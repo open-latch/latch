@@ -154,7 +154,9 @@ decisions you've ratified, and the honest limits are in
 **Prerequisites:** Git, and at least one installed agent CLI — **Claude Code**, **Codex**, or
 **Cursor Agent**.
 
-**Install in one command.** Open a terminal in the repo you want latch to protect.
+**Install in one command.** In an interactive terminal, the installer offers the current directory
+as the project to protect; press Enter to accept it or enter another directory before anything is
+wired.
 
 macOS, Linux, or Windows Git Bash:
 
