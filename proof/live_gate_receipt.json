@@ -1,8 +1,8 @@
 {
   "backend": "codex",
-  "better_next_action": "Keep SQLite and implement an explicit export/import workflow with documented limitations if cross-machine data movement is required.",
+  "better_next_action": "Keep SQLite and implement an explicit export/import workflow, documenting that it does not provide multi-user accounts or live synchronization.",
   "capture_command": "bash bin/latch_proof_packet.sh --capture-live --backend codex",
-  "captured_at_utc": "2026-08-04T13:58:23Z",
+  "captured_at_utc": "2026-08-05T02:52:02Z",
   "demo_kind": "synthetic_no_history_fixture",
   "evidence_nodes": [
     {
@@ -30,10 +30,10 @@
   "observed": true,
   "recommendation": "DO_NOT_PROCEED",
   "request": "Add multi-user accounts by moving the datastore from local SQLite to a hosted Postgres service.",
-  "risk_if_proceed": "It would overturn the local-first demo constraint and repeat an explicitly rejected hosted-database path.",
+  "risk_if_proceed": "It would violate the project's local-first, no-hosted-database architecture and revive an explicitly rejected design.",
   "schema_version": 2,
-  "source_commit": "72018b394e931dae86fb0a2d5b01163f3252db53",
-  "summary": "The request directly contradicts the canonical decision to keep the demo app local-first on a single embedded SQLite file with no hosted database (id=1). The same node explicitly rejects moving to a hosted/client-server database such as managed Postgres for multi-user accounts or sync, and names export/import as the allowed data-movement path.",
+  "source_commit": "48390cb09aa08dae91306eb4c01f389d85ee9e8c",
+  "summary": "The canonical decision explicitly keeps the demo app local-first on embedded SQLite and rejects moving to hosted Postgres for multi-user accounts or sync (id=1). The request directly repeats that ruled-out path; the approved alternative is explicit export/import with documented limitations.",
   "tested_runtime_git_blobs": {
     ".gitattributes": "dfdb8b771ce07609491fa2e83698969fd917a135",
     "KB_SCHEMA_VERSION": "00750edc07d6415dcc07ae0351e9397b0222b7ba",
@@ -101,7 +101,7 @@
     "src/kb_gate_cli.py": "2b95902df966e4283442a88d5b4596cca94b1c5e",
     "src/lifecycle_receipts.py": "97e5b63f1ce470a48543d0d08cc4cf972fb389d6",
     "src/lifecycle_signals.py": "b50388b55e3a9fd4b9d0f77b53835ed8ff3e8a33",
-    "src/local_review.py": "c3faf7226b2a1afc9d41590f1b6d1df07cea3edf",
+    "src/local_review.py": "4f3793f4709fa893b610df48ff9bf954ad44da0f",
     "src/lockfile.py": "8e64b385c11804f8a0bab5c738233401eea4b94b",
     "src/log_utils.py": "92ba2f494dc3e74ba2945afb4c50cd66f3a1192e",
     "src/maintenance.py": "11079e8ab8b16d26d7ccb98d787eb5c2602cb91d",
