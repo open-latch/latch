@@ -286,6 +286,22 @@ runtime_python() {
   fi
 }
 
+sqlite_vec_preflight() {
+  local app="$1" python_path="$2"
+  if ! "$python_path" -B -c '
+import sys
+sys.path.insert(0, sys.argv[1])
+from doctor import OK, _VEC_PROBE, _run_probe
+level, _ = _run_probe(_VEC_PROBE, "VEC_OK", 30, arch_hint=True)
+if level != OK:
+    raise SystemExit(1)
+' "$app/src"; then
+    printf 'sqlite-vec capability preflight failed for %s. The resolved interpreter may be built without SQLite extension loading support. Rebuild or replace the interpreter or %s/.venv, then rerun. No project or agent configuration was written; no app files were removed.\n' \
+      "$python_path" "$app" >&2
+    return 1
+  fi
+}
+
 prepare_runtime() {
   local app="$1" python_path requirements
   python_path="$(runtime_python "$app" 2>/dev/null || true)"
@@ -306,6 +322,7 @@ prepare_runtime() {
     UV_NO_CONFIG=1 "$UV" pip install --python "$python_path" -r "$requirements" \
       || return
   fi
+  sqlite_vec_preflight "$app" "$python_path"
 }
 
 mkdir -p "$INSTALL_PARENT"
