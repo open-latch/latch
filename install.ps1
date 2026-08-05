@@ -154,6 +154,19 @@ function Get-RuntimePython([string]$App) {
   return $null
 }
 
+function Test-SqliteVecCapability([string]$App, [string]$Python) {
+  $probe = @'
+import sys
+sys.path.insert(0, sys.argv[1])
+from doctor import OK, _VEC_PROBE, _run_probe
+level, _ = _run_probe(_VEC_PROBE, "VEC_OK", 30, arch_hint=True)
+if level != OK:
+    raise SystemExit(1)
+'@
+  & $Python -B -c $probe (Join-Path $App "src")
+  return ($LASTEXITCODE -eq 0)
+}
+
 function Prepare-Runtime([string]$App, [string]$Uv) {
   $python = Get-RuntimePython $App
   $previousNoConfig = $env:UV_NO_CONFIG
@@ -176,7 +189,16 @@ function Prepare-Runtime([string]$App, [string]$Uv) {
       # Compatibility for pre-runtime-lock releases.
       & $Uv pip install --python $python -r (Join-Path $App "requirements.txt") | Out-Host
     }
-    return ($LASTEXITCODE -eq 0)
+    if ($LASTEXITCODE -ne 0) { return $false }
+    if (-not (Test-SqliteVecCapability $App $python)) {
+      [Console]::Error.WriteLine(
+        "sqlite-vec capability preflight failed for $python. The resolved interpreter may be " +
+        "built without SQLite extension loading support. Rebuild or replace the interpreter or " +
+        "$App\.venv, then rerun. No project or agent configuration was written; no app files were removed."
+      )
+      return $false
+    }
+    return $true
   } finally {
     $env:UV_NO_CONFIG = $previousNoConfig
   }

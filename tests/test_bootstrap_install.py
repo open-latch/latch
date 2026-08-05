@@ -67,9 +67,37 @@ payload = {
     "latch_home": os.environ.get("LATCH_HOME"),
     "latch_python": os.environ.get("LATCH_PYTHON"),
 }
+config_file = os.environ.get("FAKE_CONFIG_FILE")
+if config_file:
+    path = Path(config_file)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("configured\\n", encoding="utf-8")
 with Path(os.environ["FAKE_QUICKSTART_LOG"]).open("a", encoding="utf-8") as fh:
     fh.write(json.dumps(payload) + "\\n")
 raise SystemExit(int(os.environ.get("FAKE_QUICKSTART_FAIL", "0")))
+""",
+        encoding="utf-8",
+    )
+    (origin / "src" / "doctor.py").write_text(
+        """import os
+from pathlib import Path
+
+OK = "OK"
+_VEC_PROBE = "existing sqlite-vec probe"
+
+
+def _run_probe(code, ok_token, timeout, arch_hint):
+    assert code == _VEC_PROBE
+    assert ok_token == "VEC_OK"
+    assert timeout == 30
+    assert arch_hint is True
+    installed_version = (Path(__file__).resolve().parents[1] / "VERSION").read_text().strip()
+    if (
+        os.environ.get("FAKE_VEC_PROBE_FAIL")
+        or os.environ.get("FAKE_VEC_PROBE_FAIL_VERSION") == installed_version
+    ):
+        return "FAIL", "RuntimeError: SQLite extension loading is disabled"
+    return OK, ""
 """,
         encoding="utf-8",
     )
@@ -268,6 +296,42 @@ def test_posix_bootstrap_runtime_failure_is_recoverable_without_config_writes(tm
     assert Path(env["FAKE_QUICKSTART_LOG"]).is_file()
 
 
+def test_posix_sqlite_vec_preflight_blocks_before_configuration_writes(tmp_path: Path):
+    origin = make_origin(tmp_path)
+    fake_uv = make_fake_uv(tmp_path)
+    config_file = tmp_path / "home" / ".codex" / "config.toml"
+    failed, app, _, env = invoke_installer(
+        tmp_path=tmp_path,
+        origin=origin,
+        fake_uv=fake_uv,
+        extra=("--agents", "codex", "--no-seed"),
+        env_extra={
+            "FAKE_CONFIG_FILE": str(config_file),
+            "FAKE_VEC_PROBE_FAIL": "1",
+        },
+    )
+
+    assert failed.returncode != 0
+    assert "sqlite-vec capability preflight failed" in failed.stderr
+    assert "without SQLite extension loading support" in failed.stderr
+    assert str(app / ".venv" / "bin" / "python") in failed.stderr
+    assert "No project or agent configuration was written" in failed.stderr
+    assert (app / ".git").is_dir()
+    assert not (app / "src" / "__pycache__").exists()
+    assert not config_file.exists()
+    assert not Path(env["FAKE_QUICKSTART_LOG"]).exists()
+
+    repaired, _, _, _ = invoke_installer(
+        tmp_path=tmp_path,
+        origin=origin,
+        fake_uv=fake_uv,
+        extra=("--agents", "codex", "--no-seed"),
+        env_extra={"FAKE_CONFIG_FILE": str(config_file)},
+    )
+    assert repaired.returncode == 0, repaired.stdout + repaired.stderr
+    assert config_file.read_text(encoding="utf-8") == "configured\n"
+
+
 def test_posix_uv_bootstrap_noise_does_not_pollute_executable_path(tmp_path: Path):
     origin = make_origin(tmp_path)
     fake_uv = make_fake_uv(tmp_path)
@@ -366,6 +430,44 @@ def test_posix_bootstrap_upgrade_is_explicit_and_dirty_safe(tmp_path: Path):
     assert upgraded.returncode == 0, upgraded.stdout + upgraded.stderr
     assert git(app, "rev-parse", "HEAD") == new_commit
     assert (app / "VERSION").read_text(encoding="utf-8") == "0.2.0\n"
+
+
+def test_posix_failed_upgrade_vec_preflight_restores_checkout_and_runtime(tmp_path: Path):
+    origin = make_origin(tmp_path)
+    fake_uv = make_fake_uv(tmp_path)
+    first, app, _, env = invoke_installer(
+        tmp_path=tmp_path,
+        origin=origin,
+        fake_uv=fake_uv,
+        extra=("--agents", "codex", "--no-seed"),
+    )
+    assert first.returncode == 0, first.stdout + first.stderr
+    old_commit = git(app, "rev-parse", "HEAD")
+
+    (origin / "VERSION").write_text("0.2.0\n", encoding="utf-8")
+    git(origin, "add", "VERSION")
+    git(origin, "commit", "-m", "fixture v2")
+    new_commit = git(origin, "rev-parse", "HEAD")
+    assert new_commit != old_commit
+
+    failed, _, _, failed_env = invoke_installer(
+        tmp_path=tmp_path,
+        origin=origin,
+        fake_uv=fake_uv,
+        extra=("--upgrade", "--ref", "main", "--agents", "codex", "--no-seed"),
+        env_extra={"FAKE_VEC_PROBE_FAIL_VERSION": "0.2.0"},
+    )
+
+    assert failed.returncode != 0
+    assert "sqlite-vec capability preflight failed" in failed.stderr
+    assert "upgrade rolled back; the previous checkout remains installed" in failed.stderr
+    assert git(app, "rev-parse", "HEAD") == old_commit
+    assert (app / "VERSION").read_text(encoding="utf-8") == "0.1.0\n"
+    quickstart_log = Path(env["FAKE_QUICKSTART_LOG"])
+    assert len(quickstart_log.read_text(encoding="utf-8").splitlines()) == 1
+    uv_log = Path(failed_env["FAKE_UV_LOG"])
+    uv_calls = uv_log.read_text(encoding="utf-8").splitlines()
+    assert sum(call.startswith("pip install ") for call in uv_calls) == 3
 
 
 def test_posix_fresh_install_honors_immutable_release_ref(tmp_path: Path):
@@ -529,6 +631,7 @@ def test_bootstrap_script_contracts_and_syntax():
         assert "https://astral.sh/uv/" in text
         assert "0.11.28" in text
         assert "quickstart.py" in text
+        assert "from doctor import OK, _VEC_PROBE, _run_probe" in text
         assert "upgrade refused because the install checkout is dirty" in text
         assert "production KB" in text
         assert "requirements.lock" in text
@@ -560,6 +663,10 @@ def test_bootstrap_script_contracts_and_syntax():
     assert (
         "tests/test_bootstrap_install.py::"
         "test_posix_bootstrap_zero_quickstart_args_on_stock_macos_bash"
+    ) in workflow
+    assert (
+        "tests/test_bootstrap_install.py::"
+        "test_posix_sqlite_vec_preflight_blocks_before_configuration_writes"
     ) in workflow
     assert "uv==0.11.28" in workflow
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
@@ -711,6 +818,19 @@ exit /b 43
     uv_calls = Path(env["FAKE_UV_LOG"]).read_text(encoding="utf-8").splitlines()
     assert sum(line.startswith("venv ") for line in uv_calls) == 1
     assert sum(line.startswith("pip install ") for line in uv_calls) == 2
+
+    blocked_config = tmp_path / "blocked-config.json"
+    env["FAKE_CONFIG_FILE"] = str(blocked_config)
+    env["FAKE_VEC_PROBE_FAIL"] = "1"
+    blocked = invoke_powershell()
+    blocked_output = blocked.stdout + blocked.stderr
+    assert blocked.returncode != 0
+    assert "sqlite-vec capability preflight failed" in blocked_output
+    assert "without SQLite extension loading support" in blocked_output
+    assert not blocked_config.exists()
+    assert len(read_json_lines(Path(env["FAKE_QUICKSTART_LOG"]))) == 2
+    env.pop("FAKE_CONFIG_FILE")
+    env.pop("FAKE_VEC_PROBE_FAIL")
 
     refused = invoke_powershell(ref="different-ref")
     assert refused.returncode != 0

@@ -96,10 +96,11 @@ jobs:
       - name: Install test runner
         run: python -m pip install pytest
 
-      - name: Test the zero-argument stock Bash activation path
+      - name: Test stock Bash activation and sqlite-vec preflight
         run: >-
           python -m pytest -q
           tests/test_bootstrap_install.py::test_posix_bootstrap_zero_quickstart_args_on_stock_macos_bash
+          tests/test_bootstrap_install.py::test_posix_sqlite_vec_preflight_blocks_before_configuration_writes
 
   proof-packet-windows:
     name: proof-packet-contract (windows-latest)
