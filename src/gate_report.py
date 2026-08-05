@@ -8,6 +8,7 @@ from datetime import date, datetime, timedelta, timezone
 import json
 import os
 from pathlib import Path
+import sqlite3
 import sys
 from typing import Any, Iterable
 
@@ -310,7 +311,41 @@ def _node_map(conn, node_ids: Iterable[int]) -> dict[int, dict[str, Any]]:
                 "workstream_id": None,
             },
         )
+    _attach_rejected_path_counts(conn, out, ids)
     return out
+
+
+def _attach_rejected_path_counts(
+    conn, nodes: dict[int, dict[str, Any]], ids: list[int]
+) -> None:
+    """Stamp each node with how many typed rejections it records (id=3948 V2).
+
+    Replaces the keyword test this report used to run on node titles. Measured
+    on the live vault, that test was 50% precision / 50% recall against the
+    pre-registered rubric (docs/v2_rejection_rubric.md): it missed rejections
+    phrased "X instead of Y" and fired on any node whose title merely discussed
+    rejection — including Latch's own roadmap nodes describing this feature.
+
+    Degrades to 0 rather than raising when the table is absent, so a report run
+    against a vault an older engine created still works.
+    """
+    for node in nodes.values():
+        node.setdefault("rejected_path_count", 0)
+    if not ids:
+        return
+    placeholders = ",".join("?" for _ in ids)
+    try:
+        rows = conn.execute(
+            f"SELECT node_id, COUNT(*) AS n FROM rejected_path "
+            f"WHERE node_id IN ({placeholders}) GROUP BY node_id",
+            ids,
+        ).fetchall()
+    except sqlite3.Error:
+        return
+    for row in rows:
+        node = nodes.get(int(row["node_id"]))
+        if node is not None:
+            node["rejected_path_count"] = int(row["n"])
 
 
 def _ranked_nodes(
@@ -619,10 +654,12 @@ def _node_commentary(node: dict[str, Any]) -> str:
             "This evidence kept the report anchored in explicit project judgment, "
             "not fuzzy remembered context."
         )
-    if "rejected" in lowered or "discarded" in lowered or "ruled" in lowered:
+    rejections = _int(node.get("rejected_path_count"))
+    if rejections:
         return (
-            "This kept abandoned paths visible, which is the part generic memory "
-            "systems usually lose."
+            f"This node records {rejections} typed "
+            f"{_plural(rejections, 'rejected path')}, which is the part generic "
+            "memory systems usually lose."
         )
     if "roadmap" in lowered or "ordering" in lowered or "next-step" in lowered:
         return (

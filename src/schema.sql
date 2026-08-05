@@ -344,6 +344,40 @@ CREATE INDEX IF NOT EXISTS idx_workstream_op_events_candidate
 CREATE INDEX IF NOT EXISTS idx_workstream_op_events_derivation
     ON workstream_op_events(derivation_id, candidate_key);
 
+-- Roadmap item V2 (decision id=3948): a rejected option as a typed row rather
+-- than prose an LLM re-reads per call.
+--
+-- Deliberately NOT a `nodes.status` value. A decision that records a rejected
+-- alternative is usually itself canonical and adopted (id=2224 ratifies a tool
+-- surface AND lists rejected alternatives); stamping that node `rejected` would
+-- destroy its authority. Rejection is a property of an OPTION, not of the node
+-- that records it, so it gets its own row keyed back to the recording node.
+--
+-- Second reason to keep it off `status`: ~12 sites treat `status != 'stale'` as
+-- live (gate.py:469,525,1079 among them), so a new status value would read as an
+-- ACTIVE decision in the gate's own retrieval — the precise failure the feature
+-- exists to prevent.
+CREATE TABLE IF NOT EXISTS rejected_path (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    node_id         INTEGER NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+    -- 3948's five declared fields.
+    option          TEXT    NOT NULL,
+    reason          TEXT    NOT NULL,
+    ratifier        TEXT,
+    decided_at      TEXT,
+    scope_predicate TEXT,
+    -- Provenance. 'declared' = written at capture time; 'backfill' = recovered
+    -- from an existing body. Kept distinct so a backfilled row is never
+    -- presented with the authority of one a human declared.
+    source          TEXT    NOT NULL DEFAULT 'declared'
+                            CHECK (source IN ('declared', 'backfill')),
+    created_at      TEXT    NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(node_id, option)
+);
+
+CREATE INDEX IF NOT EXISTS idx_rejected_path_node ON rejected_path(node_id);
+CREATE INDEX IF NOT EXISTS idx_rejected_path_source ON rejected_path(source);
+
 -- FTS5 virtual table mirrors nodes(title, body). Kept in sync via triggers.
 CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts USING fts5(
     title,
