@@ -3000,11 +3000,8 @@ def parse_host_record_segments(
                     )
                 )
                 continue
-            payload = (
-                value.get("payload")
-                if isinstance(value.get("payload"), Mapping)
-                else {}
-            )
+            raw_payload = value.get("payload")
+            payload = raw_payload if isinstance(raw_payload, Mapping) else {}
             record_type = str(value.get("type") or "")
             payload_type = str(payload.get("type") or "")
             ts, record_ts_errors = _first_optional_timestamp_field(
@@ -3034,6 +3031,28 @@ def parse_host_record_segments(
                             SOURCE_HOST, file, None, config
                         ),
                         detail="|".join(record_ts_errors),
+                    )
+                )
+                continue
+
+            if (
+                record_type == "session_meta"
+                and raw_payload is not None
+                and not isinstance(raw_payload, Mapping)
+            ):
+                session_id = None
+                session_cwd = None
+                codex_context_valid = False
+                markers.append(
+                    LossMarker(
+                        reason="schema_invalid",
+                        source=SOURCE_HOST,
+                        file=file,
+                        byte_offset=offset,
+                        ts=ts,
+                        adapter="codex",
+                        in_scope=_in_window(ts, config),
+                        detail="invalid_object:payload",
                     )
                 )
                 continue
@@ -3208,6 +3227,10 @@ def parse_host_record_segments(
                 if block.get("type") == "tool_use":
                     call_id, call_id_errors = _optional_string_field(block, "id")
                     if call_id_errors:
+                        if str(block.get("name") or "") not in gate_tool_names:
+                            # Malformed metadata on an unrelated tool is not
+                            # loss in the gate measurement stream.
+                            continue
                         markers.append(
                             LossMarker(
                                 reason="schema_invalid",
@@ -3251,6 +3274,10 @@ def parse_host_record_segments(
                         block, "tool_use_id"
                     )
                     if call_id_errors:
+                        if _gate_result_payload(block.get("content")) is None:
+                            # Without a joinable id, only a structurally
+                            # identifiable gate result belongs to this stream.
+                            continue
                         markers.append(
                             LossMarker(
                                 reason="schema_invalid",
@@ -3294,6 +3321,10 @@ def parse_host_record_segments(
                     payload, ("call_id", "id")
                 )
                 if call_id_errors:
+                    if not _codex_gate_call(payload, gate_tool_names):
+                        # Malformed metadata on an unrelated tool is not
+                        # loss in the gate measurement stream.
+                        continue
                     markers.append(
                         LossMarker(
                             reason="schema_invalid",
@@ -3340,6 +3371,10 @@ def parse_host_record_segments(
                     payload, "call_id"
                 )
                 if call_id_errors:
+                    if _gate_result_payload(payload.get("output")) is None:
+                        # Without a joinable id, only a structurally
+                        # identifiable gate result belongs to this stream.
+                        continue
                     markers.append(
                         LossMarker(
                             reason="schema_invalid",
@@ -3845,55 +3880,6 @@ def _apply_outcome_evidence(
         resolved = tuple(
             resolver(preliminary_receipts, stable_source_bytes, config)
         )
-        by_identity: dict[tuple[str, str, str, str], OutcomeEvidence] = {}
-        for evidence in resolved:
-            if not evidence.adapter or not evidence.project_fingerprint:
-                raise ValueError("outcome evidence namespace is incomplete")
-            key = (
-                evidence.nonce,
-                evidence.adapter,
-                evidence.project_fingerprint,
-                evidence.session_id,
-            )
-            if key in by_identity:
-                raise ValueError("duplicate outcome evidence identity")
-            by_identity[key] = evidence
-        evidence_by_observation: dict[
-            tuple[str, str, int], OutcomeEvidence
-        ] = {}
-        for receipt in preliminary_receipts:
-            candidates = {
-                (
-                    observation.adapter,
-                    observation.project_proof.get("fingerprint"),
-                )
-                for observation in _boundary_observations(receipt)
-                if observation.adapter
-                and isinstance(observation.project_proof, Mapping)
-                and isinstance(
-                    observation.project_proof.get("fingerprint"), str
-                )
-            }
-            if len(candidates) != 1 or not receipt.session_id:
-                continue
-            adapter, fingerprint = next(iter(candidates))
-            evidence = by_identity.get(
-                (
-                    receipt.nonce,
-                    adapter,
-                    fingerprint,
-                    receipt.session_id,
-                )
-            )
-            if evidence is None:
-                continue
-            for observation in receipt.observations:
-                prior = evidence_by_observation.get(observation.obs_id)
-                if prior is not None and prior != evidence:
-                    raise ValueError(
-                        "observation belongs to conflicting receipt evidence"
-                    )
-                evidence_by_observation[observation.obs_id] = evidence
     except Exception as exc:  # Resolver errors are evidence loss, never outcomes.
         sessions = sorted({row.session_id for row in rows if row.session_id}) or [None]
         return (
@@ -3911,6 +3897,110 @@ def _apply_outcome_evidence(
                 for session in sessions
             ],
         )
+
+    # A resolver can legitimately return an unavailable result for one
+    # gate-only or otherwise incomplete receipt.  Keep that failure local:
+    # evidence with no exact namespace cannot be attached to any observation,
+    # while an unrelated exact result remains usable.  Duplicate exact
+    # identities likewise invalidate only that identity rather than the whole
+    # cohort.
+    by_identity: dict[tuple[str, str, str, str], OutcomeEvidence] = {}
+    invalid_identities: set[tuple[str, str, str, str]] = set()
+    for evidence in resolved:
+        try:
+            identity = (
+                evidence.nonce,
+                evidence.adapter,
+                evidence.project_fingerprint,
+                evidence.session_id,
+            )
+            if any(
+                not isinstance(value, str) or not value
+                for value in identity
+            ):
+                continue
+            key = identity
+        except Exception:
+            # Without an exact namespace, the malformed item cannot be tied
+            # to (and therefore cannot censor) any particular receipt.
+            continue
+        try:
+            scalar_fields_valid = not (
+                not isinstance(evidence.observable, bool)
+                or not isinstance(evidence.evidence_available, bool)
+                or any(
+                    isinstance(value, bool)
+                    or not isinstance(value, int)
+                    or value < 0
+                    for value in (
+                        evidence.progress_inserts,
+                        evidence.inserts,
+                        evidence.touches,
+                    )
+                )
+                or not isinstance(evidence.linked_cited_insert, bool)
+                or not isinstance(evidence.cited_edge_activity, bool)
+            )
+        except Exception:
+            scalar_fields_valid = False
+        if not scalar_fields_valid:
+            # The item is matchable but unusable. Invalidate only its exact
+            # identity, including any otherwise-valid duplicate result.
+            by_identity.pop(key, None)
+            invalid_identities.add(key)
+            continue
+        try:
+            if key in invalid_identities:
+                continue
+            if key in by_identity:
+                by_identity.pop(key, None)
+                invalid_identities.add(key)
+                continue
+            by_identity[key] = evidence
+        except Exception:
+            # A malformed resolver item can censor only the receipt it fails
+            # to match; it must not abort evidence application for its peers.
+            continue
+
+    evidence_by_observation: dict[
+        tuple[str, str, int], OutcomeEvidence
+    ] = {}
+    invalid_observations: set[tuple[str, str, int]] = set()
+    for receipt in preliminary_receipts:
+        candidates = {
+            (
+                observation.adapter,
+                observation.project_proof.get("fingerprint"),
+            )
+            for observation in _boundary_observations(receipt)
+            if observation.adapter
+            and isinstance(observation.project_proof, Mapping)
+            and isinstance(
+                observation.project_proof.get("fingerprint"), str
+            )
+        }
+        if len(candidates) != 1 or not receipt.session_id:
+            continue
+        adapter, fingerprint = next(iter(candidates))
+        evidence = by_identity.get(
+            (
+                receipt.nonce,
+                adapter,
+                fingerprint,
+                receipt.session_id,
+            )
+        )
+        if evidence is None:
+            continue
+        for observation in receipt.observations:
+            if observation.obs_id in invalid_observations:
+                continue
+            prior = evidence_by_observation.get(observation.obs_id)
+            if prior is not None and prior != evidence:
+                evidence_by_observation.pop(observation.obs_id, None)
+                invalid_observations.add(observation.obs_id)
+                continue
+            evidence_by_observation[observation.obs_id] = evidence
 
     result: list[Observation] = []
     for row in rows:
@@ -4027,6 +4117,7 @@ def measure(
         malformed = unstable = parsed_n = 0
         hashes: list[tuple[str, str]] = []
         host_segments: list[tuple[str, bytes]] = []
+        data: bytes | None = None
         for path in files:
             token = os.fspath(path)
             file_in_scope = _source_record_in_scope(
@@ -4120,6 +4211,12 @@ def measure(
                     == PROJECT_MATCH
                 ):
                     dates_by_source[source].add(row.ts.date())
+
+        # Parsing is complete. Drop the initial snapshots before the terminal
+        # full-hash pass reads the same corpus again; retaining S2 segments (or
+        # the loop's final S1/S2 value) would briefly double corpus residency.
+        host_segments.clear()
+        data = None
 
         # Couple a terminal inventory to a final full-file hash pass. A stable
         # filename set alone is insufficient because files may be rewritten

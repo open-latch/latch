@@ -30,7 +30,6 @@ bad 0.4.0 output without masquerading as finalized protocol receipts.
 """
 from __future__ import annotations
 
-import json
 import sqlite3
 import sys
 from datetime import date, datetime, timedelta, timezone
@@ -352,15 +351,12 @@ def _count_file_touches(
     try:
         before = path.stat()
         first = path.read_bytes()
-        decoded = first.decode("utf-8")
-        for line in decoded.splitlines():
-            if not line.strip():
-                continue
-            value = json.loads(line)
-            if not isinstance(value, dict):
-                return None
-        count = len(artifacts.observe_session_artifacts_in_window(
-            tpath, project_path, t0, t_end,
+        count = len(artifacts.observe_session_artifacts_in_window_bytes(
+            first,
+            project_path,
+            t0,
+            t_end,
+            session_id=session_id,
         ))
         second = path.read_bytes()
         after = path.stat()
@@ -990,7 +986,9 @@ def correlate(
         # Built at most once per run, and only if a session-less row actually
         # turns up: the rollout directory holds hundreds of multi-megabyte files,
         # so an unconditional scan would tax every correlation of an
-        # all-attributed range. Bounded to the correlated dates.
+        # all-attributed range. Discovery still spans the full rollout root so
+        # resumed sessions remain candidate-complete; window filtering happens
+        # only after attribution.
         attribution_index: dict | None = None
 
         def _attribution() -> dict:

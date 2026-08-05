@@ -538,6 +538,115 @@ def test_nonidentical_artifact_candidates_with_same_tool_id_fail_closed(
         conn.close()
 
 
+@pytest.mark.parametrize("adapter", ["claude", "codex"])
+@pytest.mark.parametrize(
+    ("shared_id", "unrelated_timestamp", "fails_closed"),
+    [
+        (False, "2026-08-04T12:05:00.500Z", False),
+        (True, "2026-08-04T12:05:00.500Z", True),
+        (True, "2026-08-04T11:59:30.000Z", False),
+    ],
+)
+def test_cross_tool_call_id_collision_is_scoped_to_the_receipt_window(
+    tmp_path: Path,
+    adapter: str,
+    shared_id: bool,
+    unrelated_timestamp: str,
+    fails_closed: bool,
+):
+    (tmp_path / ".git").mkdir()
+    edit_id = "edit-call"
+    unrelated_id = edit_id if shared_id else "read-call"
+    if adapter == "claude":
+        rows = [
+            {
+                "timestamp": "2026-08-04T12:05:00.000Z",
+                "sessionId": SESSION,
+                "cwd": str(tmp_path),
+                "type": "assistant",
+                "message": {"content": [{
+                    "type": "tool_use",
+                    "id": edit_id,
+                    "name": "Edit",
+                    "input": {"file_path": str(tmp_path / "src/a.py")},
+                }]},
+            },
+            {
+                "timestamp": unrelated_timestamp,
+                "sessionId": SESSION,
+                "cwd": str(tmp_path),
+                "type": "assistant",
+                "message": {"content": [{
+                    "type": "tool_use",
+                    "id": unrelated_id,
+                    "name": "Read",
+                    "input": {"file_path": str(tmp_path / "src/a.py")},
+                }]},
+            },
+            {
+                "timestamp": "2026-08-04T12:05:01.000Z",
+                "sessionId": SESSION,
+                "cwd": str(tmp_path),
+                "type": "user",
+                "message": {"content": [{
+                    "type": "tool_result",
+                    "tool_use_id": edit_id,
+                    "content": "updated",
+                }]},
+            },
+        ]
+    else:
+        rows = [
+            {
+                "timestamp": "2026-08-04T11:59:00.000Z",
+                "type": "session_meta",
+                "payload": {"id": SESSION, "cwd": str(tmp_path)},
+            },
+            {
+                "timestamp": "2026-08-04T12:05:00.000Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call",
+                    "name": "apply_patch",
+                    # Codex call identity accepts either structural alias; the
+                    # collision index and edit index must select the same one.
+                    "call_id": "",
+                    "id": edit_id,
+                    "status": "completed",
+                    "input": (
+                        "*** Begin Patch\n"
+                        f"*** Update File: {tmp_path / 'src/a.py'}\n"
+                        "@@\n-a\n+b\n*** End Patch"
+                    ),
+                },
+            },
+            {
+                "timestamp": unrelated_timestamp,
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "name": "read_file",
+                    "call_id": unrelated_id,
+                    "arguments": "{}",
+                },
+            },
+        ]
+    data = "".join(json.dumps(row) + "\n" for row in rows).encode()
+
+    if fails_closed:
+        with pytest.raises(
+            artifacts.ArtifactEvidenceError,
+            match="identity is shared by conflicting tool calls",
+        ):
+            artifacts.observe_session_artifacts_in_window_bytes(
+                data, str(tmp_path), START, END, session_id=SESSION,
+            )
+    else:
+        assert artifacts.observe_session_artifacts_in_window_bytes(
+            data, str(tmp_path), START, END, session_id=SESSION,
+        ) == [{"repo": str(tmp_path), "path": "src/a.py"}]
+
+
 def test_resolver_builds_stable_segment_index_once_per_invocation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -17,6 +17,7 @@ import hmac
 import ntpath
 import os
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Mapping
@@ -36,6 +37,74 @@ _HEX_64_RE = re.compile(r"[0-9a-f]{64}")
 _MINGW_RE = re.compile(r"^/([a-zA-Z])/(.*)$")
 _URI_DRIVE_RE = re.compile(r"^/([a-zA-Z]:[\\/].*)$")
 _WINDOWS_ABS_RE = re.compile(r"^[a-zA-Z]:[\\/]")
+_WINDOWS_UNC_RE = re.compile(r"^\\\\(?![?.]\\)[^\\]+\\[^\\]+")
+
+
+def _windows_namespace_path(value: str) -> str:
+    """Collapse replay-safe extended Windows names to their ordinary form."""
+
+    normalized = value.replace("/", "\\")
+    folded = normalized.casefold()
+    extended_unc = "\\\\?\\unc\\"
+    if folded.startswith(extended_unc):
+        return "\\\\" + normalized[len(extended_unc):]
+    extended = "\\\\?\\"
+    if folded.startswith(extended):
+        candidate = normalized[len(extended):]
+        if _WINDOWS_ABS_RE.match(candidate):
+            return candidate
+    return normalized
+
+
+def _path_component_key(value: str) -> str:
+    return unicodedata.normalize("NFC", value).casefold()
+
+
+def _canonical_existing_posix_spelling(value: str) -> str:
+    """Recover on-disk spelling without collapsing a case-sensitive volume.
+
+    ``realpath`` preserves caller-supplied case on case-insensitive APFS/HFS.
+    Walking the already-existing path lets those aliases converge while a
+    same-file check prevents case-fold collisions from merging distinct paths.
+    Any lookup ambiguity or filesystem error keeps the resolved input spelling,
+    which is the conservative comparison result.
+    """
+
+    if not os.path.exists(value):
+        return value
+    path = Path(value)
+    if not path.is_absolute() or not path.anchor:
+        return value
+
+    current = path.anchor
+    for component in path.parts[1:]:
+        supplied = os.path.join(current, component)
+        folded_component = _path_component_key(component)
+        exact_match: str | None = None
+        folded_matches: list[str] = []
+        try:
+            with os.scandir(current) as entries:
+                for entry in entries:
+                    if entry.name == component:
+                        exact_match = entry.name
+                        break
+                    if _path_component_key(entry.name) != folded_component:
+                        continue
+                    candidate = os.path.join(current, entry.name)
+                    try:
+                        if os.path.samefile(candidate, supplied):
+                            folded_matches.append(entry.name)
+                    except OSError:
+                        continue
+        except OSError:
+            return value
+        if exact_match is not None:
+            current = os.path.join(current, exact_match)
+        elif len(folded_matches) == 1:
+            current = os.path.join(current, folded_matches[0])
+        else:
+            return value
+    return current
 
 
 def canonical_project_path(value: str | os.PathLike) -> str:
@@ -52,8 +121,27 @@ def canonical_project_path(value: str | os.PathLike) -> str:
     uri_drive = _URI_DRIVE_RE.fullmatch(raw)
     if uri_drive:
         raw = uri_drive.group(1)
-    if _WINDOWS_ABS_RE.match(raw):
-        normalized = ntpath.normcase(ntpath.normpath(raw.replace("/", "\\")))
+    existing_posix_double_slash = (
+        os.name != "nt" and raw.startswith("//") and os.path.exists(raw)
+    )
+    windows_path = _windows_namespace_path(raw)
+    if (
+        _WINDOWS_ABS_RE.match(windows_path)
+        or (
+            not existing_posix_double_slash
+            and _WINDOWS_UNC_RE.match(windows_path)
+        )
+    ):
+        if os.name == "nt" and os.path.exists(windows_path):
+            try:
+                windows_path = _windows_namespace_path(
+                    str(Path(windows_path).resolve(strict=True))
+                )
+            except OSError:
+                # Lexical normalization remains deterministic and does not
+                # manufacture equality when the live filesystem is unavailable.
+                pass
+        normalized = ntpath.normcase(ntpath.normpath(windows_path))
         return "windows\x00" + normalized
 
     source = Path(raw).expanduser()
@@ -61,7 +149,8 @@ def canonical_project_path(value: str | os.PathLike) -> str:
         normalized = str(source.resolve(strict=False))
     except OSError:
         normalized = os.path.abspath(str(source))
-    return "posix\x00" + os.path.normpath(normalized)
+    normalized = os.path.normpath(normalized)
+    return "posix\x00" + _canonical_existing_posix_spelling(normalized)
 
 
 def _proof_payload(

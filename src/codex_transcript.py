@@ -61,13 +61,22 @@ def transcript_session_id(path: str | Path) -> str | None:
     p = Path(path)
     if not p.exists():
         return None
-    for line in p.read_text(encoding="utf-8", errors="replace").splitlines():
+    return transcript_session_id_bytes(p.read_bytes())
+
+
+def transcript_session_id_bytes(data: bytes) -> str | None:
+    """Return the rollout session id from an already-read byte snapshot."""
+    for line in data.decode("utf-8", errors="replace").splitlines():
         try:
             obj = json.loads(line)
         except json.JSONDecodeError:
             continue
+        if not isinstance(obj, dict):
+            continue
         if obj.get("type") == "session_meta":
-            payload = obj.get("payload") or {}
+            payload = obj.get("payload")
+            if not isinstance(payload, dict):
+                continue
             sid = payload.get("id")
             return str(sid) if sid else None
     return None

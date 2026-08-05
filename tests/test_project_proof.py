@@ -2,9 +2,12 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 
 _SRC = Path(__file__).resolve().parent.parent / "src"
@@ -57,6 +60,105 @@ def test_canonical_aliases_compare_equal(tmp_path: Path) -> None:
     assert project_proof.compare_project_proofs(
         windows_native, windows_mingw,
     ) == project_proof.PROJECT_MATCH
+
+
+def test_existing_case_variant_alias_matches_on_case_insensitive_posix(
+    tmp_path: Path,
+) -> None:
+    if os.name == "nt":
+        pytest.skip("POSIX on-disk spelling regression")
+    project = tmp_path / "CaseVariantProject"
+    project.mkdir()
+    alias = project.with_name(project.name.swapcase())
+    try:
+        same_file = os.path.samefile(project, alias)
+    except OSError:
+        same_file = False
+    if not same_file:
+        pytest.skip("test filesystem is case-sensitive")
+
+    context = _context()
+    assert project_proof.canonical_project_path(project) == (
+        project_proof.canonical_project_path(alias)
+    )
+    assert project_proof.compare_project_proofs(
+        context.prove(project), context.prove(alias),
+    ) == project_proof.PROJECT_MATCH
+
+
+def test_existing_case_distinctions_remain_foreign_on_case_sensitive_posix(
+    tmp_path: Path,
+) -> None:
+    if os.name == "nt":
+        pytest.skip("POSIX case-sensitivity regression")
+    upper = tmp_path / "CaseDistinctProject"
+    lower = tmp_path / "casedistinctproject"
+    upper.mkdir()
+    try:
+        lower.mkdir()
+    except FileExistsError:
+        pytest.skip("test filesystem is case-insensitive")
+
+    context = _context()
+    assert project_proof.compare_project_proofs(
+        context.prove(upper), context.prove(lower),
+    ) == project_proof.PROJECT_FOREIGN
+
+
+def test_windows_unc_and_extended_namespaces_compare_equal() -> None:
+    context = _context()
+    ordinary = context.prove(r"\\Server\Share\Folder\Repo")
+    extended = context.prove(r"\\?\UNC\server\share\folder\repo")
+    slash_unc = context.prove("//SERVER/SHARE/folder/repo")
+    assert project_proof.compare_project_proofs(
+        ordinary, extended,
+    ) == project_proof.PROJECT_MATCH
+    assert project_proof.compare_project_proofs(
+        ordinary, slash_unc,
+    ) == project_proof.PROJECT_MATCH
+
+
+def test_windows_extended_drive_namespace_matches_native_drive() -> None:
+    context = _context()
+    native = context.prove(r"C:\Users\Me\Repo")
+    extended = context.prove(r"\\?\C:\users\me\repo")
+    assert project_proof.compare_project_proofs(
+        native, extended,
+    ) == project_proof.PROJECT_MATCH
+
+
+def test_existing_posix_double_slash_is_not_reclassified_as_unc(
+    tmp_path: Path,
+) -> None:
+    if os.name == "nt":
+        pytest.skip("POSIX double-slash regression")
+    project = tmp_path / "double-slash-project"
+    project.mkdir()
+    alias = "/" + str(project)
+    assert os.path.samefile(project, alias)
+    context = _context()
+    assert project_proof.compare_project_proofs(
+        context.prove(project), context.prove(alias),
+    ) == project_proof.PROJECT_MATCH
+
+
+def test_posix_spelling_lookup_failure_keeps_resolved_input(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if os.name == "nt":
+        pytest.skip("POSIX lookup-failure regression")
+    project = tmp_path / "CasePreservedOnFailure"
+    project.mkdir()
+
+    def denied(_path):
+        raise PermissionError("sanitized test failure")
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(project_proof.os, "scandir", denied)
+        assert project_proof.canonical_project_path(project) == (
+            "posix\x00" + os.path.normpath(str(project.resolve()))
+        )
 
 
 def test_key_rotation_is_loss_not_foreign(tmp_path: Path) -> None:

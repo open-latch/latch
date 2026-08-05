@@ -408,7 +408,7 @@ def build_index(
             int(receipt["missing_tool_results"])
             + int(health["missing_tool_results"])
         )
-        session_id = codex_transcript.transcript_session_id(path)
+        session_id = codex_transcript.transcript_session_id_bytes(data)
         if not session_id:
             if calls:
                 receipt["unidentified_gate_files"] = (

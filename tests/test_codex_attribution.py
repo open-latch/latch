@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sqlite3
 import sys
 import tempfile
 from datetime import date, datetime, timezone
@@ -277,35 +278,66 @@ def test_gate_returns_gate_call_id_so_future_rows_join_exactly():
 
 def test_file_touches_accepts_a_supplied_transcript_path():
     """Most Codex threads have no `sessions` row, so a DB lookup would find
-    nothing. Attribution already knows the transcript; it must be usable."""
+    nothing. Attribution already knows the transcript; it must be usable. The
+    corpus-shaped current `functions.exec` transport must remain observable."""
     tmp = tempfile.mkdtemp(prefix="codex_attr_touch_")
-    conn = db.connect(tmp)
+    conn = sqlite3.connect(":memory:")
     try:
         repo = Path(tmp) / "repo"
         (repo / ".git").mkdir(parents=True)
         t = Path(tmp) / "rollout.jsonl"
-        t.write_text(json.dumps({
-            "timestamp": "2026-07-30T05:20:00.000Z",
-            "type": "response_item",
-            "payload": {
-                "type": "custom_tool_call",
-                "status": "completed",
-                "call_id": "c1",
-                "name": "apply_patch",
-                "input": f"*** Begin Patch\n*** Update File: {repo / 'x.py'}\n@@\n-a\n+b\n",
+        session_id = "thread-with-no-sessions-row"
+        patch = (
+            "*** Begin Patch\n"
+            f"*** Update File: {repo / 'x.py'}\n"
+            "@@\n-a\n+b\n*** End Patch"
+        )
+        script = (
+            f"const patch = {json.dumps(patch)};\n"
+            "const result = await tools.apply_patch(patch);\n"
+            "text(result);"
+        )
+        rows = [
+            {
+                "timestamp": "2026-07-30T05:19:00.000Z",
+                "type": "session_meta",
+                "payload": {"id": session_id, "cwd": str(repo)},
             },
-        }) + "\n", encoding="utf-8")
+            {
+                "timestamp": "2026-07-30T05:20:00.000Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call",
+                    "name": "functions.exec",
+                    "call_id": "outer-exec",
+                    "input": script,
+                },
+            },
+            {
+                "timestamp": "2026-07-30T05:20:01.000Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call_output",
+                    "call_id": "outer-exec",
+                    "output": json.dumps({"exit_code": 0}),
+                },
+            },
+        ]
+        t.write_text(
+            "".join(json.dumps(row) + "\n" for row in rows),
+            encoding="utf-8",
+        )
 
         t0 = datetime(2026, 7, 30, 5, 0, tzinfo=timezone.utc)
         t_end = datetime(2026, 7, 30, 6, 0, tzinfo=timezone.utc)
 
         without = correlator._count_file_touches(
-            conn, "thread-with-no-sessions-row", str(repo), t0, t_end)
+            conn, session_id, str(repo), t0, t_end)
         _assert(without is None,
                 f"no sessions row means evidence unavailable: {without}")
 
         with_path = correlator._count_file_touches(
-            conn, "thread-with-no-sessions-row", str(repo), t0, t_end,
+            conn, session_id, str(repo), t0, t_end,
             transcript_path=str(t))
         _assert(with_path == 1,
                 f"supplied transcript should yield the edit: {with_path}")
@@ -928,6 +960,58 @@ def test_full_file_digest_change_between_passes_fails_completeness(monkeypatch):
         receipt = idx["candidate_completeness"]
         _assert(receipt["content_changed_files"] == 1, receipt)
         _assert(receipt["complete"] is False, receipt)
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_build_index_reads_session_identity_from_snapshot_bytes(monkeypatch):
+    home = _make_home({
+        THREAD_A: [("2026-07-30T05:20:00.000Z", "valid request", "aaaaaaaaaaaa")],
+    })
+
+    def forbid_path_reread(_path):
+        raise AssertionError("build_index must not reread the rollout for identity")
+
+    monkeypatch.setattr(
+        codex_attribution.codex_transcript,
+        "transcript_session_id",
+        forbid_path_reread,
+    )
+    try:
+        idx = codex_attribution.build_index(Path(home))
+        _assert(idx["candidate_completeness"]["complete"] is True, idx)
+        _assert(
+            idx["by_nonce"]["aaaaaaaaaaaa"][0]["session_id"] == THREAD_A,
+            idx,
+        )
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+@pytest.mark.parametrize(
+    "malformed_prefix",
+    [
+        b"[]\n",
+        b'{"type":"session_meta","payload":[1]}\n',
+    ],
+)
+def test_build_index_handles_malformed_json_shape_as_incomplete(
+    malformed_prefix: bytes,
+):
+    home = _make_home({
+        THREAD_A: [("2026-07-30T05:20:00.000Z", "valid request", "aaaaaaaaaaaa")],
+    })
+    try:
+        rollout = next((Path(home) / "sessions").rglob("*.jsonl"))
+        rollout.write_bytes(malformed_prefix + rollout.read_bytes())
+        idx = codex_attribution.build_index(Path(home))
+        receipt = idx["candidate_completeness"]
+        _assert(receipt["malformed_candidate_regions"] == 1, receipt)
+        _assert(receipt["complete"] is False, receipt)
+        _assert(
+            idx["by_nonce"]["aaaaaaaaaaaa"][0]["session_id"] == THREAD_A,
+            idx,
+        )
     finally:
         shutil.rmtree(home, ignore_errors=True)
 

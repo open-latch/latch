@@ -713,6 +713,9 @@ class ArtifactEvidenceIndex:
     """
 
     calls_by_identity: Mapping[ArtifactIdentity, tuple[_IndexedArtifactCall, ...]]
+    call_candidates: Mapping[
+        tuple[ArtifactIdentity, str], tuple[_IndexedArtifactCall, ...]
+    ]
     results: Mapping[tuple[ArtifactIdentity, str], tuple[bool, ...]]
     result_conflicts: frozenset[tuple[ArtifactIdentity, str]]
     identities_by_file: Mapping[str, frozenset[ArtifactIdentity]]
@@ -737,6 +740,9 @@ def build_artifact_evidence_index(
     """
 
     calls: dict[ArtifactIdentity, list[_IndexedArtifactCall]] = defaultdict(list)
+    call_candidates: dict[
+        tuple[ArtifactIdentity, str], list[_IndexedArtifactCall]
+    ] = defaultdict(list)
     results: dict[tuple[ArtifactIdentity, str], list[bool]] = defaultdict(list)
     result_fingerprints: dict[
         tuple[ArtifactIdentity, str], set[str]
@@ -849,17 +855,19 @@ def build_artifact_evidence_index(
                                 )
                             )
                         continue
-                    if (
-                        item.get("type") == "tool_use"
-                        and item.get("name") in _EDIT_TOOLS
-                    ):
-                        calls[identity].append(_IndexedArtifactCall(
+                    if item.get("type") == "tool_use":
+                        call_id = item.get("id")
+                        candidate = _IndexedArtifactCall(
                             identity=identity,
                             timestamp=_parse_transcript_ts(obj.get("timestamp")),
-                            call_id=item.get("id"),
+                            call_id=call_id,
                             adapter="claude",
                             payload=item,
-                        ))
+                        )
+                        if isinstance(call_id, str) and call_id:
+                            call_candidates[(identity, call_id)].append(candidate)
+                        if item.get("name") in _EDIT_TOOLS:
+                            calls[identity].append(candidate)
 
             if payload_type in {
                 "function_call_output", "custom_tool_call_output",
@@ -878,17 +886,26 @@ def build_artifact_evidence_index(
                             separators=(",", ":"),
                         )
                     )
-            elif (
-                payload.get("name") in _CODEX_EDIT_TOOLS
-                or _outer_exec_has_apply_patch(payload)
-            ):
-                calls[identity].append(_IndexedArtifactCall(
-                    identity=identity,
-                    timestamp=_parse_transcript_ts(obj.get("timestamp")),
-                    call_id=payload.get("call_id"),
-                    adapter="codex",
-                    payload=payload,
-                ))
+            else:
+                is_edit = (
+                    payload.get("name") in _CODEX_EDIT_TOOLS
+                    or _outer_exec_has_apply_patch(payload)
+                )
+                if payload_type in {"function_call", "custom_tool_call"} or is_edit:
+                    call_id = payload.get("call_id")
+                    if call_id in (None, ""):
+                        call_id = payload.get("id")
+                    candidate = _IndexedArtifactCall(
+                        identity=identity,
+                        timestamp=_parse_transcript_ts(obj.get("timestamp")),
+                        call_id=call_id,
+                        adapter="codex",
+                        payload=payload,
+                    )
+                    if isinstance(call_id, str) and call_id:
+                        call_candidates[(identity, call_id)].append(candidate)
+                    if is_edit:
+                        calls[identity].append(candidate)
 
     file_errors.update(conflict_files)
     identity_errors: set[ArtifactIdentity] = set()
@@ -897,6 +914,9 @@ def build_artifact_evidence_index(
     return ArtifactEvidenceIndex(
         calls_by_identity={
             identity: tuple(rows) for identity, rows in calls.items()
+        },
+        call_candidates={
+            key: tuple(rows) for key, rows in call_candidates.items()
         },
         results={key: tuple(values) for key, values in results.items()},
         result_conflicts=frozenset(
@@ -942,6 +962,21 @@ def observe_indexed_session_artifacts(
 
     in_window_calls: dict[str, tuple[str, _IndexedArtifactCall]] = {}
     unkeyed_calls: list[_IndexedArtifactCall] = []
+
+    def call_fingerprint(call: _IndexedArtifactCall) -> str:
+        return json.dumps(
+            {
+                "adapter": call.adapter,
+                "timestamp": (
+                    call.timestamp.isoformat() if call.timestamp else None
+                ),
+                "payload": call.payload,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
     for call in index.calls_by_identity.get(identity, ()):
         ts = call.timestamp
         if ts is None:
@@ -955,16 +990,7 @@ def observe_indexed_session_artifacts(
         if not isinstance(call_id, str) or not call_id:
             unkeyed_calls.append(call)
             continue
-        fingerprint = json.dumps(
-            {
-                "adapter": call.adapter,
-                "timestamp": ts.isoformat(),
-                "payload": call.payload,
-            },
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        )
+        fingerprint = call_fingerprint(call)
         existing = in_window_calls.get(call_id)
         if existing is not None and existing[0] != fingerprint:
             raise ArtifactEvidenceError(
@@ -979,6 +1005,21 @@ def observe_indexed_session_artifacts(
         call_id = call.call_id
         if not isinstance(call_id, str) or not call_id:
             raise ArtifactEvidenceError("edit call has no tool identity")
+        candidates = index.call_candidates.get((identity, call_id), ())
+        if any(candidate.timestamp is None for candidate in candidates):
+            raise ArtifactEvidenceError(
+                "edit call identity has an unplaceable tool-call candidate"
+            )
+        candidate_fingerprints = {
+            call_fingerprint(candidate)
+            for candidate in candidates
+            if candidate.timestamp is not None
+            and t0 <= candidate.timestamp <= t_end
+        }
+        if len(candidate_fingerprints) > 1:
+            raise ArtifactEvidenceError(
+                "edit call identity is shared by conflicting tool calls"
+            )
         statuses = index.results.get((identity, call_id))
         if (identity, call_id) in index.result_conflicts:
             raise ArtifactEvidenceError("edit call has conflicting result payloads")

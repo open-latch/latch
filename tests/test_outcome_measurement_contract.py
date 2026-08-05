@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
+import gc
 import hashlib
 import json
 import os
@@ -2076,6 +2077,122 @@ def test_exact_s2_receipt_evidence_propagates_to_s1_without_session_id():
     assert final.receipts[0].censored_reason is None
 
 
+def test_malformed_receipt_evidence_is_isolated_by_exact_identity():
+    class RaisingEvidence:
+        nonce = "raising-evidence"
+        session_id = "raising-session"
+
+        @property
+        def adapter(self):
+            raise RuntimeError("sanitized malformed evidence")
+
+    rows = [
+        *_pair(
+            "complete-evidence",
+            1,
+            session="complete-session",
+            observable=None,
+            evidence_available=False,
+            progress=0,
+        ),
+        *_pair(
+            "unrelated-evidence",
+            3,
+            session="unrelated-session",
+            observable=None,
+            evidence_available=False,
+            progress=0,
+        ),
+        _obs(
+            "gate-only-evidence",
+            om.SOURCE_GATE,
+            2,
+            session="gate-only-session",
+            observable=None,
+            evidence_available=False,
+            progress=0,
+        ),
+    ]
+    preliminary = _state(rows)
+
+    applied, markers = om._apply_outcome_evidence(
+        rows,
+        preliminary.receipts,
+        {},
+        _config(),
+        lambda _receipts, _stable_bytes, _config: (
+            om.OutcomeEvidence(
+                nonce="complete-evidence",
+                session_id="complete-session",
+                observable=True,
+                evidence_available=True,
+                adapter="codex",
+                project_fingerprint=_proof()["fingerprint"],
+                progress_inserts=1,
+            ),
+            om.OutcomeEvidence(
+                nonce="gate-only-evidence",
+                session_id="gate-only-session",
+                observable=False,
+                evidence_available=False,
+                adapter=None,
+                project_fingerprint=None,
+            ),
+            om.OutcomeEvidence(
+                nonce="complete-evidence",
+                session_id="complete-session",
+                observable="yes",
+                evidence_available=True,
+                adapter="codex",
+                project_fingerprint=_proof()["fingerprint"],
+                progress_inserts=1,
+            ),
+            om.OutcomeEvidence(
+                nonce="unrelated-evidence",
+                session_id="unrelated-session",
+                observable=True,
+                evidence_available=True,
+                adapter="codex",
+                project_fingerprint=_proof()["fingerprint"],
+                progress_inserts=1,
+            ),
+            om.OutcomeEvidence(
+                nonce=[],
+                session_id="malformed-session",
+                observable=True,
+                evidence_available=True,
+                adapter="codex",
+                project_fingerprint=_proof()["fingerprint"],
+            ),
+            RaisingEvidence(),
+        ),
+    )
+
+    assert not markers
+    malformed = [row for row in applied if row.nonce == "complete-evidence"]
+    complete = [row for row in applied if row.nonce == "unrelated-evidence"]
+    gate_only = [row for row in applied if row.nonce == "gate-only-evidence"]
+    assert all(row.observable is True for row in complete)
+    assert all(row.evidence_available is True for row in complete)
+    assert all(row.progress_inserts == 1 for row in complete)
+    assert all(row.observable is None for row in malformed)
+    assert all(row.evidence_available is False for row in malformed)
+    assert len(gate_only) == 1
+    assert gate_only[0].observable is None
+    assert gate_only[0].evidence_available is False
+    final = _state(applied)
+    by_nonce = {receipt.nonce: receipt for receipt in final.receipts}
+    assert by_nonce["complete-evidence"].outcome == "CENSORED"
+    assert by_nonce["complete-evidence"].censored_reason == (
+        "instrument_unavailable"
+    )
+    assert by_nonce["unrelated-evidence"].outcome == "ACCEPTED"
+    assert by_nonce["gate-only-evidence"].outcome == "CENSORED"
+    assert by_nonce["gate-only-evidence"].censored_reason == (
+        "instrument_unavailable"
+    )
+
+
 def test_resolver_failure_censors_but_unscoped_marker_cannot_set_a_boundary():
     failed = _measure_current(
         evidence_resolver=lambda _receipts, _stable_bytes, _config: (
@@ -3363,6 +3480,23 @@ def test_unrelated_codex_tool_result_is_neither_observation_nor_loss():
     assert not rows
     assert not markers
 
+    records[1]["payload"]["call_id"] = 123
+    records[2]["payload"]["call_id"] = 123
+    malformed_id_data = (
+        "\n".join(
+            json.dumps(record, separators=(",", ":")) for record in records
+        )
+        + "\n"
+    ).encode()
+    rows, markers = om.parse_host_record_bytes(
+        malformed_id_data,
+        file="rollout-unrelated-malformed-id.jsonl",
+        config=_config(),
+        project_proof_context=_proof_context(),
+    )
+    assert not rows
+    assert not markers
+
 
 def test_unrelated_claude_tool_result_is_neither_observation_nor_loss():
     records = [
@@ -3384,6 +3518,23 @@ def test_unrelated_claude_tool_result_is_neither_observation_nor_loss():
     rows, markers = om.parse_host_record_bytes(
         data,
         file="claude-unrelated.jsonl",
+        config=_config(),
+        project_proof_context=_proof_context(),
+    )
+    assert not rows
+    assert not markers
+
+    records[0]["message"]["content"][0]["id"] = 123
+    records[1]["message"]["content"][0]["tool_use_id"] = 123
+    malformed_id_data = (
+        "\n".join(
+            json.dumps(record, separators=(",", ":")) for record in records
+        )
+        + "\n"
+    ).encode()
+    rows, markers = om.parse_host_record_bytes(
+        malformed_id_data,
+        file="claude-unrelated-malformed-id.jsonl",
         config=_config(),
         project_proof_context=_proof_context(),
     )
@@ -3546,6 +3697,46 @@ def test_terminal_full_hash_pass_detects_rewrite_after_stable_double_read():
         and marker.source == om.SOURCE_GATE
         for marker in state.loss_markers
     )
+
+
+def test_initial_snapshot_bytes_are_released_before_terminal_hash_reads():
+    gate_path = FIXTURES / "gate-2026-08-03.sanitized.jsonl"
+    host_path = FIXTURES / "codex-rollout-2026-07-29.sanitized.jsonl"
+    roots = {
+        om.SOURCE_GATE: (str(gate_path),),
+        om.SOURCE_HOST: (str(host_path),),
+    }
+    gate_bytes, host_bytes = _current_measurement_bytes()
+    content = {gate_path: gate_bytes, host_path: host_bytes}
+    reads = {gate_path: 0, host_path: 0}
+    released: set[str] = set()
+
+    class TrackedBytes(bytes):
+        def __new__(cls, value: bytes, label: str):
+            instance = super().__new__(cls, value)
+            instance.label = label
+            return instance
+
+        def __del__(self):
+            released.add(self.label)
+
+    def reader(path):
+        reads[path] += 1
+        label = f"{path.name}:{reads[path]}"
+        if reads[path] == 3:
+            gc.collect()
+            assert f"{path.name}:2" in released
+        return TrackedBytes(content[path], label)
+
+    om.measure(
+        roots,
+        _config(roots=roots),
+        project_proof_context=_proof_context(),
+        now=T0 + timedelta(days=2),
+        read_bytes=reader,
+        enumerate_files=lambda items: tuple(Path(item) for item in items),
+    )
+    assert reads == {gate_path: 3, host_path: 3}
 
 
 def test_malformed_region_makes_candidate_completeness_false(tmp_path):
