@@ -34,6 +34,7 @@ they are unused until then.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sqlite3
@@ -714,8 +715,45 @@ class _IndexedArtifactResult:
     item_index: int
     call_id: str
     adapter: str
+    family: str
     failed: bool
-    payload: Mapping[str, Any]
+    fingerprint_sha256: str
+
+
+def _artifact_result_family(
+    adapter: str,
+    payload: Mapping[str, Any],
+) -> str:
+    """Return the call/result envelope family used for occurrence joins."""
+
+    if adapter == "claude":
+        return "claude-tool"
+    payload_type = str(payload.get("type") or "")
+    if payload_type.startswith("function_call"):
+        return "codex-function"
+    if payload_type.startswith("custom_tool_call"):
+        return "codex-custom"
+    return f"codex-{payload_type or 'unknown'}"
+
+
+def _artifact_result_fingerprint(
+    adapter: str,
+    timestamp: datetime | None,
+    payload: Mapping[str, Any],
+) -> str:
+    """Hash result identity without retaining its potentially large output."""
+
+    encoded = json.dumps(
+        {
+            "adapter": adapter,
+            "timestamp": timestamp.isoformat() if timestamp else None,
+            "payload": payload,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -857,23 +895,31 @@ def build_artifact_evidence_index(
                     if item.get("type") == "tool_result":
                         call_id = item.get("tool_use_id")
                         if isinstance(call_id, str) and call_id:
+                            timestamp = _parse_transcript_ts(
+                                obj.get("timestamp")
+                            )
                             result_key = (identity, call_id)
                             results[result_key].append(
                                 _IndexedArtifactResult(
                                     identity=identity,
-                                    timestamp=_parse_transcript_ts(
-                                        obj.get("timestamp")
-                                    ),
+                                    timestamp=timestamp,
                                     file_token=file_token,
                                     line_index=line_index,
                                     item_index=item_index,
                                     call_id=call_id,
                                     adapter="claude",
+                                    family=_artifact_result_family(
+                                        "claude", item
+                                    ),
                                     failed=(
                                         bool(item.get("is_error"))
                                         or _nested_result_failed(item.get("content"))
                                     ),
-                                    payload=item,
+                                    fingerprint_sha256=(
+                                        _artifact_result_fingerprint(
+                                            "claude", timestamp, item
+                                        )
+                                    ),
                                 )
                             )
                         continue
@@ -899,18 +945,22 @@ def build_artifact_evidence_index(
             }:
                 call_id = payload.get("call_id")
                 if isinstance(call_id, str) and call_id:
+                    timestamp = _parse_transcript_ts(obj.get("timestamp"))
                     result_key = (identity, call_id)
                     results[result_key].append(
                         _IndexedArtifactResult(
                             identity=identity,
-                            timestamp=_parse_transcript_ts(obj.get("timestamp")),
+                            timestamp=timestamp,
                             file_token=file_token,
                             line_index=line_index,
                             item_index=0,
                             call_id=call_id,
                             adapter="codex",
+                            family=_artifact_result_family("codex", payload),
                             failed=_nested_result_failed(payload.get("output")),
-                            payload=payload,
+                            fingerprint_sha256=_artifact_result_fingerprint(
+                                "codex", timestamp, payload
+                            ),
                         )
                     )
             else:
@@ -1002,20 +1052,6 @@ def observe_indexed_session_artifacts(
             separators=(",", ":"),
         )
 
-    def result_fingerprint(result: _IndexedArtifactResult) -> str:
-        return json.dumps(
-            {
-                "adapter": result.adapter,
-                "timestamp": (
-                    result.timestamp.isoformat() if result.timestamp else None
-                ),
-                "payload": result.payload,
-            },
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-
     def event_order(
         timestamp: datetime,
         file_token: str,
@@ -1034,29 +1070,18 @@ def observe_indexed_session_artifacts(
         call_id = call.call_id
         if not isinstance(call_id, str) or not call_id:
             return ()
-        def result_family(adapter: str, payload: Mapping[str, Any]) -> str:
-            if adapter == "claude":
-                return "claude-tool"
-            payload_type = str(payload.get("type") or "")
-            if payload_type.startswith("function_call"):
-                return "codex-function"
-            if payload_type.startswith("custom_tool_call"):
-                return "codex-custom"
-            return f"codex-{payload_type or 'unknown'}"
-
         key = (identity, call_id)
-        selected_family = result_family(call.adapter, call.payload)
+        selected_family = _artifact_result_family(call.adapter, call.payload)
         candidates = tuple(
             candidate
             for candidate in index.call_candidates.get(key, ())
-            if result_family(candidate.adapter, candidate.payload)
+            if _artifact_result_family(candidate.adapter, candidate.payload)
             == selected_family
         )
         result_candidates = tuple(
             candidate
             for candidate in index.results.get(key, ())
-            if result_family(candidate.adapter, candidate.payload)
-            == selected_family
+            if candidate.family == selected_family
         )
         if any(candidate.timestamp is None for candidate in result_candidates):
             raise ArtifactEvidenceError(
@@ -1088,7 +1113,7 @@ def observe_indexed_session_artifacts(
         ] = {}
         for candidate in result_candidates:
             assert candidate.timestamp is not None
-            fingerprint = result_fingerprint(candidate)
+            fingerprint = candidate.fingerprint_sha256
             order = event_order(
                 candidate.timestamp,
                 candidate.file_token,

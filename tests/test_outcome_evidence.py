@@ -1,11 +1,13 @@
 """Production evidence resolution over canonical windows and stable S2 bytes."""
 from __future__ import annotations
 
+import gc
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 import sys
+import tracemalloc
 
 import pytest
 
@@ -1358,3 +1360,77 @@ def test_bytes_helper_ignores_broken_edit_outside_exact_window(tmp_path: Path):
         END,
         session_id=SESSION,
     ) == [{"repo": str(tmp_path), "path": "src/inside.py"}]
+
+
+@pytest.mark.parametrize(
+    ("adapter", "expected_family"),
+    [("claude", "claude-tool"), ("codex", "codex-custom")],
+)
+def test_artifact_result_index_retains_digest_not_raw_payload(
+    tmp_path: Path,
+    adapter: str,
+    expected_family: str,
+):
+    identity = (adapter, "target-proof", SESSION)
+
+    def resolve_identity(row_adapter, session_id, _cwd, _proof):
+        if row_adapter == adapter and session_id == SESSION:
+            return identity
+        return None
+
+    large_output = "unique-result-output:" + ("x" * 4_000_000)
+    if adapter == "claude":
+        rows = [{
+            "timestamp": "2026-08-04T12:05:01.000Z",
+            "sessionId": SESSION,
+            "cwd": str(tmp_path),
+            "type": "user",
+            "message": {"content": [{
+                "type": "tool_result",
+                "tool_use_id": "large-result",
+                "content": large_output,
+            }]},
+        }]
+    else:
+        rows = [
+            {
+                "timestamp": "2026-08-04T12:05:00.000Z",
+                "type": "session_meta",
+                "payload": {"id": SESSION, "cwd": str(tmp_path)},
+            },
+            {
+                "timestamp": "2026-08-04T12:05:01.000Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call_output",
+                    "call_id": "large-result",
+                    "output": large_output,
+                },
+            },
+        ]
+    data = "".join(
+        json.dumps(row, separators=(",", ":")) + "\n" for row in rows
+    ).encode()
+
+    was_tracing = tracemalloc.is_tracing()
+    if not was_tracing:
+        tracemalloc.start()
+    try:
+        gc.collect()
+        retained_before, _peak_before = tracemalloc.get_traced_memory()
+        index = artifacts.build_artifact_evidence_index(
+            ((S2_FILE, data),),
+            resolve_identity=resolve_identity,
+        )
+        gc.collect()
+        retained_after, _peak_after = tracemalloc.get_traced_memory()
+    finally:
+        if not was_tracing:
+            tracemalloc.stop()
+
+    indexed = index.results[(identity, "large-result")][0]
+    assert indexed.family == expected_family
+    assert len(indexed.fingerprint_sha256) == 64
+    assert not hasattr(indexed, "payload")
+    assert large_output not in repr(index)
+    assert retained_after - retained_before < 2_000_000
