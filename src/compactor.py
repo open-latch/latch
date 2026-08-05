@@ -920,7 +920,7 @@ def _invoke_codex_once(
                 final_text = out_path.read_text(encoding="utf-8", errors="replace")
             if not final_text.strip():
                 final_text = proc.stdout
-    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+    except (OSError, subprocess.TimeoutExpired) as e:
         return None, f"{type(e).__name__}: {e}"
 
     if proc.returncode != 0:

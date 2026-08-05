@@ -208,7 +208,7 @@ def _invoke_codex(
             final_text = mcp_runtime.redact_subprocess_output(final_text)
     except subprocess.TimeoutExpired:
         return ModelCallResult(None, f"{purpose} timed out after {timeout_s}s", True, "codex")
-    except FileNotFoundError as e:
+    except OSError as e:
         return ModelCallResult(None, f"subprocess failed: {type(e).__name__}: {e}", False, "codex")
 
     if proc.returncode != 0:

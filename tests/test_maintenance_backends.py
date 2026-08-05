@@ -272,6 +272,31 @@ def test_connection_maintenance_backend_outranks_daemon_environment():
     print("PASS connection_maintenance_backend_outranks_daemon_environment")
 
 
+def test_codex_maintenance_permission_error_is_structured(monkeypatch):
+    def deny_launch(*_args, **_kwargs):
+        raise PermissionError(
+            5,
+            "Access is denied",
+            "C:/Program Files/WindowsApps/codex.exe",
+        )
+
+    monkeypatch.setattr(model_backends.subprocess, "run", deny_launch)
+
+    result = model_backends.invoke_prompt(
+        "summarize",
+        backend="codex",
+        timeout_s=1,
+        purpose="maintenance",
+        codex_bin="C:/Program Files/WindowsApps/codex.exe",
+    )
+
+    _assert(result.text is None, result)
+    _assert(result.timed_out is False, result)
+    _assert(result.backend == "codex", result)
+    _assert("PermissionError" in str(result.error), result)
+    _assert("Access is denied" in str(result.error), result)
+
+
 def test_private_claude_environment_is_backend_scoped_and_redacted(monkeypatch):
     captured = {}
 

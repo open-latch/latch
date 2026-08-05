@@ -297,9 +297,12 @@ def run_all(
     summarizer_backend: str | None = None,
     require_compact: bool = False,
 ) -> list[Check]:
+    mcp_python, mcp_server = install_engine.mcp_launch_command(
+        python_path, server_py,
+    )
     checks = [
-        check_codex_config(config_path, python_path, server_py),
-        check_mcp_launch_target(python_path, server_py),
+        check_codex_config(config_path, mcp_python, mcp_server),
+        check_mcp_launch_target(mcp_python, mcp_server),
         check_kb_access(),
     ]
     if skip_hooks:
