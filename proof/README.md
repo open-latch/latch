@@ -14,14 +14,14 @@ This packet combines one observed live gate receipt with two small, deterministi
 
 ## Observed live gate
 
-Captured with the `claude` backend on commit `0aff8032209ee1a7c70095e209961c174808d955`. This is a synthetic no-history fixture and used no personal conversation history.
+Captured with the `claude` backend on commit `1a2000d734b291b840410c76daa627bac34a8319`. This is a synthetic no-history fixture and used no personal conversation history.
 
 ```text
 Request: Add multi-user accounts by moving the datastore from local SQLite to a hosted Postgres service.
 Recommendation: DO_NOT_PROCEED
-Summary: Node id=1 is a canonical decision that explicitly keeps the demo app local-first on a single embedded SQLite file and explicitly names the rejected path as moving the datastore to a hosted or client-server database (for example a managed Postgres service) to add multi-user accounts or sync. The request is that rejected path verbatim, so executing it would unwind a live, standing decision rather than extend it. The same node names the allowed path: stay on SQLite and, if data must cross machines, add an explicit export/import step with documented limits.
-Risk if proceed: The project silently abandons its local-first architecture and takes on a hosted-database dependency that a canonical decision already ruled out.
-Better next action: Stay on local SQLite per id=1; if the real need is moving data between machines, implement the sanctioned explicit export/import step and document its limits — and if genuine multi-user accounts are now a requirement, reopen id=1 with the user before writing any migration code.
+Summary: The request is the exact rejected path named in the seed decision (id=1): moving the datastore to a hosted or client-server database (explicitly 'a managed Postgres service') to add multi-user accounts. The canonical decision is to keep the demo app local-first on a single embedded SQLite file, with the allowed alternative being an explicit export/import step when data must cross machines. Implementing hosted Postgres would directly unwind that decision rather than extend it.
+Risk if proceed: The app loses its local-first property and reverses a canonical decision that specifically enumerated managed Postgres for multi-user accounts as the rejected path.
+Better next action: If the underlying need is moving data between machines, implement the allowed path from id=1 — an explicit export/import step with documented limits; if genuine multi-user accounts are now a hard requirement, take that scope change back to the human to supersede id=1 before writing code.
 Cited evidence:
 - id=1 decision status=canonical: Keep the demo app local-first on SQLite — no hosted database
 Worktree changed before/after gate: no
@@ -63,7 +63,7 @@ This deterministic fixture eval grades seed-report capture and filtering; it is 
 
 ## Reproduce
 
-The deterministic results were generated from commit `0aff8032209ee1a7c70095e209961c174808d955`.
+The deterministic results were generated from commit `1a2000d734b291b840410c76daa627bac34a8319`.
 
 ```bash
 bash bin/latch_eval.sh
