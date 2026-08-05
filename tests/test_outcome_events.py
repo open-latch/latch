@@ -830,7 +830,22 @@ def test_concurrent_process_rows_remain_valid_json(
     assert len({row["gate_call_id"] for row in rows}) == 32
 
 
-@pytest.mark.parametrize("filename", ["gate.py", "capture_streams.py"])
+@pytest.mark.parametrize(
+    "filename",
+    [
+        "gate.py",
+        "capture_streams.py",
+        "outcome_measurement.py",
+        "outcome_measurement_runner.py",
+        "outcome_evidence.py",
+        "artifacts.py",
+        "project_proof.py",
+        "paths.py",
+        "db.py",
+        "vault_identity.py",
+        "log_utils.py",
+    ],
+)
 def test_outcome_runtime_modules_change_the_shared_runtime_key(
     monkeypatch: pytest.MonkeyPatch,
     filename: str,

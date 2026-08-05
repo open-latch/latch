@@ -32,6 +32,7 @@ import correlator   # noqa: E402
 import db           # noqa: E402
 import gate         # noqa: E402
 import gate_report  # noqa: E402
+import outcome_measurement  # noqa: E402
 import paths        # noqa: E402
 
 
@@ -383,16 +384,15 @@ def test_failed_codex_apply_patch_does_not_count():
 def test_dedup_prefers_gate_call_id_over_hash_and_timestamp():
     """PR #71 review P1. Two distinct calls can share (query_hash, ts) — a
     MODIFY and its retry — so the nonce must be the join key when present."""
-    same_hash_ts = {"gate_query_hash": "h", "gate_ts": "t",
-                    "correlator_version": "0.3.0"}
+    same_hash_ts = {
+        "gate_query_hash": "h", "gate_ts": "t",
+        "correlator_version": "0.5.0",
+    }
     a = correlator._dedup_key({**same_hash_ts, "gate_call_id": "call-a"})
     b = correlator._dedup_key({**same_hash_ts, "gate_call_id": "call-b"})
     _assert(a != b, f"distinct nonces must not collapse: {a} == {b}")
-    legacy_x = correlator._dedup_key(same_hash_ts)
-    legacy_y = correlator._dedup_key(dict(same_hash_ts))
-    _assert(legacy_x == legacy_y and legacy_x is not None,
-            "pre-nonce rows still dedup on hash+ts")
-    _assert(a != legacy_x, "nonce and legacy keys must not alias")
+    _assert(correlator._dedup_key(same_hash_ts) is None,
+            "pre-nonce observations are loss markers, not invocations")
     _assert(correlator._dedup_key({"gate_call_id": "c"}) is None,
             "a row with no version cannot be keyed")
     print("PASS dedup_prefers_gate_call_id_over_hash_and_timestamp")
@@ -434,8 +434,8 @@ def test_modify_with_no_activity_at_all_stays_ambiguous():
         _cleanup(tmp, conn)
 
 
-def test_file_touches_is_zero_when_session_has_no_transcript():
-    """Failure isolation: a missing transcript yields 0, never an exception."""
+def test_file_touches_is_unavailable_when_session_has_no_transcript():
+    """Missing evidence is distinct from an observed zero."""
     tmp, conn = _fresh()
     try:
         count = correlator._count_file_touches(
@@ -443,8 +443,8 @@ def test_file_touches_is_zero_when_session_has_no_transcript():
             datetime(2026, 5, 25, 12, 0, tzinfo=timezone.utc),
             datetime(2026, 5, 25, 12, 30, tzinfo=timezone.utc),
         )
-        _assert(count == 0, f"missing session must yield 0, got {count}")
-        print("PASS file_touches_is_zero_when_session_has_no_transcript")
+        _assert(count is None, f"missing session must be unavailable, got {count}")
+        print("PASS file_touches_is_unavailable_when_session_has_no_transcript")
     finally:
         _cleanup(tmp, conn)
 
@@ -555,22 +555,25 @@ def test_coverage_reports_none_not_zero_on_empty_window():
     print("PASS coverage_reports_none_not_zero_on_empty_window")
 
 
-def test_outcome_rows_deduped_to_highest_correlator_version():
+def test_outcome_rows_filter_exact_measurement_protocol_generation():
     rows = [
-        {"gate_query_hash": "h1", "gate_ts": "t1",
-         "correlator_version": "0.2.0", "outcome_category": "AMBIGUOUS"},
-        {"gate_query_hash": "h1", "gate_ts": "t1",
-         "correlator_version": "0.3.0", "outcome_category": "OVERRIDDEN"},
-        {"gate_query_hash": "h2", "gate_ts": "t2",
-         "correlator_version": "0.2.0", "outcome_category": "ACCEPTED"},
+        {"gate_call_id": "call-a", "gate_ts": "2026-05-25T12:00:00Z",
+         "measurement_protocol_version": "outcome-v2.5.0",
+         "correlator_version": "99.0.0", "outcome_category": "AMBIGUOUS"},
+        {"gate_call_id": "call-a", "gate_ts": "2026-05-25T12:00:00Z",
+         "measurement_protocol_version": "outcome-v2.6.0",
+         "correlator_version": "0.5.0", "outcome_category": "OVERRIDDEN"},
+        {"gate_call_id": "call-b", "gate_ts": "2026-05-25T12:01:00Z",
+         "measurement_protocol_version": "outcome-v2.6.0",
+         "correlator_version": "0.5.0", "outcome_category": "ACCEPTED"},
     ]
     kept = gate_report._latest_version_only(rows)
     _assert(len(kept) == 2, f"one row per gate call expected: {kept}")
-    by_hash = {r["gate_query_hash"]: r for r in kept}
-    _assert(by_hash["h1"]["correlator_version"] == "0.3.0", kept)
-    _assert(by_hash["h1"]["outcome_category"] == "OVERRIDDEN", kept)
-    _assert(by_hash["h2"]["correlator_version"] == "0.2.0", kept)
-    print("PASS outcome_rows_deduped_to_highest_correlator_version")
+    by_call = {r["gate_call_id"]: r for r in kept}
+    _assert(by_call["call-a"]["outcome_category"] == "OVERRIDDEN", kept)
+    _assert(all(r["measurement_protocol_version"] == "outcome-v2.6.0"
+                for r in kept), kept)
+    print("PASS outcome_rows_filter_exact_measurement_protocol_generation")
 
 
 def test_report_dedup_keeps_distinct_calls_that_share_hash_and_timestamp():
@@ -579,9 +582,11 @@ def test_report_dedup_keeps_distinct_calls_that_share_hash_and_timestamp():
     ts — still collapsed into one report row and undercounted gate calls."""
     rows = [
         {"gate_call_id": "call-a", "gate_query_hash": "h", "gate_ts": "t",
-         "correlator_version": "0.3.0", "outcome_category": "OVERRIDDEN"},
+         "measurement_protocol_version": "outcome-v2.6.0",
+         "correlator_version": "0.5.0", "outcome_category": "OVERRIDDEN"},
         {"gate_call_id": "call-b", "gate_query_hash": "h", "gate_ts": "t",
-         "correlator_version": "0.3.0", "outcome_category": "ACCEPTED"},
+         "measurement_protocol_version": "outcome-v2.6.0",
+         "correlator_version": "0.5.0", "outcome_category": "ACCEPTED"},
     ]
     kept = gate_report._latest_version_only(rows)
     _assert(len(kept) == 2,
@@ -590,57 +595,209 @@ def test_report_dedup_keeps_distinct_calls_that_share_hash_and_timestamp():
     print("PASS report_dedup_keeps_distinct_calls_that_share_hash_and_timestamp")
 
 
-def test_report_dedup_still_collapses_versions_of_one_call():
-    """The nonce must not defeat the version collapse it was added beside."""
+def test_report_dedup_never_crosses_protocol_generations():
     rows = [
         {"gate_call_id": "call-a", "gate_query_hash": "h", "gate_ts": "t",
-         "correlator_version": "0.2.0", "outcome_category": "AMBIGUOUS"},
+         "measurement_protocol_version": "outcome-v2.5.0",
+         "correlator_version": "99.0.0", "outcome_category": "AMBIGUOUS"},
         {"gate_call_id": "call-a", "gate_query_hash": "h", "gate_ts": "t",
-         "correlator_version": "0.3.0", "outcome_category": "OVERRIDDEN"},
+         "measurement_protocol_version": "outcome-v2.6.0",
+         "correlator_version": "0.5.0", "outcome_category": "OVERRIDDEN"},
     ]
     kept = gate_report._latest_version_only(rows)
     _assert(len(kept) == 1, f"one call is one row: {kept}")
-    _assert(kept[0]["correlator_version"] == "0.3.0", kept)
-    print("PASS report_dedup_still_collapses_versions_of_one_call")
+    _assert(kept[0]["measurement_protocol_version"] == "outcome-v2.6.0", kept)
+    print("PASS report_dedup_never_crosses_protocol_generations")
 
 
 def test_report_and_correlator_agree_on_call_identity():
-    """Writer and reader must define "one gate call" the same way, or the report
-    silently disagrees with the log it is reporting on."""
+    """Legacy diagnostics and canonical receipts use separate generations."""
     row = {"gate_call_id": "call-a", "gate_query_hash": "h", "gate_ts": "t",
-           "correlator_version": "0.3.0"}
+           "correlator_version": "0.5.0"}
     legacy = {"gate_query_hash": "h", "gate_ts": "t",
-              "correlator_version": "0.3.0"}
-    for candidate in (row, legacy):
-        report_key = gate_report._gate_call_identity(candidate)
-        corr_key = correlator._dedup_key(candidate)
-        _assert(report_key is not None and corr_key is not None, candidate)
-        # The correlator appends the version; the report deliberately does not,
-        # because collapsing versions is its whole job. The call-identity prefix
-        # must match exactly.
-        _assert(corr_key[:len(report_key)] == report_key,
-                f"identity prefixes disagree: {corr_key} vs {report_key}")
+              "measurement_protocol_version": "outcome-v2.6.0"}
+    report_key = gate_report._gate_call_identity(row)
+    corr_key = correlator._dedup_key(row)
+    _assert(report_key is not None and corr_key is not None, row)
+    _assert(corr_key == ("diagnostic_call", "call-a", "0.5.0"), corr_key)
+    _assert(report_key == ("call", "call-a"), report_key)
+    _assert(gate_report._gate_call_identity(legacy) is None, legacy)
+    _assert(correlator._dedup_key(legacy) is None, legacy)
     print("PASS report_and_correlator_agree_on_call_identity")
 
 
-def test_version_dedup_order_independent():
-    """The newer row must win whichever order the daily files are read in."""
-    newer = {"gate_query_hash": "h", "gate_ts": "t",
-             "correlator_version": "0.3.0"}
-    older = {"gate_query_hash": "h", "gate_ts": "t",
-             "correlator_version": "0.2.0"}
-    for rows in ([newer, older], [older, newer]):
+def test_protocol_filter_order_independent():
+    pinned = {"gate_call_id": "call-a", "gate_ts": "t",
+              "measurement_protocol_version": "outcome-v2.6.0"}
+    legacy = {"gate_call_id": "call-a", "gate_ts": "t",
+              "measurement_protocol_version": "outcome-v2.5.0"}
+    for rows in ([pinned, legacy], [legacy, pinned]):
         kept = gate_report._latest_version_only(rows)
         _assert(len(kept) == 1, kept)
-        _assert(kept[0]["correlator_version"] == "0.3.0", kept)
-    print("PASS version_dedup_order_independent")
+        _assert(kept[0]["measurement_protocol_version"] == "outcome-v2.6.0", kept)
+    print("PASS protocol_filter_order_independent")
 
 
-def test_version_dedup_keeps_unkeyed_rows():
+def test_protocol_filter_excludes_unkeyed_rows_as_loss_markers():
     rows = [{"outcome_category": "ACCEPTED"}]
-    _assert(len(gate_report._latest_version_only(rows)) == 1,
-            "a row without a join key must not be silently dropped")
-    print("PASS version_dedup_keeps_unkeyed_rows")
+    _assert(gate_report._latest_version_only(rows) == [],
+            "a row without an invocation/version cannot enter a generation")
+    print("PASS protocol_filter_excludes_unkeyed_rows_as_loss_markers")
+
+
+def _v26_gate(index: int) -> dict:
+    row = {
+        "gate_call_id": f"{index:012x}",
+        "ts": f"2026-05-25T12:{index % 60:02d}:00.000Z",
+    }
+    for field in outcome_measurement.REQUIRED_ID_LIST_FIELDS:
+        row[field] = []
+    return row
+
+
+def _v26_receipt(index: int, *, disposition: str, outcome: str) -> dict:
+    row = {
+        "gate_call_id": f"{index:012x}",
+        "gate_ts": f"2026-05-25T12:{index % 60:02d}:00.000Z",
+        "measurement_protocol_version": "outcome-v2.6.0",
+        "measurement_disposition": disposition,
+        "outcome_category": outcome,
+        "admitted": True,
+        "finalized": True,
+        "prefix_member": True,
+    }
+    if disposition == "loss_signal":
+        row["loss_reasons"] = ["gate_only"]
+    return row
+
+
+def _clean_source_receipts() -> tuple[list[dict], list[dict]]:
+    health = [
+        {"source": source, "roots": (f"{source}-root",)}
+        for source in ("S1", "S2")
+    ]
+    completeness = [
+        {
+            "source": source,
+            "roots": (f"{source}-root",),
+            "enumerated_files": (f"{source}-fixture",),
+            "stable_file_hashes": ((f"{source}-fixture", "a" * 64),),
+            "complete": True,
+        }
+        for source in ("S1", "S2")
+    ]
+    return health, completeness
+
+
+def test_clean_quality_excludes_pilot_and_censored_raw_rows():
+    gates = [_v26_gate(i) for i in range(32)]
+    receipts = [
+        _v26_receipt(i, disposition="confirmatory", outcome="ACCEPTED")
+        for i in range(30)
+    ] + [
+        _v26_receipt(30, disposition="pilot", outcome="AMBIGUOUS"),
+        _v26_receipt(31, disposition="confirmatory", outcome="CENSORED"),
+    ]
+    health, completeness = _clean_source_receipts()
+    quality = gate_report._measurement_quality(
+        gates,
+        receipts,
+        start=date(2026, 5, 25),
+        end=date(2026, 5, 25),
+        source_health=health,
+        candidate_completeness=completeness,
+    )
+    _assert(quality["eligible_n"] == 30, quality)
+    _assert(quality["d_min"] == 32, quality)
+    _assert(quality["raw_label_counts"]["AMBIGUOUS"] == 1, quality)
+    _assert(quality["clean_label_counts"].get("AMBIGUOUS", 0) == 0, quality)
+    _assert(quality["clean_ambiguous_pct"] == 0.0, quality)
+    _assert(quality["o2"] == "pass", quality)
+    _assert(quality["o3_status"] == "pass", quality)
+    print("PASS clean_quality_excludes_pilot_and_censored_raw_rows")
+
+
+def test_d_min_loss_markers_force_indeterminate_not_false_fail():
+    gates = [_v26_gate(i) for i in range(37)]
+    receipts = [
+        _v26_receipt(i, disposition="confirmatory", outcome="ACCEPTED")
+        for i in range(30)
+    ] + [
+        _v26_receipt(i, disposition="loss_signal", outcome="CENSORED")
+        for i in range(30, 37)
+    ]
+    markers = [
+        {"reason": "identity_missing", "source": "S2", "in_scope": True}
+        for _ in range(7)
+    ]
+    health, completeness = _clean_source_receipts()
+    quality = gate_report._measurement_quality(
+        gates,
+        receipts,
+        start=date(2026, 5, 25),
+        end=date(2026, 5, 25),
+        loss_markers=markers,
+        source_health=health,
+        candidate_completeness=completeness,
+    )
+    _assert(quality["eligible_n"] == 30, quality)
+    _assert(quality["d_min"] == 37, quality)
+    _assert(quality["o2"] == "indeterminate", quality)
+    _assert("loss_markers_present" in quality["o2_reasons"], quality)
+    _assert(quality["o3_subordinated_to_o2"] is True, quality)
+    print("PASS d_min_loss_markers_force_indeterminate_not_false_fail")
+
+
+def test_o3_failure_is_diagnostic_only_while_o2_indeterminate():
+    gates = [_v26_gate(i) for i in range(31)]
+    receipts = [
+        _v26_receipt(
+            i,
+            disposition="confirmatory",
+            outcome="AMBIGUOUS" if i < 7 else "ACCEPTED",
+        )
+        for i in range(30)
+    ]
+    health, completeness = _clean_source_receipts()
+    quality = gate_report._measurement_quality(
+        gates,
+        receipts,
+        start=date(2026, 5, 25),
+        end=date(2026, 5, 25),
+        loss_markers=[{"reason": "schema_invalid", "in_scope": True}],
+        source_health=health,
+        candidate_completeness=completeness,
+    )
+    _assert(quality["o2"] == "indeterminate", quality)
+    _assert(quality["o3"] is False, quality)
+    _assert(quality["o3_status"] == "diagnostic-fail", quality)
+    _assert(quality["o3_subordinated_to_o2"] is True, quality)
+    _assert(quality["v1_green"] is False, quality)
+    print("PASS o3_failure_is_diagnostic_only_while_o2_indeterminate")
+
+
+def test_gate_report_invalidates_missing_or_malformed_lineage_order():
+    health, completeness = _clean_source_receipts()
+    for value, issue in ((None, "missing"), ("not-a-timestamp", "invalid")):
+        receipt = _v26_receipt(
+            0, disposition="confirmatory", outcome="ACCEPTED",
+        )
+        receipt.pop("gate_ts", None)
+        if value is not None:
+            receipt["lineage_order_key"] = value
+        quality = gate_report._measurement_quality(
+            [_v26_gate(0)],
+            [receipt],
+            start=date(2026, 5, 25),
+            end=date(2026, 5, 25),
+            source_health=health,
+            candidate_completeness=completeness,
+        )
+        reason = f"canonical_receipt_lineage_order_{issue}:000000000000"
+        _assert(quality["invalidated"] is True, quality)
+        _assert(reason in quality["invalidation_reasons"], quality)
+        _assert(quality["loss_marker_count"] >= 1, quality)
+    print("PASS gate_report_invalidates_missing_or_malformed_lineage_order")
 
 
 if __name__ == "__main__":
@@ -662,10 +819,14 @@ if __name__ == "__main__":
     test_text_report_renders_the_coverage_block()
     test_coverage_denominator_is_all_gate_rows()
     test_coverage_reports_none_not_zero_on_empty_window()
-    test_outcome_rows_deduped_to_highest_correlator_version()
+    test_outcome_rows_filter_exact_measurement_protocol_generation()
     test_report_dedup_keeps_distinct_calls_that_share_hash_and_timestamp()
-    test_report_dedup_still_collapses_versions_of_one_call()
+    test_report_dedup_never_crosses_protocol_generations()
     test_report_and_correlator_agree_on_call_identity()
-    test_version_dedup_order_independent()
-    test_version_dedup_keeps_unkeyed_rows()
+    test_protocol_filter_order_independent()
+    test_protocol_filter_excludes_unkeyed_rows_as_loss_markers()
+    test_clean_quality_excludes_pilot_and_censored_raw_rows()
+    test_d_min_loss_markers_force_indeterminate_not_false_fail()
+    test_o3_failure_is_diagnostic_only_while_o2_indeterminate()
+    test_gate_report_invalidates_missing_or_malformed_lineage_order()
     print("ALL V1 INSTRUMENTATION TESTS PASSED")

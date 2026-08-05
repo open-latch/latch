@@ -15,10 +15,12 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 import db  # noqa: E402
 import log_utils  # noqa: E402
+import outcome_measurement  # noqa: E402
 
 
 DEFAULT_DAYS = 14
 DEFAULT_LIMIT = 10
+MEASUREMENT_PROTOCOL_VERSION = outcome_measurement.MEASUREMENT_PROTOCOL_VERSION
 
 
 def assemble_gate_report(
@@ -35,7 +37,11 @@ def assemble_gate_report(
     gates = _read("gate", start, end, project_path)
     adversary = _read("adversary", start, end, project_path)
     decisions = _read("decision", start, end, project_path)
-    outcomes = _latest_version_only(_read("gate_outcome", start, end, project_path))
+    outcomes = _read("gate_outcome", start, end, project_path)
+    measurement_outcomes = _latest_version_only(
+        outcomes,
+        measurement_protocol_version=MEASUREMENT_PROTOCOL_VERSION,
+    )
 
     evidence_counts = Counter(
         int(node_id)
@@ -77,6 +83,13 @@ def assemble_gate_report(
         "gap_type_counts": dict(gap_type_counts),
     }
     coverage = _coverage(gates, outcomes)
+    measurement = _measurement_quality(
+        gates,
+        measurement_outcomes,
+        start=start,
+        end=end,
+        measurement_protocol_version=MEASUREMENT_PROTOCOL_VERSION,
+    )
     used = {
         "gate_rows": len(gates),
         "adversary_rows": len(adversary),
@@ -109,6 +122,7 @@ def assemble_gate_report(
         "structural_only": True,
         "verdict_counts": verdict_counts,
         "coverage": coverage,
+        "measurement": measurement,
         "outcome_counts": outcome_counts,
         "outcome_by_verdict_counts": outcome_by_verdict_counts,
         "adversary_delta_counts": adversary_delta_counts,
@@ -153,6 +167,7 @@ def format_text(report: dict[str, Any]) -> str:
     _append_counts(lines, "Evidence types", claim_signals.get("evidence_type_counts") or {})
     _append_counts(lines, "Gap types", claim_signals.get("gap_type_counts") or {})
     _append_coverage(lines, report.get("coverage") or {})
+    _append_measurement(lines, report.get("measurement") or {})
 
     _append_nodes(
         lines,
@@ -400,7 +415,11 @@ def _coverage(
             round(100 * labeled / labelable, 1) if labelable > 0 else None
         ),
         "ambiguous_rows": ambiguous,
+        "ambiguous_rows_raw": ambiguous,
         "ambiguous_pct": (
+            round(100 * ambiguous / labeled, 1) if labeled else None
+        ),
+        "ambiguous_pct_raw": (
             round(100 * ambiguous / labeled, 1) if labeled else None
         ),
         # Identity provenance of the labeled rows. Rows recovered from a host
@@ -423,6 +442,11 @@ def _coverage(
 def _parse_gate_ts(value: Any) -> datetime | None:
     """Parse a gate row's ISO-8601 ``ts``, mirroring the correlator's parser so
     the report's unlabelable count matches what the correlator actually skips."""
+    if isinstance(value, datetime):
+        parsed = value
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
     if not isinstance(value, str) or not value.strip():
         return None
     try:
@@ -434,46 +458,42 @@ def _parse_gate_ts(value: Any) -> datetime | None:
 def _gate_call_identity(row: dict[str, Any]) -> tuple[Any, ...] | None:
     """Which gate call an outcome row belongs to, or None when unknowable.
 
-    Prefers the ``gate_call_id`` nonce. Hash-plus-timestamp is a fallback for
-    pre-nonce rows only: a repeated identical request shares its ``query_hash``,
-    so keying on the hash collapses a MODIFY and its retry into one row and
-    undercounts real gate calls (KB id=3310). This must stay consistent with
-    ``correlator._dedup_key`` — the writer and the reader have to agree on what
-    "one gate call" means, or the report silently disagrees with the log.
+    The nonce is the invocation identity. A pre-nonce observation is a loss
+    marker under v2.6, not a hash-promoted invocation.
     """
     call_id = row.get("gate_call_id")
     if isinstance(call_id, str) and call_id:
         return ("call", call_id)
-    query_hash = row.get("gate_query_hash")
-    gate_ts = row.get("gate_ts")
-    if query_hash is None or gate_ts is None:
-        return None
-    return ("hash", query_hash, gate_ts)
+    return None
 
 
 def _latest_version_only(
     rows: list[dict[str, Any]],
+    *,
+    measurement_protocol_version: str = MEASUREMENT_PROTOCOL_VERSION,
 ) -> list[dict[str, Any]]:
-    """Keep one outcome row per gate call — the highest ``correlator_version``.
+    """Read exactly one pinned measurement generation.
 
-    A correlator version bump re-emits rows into the SAME daily files under the
-    new classification, and dedup keys on the version, so both generations
-    coexist on disk by design. Reading them all would double-count every
-    outcome and inflate the very numbers this report exists to measure.
+    Correlator implementation semver is not a measurement protocol.  Selecting
+    the numerically newest correlator row can mix or silently replace protocol
+    generations, so v2.6 filters the exact pin and keys receipts by
+    ``(invocation, measurement_protocol_version)``.
     """
     best: dict[tuple[Any, ...], dict[str, Any]] = {}
-    unkeyed: list[dict[str, Any]] = []
     for row in rows:
+        if row.get("measurement_protocol_version") != measurement_protocol_version:
+            continue
         key = _gate_call_identity(row)
         if key is None:
-            unkeyed.append(row)
             continue
         prior = best.get(key)
-        if prior is None or _version_key(
-            row.get("correlator_version"),
-        ) >= _version_key(prior.get("correlator_version")):
-            best[key] = row
-    return list(best.values()) + unkeyed
+        if prior is None:
+            best[key] = dict(row)
+        elif prior != row:
+            # Impossible under immutable receipts. Keep one structural row for
+            # rendering but force the oracle adapter to invalidate the audit.
+            best[key]["generation_conflict"] = True
+    return list(best.values())
 
 
 def _version_key(value: Any) -> tuple[int, ...]:
@@ -487,6 +507,189 @@ def _version_key(value: Any) -> tuple[int, ...]:
         except ValueError:
             return (-1,)
     return tuple(parts) or (-1,)
+
+
+def _measurement_quality(
+    gates: list[dict[str, Any]],
+    outcomes: list[dict[str, Any]],
+    *,
+    start: date,
+    end: date,
+    measurement_protocol_version: str = MEASUREMENT_PROTOCOL_VERSION,
+    loss_markers: Iterable[dict[str, Any] | outcome_measurement.LossMarker] = (),
+    source_health: Iterable[dict[str, Any] | outcome_measurement.SourceHealth] = (),
+    candidate_completeness: Iterable[
+        dict[str, Any] | outcome_measurement.CandidateCompletenessReceipt
+    ] = (),
+) -> dict[str, Any]:
+    """Run the frozen v2.6 oracle engine over one exact receipt generation."""
+    source_health_rows = tuple(source_health)
+    completeness_rows = tuple(candidate_completeness)
+    configured_roots: dict[str, tuple[str, ...]] = {}
+    for row in source_health_rows:
+        source = row.source if isinstance(
+            row, outcome_measurement.SourceHealth
+        ) else row.get("source")
+        roots = row.roots if isinstance(
+            row, outcome_measurement.SourceHealth
+        ) else row.get("roots", ())
+        if source in outcome_measurement.SOURCES and roots:
+            configured_roots[str(source)] = tuple(str(root) for root in roots)
+    start_dt = datetime(start.year, start.month, start.day, tzinfo=timezone.utc)
+    cap_date = end + timedelta(days=1)
+    requested_cap_dt = datetime(
+        cap_date.year, cap_date.month, cap_date.day, tzinfo=timezone.utc
+    )
+    hard_invalidations: list[str] = []
+    if requested_cap_dt - start_dt > timedelta(days=21):
+        hard_invalidations.append("report_window_exceeds_21_day_measurement_cap")
+    # Report selection already applied ``end``. MeasurementConfig retains the
+    # frozen exact cap independently of that diagnostic selection window.
+    cap_dt = start_dt + timedelta(days=21)
+
+    # The report adapter does not persist or compare a project path. The opaque
+    # placeholder only satisfies MeasurementConfig's type boundary; receipt
+    # project proof was already classified before this arithmetic layer.
+    report_proof = {
+        "version": outcome_measurement.PROJECT_PROOF_VERSION,
+        "key_epoch": "report-adapter",
+        "fingerprint": "0" * 64,
+    }
+    config = outcome_measurement.MeasurementConfig(
+        t0=start_dt,
+        cap=cap_dt,
+        target_project_proof=report_proof,
+        key_epoch="report-adapter",
+        pinned_runtime_version="report-adapter",
+        measurement_protocol_version=measurement_protocol_version,
+        source_roots=configured_roots,
+    )
+
+    selected = _latest_version_only(
+        outcomes,
+        measurement_protocol_version=measurement_protocol_version,
+    )
+    receipt_rows: list[dict[str, Any]] = []
+    derived_markers: list[dict[str, Any] | outcome_measurement.LossMarker] = list(
+        loss_markers
+    )
+    for row in selected:
+        nonce = str(row.get("gate_call_id") or "unknown")
+        if row.get("generation_conflict"):
+            hard_invalidations.append(f"conflicting_duplicate_receipt:{nonce}")
+        raw_order = row.get("lineage_order_key") or row.get("gate_ts")
+        order_key = _parse_gate_ts(raw_order)
+        if order_key is None:
+            issue = "missing" if raw_order in (None, "") else "invalid"
+            hard_invalidations.append(
+                f"canonical_receipt_lineage_order_{issue}:{nonce}"
+            )
+            derived_markers.append({
+                "reason": "schema_invalid",
+                "nonce": nonce if nonce != "unknown" else None,
+                "in_scope": True,
+                "detail": f"receipt_lineage_order_{issue}",
+            })
+            continue
+        disposition = row.get("measurement_disposition") or row.get("disposition")
+        if disposition not in outcome_measurement.DISPOSITIONS:
+            disposition = "loss_signal"
+        receipt_rows.append({
+            **row,
+            "nonce": row.get("gate_call_id"),
+            "disposition": disposition,
+            "outcome": row.get("outcome_category"),
+            # Missing canonical receipt state is never inferred from a legacy
+            # diagnostic row. Core v2.6 receipts must assert all three flags.
+            "admitted": row.get("admitted") is True,
+            "lineage_order_key": order_key,
+            "fresh_ts": row.get("fresh_ts") or row.get("gate_ts"),
+            "finalized": row.get("finalized") is True,
+            "prefix_member": row.get("prefix_member") is True,
+        })
+
+    gate_checks: list[dict[str, Any]] = []
+    for index, row in enumerate(gates):
+        missing = []
+        for field in outcome_measurement.REQUIRED_ID_LIST_FIELDS:
+            value = row.get(field)
+            if not isinstance(value, list) or any(
+                isinstance(item, bool) or not isinstance(item, int) for item in value
+            ):
+                missing.append(field)
+        parsed_ts = _parse_gate_ts(row.get("ts"))
+        gate_checks.append({
+            "obs_id": (outcome_measurement.SOURCE_GATE, "gate_report", index),
+            "ts": parsed_ts,
+            "in_scope": True,
+            "id_lists_valid": not missing,
+            "missing_fields": missing,
+        })
+        if not row.get("gate_call_id"):
+            derived_markers.append({
+                "reason": "identity_missing",
+                "source": outcome_measurement.SOURCE_GATE,
+                "ts": parsed_ts,
+                "in_scope": True,
+            })
+        elif parsed_ts is None:
+            derived_markers.append({
+                "reason": "schema_invalid",
+                "source": outcome_measurement.SOURCE_GATE,
+                "in_scope": True,
+            })
+
+    result = outcome_measurement.audit_rows(
+        receipt_rows,
+        config,
+        gate_rows=gate_checks,
+        loss_markers=derived_markers,
+        source_health=source_health_rows,
+        candidate_completeness=completeness_rows,
+        hard_invalidations=hard_invalidations,
+        # The report is a noncanonical diagnostic projection over a closed,
+        # inclusive date range.  Its deterministic as-of coordinate is the
+        # first UTC instant after that range; never ask the canonical oracle to
+        # infer wall-clock provenance from process time.
+        measurement_taken_at=requested_cap_dt,
+    )
+    if result.o3_pass is None:
+        o3_status = "unevaluated"
+    elif result.o2 != "pass":
+        o3_status = "diagnostic-pass" if result.o3_pass else "diagnostic-fail"
+    else:
+        o3_status = "pass" if result.o3_pass else "fail"
+    raw_total = sum(result.raw_label_counts.values())
+    raw_ambiguous = result.raw_label_counts.get("AMBIGUOUS", 0)
+    return {
+        "diagnostic": True,
+        "canonical": False,
+        "envelope_verified": False,
+        "diagnostic_status": "invalidated" if result.invalidated else "noncanonical",
+        "measurement_protocol_version": measurement_protocol_version,
+        "o1": result.o1_pass,
+        "o2": result.o2,
+        "o2_reasons": list(result.o2_reasons),
+        "o3": result.o3_pass,
+        "o3_status": o3_status,
+        "o3_subordinated_to_o2": result.o2 != "pass",
+        "eligible_n": result.eligible_n,
+        "d_min": result.d_min,
+        "raw_label_counts": dict(result.raw_label_counts),
+        "clean_label_counts": dict(result.clean_label_counts),
+        "raw_ambiguous_pct": (
+            round(100.0 * raw_ambiguous / raw_total, 6) if raw_total else None
+        ),
+        "clean_ambiguous_pct": result.ambiguous_rate,
+        "disposition_counts": dict(result.disposition_counts),
+        "loss_marker_count": result.marker_count,
+        "source_health_clean": result.source_health_clean,
+        "v1_green": result.v1_green,
+        "verdict": result.verdict,
+        "quality_summary": result.quality_summary,
+        "invalidated": result.invalidated,
+        "invalidation_reasons": list(result.invalidation_reasons),
+    }
 
 
 def _label_counts(labels: Iterable[Any]) -> dict[str, int]:
@@ -546,7 +749,7 @@ def _append_coverage(lines: list[str], coverage: dict[str, Any]) -> None:
     labelable = _int(coverage.get("labelable_rows"))
     pct = coverage.get("coverage_pct")
     pct_labelable = coverage.get("coverage_pct_of_labelable")
-    amb = coverage.get("ambiguous_pct")
+    amb = coverage.get("ambiguous_pct_raw", coverage.get("ambiguous_pct"))
     lines.extend([
         "",
         "### Outcome Coverage",
@@ -569,8 +772,9 @@ def _append_coverage(lines: list[str], coverage: dict[str, Any]) -> None:
         lines.append(f"- Not labelable — {', '.join(present)}")
     if amb is not None:
         lines.append(
-            f"- AMBIGUOUS: {_int(coverage.get('ambiguous_rows'))} of "
-            f"{labeled} labeled ({amb}%)"
+            f"- Raw diagnostic AMBIGUOUS: "
+            f"{_int(coverage.get('ambiguous_rows_raw', coverage.get('ambiguous_rows')))} "
+            f"of {labeled} labeled ({amb}%); not a clean quality rate"
         )
     by_source = coverage.get("labeled_by_session_source") or {}
     # UNKNOWN is what _label_counts renders for a row with no session_source —
@@ -605,6 +809,62 @@ def _append_coverage(lines: list[str], coverage: dict[str, Any]) -> None:
     lines.append(
         "- A low rate here measures how much gate traffic carries a "
         "correlatable identity, not whether the gate works."
+    )
+
+
+def _append_measurement(lines: list[str], measurement: dict[str, Any]) -> None:
+    """Render noncanonical arithmetic without implying audit authority."""
+    if not measurement:
+        return
+    invalidated = measurement.get("invalidated") is True
+    status = "INVALIDATED" if invalidated else "NONCANONICAL DIAGNOSTIC"
+    lines.extend([
+        "",
+        "### Outcome Measurement v2.6 — Diagnostic (Noncanonical)",
+        (
+            f"- Status: {status} — gate-report arithmetic only; this view is "
+            "not the frozen envelope audit and carries no canonical authority"
+        ),
+        (
+            "- Receipt generation: "
+            f"{measurement.get('measurement_protocol_version')} "
+            "(diagnostic generation filter)"
+        ),
+        (
+            f"- O1 field presence: {measurement.get('o1')}; "
+            f"O2 coverage: {measurement.get('o2')} "
+            f"(E={_int(measurement.get('eligible_n'))}, "
+            f"D_min={_int(measurement.get('d_min'))})"
+        ),
+        (
+            f"- O3 AMBIGUOUS: {measurement.get('o3_status')}"
+            + (
+                " — diagnostic only until O2 passes"
+                if measurement.get("o3_subordinated_to_o2") else ""
+            )
+        ),
+        (
+            "- Quality counts — raw: "
+            f"{measurement.get('raw_label_counts') or {}}; clean eligible: "
+            f"{measurement.get('clean_label_counts') or {}}"
+        ),
+    ])
+    invalidation_reasons = measurement.get("invalidation_reasons") or []
+    if invalidated:
+        lines.append(
+            "- Invalidation reasons: "
+            + (
+                ", ".join(str(item) for item in invalidation_reasons)
+                if invalidation_reasons
+                else "unspecified"
+            )
+        )
+    reasons = measurement.get("o2_reasons") or []
+    if reasons:
+        lines.append("- O2 reasons: " + ", ".join(str(item) for item in reasons))
+    lines.append(
+        "- Censored, uncertain, pilot, loss, and conflict rows never enter the "
+        "clean quality cohort."
     )
 
 
