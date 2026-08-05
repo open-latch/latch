@@ -95,7 +95,9 @@ The runner:
   evidence; conclusions requiring a build or rendered output become coverage
   gaps because project code and recipes are never executed
 - validates each receipt with the shared schema and aggregates with the shared
-  deterministic policy
+  deterministic policy; the provider-facing schema deliberately uses JSON
+  Schema draft-07 and avoids regex lookaround, while trusted post-generation
+  validation separately enforces repository-relative finding paths
 - live-caps each provider stdout/stderr stream; very large PR ancestry can still
   consume temporary disk during the initial Git fetch before evidence caps apply
 
