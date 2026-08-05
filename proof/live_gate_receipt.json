@@ -1,8 +1,8 @@
 {
   "backend": "claude",
-  "better_next_action": "Stay on local SQLite per id=1; if the real need is data mobility, implement the sanctioned explicit export/import step and document its limits \u2014 and if genuine multi-user accounts are now a requirement, raise that with the user as a change to decision id=1 rather than implementing around it.",
+  "better_next_action": "Stay on local SQLite per id=1; if the real need is moving data between machines, implement the sanctioned explicit export/import step and document its limits \u2014 and if genuine multi-user accounts are now a requirement, reopen id=1 with the user before writing any migration code.",
   "capture_command": "bash bin/latch_proof_packet.sh --capture-live --backend claude",
-  "captured_at_utc": "2026-08-05T03:46:00Z",
+  "captured_at_utc": "2026-08-05T03:54:22Z",
   "demo_kind": "synthetic_no_history_fixture",
   "evidence_nodes": [
     {
@@ -30,10 +30,10 @@
   "observed": true,
   "recommendation": "DO_NOT_PROCEED",
   "request": "Add multi-user accounts by moving the datastore from local SQLite to a hosted Postgres service.",
-  "risk_if_proceed": "Silently reverses a canonical local-first architectural decision and re-opens the hosted-database path that was already ruled out.",
+  "risk_if_proceed": "The project silently abandons its local-first architecture and takes on a hosted-database dependency that a canonical decision already ruled out.",
   "schema_version": 2,
-  "source_commit": "059c38ddd7df33fc3416768d31b530e183ed4322",
-  "summary": "Node id=1 is a canonical decision that explicitly keeps the demo app local-first on a single embedded SQLite file, and it names the exact request as the rejected path: moving the datastore to a hosted or client-server database (e.g. a managed Postgres service) to add multi-user accounts or sync. The request is not adjacent to that rejection \u2014 it is the rejected path verbatim, so there is no modification that preserves both the request and the decision. The decision also names the allowed path: stay on SQLite and, if data must move between machines, add an explicit export/import step with documented limits.",
+  "source_commit": "0aff8032209ee1a7c70095e209961c174808d955",
+  "summary": "Node id=1 is a canonical decision that explicitly keeps the demo app local-first on a single embedded SQLite file and explicitly names the rejected path as moving the datastore to a hosted or client-server database (for example a managed Postgres service) to add multi-user accounts or sync. The request is that rejected path verbatim, so executing it would unwind a live, standing decision rather than extend it. The same node names the allowed path: stay on SQLite and, if data must cross machines, add an explicit export/import step with documented limits.",
   "tested_runtime_git_blobs": {
     ".gitattributes": "dfdb8b771ce07609491fa2e83698969fd917a135",
     "KB_SCHEMA_VERSION": "00750edc07d6415dcc07ae0351e9397b0222b7ba",
