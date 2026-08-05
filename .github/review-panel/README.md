@@ -41,6 +41,14 @@ The runner requires:
 - Claude Code authenticated through `claude.ai` with a subscription
 - Codex CLI authenticated with `ChatGPT`
 
+The runner resolves both provider executables once to absolute real paths and
+uses those exact paths for authentication checks and every review lane. If more
+than one CLI is installed, select one explicitly with an absolute `CLAUDE_BIN`
+or `CODEX_BIN`. Before starting any lane, it records both versions and verifies
+from the selected Codex binary's offline `debug models --bundled` catalog that
+`gpt-5.6-sol` supports `high` effort. An incompatible binary fails once during
+preflight; the runner never silently downgrades the model or effort.
+
 Before resolving the review scope or invoking a model, it fails closed if a
 provider API key, alternate auth token, endpoint override, or hosted-provider
 toggle is present. This includes `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,

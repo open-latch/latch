@@ -39,6 +39,10 @@ PROVIDER_OVERRIDE_ENV_VARS = (
     "AZURE_OPENAI_ENDPOINT",
 )
 BLOCKED_PROVIDER_ENV_VARS = API_KEY_ENV_VARS + PROVIDER_OVERRIDE_ENV_VARS
+PROVIDER_EXECUTABLE_ENV_VARS = {
+    "claude": "CLAUDE_BIN",
+    "codex": "CODEX_BIN",
+}
 CLAUDE_MODEL = "claude-opus-5"
 CLAUDE_EFFORT = "high"
 CODEX_MODEL = "gpt-5.6-sol"
@@ -70,6 +74,7 @@ EMPTY_TREE_SHA = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 MAX_MODEL_OUTPUT_BYTES = 10 * 1024 * 1024
 MODEL_TIMEOUT_SECONDS = 30 * 60
 FETCH_TIMEOUT_SECONDS = 5 * 60
+PREFLIGHT_TIMEOUT_SECONDS = 30
 
 
 @dataclass(frozen=True)
@@ -97,6 +102,15 @@ class LaneResult:
     success: bool
     result: Path
     detail: str
+
+
+@dataclass(frozen=True)
+class ProviderRuntime:
+    authentication: dict[str, str]
+    claude_executable: str
+    claude_version: str
+    codex_executable: str
+    codex_version: str
 
 
 def _run(
@@ -361,11 +375,108 @@ def sanitized_environment() -> dict[str, str]:
     environment = dict(os.environ)
     for name in BLOCKED_PROVIDER_ENV_VARS:
         environment.pop(name, None)
+    for name in PROVIDER_EXECUTABLE_ENV_VARS.values():
+        environment.pop(name, None)
     environment["PYTHONDONTWRITEBYTECODE"] = "1"
     return environment
 
 
-def preflight_auth(repo: Path) -> dict[str, str]:
+def _resolve_provider_executable(provider: str) -> str:
+    selector = PROVIDER_EXECUTABLE_ENV_VARS[provider]
+    configured = os.environ.get(selector)
+    if configured:
+        candidate = Path(configured).expanduser()
+        if not candidate.is_absolute():
+            raise ValueError(f"{selector} must be an absolute executable path")
+    else:
+        located = shutil.which(provider)
+        if located is None:
+            raise ValueError(f"required executable is not installed: {provider}")
+        candidate = Path(located)
+    try:
+        resolved = candidate.resolve(strict=True)
+    except OSError as exc:
+        raise ValueError(f"{selector} does not resolve to an executable") from exc
+    if not resolved.is_file() or not os.access(resolved, os.X_OK):
+        raise ValueError(f"{selector} does not resolve to an executable")
+    return str(resolved)
+
+
+def _provider_version(executable: str, repo: Path, environment: dict[str, str]) -> str:
+    result = _run(
+        [executable, "--version"],
+        cwd=repo,
+        environment=environment,
+        check=False,
+        timeout=PREFLIGHT_TIMEOUT_SECONDS,
+    )
+    version = result.stdout.strip().splitlines()
+    if result.returncode != 0 or not version:
+        detail = (result.stderr or result.stdout).strip()
+        raise ValueError(
+            f"could not read provider version from {executable}: "
+            f"{detail[:500] or 'no diagnostic output'}"
+        )
+    return version[-1][:200]
+
+
+def _require_codex_model_capability(
+    executable: str,
+    version: str,
+    repo: Path,
+    environment: dict[str, str],
+) -> None:
+    result = _run(
+        [executable, "debug", "models", "--bundled"],
+        cwd=repo,
+        environment=environment,
+        check=False,
+        timeout=PREFLIGHT_TIMEOUT_SECONDS,
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()
+        raise ValueError(
+            f"Codex executable {executable} ({version}) could not expose its "
+            f"bundled model catalog: {detail[:500] or 'no diagnostic output'}"
+        )
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"Codex executable {executable} ({version}) returned an unreadable "
+            "bundled model catalog"
+        ) from exc
+    models = payload.get("models") if isinstance(payload, dict) else None
+    model = next(
+        (
+            item
+            for item in models or []
+            if isinstance(item, dict) and item.get("slug") == CODEX_MODEL
+        ),
+        None,
+    )
+    if model is None:
+        raise ValueError(
+            f"Codex executable {executable} ({version}) does not bundle "
+            f"{CODEX_MODEL}. Select a compatible ChatGPT-authenticated CLI with "
+            "an absolute CODEX_BIN; no model downgrade was attempted."
+        )
+    efforts = model.get("supported_reasoning_levels")
+    supported = {
+        item.get("effort")
+        for item in efforts or []
+        if isinstance(item, dict)
+    }
+    if CODEX_EFFORT not in supported:
+        raise ValueError(
+            f"Codex executable {executable} ({version}) does not bundle "
+            f"{CODEX_MODEL} with effort {CODEX_EFFORT}. Select a compatible "
+            "ChatGPT-authenticated CLI with an absolute CODEX_BIN; no effort "
+            "downgrade was attempted."
+        )
+
+
+def preflight_auth(repo: Path) -> ProviderRuntime:
     present = [name for name in BLOCKED_PROVIDER_ENV_VARS if os.environ.get(name)]
     if present:
         raise ValueError(
@@ -373,15 +484,23 @@ def preflight_auth(repo: Path) -> dict[str, str]:
             "override environment variables are "
             f"set: {', '.join(present)}. Unset them and retry."
         )
-    for executable in ("claude", "codex", "gh", "git"):
+    claude_executable = _resolve_provider_executable("claude")
+    codex_executable = _resolve_provider_executable("codex")
+    for executable in ("gh", "git"):
         if shutil.which(executable) is None:
             raise ValueError(f"required executable is not installed: {executable}")
     environment = sanitized_environment()
+    claude_version = _provider_version(claude_executable, repo, environment)
+    codex_version = _provider_version(codex_executable, repo, environment)
+    _require_codex_model_capability(
+        codex_executable, codex_version, repo, environment
+    )
     claude = _run(
-        ["claude", "auth", "status", "--json"],
+        [claude_executable, "auth", "status", "--json"],
         cwd=repo,
         environment=environment,
         check=False,
+        timeout=PREFLIGHT_TIMEOUT_SECONDS,
     )
     try:
         claude_status = json.loads(claude.stdout)
@@ -399,10 +518,11 @@ def preflight_auth(repo: Path) -> dict[str, str]:
             "`claude auth login`, and ensure ANTHROPIC_API_KEY is unset."
         )
     codex = _run(
-        ["codex", "login", "status"],
+        [codex_executable, "login", "status"],
         cwd=repo,
         environment=environment,
         check=False,
+        timeout=PREFLIGHT_TIMEOUT_SECONDS,
     )
     if (
         codex.returncode != 0
@@ -412,10 +532,16 @@ def preflight_auth(repo: Path) -> dict[str, str]:
             "Codex CLI is not using a ChatGPT login. Run `codex login`, and "
             "ensure OPENAI_API_KEY and CODEX_API_KEY are unset."
         )
-    return {
-        "claude": f"claude.ai/{str(claude_status['subscriptionType']).lower()}",
-        "codex": "ChatGPT",
-    }
+    return ProviderRuntime(
+        authentication={
+            "claude": f"claude.ai/{str(claude_status['subscriptionType']).lower()}",
+            "codex": "ChatGPT",
+        },
+        claude_executable=claude_executable,
+        claude_version=claude_version,
+        codex_executable=codex_executable,
+        codex_version=codex_version,
+    )
 
 
 def _prepare_object_store(repo: Path, workspace: Path, scope: ReviewScope) -> Path:
@@ -527,7 +653,11 @@ def _build_lanes(
     return lanes, skipped
 
 
-def _provider_command(lane: Lane, workspace: Path) -> list[str]:
+def _provider_command(
+    lane: Lane,
+    workspace: Path,
+    runtime: ProviderRuntime,
+) -> list[str]:
     if lane.provider == "claude":
         schema = json.dumps(
             json.loads(SCHEMA_PATH.read_text(encoding="utf-8")),
@@ -535,7 +665,7 @@ def _provider_command(lane: Lane, workspace: Path) -> list[str]:
             separators=(",", ":"),
         )
         return [
-            "claude",
+            runtime.claude_executable,
             "-p",
             "--safe-mode",
             "--no-session-persistence",
@@ -553,14 +683,14 @@ def _provider_command(lane: Lane, workspace: Path) -> list[str]:
             "1",
             "--strict-mcp-config",
             "--mcp-config",
-            "{}",
+            json.dumps({"mcpServers": {}}, separators=(",", ":")),
             "--tools",
             "",
             "--disallowedTools",
             "*",
         ]
     command = [
-        "codex",
+        runtime.codex_executable,
         "exec",
         "--ignore-user-config",
         "--ignore-rules",
@@ -641,12 +771,16 @@ def _drain_provider_stream(
             pass
 
 
-def _invoke_lane(lane: Lane, workspace: Path) -> LaneResult:
+def _invoke_lane(
+    lane: Lane,
+    workspace: Path,
+    runtime: ProviderRuntime,
+) -> LaneResult:
     stdout_path, stderr_path = lane.raw_dir / "stdout.txt", lane.raw_dir / "stderr.txt"
     try:
         with lane.prompt.open("rb") as prompt:
             process = subprocess.Popen(
-                _provider_command(lane, workspace),
+                _provider_command(lane, workspace, runtime),
                 cwd=workspace,
                 env=sanitized_environment(),
                 stdin=prompt,
@@ -858,10 +992,16 @@ def _output_dir(repo: Path, head_sha: str) -> Path:
 
 def run_review(args: argparse.Namespace) -> int:
     repo = repository_root()
-    auth = preflight_auth(repo)
+    runtime = preflight_auth(repo)
     print(
         "Authentication guard: provider API-key auth is disabled. Account-level "
         "usage credits and auto-top-up cannot be inspected locally.",
+        file=sys.stderr,
+    )
+    print(
+        f"Provider executables: Claude {runtime.claude_executable} "
+        f"({runtime.claude_version}); Codex {runtime.codex_executable} "
+        f"({runtime.codex_version}; bundled {CODEX_MODEL}/{CODEX_EFFORT} verified)",
         file=sys.stderr,
     )
     policy = json.loads(POLICY_PATH.read_text(encoding="utf-8"))
@@ -898,7 +1038,8 @@ def run_review(args: argparse.Namespace) -> int:
         results: list[LaneResult] = []
         with ThreadPoolExecutor(max_workers=len(lanes)) as executor:
             futures = {
-                executor.submit(_invoke_lane, lane, workspace): lane for lane in lanes
+                executor.submit(_invoke_lane, lane, workspace, runtime): lane
+                for lane in lanes
             }
             for future in as_completed(futures):
                 result = future.result()
@@ -959,7 +1100,20 @@ def run_review(args: argparse.Namespace) -> int:
             },
             "codex": {"model": CODEX_MODEL, "reasoning_effort": CODEX_EFFORT},
         },
-        "authentication": auth,
+        "authentication": runtime.authentication,
+        "executables": {
+            "claude": {
+                "path": runtime.claude_executable,
+                "version": runtime.claude_version,
+            },
+            "codex": {
+                "path": runtime.codex_executable,
+                "version": runtime.codex_version,
+                "capability_source": "bundled_model_catalog",
+                "model": CODEX_MODEL,
+                "reasoning_effort": CODEX_EFFORT,
+            },
+        },
         "billing_guard": {
             "provider_api_key_environment": "absent",
             "account_credit_settings": "not_verifiable_by_cli",

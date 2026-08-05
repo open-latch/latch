@@ -304,7 +304,10 @@ the artifact/output lane when user-facing files change. It uses the CLIs'
 subscription logins, refuses provider auth or endpoint overrides, and saves
 its consolidated report inside the target repository's local Git metadata,
 where it cannot be committed. Nothing is posted to GitHub unless you add
-`--post-pr`. The CLIs cannot inspect
+`--post-pr`. If multiple provider CLIs are installed, set an absolute
+`CLAUDE_BIN` or `CODEX_BIN`; the runner pins that executable for the whole run
+and rejects a Codex binary whose offline bundled catalog lacks the configured
+model or effort. The CLIs cannot inspect
 account-level usage-credit or auto-top-up settings, so disable those separately
 if you want a hard stop at the included allowance. See
 [the local review-panel reference](./.github/review-panel/README.md).

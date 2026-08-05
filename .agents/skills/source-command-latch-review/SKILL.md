@@ -38,7 +38,10 @@ The runner must abort if a provider API key, alternate auth token, endpoint
 override, or hosted-provider toggle is present. It requires Claude `claude.ai`
 subscription auth and Codex `ChatGPT` auth, runs the specialist lanes in
 parallel, and saves the untracked report inside the target repository's local
-Git metadata.
+Git metadata. When multiple provider CLIs are installed, pass an absolute
+`CLAUDE_BIN` or `CODEX_BIN`; the runner resolves the selected executables once,
+records their versions, and verifies the pinned Codex model and effort from the
+exact binary's offline bundled catalog before launching any lane.
 
 After it finishes, summarize the panel outcome, actionable findings, complexity
 risk, coverage gaps, exact models, and saved report path. A nonzero exit of `1`
