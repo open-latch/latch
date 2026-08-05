@@ -17,6 +17,25 @@ sys.path.insert(0, str(ROOT / "src"))
 import local_review  # noqa: E402
 
 
+SCHEMA_CANARY = json.loads(
+    (ROOT / "tests" / "fixtures" / "review_provider_schema_canary.json").read_text(
+        encoding="utf-8"
+    )
+)
+
+
+def _schema_patterns(value):
+    if isinstance(value, dict):
+        pattern = value.get("pattern")
+        if isinstance(pattern, str):
+            yield pattern
+        for child in value.values():
+            yield from _schema_patterns(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _schema_patterns(child)
+
+
 def _git(repo: Path, *args: str) -> str:
     return subprocess.run(
         ["git", *args],
@@ -425,6 +444,10 @@ def test_provider_commands_pin_models_and_remove_agent_tools(tmp_path: Path):
     assert claude_command.count("--mcp-config") == 1
     mcp_config = claude_command[claude_command.index("--mcp-config") + 1]
     assert json.loads(mcp_config) == {"mcpServers": {}}
+    assert claude_command.count("--json-schema") == 1
+    claude_schema = json.loads(
+        claude_command[claude_command.index("--json-schema") + 1]
+    )
 
     codex = local_review.Lane(
         "codex", "simplicity-consolidation", prompt, raw / "codex.json", raw
@@ -435,6 +458,21 @@ def test_provider_commands_pin_models_and_remove_agent_tools(tmp_path: Path):
     assert 'model_reasoning_effort="high"' in codex_command
     assert "--ignore-user-config" in codex_command
     assert "--skip-git-repo-check" in codex_command
+    assert codex_command.count("--output-schema") == 1
+    codex_schema_path = Path(
+        codex_command[codex_command.index("--output-schema") + 1]
+    )
+    codex_schema = json.loads(codex_schema_path.read_text(encoding="utf-8"))
+    assert claude_schema == codex_schema
+    assert claude_schema["$schema"] == SCHEMA_CANARY["claude"][
+        "compatible_schema_uri"
+    ]
+    assert claude_schema["type"] == "object"
+    assert not any(
+        token in pattern
+        for pattern in _schema_patterns(claude_schema)
+        for token in SCHEMA_CANARY["codex"]["unsupported_pattern_tokens"]
+    )
     for feature in local_review.CODEX_DISABLED_FEATURES:
         assert feature in codex_command
 
@@ -503,6 +541,15 @@ if {provider!r} == "claude":
         raise SystemExit("malformed MCP config")
     if mcp_config != {{"mcpServers": {{}}}}:
         raise SystemExit("MCP config must contain only an empty mcpServers record")
+    if args.count("--json-schema") != 1:
+        raise SystemExit("Claude must receive exactly one inline JSON schema")
+    try:
+        provider_schema = json.loads(args[args.index("--json-schema") + 1])
+    except (ValueError, IndexError, json.JSONDecodeError):
+        raise SystemExit("malformed Claude JSON schema")
+    schema_canary = {SCHEMA_CANARY!r}
+    if provider_schema.get("$schema") != schema_canary["claude"]["compatible_schema_uri"]:
+        raise SystemExit(schema_canary["claude"]["stderr"])
     if args[args.index("--model") + 1] != "claude-opus-5":
         raise SystemExit("unexpected Claude model")
     if args[args.index("--effort") + 1] != "high":
@@ -510,6 +557,30 @@ if {provider!r} == "claude":
     if args[args.index("--tools") + 1] != "" or args[args.index("--disallowedTools") + 1] != "*":
         raise SystemExit("Claude tools were not disabled")
 else:
+    if args.count("--output-schema") != 1:
+        raise SystemExit("Codex must receive exactly one output schema")
+    try:
+        provider_schema = json.loads(
+            Path(args[args.index("--output-schema") + 1]).read_text(encoding="utf-8")
+        )
+    except (ValueError, IndexError, OSError, json.JSONDecodeError):
+        raise SystemExit("malformed Codex output schema")
+    schema_canary = {SCHEMA_CANARY!r}
+    def schema_patterns(value):
+        if isinstance(value, dict):
+            if isinstance(value.get("pattern"), str):
+                yield value["pattern"]
+            for child in value.values():
+                yield from schema_patterns(child)
+        elif isinstance(value, list):
+            for child in value:
+                yield from schema_patterns(child)
+    if any(
+        token in pattern
+        for pattern in schema_patterns(provider_schema)
+        for token in schema_canary["codex"]["unsupported_pattern_tokens"]
+    ):
+        raise SystemExit(schema_canary["codex"]["stderr"])
     if args[args.index("--model") + 1] != "gpt-5.6-sol":
         raise SystemExit("unexpected Codex model")
     if 'model_reasoning_effort="high"' not in args:
@@ -550,6 +621,41 @@ else:
 """
     path.write_text(body, encoding="utf-8")
     path.chmod(path.stat().st_mode | stat.S_IXUSR)
+
+
+@pytest.mark.parametrize("provider", ["claude", "codex"])
+def test_fake_providers_reject_the_live_canary_schema_failures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    provider: str,
+):
+    schema = json.loads(local_review.SCHEMA_PATH.read_text(encoding="utf-8"))
+    if provider == "claude":
+        schema["$schema"] = SCHEMA_CANARY["claude"]["rejected_schema_uri"]
+        expected = "no schema with key or ref"
+    else:
+        path_schema = (
+            schema["properties"]["findings"]["items"]["properties"]
+            ["code_location"]["properties"]["path"]
+        )
+        path_schema["pattern"] = SCHEMA_CANARY["codex"]["rejected_pattern"]
+        expected = "regex lookaround is not supported"
+    schema_path = tmp_path / "review.schema.json"
+    schema_path.write_text(json.dumps(schema), encoding="utf-8")
+    monkeypatch.setattr(local_review, "SCHEMA_PATH", schema_path)
+
+    fake = tmp_path / provider
+    _fake_provider(fake, provider)
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("review", encoding="utf-8")
+    lane = local_review.Lane(provider, "fixture", prompt, raw / "result.json", raw)
+    runtime = _provider_runtime(fake, fake)
+
+    result = local_review._invoke_lane(lane, tmp_path, runtime)
+    assert result.success is False
+    assert expected in result.detail
 
 
 @pytest.mark.parametrize("post_failure", [False, True])

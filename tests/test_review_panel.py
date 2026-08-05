@@ -157,6 +157,12 @@ def test_policy_keeps_simplicity_mandatory_and_uses_both_providers():
 
 def test_schema_requires_complexity_and_receipt_validation_is_strict():
     schema = json.loads(SCHEMA.read_text(encoding="utf-8"))
+    assert schema["$schema"] == "http://json-schema.org/draft-07/schema#"
+    path_schema = (
+        schema["properties"]["findings"]["items"]["properties"]
+        ["code_location"]["properties"]["path"]
+    )
+    assert "pattern" not in path_schema
     assert "complexity" in schema["required"]
     assert {
         "new_structural_surfaces",
@@ -191,13 +197,17 @@ def test_schema_requires_complexity_and_receipt_validation_is_strict():
         review_panel.validate_receipt(receipt)
     )
 
+    for unsafe_path in ("../outside.py", "/outside.py", "src/../../outside.py"):
+        receipt = completed_receipt("codex", "simplicity-consolidation")
+        receipt["findings"] = [finding()]
+        receipt["findings"][0]["code_location"]["path"] = unsafe_path
+        assert review_panel.validate_receipt(receipt) == [
+            "$.findings[0].code_location.path must be repository-relative"
+        ]
+        assert review_panel._salvage_findings(receipt["findings"]) == []
+
     receipt = completed_receipt("codex", "simplicity-consolidation")
     receipt["findings"] = [finding()]
-    receipt["findings"][0]["code_location"]["path"] = "../outside.py"
-    errors = review_panel.validate_receipt(receipt)
-    assert any("required pattern" in error for error in errors)
-    assert any("repository-relative" in error for error in errors)
-
     receipt["findings"][0]["code_location"] = {
         "path": "src/example.py",
         "start_line": 22,
