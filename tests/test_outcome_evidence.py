@@ -595,6 +595,24 @@ def test_cross_tool_call_id_collision_is_scoped_to_the_receipt_window(
                 }]},
             },
         ]
+        if (
+            shared_id
+            and unrelated_timestamp == "2026-08-04T11:59:30.000Z"
+        ):
+            # Complete the historical occurrence before the in-window edit.
+            # The separate ordered-occurrence regression below covers the
+            # indistinguishable unresolved-overlap case and requires censoring.
+            rows.insert(2, {
+                "timestamp": "2026-08-04T11:59:31.000Z",
+                "sessionId": SESSION,
+                "cwd": str(tmp_path),
+                "type": "user",
+                "message": {"content": [{
+                    "type": "tool_result",
+                    "tool_use_id": edit_id,
+                    "content": "historical read",
+                }]},
+            })
     else:
         rows = [
             {
@@ -645,6 +663,422 @@ def test_cross_tool_call_id_collision_is_scoped_to_the_receipt_window(
         assert artifacts.observe_session_artifacts_in_window_bytes(
             data, str(tmp_path), START, END, session_id=SESSION,
         ) == [{"repo": str(tmp_path), "path": "src/a.py"}]
+
+
+@pytest.mark.parametrize("adapter", ["claude", "codex"])
+@pytest.mark.parametrize(
+    (
+        "old_failed",
+        "include_new_result",
+        "old_result_timestamp",
+        "error_match",
+        "second_old_call",
+    ),
+    [
+        (False, False, "2026-08-04T11:58:01.000Z", "no tool result", False),
+        (True, True, "2026-08-04T11:58:01.000Z", None, False),
+        (False, False, "2026-08-04T12:05:01.000Z", "ambiguous", False),
+        (False, True, "2026-08-04T11:58:01.000Z", "ambiguous", True),
+    ],
+    ids=[
+        "old-success-cannot-supply",
+        "old-failure-cannot-poison",
+        "unresolved-overlap-fails-closed",
+        "ambiguity-debt-propagates",
+    ],
+)
+def test_artifact_results_join_the_ordered_same_id_call_occurrence(
+    tmp_path: Path,
+    adapter: str,
+    old_failed: bool,
+    include_new_result: bool,
+    old_result_timestamp: str,
+    error_match: str | None,
+    second_old_call: bool,
+):
+    (tmp_path / ".git").mkdir()
+    shared_id = "reused-call-id"
+    expected = [{"repo": str(tmp_path), "path": "src/inside.py"}]
+    if adapter == "claude":
+        rows = [
+            {
+                "timestamp": "2026-08-04T11:58:00.000Z",
+                "sessionId": SESSION,
+                "cwd": str(tmp_path),
+                "type": "assistant",
+                "message": {"content": [{
+                    "type": "tool_use",
+                    "id": shared_id,
+                    "name": "Read",
+                    "input": {"file_path": str(tmp_path / "src/old.py")},
+                }]},
+            },
+            {
+                "timestamp": old_result_timestamp,
+                "sessionId": SESSION,
+                "cwd": str(tmp_path),
+                "type": "user",
+                "message": {"content": [{
+                    "type": "tool_result",
+                    "tool_use_id": shared_id,
+                    "is_error": old_failed,
+                    "content": "old result",
+                }]},
+            },
+            {
+                "timestamp": "2026-08-04T12:05:00.000Z",
+                "sessionId": SESSION,
+                "cwd": str(tmp_path),
+                "type": "assistant",
+                "message": {"content": [{
+                    "type": "tool_use",
+                    "id": shared_id,
+                    "name": "Edit",
+                    "input": {"file_path": str(tmp_path / "src/inside.py")},
+                }]},
+            },
+        ]
+        if second_old_call:
+            rows.insert(1, {
+                "timestamp": "2026-08-04T11:58:00.500Z",
+                "sessionId": SESSION,
+                "cwd": str(tmp_path),
+                "type": "assistant",
+                "message": {"content": [{
+                    "type": "tool_use",
+                    "id": shared_id,
+                    "name": "Read",
+                    "input": {"file_path": str(tmp_path / "src/old-two.py")},
+                }]},
+            })
+        if include_new_result:
+            rows.append({
+                "timestamp": "2026-08-04T12:05:01.000Z",
+                "sessionId": SESSION,
+                "cwd": str(tmp_path),
+                "type": "user",
+                "message": {"content": [{
+                    "type": "tool_result",
+                    "tool_use_id": shared_id,
+                    "content": "new success",
+                }]},
+            })
+    else:
+        patch = (
+            "*** Begin Patch\n"
+            f"*** Update File: {tmp_path / 'src/inside.py'}\n"
+            "@@\n-a\n+b\n*** End Patch"
+        )
+        rows = [
+            {
+                "timestamp": "2026-08-04T11:57:00.000Z",
+                "type": "session_meta",
+                "payload": {"id": SESSION, "cwd": str(tmp_path)},
+            },
+            {
+                "timestamp": "2026-08-04T11:58:00.000Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call",
+                    "name": "read_file",
+                    "call_id": shared_id,
+                    "input": "{}",
+                },
+            },
+            {
+                "timestamp": old_result_timestamp,
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call_output",
+                    "call_id": shared_id,
+                    "output": json.dumps({
+                        "exit_code": 7 if old_failed else 0,
+                    }),
+                },
+            },
+            {
+                "timestamp": "2026-08-04T12:05:00.000Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call",
+                    "name": "exec",
+                    "call_id": shared_id,
+                    "input": f"await tools.apply_patch({json.dumps(patch)});",
+                },
+            },
+        ]
+        if second_old_call:
+            rows.insert(2, {
+                "timestamp": "2026-08-04T11:58:00.500Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call",
+                    "name": "read_file",
+                    "call_id": shared_id,
+                    "input": "{}",
+                },
+            })
+        if include_new_result:
+            rows.append({
+                "timestamp": "2026-08-04T12:05:01.000Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call_output",
+                    "call_id": shared_id,
+                    "output": json.dumps({"exit_code": 0}),
+                },
+            })
+
+    data = "".join(json.dumps(row) + "\n" for row in rows).encode()
+    if error_match is None:
+        assert artifacts.observe_session_artifacts_in_window_bytes(
+            data,
+            str(tmp_path),
+            START,
+            END,
+            session_id=SESSION,
+        ) == expected
+    else:
+        with pytest.raises(artifacts.ArtifactEvidenceError, match=error_match):
+            artifacts.observe_session_artifacts_in_window_bytes(
+                data,
+                str(tmp_path),
+                START,
+                END,
+                session_id=SESSION,
+            )
+
+
+def test_call_local_codex_completion_does_not_create_result_debt(tmp_path: Path):
+    (tmp_path / ".git").mkdir()
+    shared_id = "call-local-completion"
+    nested_patch = (
+        "*** Begin Patch\n"
+        f"*** Update File: {tmp_path / 'src/inside.py'}\n"
+        "@@\n-a\n+b\n*** End Patch"
+    )
+    rows = [
+        {
+            "timestamp": "2026-08-04T11:57:00.000Z",
+            "type": "session_meta",
+            "payload": {"id": SESSION, "cwd": str(tmp_path)},
+        },
+        {
+            "timestamp": "2026-08-04T11:58:00.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call",
+                "name": "apply_patch",
+                "call_id": shared_id,
+                "status": "completed",
+                "input": (
+                    "*** Begin Patch\n"
+                    f"*** Update File: {tmp_path / 'src/old.py'}\n"
+                    "@@\n-a\n+b\n*** End Patch"
+                ),
+            },
+        },
+        {
+            "timestamp": "2026-08-04T12:05:00.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call",
+                "name": "exec",
+                "call_id": shared_id,
+                "input": (
+                    f"await tools.apply_patch({json.dumps(nested_patch)});"
+                ),
+            },
+        },
+        {
+            "timestamp": "2026-08-04T12:05:01.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call_output",
+                "call_id": shared_id,
+                "output": json.dumps({"exit_code": 0}),
+            },
+        },
+    ]
+    data = "".join(json.dumps(row) + "\n" for row in rows).encode()
+    assert artifacts.observe_session_artifacts_in_window_bytes(
+        data,
+        str(tmp_path),
+        START,
+        END,
+        session_id=SESSION,
+    ) == [{"repo": str(tmp_path), "path": "src/inside.py"}]
+
+
+def test_call_local_codex_completion_ignores_ambiguous_old_output(tmp_path: Path):
+    (tmp_path / ".git").mkdir()
+    shared_id = "call-local-isolation"
+    rows = [
+        {
+            "timestamp": "2026-08-04T11:57:00.000Z",
+            "type": "session_meta",
+            "payload": {"id": SESSION, "cwd": str(tmp_path)},
+        },
+        {
+            "timestamp": "2026-08-04T11:58:00.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "read_file",
+                "call_id": shared_id,
+                "arguments": "{}",
+            },
+        },
+        {
+            "timestamp": "2026-08-04T12:05:00.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call",
+                "name": "apply_patch",
+                "call_id": shared_id,
+                "status": "completed",
+                "input": (
+                    "*** Begin Patch\n"
+                    f"*** Update File: {tmp_path / 'src/inside.py'}\n"
+                    "@@\n-a\n+b\n*** End Patch"
+                ),
+            },
+        },
+        {
+            "timestamp": "2026-08-04T12:05:01.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": shared_id,
+                "output": json.dumps({"exit_code": 7}),
+            },
+        },
+    ]
+    data = "".join(json.dumps(row) + "\n" for row in rows).encode()
+    assert artifacts.observe_session_artifacts_in_window_bytes(
+        data,
+        str(tmp_path),
+        START,
+        END,
+        session_id=SESSION,
+    ) == [{"repo": str(tmp_path), "path": "src/inside.py"}]
+
+
+def test_codex_result_envelopes_realign_matching_call_families(tmp_path: Path):
+    (tmp_path / ".git").mkdir()
+    shared_id = "codex-result-family"
+    nested_patch = (
+        "*** Begin Patch\n"
+        f"*** Update File: {tmp_path / 'src/inside.py'}\n"
+        "@@\n-a\n+b\n*** End Patch"
+    )
+    rows = [
+        {
+            "timestamp": "2026-08-04T11:57:00.000Z",
+            "type": "session_meta",
+            "payload": {"id": SESSION, "cwd": str(tmp_path)},
+        },
+        {
+            "timestamp": "2026-08-04T11:58:00.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "read_file",
+                "call_id": shared_id,
+                "arguments": "{}",
+            },
+        },
+        {
+            "timestamp": "2026-08-04T11:59:00.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call",
+                "name": "apply_patch",
+                "call_id": shared_id,
+                "status": "completed",
+                "input": (
+                    "*** Begin Patch\n"
+                    f"*** Update File: {tmp_path / 'src/old.py'}\n"
+                    "@@\n-a\n+b\n*** End Patch"
+                ),
+            },
+        },
+        {
+            "timestamp": "2026-08-04T11:59:30.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": shared_id,
+                "output": json.dumps({"exit_code": 7}),
+            },
+        },
+        {
+            "timestamp": "2026-08-04T12:05:00.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call",
+                "name": "exec",
+                "call_id": shared_id,
+                "input": (
+                    f"await tools.apply_patch({json.dumps(nested_patch)});"
+                ),
+            },
+        },
+        {
+            "timestamp": "2026-08-04T12:05:01.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call_output",
+                "call_id": shared_id,
+                "output": json.dumps({"exit_code": 0}),
+            },
+        },
+    ]
+    data = "".join(json.dumps(row) + "\n" for row in rows).encode()
+    assert artifacts.observe_session_artifacts_in_window_bytes(
+        data,
+        str(tmp_path),
+        START,
+        END,
+        session_id=SESSION,
+    ) == [{"repo": str(tmp_path), "path": "src/inside.py"}]
+
+
+def test_artifact_result_just_after_window_still_joins_its_call(tmp_path: Path):
+    (tmp_path / ".git").mkdir()
+    rows = [
+        {
+            "timestamp": "2026-08-04T12:29:59.000Z",
+            "sessionId": SESSION,
+            "cwd": str(tmp_path),
+            "type": "assistant",
+            "message": {"content": [{
+                "type": "tool_use",
+                "id": "edge-edit",
+                "name": "Edit",
+                "input": {"file_path": str(tmp_path / "src/edge.py")},
+            }]},
+        },
+        {
+            "timestamp": "2026-08-04T12:30:01.000Z",
+            "sessionId": SESSION,
+            "cwd": str(tmp_path),
+            "type": "user",
+            "message": {"content": [{
+                "type": "tool_result",
+                "tool_use_id": "edge-edit",
+                "content": "updated",
+            }]},
+        },
+    ]
+    data = "".join(json.dumps(row) + "\n" for row in rows).encode()
+    assert artifacts.observe_session_artifacts_in_window_bytes(
+        data,
+        str(tmp_path),
+        START,
+        END,
+        session_id=SESSION,
+    ) == [{"repo": str(tmp_path), "path": "src/edge.py"}]
 
 
 def test_resolver_builds_stable_segment_index_once_per_invocation(

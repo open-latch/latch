@@ -697,8 +697,24 @@ ArtifactIdentityResolver = Callable[
 class _IndexedArtifactCall:
     identity: ArtifactIdentity
     timestamp: datetime | None
+    file_token: str
+    line_index: int
+    item_index: int
     call_id: Any
     adapter: str
+    payload: Mapping[str, Any]
+
+
+@dataclass(frozen=True)
+class _IndexedArtifactResult:
+    identity: ArtifactIdentity
+    timestamp: datetime | None
+    file_token: str
+    line_index: int
+    item_index: int
+    call_id: str
+    adapter: str
+    failed: bool
     payload: Mapping[str, Any]
 
 
@@ -716,8 +732,9 @@ class ArtifactEvidenceIndex:
     call_candidates: Mapping[
         tuple[ArtifactIdentity, str], tuple[_IndexedArtifactCall, ...]
     ]
-    results: Mapping[tuple[ArtifactIdentity, str], tuple[bool, ...]]
-    result_conflicts: frozenset[tuple[ArtifactIdentity, str]]
+    results: Mapping[
+        tuple[ArtifactIdentity, str], tuple[_IndexedArtifactResult, ...]
+    ]
     identities_by_file: Mapping[str, frozenset[ArtifactIdentity]]
     file_errors: frozenset[str]
     identity_errors: frozenset[ArtifactIdentity]
@@ -743,10 +760,9 @@ def build_artifact_evidence_index(
     call_candidates: dict[
         tuple[ArtifactIdentity, str], list[_IndexedArtifactCall]
     ] = defaultdict(list)
-    results: dict[tuple[ArtifactIdentity, str], list[bool]] = defaultdict(list)
-    result_fingerprints: dict[
-        tuple[ArtifactIdentity, str], set[str]
-    ] = defaultdict(set)
+    results: dict[
+        tuple[ArtifactIdentity, str], list[_IndexedArtifactResult]
+    ] = defaultdict(list)
     identities_by_file: dict[str, set[ArtifactIdentity]] = defaultdict(set)
     file_errors = {str(file) for file in invalid_files if str(file)}
     conflict_files = {str(file) for file in conflicting_files if str(file)}
@@ -765,7 +781,7 @@ def build_artifact_evidence_index(
 
         codex_session: str | None = None
         codex_cwd: str | None = None
-        for line in decoded.splitlines():
+        for line_index, line in enumerate(decoded.splitlines(), start=1):
             if not line.strip():
                 continue
             try:
@@ -835,7 +851,7 @@ def build_artifact_evidence_index(
             message = message if isinstance(message, dict) else obj
             content = message.get("content") if isinstance(message, dict) else None
             if isinstance(content, list):
-                for item in content:
+                for item_index, item in enumerate(content):
                     if not isinstance(item, dict):
                         continue
                     if item.get("type") == "tool_result":
@@ -843,15 +859,21 @@ def build_artifact_evidence_index(
                         if isinstance(call_id, str) and call_id:
                             result_key = (identity, call_id)
                             results[result_key].append(
-                                bool(item.get("is_error"))
-                                or _nested_result_failed(item.get("content"))
-                            )
-                            result_fingerprints[result_key].add(
-                                json.dumps(
-                                    item,
-                                    ensure_ascii=False,
-                                    sort_keys=True,
-                                    separators=(",", ":"),
+                                _IndexedArtifactResult(
+                                    identity=identity,
+                                    timestamp=_parse_transcript_ts(
+                                        obj.get("timestamp")
+                                    ),
+                                    file_token=file_token,
+                                    line_index=line_index,
+                                    item_index=item_index,
+                                    call_id=call_id,
+                                    adapter="claude",
+                                    failed=(
+                                        bool(item.get("is_error"))
+                                        or _nested_result_failed(item.get("content"))
+                                    ),
+                                    payload=item,
                                 )
                             )
                         continue
@@ -860,6 +882,9 @@ def build_artifact_evidence_index(
                         candidate = _IndexedArtifactCall(
                             identity=identity,
                             timestamp=_parse_transcript_ts(obj.get("timestamp")),
+                            file_token=file_token,
+                            line_index=line_index,
+                            item_index=item_index,
                             call_id=call_id,
                             adapter="claude",
                             payload=item,
@@ -876,14 +901,16 @@ def build_artifact_evidence_index(
                 if isinstance(call_id, str) and call_id:
                     result_key = (identity, call_id)
                     results[result_key].append(
-                        _nested_result_failed(payload.get("output"))
-                    )
-                    result_fingerprints[result_key].add(
-                        json.dumps(
-                            payload,
-                            ensure_ascii=False,
-                            sort_keys=True,
-                            separators=(",", ":"),
+                        _IndexedArtifactResult(
+                            identity=identity,
+                            timestamp=_parse_transcript_ts(obj.get("timestamp")),
+                            file_token=file_token,
+                            line_index=line_index,
+                            item_index=0,
+                            call_id=call_id,
+                            adapter="codex",
+                            failed=_nested_result_failed(payload.get("output")),
+                            payload=payload,
                         )
                     )
             else:
@@ -898,6 +925,9 @@ def build_artifact_evidence_index(
                     candidate = _IndexedArtifactCall(
                         identity=identity,
                         timestamp=_parse_transcript_ts(obj.get("timestamp")),
+                        file_token=file_token,
+                        line_index=line_index,
+                        item_index=0,
                         call_id=call_id,
                         adapter="codex",
                         payload=payload,
@@ -919,11 +949,6 @@ def build_artifact_evidence_index(
             key: tuple(rows) for key, rows in call_candidates.items()
         },
         results={key: tuple(values) for key, values in results.items()},
-        result_conflicts=frozenset(
-            key
-            for key, fingerprints in result_fingerprints.items()
-            if len(fingerprints) > 1
-        ),
         identities_by_file={
             file: frozenset(identities)
             for file, identities in identities_by_file.items()
@@ -977,6 +1002,175 @@ def observe_indexed_session_artifacts(
             separators=(",", ":"),
         )
 
+    def result_fingerprint(result: _IndexedArtifactResult) -> str:
+        return json.dumps(
+            {
+                "adapter": result.adapter,
+                "timestamp": (
+                    result.timestamp.isoformat() if result.timestamp else None
+                ),
+                "payload": result.payload,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
+    def event_order(
+        timestamp: datetime,
+        file_token: str,
+        line_index: int,
+        item_index: int,
+    ) -> tuple[datetime, str, int, int]:
+        # v2.6 fixes the stable S2 union order at
+        # (timestamp, segment path, line index); item index is the deterministic
+        # extension for multiple tool records carried by one transcript row.
+        return (timestamp, file_token, line_index, item_index)
+
+    def result_statuses_for_call(
+        call: _IndexedArtifactCall,
+    ) -> tuple[bool, ...]:
+        """Results belonging to this ordered same-id call occurrence only."""
+        call_id = call.call_id
+        if not isinstance(call_id, str) or not call_id:
+            return ()
+        def result_family(adapter: str, payload: Mapping[str, Any]) -> str:
+            if adapter == "claude":
+                return "claude-tool"
+            payload_type = str(payload.get("type") or "")
+            if payload_type.startswith("function_call"):
+                return "codex-function"
+            if payload_type.startswith("custom_tool_call"):
+                return "codex-custom"
+            return f"codex-{payload_type or 'unknown'}"
+
+        key = (identity, call_id)
+        selected_family = result_family(call.adapter, call.payload)
+        candidates = tuple(
+            candidate
+            for candidate in index.call_candidates.get(key, ())
+            if result_family(candidate.adapter, candidate.payload)
+            == selected_family
+        )
+        result_candidates = tuple(
+            candidate
+            for candidate in index.results.get(key, ())
+            if result_family(candidate.adapter, candidate.payload)
+            == selected_family
+        )
+        if any(candidate.timestamp is None for candidate in result_candidates):
+            raise ArtifactEvidenceError(
+                "edit call result has no valid timestamp"
+            )
+
+        # Exact duplicates across resumed segments coalesce. Keeping the
+        # smallest contract-order coordinate makes the result independent of
+        # the input segment enumeration order.
+        unique_calls: dict[
+            str, tuple[tuple[datetime, str, int, int], _IndexedArtifactCall]
+        ] = {}
+        for candidate in candidates:
+            if candidate.timestamp is None:
+                continue
+            fingerprint = call_fingerprint(candidate)
+            order = event_order(
+                candidate.timestamp,
+                candidate.file_token,
+                candidate.line_index,
+                candidate.item_index,
+            )
+            existing = unique_calls.get(fingerprint)
+            if existing is None or order < existing[0]:
+                unique_calls[fingerprint] = (order, candidate)
+
+        unique_results: dict[
+            str, tuple[tuple[datetime, str, int, int], _IndexedArtifactResult]
+        ] = {}
+        for candidate in result_candidates:
+            assert candidate.timestamp is not None
+            fingerprint = result_fingerprint(candidate)
+            order = event_order(
+                candidate.timestamp,
+                candidate.file_token,
+                candidate.line_index,
+                candidate.item_index,
+            )
+            existing = unique_results.get(fingerprint)
+            if existing is None or order < existing[0]:
+                unique_results[fingerprint] = (order, candidate)
+
+        events: list[
+            tuple[
+                tuple[datetime, str, int, int],
+                int,
+                str,
+                _IndexedArtifactCall | _IndexedArtifactResult,
+            ]
+        ] = []
+        for fingerprint, (order, candidate) in unique_calls.items():
+            events.append((order, 0, fingerprint, candidate))
+        for fingerprint, (order, candidate) in unique_results.items():
+            events.append((order, 1, fingerprint, candidate))
+
+        current_call: str | None = None
+        pending_calls: list[str] = []
+        ambiguous_calls: set[str] = set()
+        occurrence_results: dict[
+            str, list[tuple[str, _IndexedArtifactResult]]
+        ] = defaultdict(list)
+        for _order, event_kind, fingerprint, event in sorted(events):
+            if event_kind == 0:
+                assert isinstance(event, _IndexedArtifactCall)
+                current_call = fingerprint
+                status = event.payload.get("status")
+                call_needs_result = (
+                    event.adapter == "claude"
+                    or _outer_exec_script(event.payload) is not None
+                    or not (isinstance(status, str) and status.strip())
+                )
+                if call_needs_result:
+                    if pending_calls:
+                        # A reused id cannot identify which unresolved call a
+                        # later result completes. Keep that ambiguity debt until
+                        # enough distinct results drain every pending call.
+                        ambiguous_calls.update(pending_calls)
+                        ambiguous_calls.add(fingerprint)
+                    pending_calls.append(fingerprint)
+                elif pending_calls:
+                    # The call-local terminal status remains authoritative,
+                    # but any later same-id output could still belong to the
+                    # unresolved historical call and must not override it.
+                    ambiguous_calls.update(pending_calls)
+                    ambiguous_calls.add(fingerprint)
+            elif current_call is not None:
+                assert isinstance(event, _IndexedArtifactResult)
+                occurrence_results[current_call].append((fingerprint, event))
+                if current_call in pending_calls:
+                    # In an ambiguous group the specific match is unknowable,
+                    # but each distinct result can discharge at most one call.
+                    pending_calls.pop(0)
+
+        selected_fingerprint = call_fingerprint(call)
+        selected = occurrence_results.get(selected_fingerprint, ())
+        if selected_fingerprint in ambiguous_calls:
+            if call.adapter == "claude" or _outer_exec_script(call.payload) is not None:
+                raise ArtifactEvidenceError(
+                    "edit call result occurrence is ambiguous"
+                )
+            status = call.payload.get("status")
+            if isinstance(status, str) and status.strip():
+                # A direct Codex edit with a call-local status does not need an
+                # ambiguously associated output as success authority.
+                return ()
+            raise ArtifactEvidenceError(
+                "edit call result occurrence is ambiguous"
+            )
+        if len({fingerprint for fingerprint, _result in selected}) > 1:
+            raise ArtifactEvidenceError(
+                "edit call has conflicting result payloads"
+            )
+        return tuple(result.failed for _fingerprint, result in selected)
+
     for call in index.calls_by_identity.get(identity, ()):
         ts = call.timestamp
         if ts is None:
@@ -1020,9 +1214,7 @@ def observe_indexed_session_artifacts(
             raise ArtifactEvidenceError(
                 "edit call identity is shared by conflicting tool calls"
             )
-        statuses = index.results.get((identity, call_id))
-        if (identity, call_id) in index.result_conflicts:
-            raise ArtifactEvidenceError("edit call has conflicting result payloads")
+        statuses = result_statuses_for_call(call)
 
         if call.adapter == "claude":
             if not statuses:
