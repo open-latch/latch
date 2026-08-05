@@ -1,8 +1,8 @@
 {
   "live_demo": {
     "backend": "codex",
-    "better_next_action": "Keep SQLite and, if cross-machine data movement is needed, implement explicit export/import with documented limitations; otherwise obtain a new human decision that supersedes id=1 before pursuing multi-user hosted storage.",
-    "captured_at_utc": "2026-08-05T03:34:05Z",
+    "better_next_action": "Keep SQLite and, if cross-machine data movement is needed, implement an explicit export/import workflow with documented limitations; revisit multi-user accounts only through a new human-approved architectural decision.",
+    "captured_at_utc": "2026-08-05T05:55:05Z",
     "demo_kind": "synthetic_no_history_fixture",
     "evidence_nodes": [
       {
@@ -30,9 +30,9 @@
     "observed": true,
     "recommendation": "DO_NOT_PROCEED",
     "request": "Add multi-user accounts by moving the datastore from local SQLite to a hosted Postgres service.",
-    "risk_if_proceed": "The implementation would directly violate the canonical local-first, no-hosted-database architecture decision.",
-    "source_commit": "e6bd1c5fd0cb7fc406a4131d0191bf1db27bebfd",
-    "summary": "The canonical decision (id=1) explicitly requires the demo app to remain local-first on a single embedded SQLite file and specifically rejects moving to hosted Postgres for multi-user accounts or sync. The request directly repeats that ruled-out path; only explicit export/import on SQLite is currently allowed."
+    "risk_if_proceed": "The implementation would violate the project\u2019s local-first, no-hosted-database direction and introduce the specifically rejected client-server architecture.",
+    "source_commit": "953acdec439bf353b4eba4e02814e752a7c1443c",
+    "summary": "The canonical decision (id=1) explicitly requires the demo app to remain local-first on embedded SQLite and rejects moving to hosted Postgres for multi-user accounts or sync. The request directly repeats that ruled-out path."
   },
   "reproduction": {
     "check_packet": "bash bin/latch_proof_packet.sh --check",
@@ -64,8 +64,8 @@
       "filtered": 4
     }
   },
-  "source_commit": "e6bd1c5fd0cb7fc406a4131d0191bf1db27bebfd",
-  "tested_runtime_manifest_sha256": "dbab8214352a817b9b77c9eea356530c51bf96f9c4645c581a853543e41d8698",
+  "source_commit": "953acdec439bf353b4eba4e02814e752a7c1443c",
+  "tested_runtime_manifest_sha256": "95d54ffb7006b8ad8244494e957abb86a0a552d698f20559ed6437b349d30b98",
   "thesis": "Latch preserves project judgment and can surface a rejected path before an agent changes files.",
   "wedge_v1": {
     "baseline_boundary": "memory_like is an internal active-search-only ablation. It is not a benchmark of any third-party memory product.",
