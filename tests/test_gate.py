@@ -28,6 +28,15 @@ import embeddings  # noqa: E402
 import gate        # noqa: E402
 
 
+CONTEXTUAL_APPROVALS = (
+    "ok lets go ahead with shifting our implementation this model and "
+    "implementing the digestible commits and such that we discussed earlier",
+    "go with your recommendation",
+    "ok get rid of all the junk and do the justified simple version, open a pr",
+    "I agree",
+)
+
+
 def _assert(cond, msg):
     if not cond:
         raise AssertionError(msg)
@@ -605,12 +614,68 @@ def test_evidence_includes_stale_targets():
 
 # ---------- output schema ----------
 
+def test_contextual_approvals_fail_closed_without_task_context():
+    for request in CONTEXTUAL_APPROVALS:
+        # A non-connection proves this branch returns before any KB read.
+        out = gate.assemble_gate(object(), request)
+        _assert(out["query"] == request, out)
+        _assert(out["scope_status"] == "unresolved", out)
+        _assert(out["task_context"] is None, out)
+        _assert(out["seeds"] == [] and out["chains"] == [], out)
+    print("PASS contextual_approvals_fail_closed_without_task_context")
+
+
+def test_task_context_drives_retrieval_without_rewriting_request():
+    tmp, conn = _fresh_db()
+    seen = []
+    original = gate.search.hybrid_search
+    gate.search.hybrid_search = lambda conn, query, **kwargs: seen.append(query) or []
+    try:
+        request = CONTEXTUAL_APPROVALS[0]
+        context = "Replace the overbuilt gate node-anchor design with one explicit task context string."
+        out = gate.assemble_gate(
+            conn, request, task_context=context, focus_seed=False,
+        )
+        _assert(seen == [context], seen)
+        _assert(out["query"] == request, out)
+        _assert(out["task_context"] == context, out)
+        _assert(out["scope_status"] == "explicit_context", out)
+        print("PASS task_context_drives_retrieval_without_rewriting_request")
+    finally:
+        gate.search.hybrid_search = original
+        _cleanup(tmp, conn)
+
+
+def test_self_contained_requests_do_not_require_task_context():
+    tmp, conn = _fresh_db()
+    original = gate.search.hybrid_search
+    gate.search.hybrid_search = lambda *args, **kwargs: []
+    try:
+        for request in (
+            "Proceed with adding an HTTP health endpoint",
+            "I approve replacing SHA-1 with SHA-256",
+            "Fix this bug in src/cache.py: null keys crash",
+            "Build this project",
+            "Refactor the current implementation to use async I/O",
+            "Upgrade the version to 2.0",
+        ):
+            out = gate.assemble_gate(conn, request, focus_seed=False)
+            _assert(out["scope_status"] == "request_only", (request, out))
+        print("PASS self_contained_requests_do_not_require_task_context")
+    finally:
+        gate.search.hybrid_search = original
+        _cleanup(tmp, conn)
+
+
 def test_output_schema_top_level_shape():
     tmp, conn = _fresh_db()
     try:
         seed = _ins(conn, "decision", "shape test", "...")
         out = gate.assemble_gate(conn, "shape test")
-        for k in ("query", "seeds", "chains", "evidence_node_ids"):
+        for k in (
+            "query", "seeds", "chains", "evidence_node_ids",
+            "task_context", "scope_status",
+        ):
             _assert(k in out, f"missing top-level key {k!r}: {out.keys()}")
         _assert(out["query"] == "shape test", "query should round-trip")
         _assert(isinstance(out["seeds"], list), "seeds is a list")
@@ -1019,6 +1084,9 @@ if __name__ == "__main__":
     test_traversal_reconciled_by_survives_hop_2_prune()
     test_seeds_excluded_from_evidence()
     test_evidence_includes_stale_targets()
+    test_contextual_approvals_fail_closed_without_task_context()
+    test_task_context_drives_retrieval_without_rewriting_request()
+    test_self_contained_requests_do_not_require_task_context()
     test_output_schema_top_level_shape()
     test_gate_findings_surface_cited_evidence_for_proceed()
     test_gate_findings_unlatched_receipt_does_not_claim_kb_evidence()

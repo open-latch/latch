@@ -57,6 +57,7 @@ from datetime import datetime, timezone
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sqlite3
@@ -189,11 +190,42 @@ LOG_QUERY_EXCERPT_CHARS = 200
 # default, which predates the id=1108 structural-only lock.)
 LOG_RAW_QUERY = os.environ.get("CLAUDE_KB_LOG_RAW_QUERY") == "1"
 
+# The gate receives one MCP call, not the host's preceding conversation. Keep
+# this deliberately small: it catches the observed approval/follow-up shape;
+# the foreground agent supplies the actual referent through `task_context`.
+_REFERENTIAL_REQUEST_RE = re.compile(
+    r"\b(?:your|this|that)\s+"
+    r"(?:recommendation|plan|approach|model|design|direction|framing|"
+    r"implementation|version)\b"
+    r"|\bthe\s+(?:(?:justified|simple|agreed|proposed|recommended|chosen)\s+)+"
+    r"(?:recommendation|plan|approach|model|design|direction|framing|"
+    r"implementation|version)\b"
+    r"|\b(?:as|we)\s+(?:discussed|agreed)(?:\s+(?:earlier|above))?\b",
+    re.IGNORECASE,
+)
+_BARE_APPROVAL_RE = re.compile(
+    r"^(?:yes(?:,? please)?|ok(?:ay)?|sure|sounds good|go ahead|proceed|"
+    r"(?:i\s+)?(?:agree|approve|authorize|confirm)|approved|do it|ship it)[.!]*$",
+    re.IGNORECASE,
+)
+
+
+def _requires_task_context(request: str) -> bool:
+    text = (request or "").strip()
+    return bool(
+        text
+        and (
+            _REFERENTIAL_REQUEST_RE.search(text)
+            or _BARE_APPROVAL_RE.fullmatch(text)
+        )
+    )
+
 
 def assemble_gate(
     conn: sqlite3.Connection,
     query: str,
     *,
+    task_context: str | None = None,
     seed_top_k: int = DEFAULT_SEED_TOP_K,
     include_stale: bool = True,
     focus_seed: bool = True,
@@ -202,15 +234,34 @@ def assemble_gate(
 ) -> dict:
     """Build the chain assembly for one kb_gate call.
 
-    `query` is the user's coding/build prompt verbatim. Hybrid seeds use this
-    directly; focus seeding ignores it (focus is set by activity, not query).
+    `query` is the user's coding/build prompt verbatim. When the request refers
+    to prior conversation, `task_context` is the foreground agent's concise,
+    self-contained description of the work being approved. Hybrid retrieval
+    uses that context; the original request remains unchanged for audit.
 
     Bumping `seed_top_k`, `max_hops`, or `body_excerpt_chars` widens the
     classifier's context at the cost of prompt-token budget. Defaults are
     tuned for "enough chain to judge, not so much that it floods the prompt."
     """
+    context = task_context.strip() if isinstance(task_context, str) else ""
+    scope_status = (
+        "explicit_context" if context else
+        "unresolved" if _requires_task_context(query) else
+        "request_only"
+    )
+    if scope_status == "unresolved":
+        return {
+            "query": query,
+            "seeds": [],
+            "chains": [],
+            "evidence_node_ids": [],
+            "priorities": [],
+            "lane_groups": [],
+            "task_context": None,
+            "scope_status": scope_status,
+        }
     seeds, seed_ids = _collect_seeds(
-        conn, query,
+        conn, context or query,
         seed_top_k=seed_top_k,
         include_stale=include_stale,
         focus_seed=focus_seed,
@@ -270,6 +321,8 @@ def assemble_gate(
         "evidence_node_ids": sorted(all_evidence_ids),
         "priorities": [_priority_for_prompt(p) for p in prio],
         "lane_groups": lane_groups,
+        "task_context": context or None,
+        "scope_status": scope_status,
     }
 
 
@@ -1252,6 +1305,7 @@ def build_classifier_prompt(
 ) -> str:
     """Compose the full prompt: system + few-shot + actual chain + request."""
     request = chain_assembly.get("query", "").strip() or "(empty request)"
+    task_context = str(chain_assembly.get("task_context") or "").strip()
     if exposure is not None:
         exposure.extend(_priority_exposure_for_prompt(
             chain_assembly.get("priorities") or []
@@ -1265,11 +1319,19 @@ def build_classifier_prompt(
     prio_section = (
         f"\n--- ACTIVE PROJECT PRIORITIES ---\n{prio_block}\n" if prio_block else ""
     )
+    context_section = (
+        "\n--- TASK CONTEXT ---\n"
+        f"{task_context}\n"
+        "The foreground agent supplied this to resolve what the current request "
+        "refers to. Treat it as the task being gated, not as KB evidence.\n"
+        if task_context else ""
+    )
     return (
         CLASSIFIER_SYSTEM
         + "\n"
         + CLASSIFIER_FEW_SHOT
         + prio_section
+        + context_section
         + "\n--- ACTUAL REQUEST ---\n"
         + f"REQUEST: {request}\n\n"
         + "CHAIN ASSEMBLY:\n"
@@ -1414,6 +1476,22 @@ def _classifier_error(reason: str) -> dict:
         "load_bearing_claims": [],
         "uncovered_claims": [],
         "error": reason,
+    }
+
+
+def _unresolved_scope_verdict() -> dict:
+    return {
+        **_classifier_error("task context required"),
+        "summary": (
+            "Latch did not issue a verdict because this request refers to prior "
+            "conversation and no task_context was supplied."
+        ),
+        "better_next_action": (
+            "Retry the same verbatim request with a concise, self-contained "
+            "task_context from the foreground task."
+        ),
+        "reason": "unresolved_scope",
+        "scope_blocked": True,
     }
 
 
@@ -1641,6 +1719,8 @@ def classify_gate(
     """
     if paths.is_unlatched_mode():
         return unlatched_verdict()
+    if chain_assembly.get("scope_status") == "unresolved":
+        return _unresolved_scope_verdict()
     if paths.is_disabled() or paths.is_in_compact():
         return {**_classifier_error("disabled/in-compact"), "skipped": True}
     if not use_llm:
@@ -2012,6 +2092,11 @@ def _gate_receipt_summary(verdict: dict, evidence: list[dict]) -> str:
             "Latch gate was skipped because Latch is currently UNLATCHED. "
             "Run /unlatch to re-latch. If LATCH_UNLATCHED is set, unset it too."
         )
+    if verdict.get("reason") == "unresolved_scope":
+        return (
+            "Latch blocked this gate call before classification because the "
+            "foreground task did not supply the referenced task context."
+        )
     counts = []
     if evidence:
         counts.append(_counted(len(evidence), "cited KB node"))
@@ -2062,6 +2147,8 @@ def format_gate_findings(
         "No KB evidence was read while latch was unlatched."
         if verdict.get("reason") == "unlatched"
         else (
+            "No classifier verdict has authority because task context was missing."
+            if verdict.get("reason") == "unresolved_scope" else
             "Use evidence_nodes[].status as the visible current-authority "
             "surface; decision_chain, abandoned_paths, current_direction, "
             "and load_bearing_claims explain the rationale and source basis."
@@ -2073,6 +2160,8 @@ def format_gate_findings(
         "message, and tell the user to run /unlatch to re-latch."
         if verdict.get("reason") == "unlatched"
         else (
+            "Show this as a Latch scope block and retry with task_context before acting."
+            if verdict.get("reason") == "unresolved_scope" else
             "Show this as an explicit Latch gate block before acting: say Latch "
             "ran the gate on the request, then show verdict, summary/rationale, "
             "cited KB evidence nodes with status/current authority, source/basis, "
@@ -2139,6 +2228,7 @@ def run_gate(
     request: str,
     *,
     project_path: str | None,
+    task_context: str | None = None,
     session_id: str | None = None,
     use_llm: bool = True,
     seed_top_k: int = DEFAULT_SEED_TOP_K,
@@ -2177,6 +2267,7 @@ def run_gate(
                 "priorities": [],
             },
             "evidence": [],
+            "scope_status": "unlatched",
         }
     try:
         gate_call_id = capture_streams.new_gate_call_id()
@@ -2190,6 +2281,7 @@ def run_gate(
     t0 = time.perf_counter()
     chain_assembly = assemble_gate(
         conn, request,
+        task_context=task_context,
         seed_top_k=seed_top_k,
         max_hops=max_hops,
         body_excerpt_chars=body_excerpt_chars,
@@ -2274,6 +2366,7 @@ def run_gate(
         "findings": format_gate_findings(verdict, evidence),
         "chains": chain_assembly,
         "evidence": evidence,
+        "scope_status": chain_assembly.get("scope_status") or "request_only",
     }
 
 
@@ -2518,6 +2611,7 @@ def _log_invocation(
             "current_direction": list(verdict.get("current_direction") or []),
             "seed_count": len(seeds),
             "seed_ids": [s["id"] for s in seeds],
+            "scope_status": chain_assembly.get("scope_status") or "request_only",
             # Structural lane-contact substrate for lifecycle detection. Never
             # copy seed/evidence titles, excerpts, or request content here.
             "seeds": _structural_seed_metadata(seeds),
