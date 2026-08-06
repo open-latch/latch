@@ -17,7 +17,7 @@
   },
   "wiring_version": {
     "before": 4,
-    "candidate": 6
+    "candidate": 7
   },
   "measurement": {
     "method": "Render each managed surface with kb_home=/opt/latch, include managed begin/end markers, count splitlines and whitespace-delimited words, and hash UTF-8 bytes.",
@@ -29,18 +29,18 @@
       "cursor_always_loaded": {"lines": 319, "words": 2562, "bytes": 17711, "sha256": "25c8bec2ae365a25aed9ce295dc9347d49d97e3d0ddb534f8d8a7c1dcc4ecc2c"}
     },
     "candidate": {
-      "source_snippet": {"lines": 88, "words": 518, "bytes": 4302, "sha256": "cf757651cc3701cfff148d79b23d2ffbcdff7a5240d6c7f620b28c3327b3165f"},
-      "claude_managed_block": {"lines": 93, "words": 582, "bytes": 4708, "sha256": "40d2a77f473c733c5a56d917fe445741e4e9ce820e8c9acb1423644020184f00"},
-      "agents_managed_block": {"lines": 93, "words": 583, "bytes": 4719, "sha256": "b89caa679f5879cfec7f71bddd1298f2a3b5882bd7b2241e33dda18fcc711c5e"},
-      "cursor_rule": {"lines": 46, "words": 340, "bytes": 2408, "sha256": "f443f99d99198a6e03bfe58b2697ada42a669a7bc2c5869f1dbe3a96f244d5dc"},
-      "cursor_always_loaded": {"lines": 140, "words": 923, "bytes": 7128, "sha256": "462a2a9a1e0165cdcc5daab06deb57f3e3c2aa4c0509f018d5ca1ccf9d5a4bbe"}
+      "source_snippet": {"lines": 89, "words": 527, "bytes": 4370, "sha256": "08989323a53f8be13fda2d846f5c3af9c4d4d5d8be6dd2ba74fcf55fc560164f"},
+      "claude_managed_block": {"lines": 94, "words": 591, "bytes": 4776, "sha256": "d0a0e7bd4b2eef13bacbdc3dbc46ddb4e82ba634855dc849655d2a93f31bdf1b"},
+      "agents_managed_block": {"lines": 94, "words": 592, "bytes": 4787, "sha256": "76f1382d4cb77d9622fe650806ffd3f129aab7684b362a3928a19dacac12d65e"},
+      "cursor_rule": {"lines": 46, "words": 340, "bytes": 2408, "sha256": "93a36b18b58c014a084ea309f765c0c18a565fd00b7b32a2276e006dfba8f501"},
+      "cursor_always_loaded": {"lines": 141, "words": 932, "bytes": 7196, "sha256": "863c0dfa642658fdcd3a54791ef3f1f5a077b08e5868163a7f56ca805e434765"}
     },
     "reductions_percent": {
-      "source_snippet": {"lines": 65.2, "words": 74.4},
-      "claude_managed_block": {"lines": 63.7, "words": 71.6},
-      "agents_managed_block": {"lines": 63.7, "words": 71.6},
+      "source_snippet": {"lines": 64.8, "words": 73.9},
+      "claude_managed_block": {"lines": 63.3, "words": 71.2},
+      "agents_managed_block": {"lines": 63.3, "words": 71.1},
       "cursor_rule": {"lines": 25.8, "words": 33.5},
-      "cursor_always_loaded": {"lines": 56.1, "words": 64.0}
+      "cursor_always_loaded": {"lines": 55.8, "words": 63.6}
     },
     "budgets": {
       "claude_managed_block": {"max_lines": 100, "max_words": 650, "passed": true},

@@ -45,7 +45,8 @@ changing code/config/test/runtime behavior or docs implementing the request. Ski
 explanation/status/search/diagnosis/read-only review/audit, priorities/planning/
 handoffs/Latch/report/admin work. Gate planning when implementation begins.
 Reuse it for unchanged substeps/verification/narration; re-gate only material
-scope changes. Legacy: `kb_gate`; honor host enforcement.
+scope changes. Contextual requests also need a self-contained `task_context`;
+without it, no verdict. Honor host enforcement.
 
 Show each non-skipped **Latch gate** first: recommendation/rationale; cited
 ids/titles/status; receipt/source; risk/action; uncovered claims.

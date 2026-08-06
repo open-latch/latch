@@ -113,6 +113,13 @@ documentation that itself implements the requested product/change work. Call
 it once, immediately before committing to or executing that mutation, with the
 then-current user request verbatim.
 
+The gate sees one tool call, not the foreground host's preceding conversation.
+For an approval or follow-up that depends on that conversation, keep the
+request verbatim and pass a concise, self-contained `task_context` naming the
+work being gated. Without required context, the gate returns no verdict before
+retrieval, budget use, or classification. A self-contained request needs no
+extra context.
+
 Do not gate explanation, status or search, diagnosis, read-only review or
 audit, prioritization, planning-only work, handoffs, Latch node capture or
 maintenance, gate-report generation, or other administrative writes. Planning

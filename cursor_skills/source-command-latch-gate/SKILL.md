@@ -20,6 +20,8 @@ unavailable, resolve `latch_home` as `${CURSOR_PLUGIN_ROOT}` when set, otherwise
 use the absolute checkout in the project-sync footer, select native `cursor`
 for plugin installs or the backend in that footer, and run
 `bin/run_latch_gate.sh` with `LATCH_GATE_BACKEND` and `LATCH_MODEL_BACKEND` set.
+For a contextual approval/follow-up, MCP also needs a concise, self-contained
+`task_context`; the shell fallback needs a self-contained request instead.
 
 Always show the returned **Latch gate** findings before edits, including the
 recommendation, rationale, cited node ids/titles/status, source receipt, better
