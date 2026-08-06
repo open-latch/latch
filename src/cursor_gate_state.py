@@ -58,7 +58,7 @@ _PRE_GATE_LATCH_ALLOWLIST = {
 _OPERATION_NAMES = {
     "latch-compact", "latch-seed", "latch-gate-report",
     "latch-budget-approve", "latch-decay", "latch-heal", "latch-tree",
-    "latch-pm", "unlatch",
+    "latch-pm", "latch", "unlatch",
 }
 _OPERATION_MARKER_RE = re.compile(
     r"(?im)^\s*Latch operation id:\s*([a-z0-9-]+)"
@@ -412,13 +412,13 @@ def _operation_invocation(
     if len(tokens) > 2:
         return None
     arg = tokens[1] if len(tokens) == 2 else None
-    if name in {"latch", "unlatch"} and arg is None \
-            and pending and pending.get("name") == "unlatch":
-        return "unlatch", "confirm", name
+    if name in {"latch", "unlatch"} and arg is None and pending \
+            and pending.get("name") in {"latch", "unlatch"}:
+        return str(pending["name"]), "confirm", name
     if name in _OPERATION_NAMES:
         if name == "latch-pm":
             return name, "apply" if arg == "apply" else "prepare", None
-        if name == "unlatch":
+        if name in {"latch", "unlatch"}:
             return name, "inspect", None
         if arg is not None:
             return None
@@ -511,15 +511,15 @@ def _begin_prompt_unlocked(
                 and pending.get("stage") == "prepared"
                 and isinstance(pending.get("candidate_digest"), str)
             )
-        elif name == "unlatch" and phase == "confirm":
+        elif name in {"latch", "unlatch"} and phase == "confirm":
             allowed = bool(pending and pending.get("name") == name)
         if name == "latch-seed" and phase == "preview":
             pending = {"name": name, "stage": "preview", "age_turns": 0}
         elif name == "latch-pm" and phase == "prepare":
             pending = {"name": name, "stage": "prepare", "age_turns": 0}
-        elif name == "unlatch" and phase == "inspect":
+        elif name in {"latch", "unlatch"} and phase == "inspect":
             pending = {"name": name, "stage": "inspect", "age_turns": 0}
-        elif name not in {"latch-seed", "latch-pm", "unlatch"}:
+        elif name not in {"latch-seed", "latch-pm", "latch", "unlatch"}:
             pending = None
         if allowed and phase not in {"prepare"}:
             operation_receipt = {
@@ -1012,6 +1012,18 @@ def _trusted_script(script: Path, relative_path: str) -> bool:
     return script == expected
 
 
+def _latch_wrapper_args(script: Path, args: list[str]) -> list[str]:
+    """Normalize native PowerShell parameter names for exact matching."""
+    if script.suffix.lower() != ".ps1":
+        return args
+    aliases = {
+        "-confirm": "--confirm",
+        "-kbdir": "--kb-dir",
+        "-newkb": "--new-kb",
+    }
+    return [aliases.get(arg.lower(), arg) for arg in args]
+
+
 def _same_project(left: str | os.PathLike, right: str | os.PathLike) -> bool:
     try:
         return Path(left).expanduser().resolve(strict=False) == \
@@ -1164,9 +1176,10 @@ def _operation_tool_matches(
     if name == "latch-budget-approve":
         return (
             _trusted_script(script, "src/budget.py")
-            and len(args) == 2
+            and len(args) == 4
             and args[0] in {"approve", "status"}
             and _project_argument_matches(args[1], project_path, payload)
+            and args[2:] == ["--session-id", operation.get("session_id")]
         )
     if name in {"latch-decay", "latch-heal", "latch-tree"}:
         expected = {"latch-decay": "weekly", "latch-heal": "nightly", "latch-tree": "tree"}[name]
@@ -1176,15 +1189,43 @@ def _operation_tool_matches(
             and args[0] == expected
             and _project_argument_matches(args[1], project_path, payload)
         )
-    if name == "unlatch":
+    if name == "latch":
         if not (
-            _trusted_script(script, "bin/unlatch.sh")
-            or _trusted_script(script, "bin/unlatch.ps1")
+            _trusted_script(script, "bin/latch.sh")
+            or _trusted_script(script, "bin/latch.ps1")
         ):
             return False
         if phase == "inspect":
             return not args
-        return phase == "confirm" and args == ["--confirm", operation.get("confirmation")]
+        if phase != "confirm" or operation.get("confirmation") != "latch":
+            return False
+        args = _latch_wrapper_args(script, args)
+        if args == ["--confirm", "latch"] or args == ["--confirm", "latch", "--new-kb"]:
+            return True
+        return (
+            len(args) == 4
+            and args[:3] == ["--confirm", "latch", "--kb-dir"]
+            and Path(args[3]).expanduser().is_absolute()
+        )
+    if name == "unlatch":
+        confirmation = operation.get("confirmation")
+        trusted_unlatch = (
+            _trusted_script(script, "bin/unlatch.sh")
+            or _trusted_script(script, "bin/unlatch.ps1")
+        )
+        trusted_latch = (
+            _trusted_script(script, "bin/latch.sh")
+            or _trusted_script(script, "bin/latch.ps1")
+        )
+        if phase == "inspect":
+            return trusted_unlatch and not args
+        if phase != "confirm" or confirmation not in {"latch", "unlatch"}:
+            return False
+        args = _latch_wrapper_args(script, args)
+        expected = ["--confirm", confirmation]
+        return args == expected and (
+            trusted_unlatch or (confirmation == "latch" and trusted_latch)
+        )
     return False
 
 
@@ -1461,9 +1502,9 @@ def consume_operation_authorization(
             receipt["consumed"] = True
             receipt["consumed_at"] = _now()
             name, phase = receipt.get("name"), receipt.get("phase")
-            if name == "unlatch" and phase == "inspect":
+            if name in {"latch", "unlatch"} and phase == "inspect":
                 state["pending_operation"] = {"name": name, "stage": "inspected", "age_turns": 0}
-            elif phase in {"apply", "confirm"} or name not in {"latch-seed", "unlatch"}:
+            elif phase in {"apply", "confirm"} or name not in {"latch-seed", "latch", "unlatch"}:
                 state["pending_operation"] = None
             state["updated_at"] = _now()
             _atomic_write(path, state)

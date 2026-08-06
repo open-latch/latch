@@ -320,6 +320,8 @@ def correlate(
     *,
     window_seconds: int = WINDOW_SECONDS_DEFAULT,
     correlator_version: str = CORRELATOR_VERSION_DEFAULT,
+    expected_binding_revision: str | None = None,
+    expected_kb_dir: str | None = None,
 ) -> dict:
     """Walk gate.log in [start_date, end_date] and emit one
     gate_outcome.log row per non-skipped, session-tagged, not-yet-seen
@@ -334,7 +336,11 @@ def correlate(
         "rows_skipped_dedup": 0,
         "rows_skipped_skipped_verdict": 0,
     }
-    conn = db.connect(project_path or "")
+    conn = db.connect(
+        project_path or "",
+        expected_binding_revision=expected_binding_revision,
+        expected_kb_dir=expected_kb_dir,
+    )
     try:
         seen = _load_existing_keys(project_path, start_date, end_date)
 

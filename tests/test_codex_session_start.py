@@ -5,20 +5,27 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
+pytestmark = pytest.mark.usefixtures("compatibility_scope_env")
+
 SRC = Path(__file__).resolve().parent.parent / "src"
 sys.path.insert(0, str(SRC))
 sys.path.insert(0, str(SRC / "hooks"))
 
 import agents_md_sync as ams  # noqa: E402
+import codex_session  # noqa: E402
 import codex_session_start as css  # noqa: E402
 import db  # noqa: E402
+import paths  # noqa: E402
+import project_config  # noqa: E402
 import versioning  # noqa: E402
 
 
 def _healthy_guards(monkeypatch) -> None:
     monkeypatch.setattr(css, "is_in_compact", lambda: False)
-    monkeypatch.setattr(css, "is_unlatched_mode", lambda: False)
-    monkeypatch.setattr(css, "is_disabled", lambda: False)
+    monkeypatch.setattr(css, "is_unlatched_mode", lambda *_args: False)
+    monkeypatch.setattr(css, "is_disabled", lambda *_args: False)
 
 
 def test_codex_payload_helpers(monkeypatch) -> None:
@@ -56,6 +63,70 @@ def test_auto_sync_agents_md_does_not_first_wire_absent_file(
     assert not target.exists()
 
 
+def test_codex_wiring_error_log_uses_payload_project_and_binding(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    logged = []
+    monkeypatch.setattr(
+        ams,
+        "sync_if_outdated",
+        lambda _target: (_ for _ in ()).throw(OSError("sync failed")),
+    )
+    monkeypatch.setattr(
+        css,
+        "log",
+        lambda message, project_path=None, **kwargs: logged.append(
+            (message, project_path, kwargs)
+        ),
+    )
+
+    assert css._auto_sync_agents_md(
+        str(tmp_path),
+        expected_revision="binding-rev",
+    ) == "error"
+    assert logged == [
+        (
+            "agents_md auto-sync skipped: sync failed",
+            str(tmp_path),
+            {"expected_revision": "binding-rev"},
+        )
+    ]
+
+
+def test_codex_start_passes_payload_project_and_binding_to_wiring(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    _healthy_guards(monkeypatch)
+    observed = []
+    monkeypatch.setattr(
+        css,
+        "record_session_binding",
+        lambda cwd, sid: "binding-rev",
+    )
+    monkeypatch.setattr(
+        css.codex_session,
+        "write_marker",
+        lambda *_args, **_kwargs: tmp_path / "marker.json",
+    )
+    monkeypatch.setattr(
+        css,
+        "_auto_sync_agents_md",
+        lambda cwd, *, expected_revision=None: observed.append(
+            (cwd, expected_revision)
+        ) or "unchanged",
+    )
+
+    assert css._run_session_start(
+        {"cwd": str(tmp_path), "threadId": "codex-thread"},
+        str(tmp_path),
+    ) == 0
+    assert capsys.readouterr().out == ""
+    assert observed == [(str(tmp_path), "binding-rev")]
+
+
 def test_healthy_codex_startup_is_silent_and_preserves_attribution(
     tmp_path: Path,
     monkeypatch,
@@ -80,7 +151,9 @@ def test_healthy_codex_startup_is_silent_and_preserves_attribution(
             (cwd, sid, transcript_path)
         ) or (tmp_path / "marker.json"),
     )
-    monkeypatch.setattr(css, "_auto_sync_agents_md", lambda _cwd: "unchanged")
+    monkeypatch.setattr(
+        css, "_auto_sync_agents_md", lambda _cwd, **_kwargs: "unchanged"
+    )
     monkeypatch.setattr(
         db,
         "connect",
@@ -113,7 +186,9 @@ def test_readonly_vault_needs_no_db_write_and_marker_survives(
         "write_marker",
         lambda _cwd, sid, transcript_path=None: marker_calls.append(sid),
     )
-    monkeypatch.setattr(css, "_auto_sync_agents_md", lambda _cwd: "unchanged")
+    monkeypatch.setattr(
+        css, "_auto_sync_agents_md", lambda _cwd, **_kwargs: "unchanged"
+    )
     monkeypatch.setattr(
         db,
         "connect",
@@ -145,7 +220,9 @@ def test_marker_failure_warns_without_opening_db(
             RuntimeError("sensitive marker detail")
         ),
     )
-    monkeypatch.setattr(css, "_auto_sync_agents_md", lambda _cwd: "unchanged")
+    monkeypatch.setattr(
+        css, "_auto_sync_agents_md", lambda _cwd, **_kwargs: "unchanged"
+    )
     monkeypatch.setattr(
         db,
         "connect",
@@ -157,7 +234,7 @@ def test_marker_failure_warns_without_opening_db(
     assert css.main() == 0
     output = json.loads(capsys.readouterr().out)
     notice = output["hookSpecificOutput"]["additionalContext"]
-    assert "could not complete silent session setup" in notice
+    assert "could not safely bind" in notice
     assert "sensitive marker detail" not in notice
 
 
@@ -186,7 +263,9 @@ def test_missing_session_id_invalidates_stale_marker_and_warns(
         "invalidate_marker",
         lambda cwd: invalidated.append(cwd),
     )
-    monkeypatch.setattr(css, "_auto_sync_agents_md", lambda _cwd: "unchanged")
+    monkeypatch.setattr(
+        css, "_auto_sync_agents_md", lambda _cwd, **_kwargs: "unchanged"
+    )
     monkeypatch.setattr(
         db,
         "connect",
@@ -198,8 +277,58 @@ def test_missing_session_id_invalidates_stale_marker_and_warns(
     assert css.main() == 0
     output = json.loads(capsys.readouterr().out)
     notice = output["hookSpecificOutput"]["additionalContext"]
-    assert "could not complete silent session setup" in notice
+    assert "could not safely bind" in notice
     assert invalidated == [str(tmp_path)]
+
+
+def test_resumed_old_task_tombstones_new_task_marker_after_repin(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    _healthy_guards(monkeypatch)
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / ".git").mkdir()
+    vaults = paths.validated_test_root() / "vaults"
+    kb_a = vaults / f"codex-marker-a-{tmp_path.name}"
+    kb_b = vaults / f"codex-marker-b-{tmp_path.name}"
+    for kb_dir in (kb_a, kb_b):
+        kb_dir.mkdir(parents=True)
+        project_config.mark_kb_target(kb_dir)
+
+    project_config.write_binding(
+        project,
+        mode=project_config.MODE_LATCHED,
+        kb_dir=kb_a,
+    )
+    payload = {"cwd": str(project), "threadId": "task-a"}
+    monkeypatch.setattr(css, "read_hook_input", lambda: dict(payload))
+    monkeypatch.setattr(
+        css, "_auto_sync_agents_md", lambda _cwd, **_kwargs: "unchanged"
+    )
+
+    assert css.main() == 0
+    assert capsys.readouterr().out == ""
+    assert codex_session.read_session_id(project) == "task-a"
+
+    project_config.repin_private_scope(project, kb_b)
+    payload["threadId"] = "task-b"
+    assert css.main() == 0
+    assert capsys.readouterr().out == ""
+    assert codex_session.read_session_id(project) == "task-b"
+
+    payload["threadId"] = "task-a"
+    assert css.main() == 0
+    notice = json.loads(capsys.readouterr().out)
+    assert "fresh agent task" in notice["hookSpecificOutput"]["additionalContext"]
+    assert codex_session.read_marker(project) is None
+    tombstone = json.loads(
+        codex_session.marker_path(project).read_text(encoding="utf-8")
+    )
+    assert tombstone["invalidated"] is True
+    assert "session_id" not in tombstone
+    assert not (kb_b / "hooks.log").exists()
 
 
 def test_agents_wiring_repair_notice_is_visible_without_brief(
@@ -218,7 +347,9 @@ def test_agents_wiring_repair_notice_is_visible_without_brief(
         "write_marker",
         lambda *_args, **_kwargs: tmp_path / "marker.json",
     )
-    monkeypatch.setattr(css, "_auto_sync_agents_md", lambda _cwd: "synced")
+    monkeypatch.setattr(
+        css, "_auto_sync_agents_md", lambda _cwd, **_kwargs: "synced"
+    )
 
     assert css.main() == 0
     output = json.loads(capsys.readouterr().out)

@@ -66,7 +66,12 @@ def test_upgrade_alias_publishes_embed_alias_for_retained_key():
             "port": 1, "token": "m" * 32, "pid": owner_embed["pid"],
             "started_at": "0",
         }
-        mcp_daemon._publish_upgrade_alias(retained_key, mcp_payload, capable=True)
+        mcp_daemon._publish_upgrade_alias(
+            retained_key,
+            mcp_payload,
+            capable=True,
+            requested_protocol=mcp_broker.PROTOCOL_VERSION,
+        )
 
         # The retained key's embed discovery must now point at the owner's LIVE
         # embed endpoint and record owner_runtime_key.
@@ -154,7 +159,10 @@ def test_upgrade_alias_stages_embed_before_mcp_and_reports_degraded_state():
         ),
     ):
         published = mcp_daemon._publish_upgrade_alias(
-            "cccccccccccccccccccc", payload, capable=True
+            "cccccccccccccccccccc",
+            payload,
+            capable=True,
+            requested_protocol=mcp_broker.PROTOCOL_VERSION,
         )
 
     _assert(calls == ["embed", "mcp"], f"unexpected publication order: {calls}")
@@ -274,6 +282,7 @@ def test_retained_key_connect_mcp_uses_live_alias():
     tmp = tempfile.mkdtemp(prefix="kb_mcp_transition_")
     with _pinned_vault(tmp):
         paths.ensure_project_dir(tmp)
+        scope = mcp_broker.resolve_connection_scope(tmp)
         owner_pid = os.getpid()
         srv, port, stop, t, observed_ops = _stub_probe_server(owner_pid)
         try:
@@ -291,6 +300,7 @@ def test_retained_key_connect_mcp_uses_live_alias():
                     "project_cwd": tmp,
                     "connection_id": "retained-key-test",
                     "proxy_pid": os.getpid(),
+                    "scope": scope.payload(),
                 })
                 sock.close()
             finally:

@@ -345,8 +345,8 @@ def test_governed_maintenance_logs_only_structural_summary(tmp_path, monkeypatch
         "suggestion_count": 0,
     }
     captured: dict[str, dict] = {}
-    monkeypatch.setattr(maintenance.paths, "is_unlatched_mode", lambda: False)
-    monkeypatch.setattr(maintenance.paths, "is_disabled", lambda: False)
+    monkeypatch.setattr(maintenance.paths, "is_unlatched_mode", lambda *_args: False)
+    monkeypatch.setattr(maintenance.paths, "is_disabled", lambda *_args: False)
     monkeypatch.setattr(
         maintenance.workstream_automation,
         "run_governed",
@@ -360,7 +360,7 @@ def test_governed_maintenance_logs_only_structural_summary(tmp_path, monkeypatch
     monkeypatch.setattr(
         maintenance,
         "_log",
-        lambda _project, row: captured.setdefault("maintenance", row),
+        lambda _project, row, **_kwargs: captured.setdefault("maintenance", row),
     )
 
     result = maintenance.run_workstream_governed(str(tmp_path))
@@ -415,12 +415,12 @@ def test_shadow_maintenance_reconciles_baselines_and_restore_before_derivation(
     monkeypatch.setattr(
         maintenance.db,
         "connect",
-        lambda project_path=None: _CommitCheckingConnection(
+        lambda project_path=None, **_kwargs: _CommitCheckingConnection(
             real_connect(project_path)
         ),
     )
-    monkeypatch.setattr(maintenance.paths, "is_unlatched_mode", lambda: False)
-    monkeypatch.setattr(maintenance.paths, "is_disabled", lambda: False)
+    monkeypatch.setattr(maintenance.paths, "is_unlatched_mode", lambda *_args: False)
+    monkeypatch.setattr(maintenance.paths, "is_disabled", lambda *_args: False)
     monkeypatch.setattr(
         maintenance.lifecycle_receipts,
         "reconcile_legacy_workstream_baselines",

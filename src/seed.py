@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 import hashlib
@@ -29,6 +30,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 import codex_transcript  # noqa: E402
 import cursor_transcript  # noqa: E402
 import paths  # noqa: E402
+import project_config  # noqa: E402
 
 DEFAULT_LOOKBACK_DAYS = 90
 LOOKBACK_CHOICES = (5, 14, 30, 90)
@@ -269,6 +271,23 @@ class CursorSeedPreviewError(SeedPreviewError):
     pass
 
 
+class SeedBindingChangedError(SeedPreviewError):
+    """The project no longer selects the KB captured for this seed run."""
+
+    def __init__(self, reason: str, message: str):
+        super().__init__(message)
+        self.reason = reason
+
+
+@dataclass(frozen=True)
+class SeedBindingSnapshot:
+    """Exact project binding and KB selected before seed source discovery."""
+
+    revision: str
+    kb_dir: Path
+    session_id: str | None = None
+
+
 class SeedWriteBlocked(RuntimeError):
     def __init__(self, reason: str, message: str):
         super().__init__(message)
@@ -281,6 +300,130 @@ class SeedApprovalError(ValueError):
 
 class SeedSourceLedgerError(RuntimeError):
     """The existing source-import ledger could not be read safely."""
+
+
+def _same_seed_target(left: Path, right: Path) -> bool:
+    return os.path.normcase(str(left)) == os.path.normcase(str(right))
+
+
+def _seed_session_id(explicit: str | None = None) -> str | None:
+    environment_session = project_config.current_agent_session_id()
+    if environment_session is not None:
+        return environment_session
+    return explicit.strip() if explicit and explicit.strip() else None
+
+
+def _binding_changed(reason: str = "target_changed") -> SeedBindingChangedError:
+    if reason == "unlatched":
+        return SeedBindingChangedError(
+            reason,
+            "Latch is Unlatched for this project; rerun seed after /latch.",
+        )
+    return SeedBindingChangedError(
+        reason,
+        "The project's Latch KB changed during seed; start a fresh seed run.",
+    )
+
+
+def snapshot_seed_binding(
+    project_path: str,
+    *,
+    session_id: str | None = None,
+) -> SeedBindingSnapshot:
+    """Capture one current project target under the transition access lock."""
+    import lockfile  # noqa: WPS433
+
+    try:
+        with lockfile.project_access_lock(project_path) as locked_kb:
+            assert locked_kb is not None
+            target = project_config.resolve(project_path)
+            if target.state != project_config.MODE_LATCHED:
+                raise _binding_changed("unlatched")
+            sid = _seed_session_id(session_id)
+            if sid is not None:
+                if project_config.current_session_revision(
+                    project_path, sid,
+                ) != target.revision:
+                    raise SeedBindingChangedError(
+                        "stale_session_binding",
+                        "This agent task belongs to an older project KB; "
+                        "start a fresh task before seeding.",
+                    )
+            elif project_config.is_agent_context():
+                raise SeedBindingChangedError(
+                    "stale_session_binding",
+                    "Latch cannot verify this agent task's project KB; "
+                    "start a fresh task before seeding.",
+                )
+            return SeedBindingSnapshot(
+                revision=target.revision,
+                kb_dir=Path(locked_kb),
+                session_id=sid,
+            )
+    except SeedBindingChangedError:
+        raise
+    except lockfile.ProjectTargetChangedError as exc:
+        raise _binding_changed(exc.reason) from exc
+    except project_config.ProjectConfigError as exc:
+        raise _binding_changed() from exc
+
+
+@contextmanager
+def seed_binding_access(
+    project_path: str,
+    snapshot: SeedBindingSnapshot,
+):
+    """Hold project access only while the captured seed target is current."""
+    import lockfile  # noqa: WPS433
+
+    try:
+        with lockfile.project_access_lock(project_path) as locked_kb:
+            assert locked_kb is not None
+            target = project_config.resolve(project_path)
+            revision = target.revision
+            if (
+                target.state != project_config.MODE_LATCHED
+            ) or revision != snapshot.revision or not _same_seed_target(
+                Path(locked_kb), snapshot.kb_dir,
+            ):
+                raise _binding_changed(
+                    "unlatched"
+                    if target.state == project_config.MODE_UNLATCHED
+                    else "target_changed"
+                )
+            if snapshot.session_id is not None and (
+                project_config.current_session_revision(
+                    project_path,
+                    snapshot.session_id,
+                    resolved_target=target,
+                )
+                != snapshot.revision
+            ):
+                raise SeedBindingChangedError(
+                    "stale_session_binding",
+                    "This agent task belongs to an older project KB; "
+                    "start a fresh task before seeding.",
+                )
+            yield Path(locked_kb)
+    except SeedBindingChangedError:
+        raise
+    except lockfile.ProjectTargetChangedError as exc:
+        raise _binding_changed(exc.reason) from exc
+    except project_config.ProjectConfigError as exc:
+        raise _binding_changed() from exc
+
+
+@contextmanager
+def seed_apply_access(
+    project_path: str,
+    snapshot: SeedBindingSnapshot,
+):
+    """Keep the exact seed target leased across the complete write batch."""
+    import lockfile  # noqa: WPS433
+
+    with seed_binding_access(project_path, snapshot) as locked_kb:
+        with lockfile.writer_lock(project_path):
+            yield locked_kb
 
 
 @dataclass
@@ -466,7 +609,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return ap.parse_args(argv)
 
 
-def prompt_choices(args: argparse.Namespace) -> None:
+def prompt_choices(
+    args: argparse.Namespace,
+    *,
+    binding_snapshot: SeedBindingSnapshot | None = None,
+) -> None:
     stream = sys.stderr if args.format == "json" else sys.stdout
     for raw in args.cursor_transcript:
         path = Path(raw).expanduser()
@@ -480,7 +627,11 @@ def prompt_choices(args: argparse.Namespace) -> None:
             stream=stream,
         )
     if args.source == "auto":
-        args.source = _prompt_source(args, stream=stream)
+        args.source = _prompt_source(
+            args,
+            stream=stream,
+            binding_snapshot=binding_snapshot,
+        )
     if args.max_sessions is None:
         args.max_sessions = _prompt_positive_int(
             "Maximum sessions to select after value/recency ranking",
@@ -554,8 +705,15 @@ def _prompt_source(
     args: argparse.Namespace,
     *,
     stream: Any = sys.stdout,
+    binding_snapshot: SeedBindingSnapshot | None = None,
 ) -> str:
-    default = default_source_choice(args)
+    default = (
+        default_source_choice(args)
+        if binding_snapshot is None
+        else default_source_choice(
+            args, binding_snapshot=binding_snapshot,
+        )
+    )
     if not sys.stdin.isatty():
         if default is None:
             raise SystemExit(
@@ -598,14 +756,27 @@ def _prompt_source(
         )
 
 
-def default_source_choice(args: argparse.Namespace) -> str | None:
-    available = available_sources(args)
+def default_source_choice(
+    args: argparse.Namespace,
+    *,
+    binding_snapshot: SeedBindingSnapshot | None = None,
+) -> str | None:
+    available = available_sources(
+        args, binding_snapshot=binding_snapshot,
+    )
     if len(available) == 1:
         return available[0]
     return None
 
 
-def available_sources(args: argparse.Namespace) -> list[str]:
+def available_sources(
+    args: argparse.Namespace,
+    *,
+    binding_snapshot: SeedBindingSnapshot | None = None,
+) -> list[str]:
+    if binding_snapshot is not None:
+        with seed_binding_access(args.project, binding_snapshot):
+            return available_sources(args)
     out: list[str] = []
     if (Path(args.claude_home) / "projects").is_dir():
         out.append("claude")
@@ -1534,6 +1705,7 @@ def coverage_plan(
     eligible: int,
     project_path: str | None = None,
     discovery_omitted: int = 0,
+    binding_snapshot: SeedBindingSnapshot | None = None,
 ) -> dict[str, Any]:
     """Exact per-run coverage, derived from pre-scan counts before any call.
 
@@ -1549,7 +1721,13 @@ def coverage_plan(
     if project_path is not None:
         try:
             import budget  # noqa: WPS433
-            remaining_daily = budget.remaining_nonheal(project_path)
+            if binding_snapshot is None:
+                remaining_daily = budget.remaining_nonheal(project_path)
+            else:
+                with seed_binding_access(project_path, binding_snapshot):
+                    remaining_daily = budget.remaining_nonheal(project_path)
+        except SeedBindingChangedError:
+            raise
         except Exception:  # budget storage is advisory here, never fatal
             remaining_daily = None
     # Three independent limits can truncate a run. Whichever is smallest is the
@@ -1648,6 +1826,7 @@ def confirm_llm_budget(
     eligible: int,
     project_path: str | None = None,
     discovery_omitted: int = 0,
+    binding_snapshot: SeedBindingSnapshot | None = None,
 ) -> str:
     """Confirm coverage before spending calls; never truncate silently.
 
@@ -1661,7 +1840,13 @@ def confirm_llm_budget(
     if args.llm != "yes":
         return "proceed"
     stream = sys.stderr if args.format == "json" else sys.stdout
-    plan = coverage_plan(args, eligible, project_path, discovery_omitted)
+    plan = coverage_plan(
+        args,
+        eligible,
+        project_path,
+        discovery_omitted,
+        binding_snapshot,
+    )
     args.coverage_plan = plan
 
     if plan["full_coverage"]:
@@ -1863,6 +2048,7 @@ def llm_candidates(
     backend: str | None,
     focus_workstream: str | None = None,
     stats: dict[str, Any] | None = None,
+    binding_snapshot: SeedBindingSnapshot | None = None,
 ) -> list[SeedCandidate]:
     max_calls = min(max_calls, HARD_MAX_LLM_CALLS_CEILING)
     if stats is not None:
@@ -1890,9 +2076,15 @@ def llm_candidates(
     total_calls = len(call_sources)
     for index, src in enumerate(call_sources, start=1):
         try:
-            allowed, state = budget.check_and_record(
-                project_path, category="nonheal",
-            )
+            if binding_snapshot is None:
+                allowed, state = budget.check_and_record(
+                    project_path, category="nonheal",
+                )
+            else:
+                with seed_binding_access(project_path, binding_snapshot):
+                    allowed, state = budget.check_and_record(
+                        project_path, category="nonheal",
+                    )
         except OSError:
             if stats is not None:
                 stats["budget_storage_unavailable"] = True
@@ -4532,9 +4724,15 @@ def format_source_counts(sources: list[SeedSource]) -> str:
     return ", ".join(f"{agent}={count}" for agent, count in counts.items())
 
 
-def _cursor_seed_preview_path(project_path: str, session_id: str) -> Path:
+def _cursor_seed_preview_path(
+    project_path: str,
+    session_id: str,
+    *,
+    kb_dir: Path | None = None,
+) -> Path:
     sid_key = hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:24]
-    return paths.ensure_project_dir(project_path) / f"cursor_seed_preview.{sid_key}.json"
+    parent = kb_dir if kb_dir is not None else paths.ensure_project_dir(project_path)
+    return parent / f"cursor_seed_preview.{sid_key}.json"
 
 
 def _cursor_seed_preview_digest(payload: dict[str, Any]) -> str:
@@ -4542,6 +4740,28 @@ def _cursor_seed_preview_digest(payload: dict[str, Any]) -> str:
         payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
     ).encode("utf-8")
     return hashlib.sha256(canonical).hexdigest()
+
+
+def _seed_binding_payload(snapshot: SeedBindingSnapshot) -> dict[str, str]:
+    return {
+        "binding_revision": snapshot.revision,
+        "kb_fingerprint": hashlib.sha256(
+            os.path.normcase(str(snapshot.kb_dir)).encode("utf-8")
+        ).hexdigest(),
+    }
+
+
+def _validate_seed_binding_payload(
+    body: dict[str, Any],
+    snapshot: SeedBindingSnapshot,
+    *,
+    error_type: type[SeedPreviewError],
+) -> None:
+    expected = _seed_binding_payload(snapshot)
+    if any(body.get(key) != value for key, value in expected.items()):
+        raise error_type(
+            "seed preview belongs to another project KB binding; rerun preview"
+        )
 
 
 def seed_preview_source_locator(agent: str, source_id: str) -> str:
@@ -4637,8 +4857,12 @@ def write_cursor_seed_preview(
     llm_stats: dict[str, Any] | None = None,
     discovery_stats: dict[str, Any] | None = None,
     llm_refinement_empty: bool = False,
+    binding_snapshot: SeedBindingSnapshot | None = None,
 ) -> str:
     """Cache the exact reviewed Cursor set without retaining transcript text."""
+    snapshot = binding_snapshot or snapshot_seed_binding(
+        project_path, session_id=session_id,
+    )
     cached_sources = list(sources)
     cached_apply_sources = (
         list(apply_sources) if apply_sources is not None else cached_sources
@@ -4648,10 +4872,11 @@ def write_cursor_seed_preview(
         for source in [*cached_sources, *cached_apply_sources]
     }
     payload = {
-        "version": 4,
+        "version": 5,
         "extractor_version": SEED_EXTRACTOR_VERSION,
         "created_at": utc_now().isoformat(),
         "project_fingerprint": project_scope_fingerprint(project_path),
+        **_seed_binding_payload(snapshot),
         "session_fingerprint": hashlib.sha256(
             session_id.encode("utf-8", errors="replace")
         ).hexdigest(),
@@ -4678,12 +4903,19 @@ def write_cursor_seed_preview(
     }
     digest = _cursor_seed_preview_digest(payload)
     body = {**payload, "preview_digest": digest}
-    path = _cursor_seed_preview_path(project_path, session_id)
-    prune_cursor_seed_preview_cache(
-        project_path,
-        keep=SEED_PREVIEW_CACHE_MAX_FILES - 1,
-    )
-    _write_private_preview_file(path, body)
+    with seed_binding_access(project_path, snapshot) as locked_kb:
+        assert locked_kb is not None
+        target_kb = locked_kb
+        target_kb.mkdir(parents=True, exist_ok=True)
+        path = _cursor_seed_preview_path(
+            project_path, session_id, kb_dir=target_kb,
+        )
+        prune_cursor_seed_preview_cache(
+            project_path,
+            keep=SEED_PREVIEW_CACHE_MAX_FILES - 1,
+            kb_dir=target_kb,
+        )
+        _write_private_preview_file(path, body)
     return digest
 
 
@@ -4691,15 +4923,26 @@ def load_cursor_seed_preview(
     *, project_path: str, session_id: str, preview_digest: str,
     include_apply_state: bool = False,
     now: datetime | None = None,
+    binding_snapshot: SeedBindingSnapshot | None = None,
 ) -> Any:
     """Load only the exact cached Cursor preview approved by digest."""
     if not re.fullmatch(r"[0-9a-f]{64}", preview_digest or ""):
         raise CursorSeedPreviewError("Cursor seed preview digest is missing or invalid")
-    path = _cursor_seed_preview_path(project_path, session_id)
-    try:
-        body = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise CursorSeedPreviewError("Cursor seed preview cache is missing or unreadable") from exc
+    snapshot = binding_snapshot or snapshot_seed_binding(
+        project_path, session_id=session_id,
+    )
+    with seed_binding_access(project_path, snapshot) as locked_kb:
+        assert locked_kb is not None
+        target_kb = locked_kb
+        path = _cursor_seed_preview_path(
+            project_path, session_id, kb_dir=target_kb,
+        )
+        try:
+            body = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise CursorSeedPreviewError(
+                "Cursor seed preview cache is missing or unreadable"
+            ) from exc
     if not isinstance(body, dict):
         raise CursorSeedPreviewError("Cursor seed preview cache is malformed")
     recorded_digest = body.pop("preview_digest", None)
@@ -4712,7 +4955,10 @@ def load_cursor_seed_preview(
         project_path
     ) or body.get("session_fingerprint") != session_fingerprint:
         raise CursorSeedPreviewError("Cursor seed preview belongs to another project or session")
-    if body.get("version") != 4 \
+    _validate_seed_binding_payload(
+        body, snapshot, error_type=CursorSeedPreviewError,
+    )
+    if body.get("version") != 5 \
             or body.get("extractor_version") != SEED_EXTRACTOR_VERSION:
         raise CursorSeedPreviewError(
             "seed extractor changed; rerun preview before apply"
@@ -4725,10 +4971,11 @@ def load_cursor_seed_preview(
             now=now,
         )
     except CursorSeedPreviewError:
-        try:
-            path.unlink()
-        except OSError:
-            pass
+        remove_cursor_seed_preview(
+            project_path,
+            session_id,
+            binding_snapshot=snapshot,
+        )
         raise
     try:
         sources = [SeedSource(**item) for item in body.get("sources", [])]
@@ -4772,16 +5019,36 @@ def load_cursor_seed_preview(
     )
 
 
-def remove_cursor_seed_preview(project_path: str, session_id: str) -> None:
+def remove_cursor_seed_preview(
+    project_path: str,
+    session_id: str,
+    *,
+    binding_snapshot: SeedBindingSnapshot | None = None,
+) -> None:
     try:
-        _cursor_seed_preview_path(project_path, session_id).unlink()
-    except OSError:
+        snapshot = binding_snapshot or snapshot_seed_binding(
+            project_path, session_id=session_id,
+        )
+        with seed_binding_access(project_path, snapshot) as locked_kb:
+            assert locked_kb is not None
+            target_kb = locked_kb
+            _cursor_seed_preview_path(
+                project_path,
+                session_id,
+                kb_dir=target_kb,
+            ).unlink()
+    except (OSError, SeedBindingChangedError):
         pass
 
 
-def _seed_preview_path(project_path: str, preview_digest: str) -> Path:
+def _seed_preview_path(
+    project_path: str,
+    preview_digest: str,
+    *,
+    kb_dir: Path | None = None,
+) -> Path:
     return (
-        paths.project_dir(project_path)
+        (kb_dir if kb_dir is not None else paths.project_dir(project_path))
         / f"seed_preview.{preview_digest[:24]}.json"
     )
 
@@ -4815,12 +5082,14 @@ def write_seed_preview(
     discovery_stats: dict[str, Any],
     llm_refinement_empty: bool,
     cursor_history: bool = False,
+    binding_snapshot: SeedBindingSnapshot | None = None,
 ) -> str:
     """Cache one exact shared-provider review without retaining transcript text.
 
     Exact current-session Cursor slash commands keep their separate
     session-bound receipt cache. Opt-in Cursor history uses this shared lane.
     """
+    snapshot = binding_snapshot or snapshot_seed_binding(project_path)
     cached_sources = list(sources)
     cached_apply_sources = list(apply_sources)
     source_agents = {
@@ -4828,10 +5097,11 @@ def write_seed_preview(
         for source in [*cached_sources, *cached_apply_sources]
     }
     payload = {
-        "version": 3,
+        "version": 4,
         "extractor_version": SEED_EXTRACTOR_VERSION,
         "created_at": utc_now().isoformat(),
         "project_fingerprint": project_scope_fingerprint(project_path),
+        **_seed_binding_payload(snapshot),
         "source_choice": source_choice,
         "cursor_history": bool(cursor_history),
         "sources": [
@@ -4856,13 +5126,17 @@ def write_seed_preview(
     }
     digest = _cursor_seed_preview_digest(payload)
     body = {**payload, "preview_digest": digest}
-    path = _seed_preview_path(project_path, digest)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    prune_seed_preview_cache(
-        project_path,
-        keep=SEED_PREVIEW_CACHE_MAX_FILES - 1,
-    )
-    _write_private_preview_file(path, body)
+    with seed_binding_access(project_path, snapshot) as locked_kb:
+        assert locked_kb is not None
+        target_kb = locked_kb
+        path = _seed_preview_path(project_path, digest, kb_dir=target_kb)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        prune_seed_preview_cache(
+            project_path,
+            keep=SEED_PREVIEW_CACHE_MAX_FILES - 1,
+            kb_dir=target_kb,
+        )
+        _write_private_preview_file(path, body)
     return digest
 
 
@@ -4873,6 +5147,7 @@ def load_seed_preview(
     preview_digest: str,
     cursor_history: bool = False,
     now: datetime | None = None,
+    binding_snapshot: SeedBindingSnapshot | None = None,
 ) -> tuple[
     list[SeedSource],
     list[SeedCandidate],
@@ -4887,11 +5162,19 @@ def load_seed_preview(
     """Load an exact shared-provider review approved by digest."""
     if not re.fullmatch(r"[0-9a-f]{64}", preview_digest or ""):
         raise SeedPreviewError("seed preview digest is missing or invalid")
-    path = _seed_preview_path(project_path, preview_digest)
-    try:
-        body = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise SeedPreviewError("seed preview cache is missing or unreadable") from exc
+    snapshot = binding_snapshot or snapshot_seed_binding(project_path)
+    with seed_binding_access(project_path, snapshot) as locked_kb:
+        assert locked_kb is not None
+        target_kb = locked_kb
+        path = _seed_preview_path(
+            project_path, preview_digest, kb_dir=target_kb,
+        )
+        try:
+            body = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise SeedPreviewError(
+                "seed preview cache is missing or unreadable"
+            ) from exc
     if not isinstance(body, dict):
         raise SeedPreviewError("seed preview cache is malformed")
     recorded_digest = body.pop("preview_digest", None)
@@ -4901,6 +5184,7 @@ def load_seed_preview(
     if body.get("project_fingerprint") != project_scope_fingerprint(project_path) \
             or body.get("source_choice") != source_choice:
         raise SeedPreviewError("seed preview belongs to another project or source choice")
+    _validate_seed_binding_payload(body, snapshot, error_type=SeedPreviewError)
     cached_cursor_history = body.get("cursor_history", False)
     if not isinstance(cached_cursor_history, bool):
         raise SeedPreviewError("seed preview apply state is malformed")
@@ -4909,7 +5193,7 @@ def load_seed_preview(
             "seed preview Cursor history consent does not match; rerun apply "
             "with the same --cursor-history choice"
         )
-    if body.get("version") != 3 \
+    if body.get("version") != 4 \
             or body.get("extractor_version") != SEED_EXTRACTOR_VERSION:
         raise SeedPreviewError("seed extractor changed; rerun preview before apply")
     try:
@@ -4920,10 +5204,11 @@ def load_seed_preview(
             now=now,
         )
     except SeedPreviewError:
-        try:
-            path.unlink()
-        except OSError:
-            pass
+        remove_seed_preview(
+            project_path,
+            preview_digest,
+            binding_snapshot=snapshot,
+        )
         raise
     try:
         sources = [SeedSource(**item) for item in body.get("sources", [])]
@@ -4960,10 +5245,23 @@ def load_seed_preview(
     )
 
 
-def remove_seed_preview(project_path: str, preview_digest: str) -> None:
+def remove_seed_preview(
+    project_path: str,
+    preview_digest: str,
+    *,
+    binding_snapshot: SeedBindingSnapshot | None = None,
+) -> None:
     try:
-        _seed_preview_path(project_path, preview_digest).unlink()
-    except OSError:
+        snapshot = binding_snapshot or snapshot_seed_binding(project_path)
+        with seed_binding_access(project_path, snapshot) as locked_kb:
+            assert locked_kb is not None
+            target_kb = locked_kb
+            _seed_preview_path(
+                project_path,
+                preview_digest,
+                kb_dir=target_kb,
+            ).unlink()
+    except (OSError, SeedBindingChangedError):
         pass
 
 
@@ -4973,8 +5271,9 @@ def _prune_seed_preview_pattern(
     pattern: str,
     keep: int,
     now: datetime | None,
+    kb_dir: Path | None = None,
 ) -> None:
-    parent = paths.project_dir(project_path)
+    parent = kb_dir if kb_dir is not None else paths.project_dir(project_path)
     current = now or utc_now()
     if current.tzinfo is None:
         current = current.replace(tzinfo=timezone.utc)
@@ -5016,13 +5315,31 @@ def prune_seed_preview_cache(
     *,
     keep: int = SEED_PREVIEW_CACHE_MAX_FILES,
     now: datetime | None = None,
+    kb_dir: Path | None = None,
+    binding_snapshot: SeedBindingSnapshot | None = None,
 ) -> None:
     """Bound abandoned generic review metadata and delete expired previews."""
+    if kb_dir is None:
+        try:
+            snapshot = binding_snapshot or snapshot_seed_binding(project_path)
+            with seed_binding_access(project_path, snapshot) as locked_kb:
+                assert locked_kb is not None
+                prune_seed_preview_cache(
+                    project_path,
+                    keep=keep,
+                    now=now,
+                    kb_dir=locked_kb,
+                    binding_snapshot=snapshot,
+                )
+        except SeedBindingChangedError:
+            pass
+        return
     _prune_seed_preview_pattern(
         project_path,
         pattern="seed_preview.*.json",
         keep=keep,
         now=now,
+        kb_dir=kb_dir,
     )
 
 
@@ -5031,13 +5348,31 @@ def prune_cursor_seed_preview_cache(
     *,
     keep: int = SEED_PREVIEW_CACHE_MAX_FILES,
     now: datetime | None = None,
+    kb_dir: Path | None = None,
+    binding_snapshot: SeedBindingSnapshot | None = None,
 ) -> None:
     """Bound abandoned Cursor review metadata and delete expired previews."""
+    if kb_dir is None:
+        try:
+            snapshot = binding_snapshot or snapshot_seed_binding(project_path)
+            with seed_binding_access(project_path, snapshot) as locked_kb:
+                assert locked_kb is not None
+                prune_cursor_seed_preview_cache(
+                    project_path,
+                    keep=keep,
+                    now=now,
+                    kb_dir=locked_kb,
+                    binding_snapshot=snapshot,
+                )
+        except SeedBindingChangedError:
+            pass
+        return
     _prune_seed_preview_pattern(
         project_path,
         pattern="cursor_seed_preview.*.json",
         keep=keep,
         now=now,
+        kb_dir=kb_dir,
     )
 
 
@@ -5056,13 +5391,20 @@ def resolve_existing_workstream_target(
         return None, "the project KB location could not be resolved"
     if not db_file.is_file():
         return None, "the project KB does not exist"
+    import db as db_store  # noqa: WPS433
+
     conn: sqlite3.Connection | None = None
     try:
-        conn = sqlite3.connect(db_file.resolve().as_uri() + "?mode=ro", uri=True)
-        conn.row_factory = sqlite3.Row
+        conn = db_store.open_existing_readonly(project_path)
         import workstreams  # noqa: WPS433
         resolution = workstreams.resolve_active(conn, int(workstream_id))
-    except sqlite3.Error:
+    except (
+        OSError,
+        sqlite3.Error,
+        project_config.ProjectConfigError,
+        db_store.ProjectTargetChangedError,
+        db_store.UnlatchedModeError,
+    ):
         return None, "the project KB could not be read"
     finally:
         if conn is not None:
@@ -5103,7 +5445,10 @@ def seed_source_import_key(
 
 
 def split_applied_sources(
-    sources: list[SeedSource], *, project_path: str, workstream_scope: str,
+    sources: list[SeedSource],
+    *,
+    project_path: str,
+    workstream_scope: str,
 ) -> tuple[list[SeedSource], list[SeedSource]]:
     """Read an existing ledger without creating or migrating preview-time state.
 
@@ -5141,9 +5486,11 @@ def split_applied_sources(
         raise SeedSourceLedgerError(
             "The seed source ledger location is not a readable database file."
         )
+    import db as db_store  # noqa: WPS433
+
     conn: sqlite3.Connection | None = None
     try:
-        conn = sqlite3.connect(db_file.resolve().as_uri() + "?mode=ro", uri=True)
+        conn = db_store.open_existing_readonly(project_path)
         table = conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' "
             "AND name='seed_source_import'"
@@ -5167,7 +5514,13 @@ def split_applied_sources(
         pending = [source for key, source in keyed.items() if key not in applied_keys]
         applied = [source for key, source in keyed.items() if key in applied_keys]
         return pending, applied
-    except (OSError, sqlite3.Error) as exc:
+    except (
+        OSError,
+        sqlite3.Error,
+        project_config.ProjectConfigError,
+        db_store.ProjectTargetChangedError,
+        db_store.UnlatchedModeError,
+    ) as exc:
         raise SeedSourceLedgerError(
             "The existing seed source ledger is unavailable or unreadable."
         ) from exc
@@ -5438,14 +5791,14 @@ def apply_candidates(
     workstream_scope: str = "project",
     source_failure_codes: dict[str, str] | None = None,
     finalize_sources: bool = True,
+    binding_snapshot: SeedBindingSnapshot | None = None,
 ) -> SeedApplyResult:
     import heal  # noqa: WPS433
     import db  # noqa: WPS433
     import artifacts as artifact_store  # noqa: WPS433
-    import lockfile  # noqa: WPS433
     import workstreams  # noqa: WPS433
 
-    if paths.is_unlatched_mode():
+    if paths.is_unlatched_mode(project_path):
         raise SeedWriteBlocked(
             "unlatched",
             "Latch is Unlatched; initial-KB apply was blocked before any write.",
@@ -5483,9 +5836,13 @@ def apply_candidates(
                 source_error_by_key.setdefault(source_key, error_code)
 
     try:
-        lock_context = lockfile.writer_lock(project_path)
-        with lock_context:
-            conn = db.connect(project_path)
+        snapshot = binding_snapshot or snapshot_seed_binding(project_path)
+        with seed_apply_access(project_path, snapshot) as locked_kb:
+            conn = db.connect(
+                project_path,
+                expected_binding_revision=snapshot.revision,
+                expected_kb_dir=locked_kb,
+            )
             try:
                 if existing_workstream_id is not None:
                     requested_existing_id = int(existing_workstream_id)
@@ -5878,6 +6235,8 @@ def apply_candidates(
                 conn.close()
     except SeedWriteBlocked:
         raise
+    except SeedBindingChangedError as exc:
+        raise SeedWriteBlocked(exc.reason, str(exc)) from exc
     except Exception as exc:
         # The lock timeout occurs before ledger or node writes. Do not expose
         # local paths or raw exception text in the structured receipt.
@@ -5910,6 +6269,18 @@ def emit_seed_cli_failure(
         print(message, file=sys.stderr)
     else:
         print(message, file=sys.stderr)
+
+
+def emit_seed_binding_failure(
+    args: argparse.Namespace,
+    exc: SeedBindingChangedError,
+) -> int:
+    emit_seed_cli_failure(
+        args,
+        code=exc.reason,
+        message=f"Initial-KB seed unavailable: {exc}",
+    )
+    return 1
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -5983,8 +6354,18 @@ def main(argv: list[str] | None = None) -> int:
     if disabled:
         print(disabled, file=sys.stderr)
         return 2
-    prompt_choices(args)
     args.project = str(Path(args.project).resolve())
+    try:
+        binding_snapshot = snapshot_seed_binding(
+            args.project,
+            session_id=args.cursor_session_id,
+        )
+    except SeedBindingChangedError as exc:
+        return emit_seed_binding_failure(args, exc)
+    try:
+        prompt_choices(args, binding_snapshot=binding_snapshot)
+    except SeedBindingChangedError as exc:
+        return emit_seed_binding_failure(args, exc)
     if args.cursor_history and "cursor" not in source_agents(args.source):
         print(
             "--cursor-history requires Cursor in the selected source; use "
@@ -6013,9 +6394,15 @@ def main(argv: list[str] | None = None) -> int:
         print("--workstream-id must be a positive node id.", file=sys.stderr)
         return 2
     if args.workstream_id is not None:
-        resolved_workstream_id, workstream_error = resolve_existing_workstream_target(
-            args.project, args.workstream_id,
-        )
+        try:
+            with seed_binding_access(args.project, binding_snapshot):
+                resolved_workstream_id, workstream_error = (
+                    resolve_existing_workstream_target(
+                        args.project, args.workstream_id,
+                    )
+                )
+        except SeedBindingChangedError as exc:
+            return emit_seed_binding_failure(args, exc)
         if workstream_error:
             print(
                 f"--workstream-id {args.workstream_id} is unavailable: "
@@ -6071,7 +6458,10 @@ def main(argv: list[str] | None = None) -> int:
                 session_id=args.cursor_session_id,
                 preview_digest=args.preview_digest,
                 include_apply_state=True,
+                binding_snapshot=binding_snapshot,
             )
+        except SeedBindingChangedError as exc:
+            return emit_seed_binding_failure(args, exc)
         except CursorSeedPreviewError as exc:
             emit_seed_cli_failure(
                 args,
@@ -6117,7 +6507,10 @@ def main(argv: list[str] | None = None) -> int:
                 source_choice=args.source,
                 preview_digest=args.preview_digest,
                 cursor_history=bool(args.cursor_history),
+                binding_snapshot=binding_snapshot,
             )
+        except SeedBindingChangedError as exc:
+            return emit_seed_binding_failure(args, exc)
         except SeedPreviewError as exc:
             emit_seed_cli_failure(
                 args,
@@ -6169,11 +6562,14 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         if not args.force_reimport:
             try:
-                sources, already_applied = split_applied_sources(
-                    sources,
-                    project_path=args.project,
-                    workstream_scope=scope_key,
-                )
+                with seed_binding_access(args.project, binding_snapshot):
+                    sources, already_applied = split_applied_sources(
+                        sources,
+                        project_path=args.project,
+                        workstream_scope=scope_key,
+                    )
+            except SeedBindingChangedError as exc:
+                return emit_seed_binding_failure(args, exc)
             except SeedSourceLedgerError:
                 emit_seed_cli_failure(
                     args,
@@ -6188,14 +6584,19 @@ def main(argv: list[str] | None = None) -> int:
 
         args.sources_selected = len(sources)
 
-        if args.llm == "yes" and sources \
-                and not prepare_llm_budget_storage(args.project):
-            if args.format == "json":
-                print(json.dumps({
-                    "ok": False,
-                    "error": "budget_storage_unavailable",
-                }))
-            return 1
+        if args.llm == "yes" and sources:
+            try:
+                with seed_binding_access(args.project, binding_snapshot):
+                    budget_ready = prepare_llm_budget_storage(args.project)
+            except SeedBindingChangedError as exc:
+                return emit_seed_binding_failure(args, exc)
+            if not budget_ready:
+                if args.format == "json":
+                    print(json.dumps({
+                        "ok": False,
+                        "error": "budget_storage_unavailable",
+                    }))
+                return 1
 
         # Coverage is confirmed against every ELIGIBLE session -- the count
         # before --last-sessions and --max-llm-calls reduce it. discover_sources
@@ -6211,7 +6612,16 @@ def main(argv: list[str] | None = None) -> int:
             omitted = int(stats_now.get("scan_truncated", 0) or 0) + int(
                 stats_now.get("inventory_truncated", 0) or 0
             )
-            verdict = confirm_llm_budget(args, eligible, args.project, omitted)
+            try:
+                verdict = confirm_llm_budget(
+                    args,
+                    eligible,
+                    args.project,
+                    omitted,
+                    binding_snapshot,
+                )
+            except SeedBindingChangedError as exc:
+                return emit_seed_binding_failure(args, exc)
             if verdict == "cancel":
                 emit_seed_cli_failure(
                     args,
@@ -6244,11 +6654,14 @@ def main(argv: list[str] | None = None) -> int:
                 return 2
             if not args.force_reimport:
                 try:
-                    sources, already_applied = split_applied_sources(
-                        sources,
-                        project_path=args.project,
-                        workstream_scope=scope_key,
-                    )
+                    with seed_binding_access(args.project, binding_snapshot):
+                        sources, already_applied = split_applied_sources(
+                            sources,
+                            project_path=args.project,
+                            workstream_scope=scope_key,
+                        )
+                except SeedBindingChangedError as exc:
+                    return emit_seed_binding_failure(args, exc)
                 except SeedSourceLedgerError:
                     emit_seed_cli_failure(
                         args,
@@ -6295,15 +6708,19 @@ def main(argv: list[str] | None = None) -> int:
 
         llm = []
         if args.llm == "yes" and call_sources:
-            llm = llm_candidates(
-                call_sources,
-                project_path=args.project,
-                max_calls=args.max_llm_calls,
-                max_candidates=effective_max_candidates(args),
-                backend=args.backend,
-                focus_workstream=args.new_workstream,
-                stats=args.llm_stats,
-            )
+            try:
+                llm = llm_candidates(
+                    call_sources,
+                    project_path=args.project,
+                    max_calls=args.max_llm_calls,
+                    max_candidates=effective_max_candidates(args),
+                    backend=args.backend,
+                    focus_workstream=args.new_workstream,
+                    stats=args.llm_stats,
+                    binding_snapshot=binding_snapshot,
+                )
+            except SeedBindingChangedError as exc:
+                return emit_seed_binding_failure(args, exc)
             if args.llm_stats.get("budget_storage_unavailable"):
                 if args.format == "json":
                     print(json.dumps({
@@ -6391,7 +6808,10 @@ def main(argv: list[str] | None = None) -> int:
                     llm_stats=args.llm_stats,
                     discovery_stats=args.discovery_stats,
                     llm_refinement_empty=args.llm_refinement_empty,
+                    binding_snapshot=binding_snapshot,
                 )
+            except SeedBindingChangedError as exc:
+                return emit_seed_binding_failure(args, exc)
             except OSError:
                 emit_seed_cli_failure(
                     args,
@@ -6417,7 +6837,10 @@ def main(argv: list[str] | None = None) -> int:
                     discovery_stats=args.discovery_stats,
                     llm_refinement_empty=args.llm_refinement_empty,
                     cursor_history=bool(args.cursor_history),
+                    binding_snapshot=binding_snapshot,
                 )
+            except SeedBindingChangedError as exc:
+                return emit_seed_binding_failure(args, exc)
             except OSError:
                 args.preview_digest = None
                 args.preview_cache_unavailable = True
@@ -6428,6 +6851,12 @@ def main(argv: list[str] | None = None) -> int:
                     "--apply run or repair vault write access.",
                     file=sys.stderr,
                 )
+
+    try:
+        with seed_binding_access(args.project, binding_snapshot):
+            pass
+    except SeedBindingChangedError as exc:
+        return emit_seed_binding_failure(args, exc)
 
     if args.dismiss_all and not candidates:
         emit_seed_cli_failure(
@@ -6531,6 +6960,7 @@ def main(argv: list[str] | None = None) -> int:
             # are approved and every unselected item is intentionally dismissed
             # for these exact source revisions.
             finalize_sources=True,
+            binding_snapshot=binding_snapshot,
         )
     except SeedWriteBlocked as exc:
         emit_seed_cli_failure(
@@ -6542,9 +6972,17 @@ def main(argv: list[str] | None = None) -> int:
     if isinstance(applied, list):  # compatibility for embedders/tests of the old helper
         applied = SeedApplyResult(inserted_ids=list(applied))
     if cached_cursor_apply and args.cursor_session_id and applied.complete:
-        remove_cursor_seed_preview(args.project, args.cursor_session_id)
+        remove_cursor_seed_preview(
+            args.project,
+            args.cursor_session_id,
+            binding_snapshot=binding_snapshot,
+        )
     if cached_seed_apply and args.preview_digest and applied.complete:
-        remove_seed_preview(args.project, args.preview_digest)
+        remove_seed_preview(
+            args.project,
+            args.preview_digest,
+            binding_snapshot=binding_snapshot,
+        )
     print(
         apply_success_message(applied, approved_candidates),
         file=status_stream,

@@ -383,6 +383,7 @@ def check_commands_installed() -> tuple[str, str, str]:
         "/bin/run_kb_gate.sh",
         "/bin/run_latch_gate.sh",
         "/bin/latch_baseline.sh",
+        "/bin/latch.sh",
         "/bin/unlatch.sh",
         "/bin/latch_gate_report.sh",
         "/bin/run_compact_now.sh",

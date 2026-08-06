@@ -37,6 +37,7 @@ import correlator  # noqa: E402
 import db  # noqa: E402
 import embeddings  # noqa: E402
 import lifecycle_signals  # noqa: E402
+import lockfile  # noqa: E402
 import log_utils  # noqa: E402
 import model_backends  # noqa: E402
 import paths  # noqa: E402
@@ -252,6 +253,7 @@ Output JSON only. No markdown fences, no commentary.
 def arbitrate(
     new: dict, old: dict, similarity: float,
     *, new_repos=frozenset(), old_repos=frozenset(),
+    project_path: str | None = None,
 ) -> dict:
     """Ask the selected model backend to decide supersede vs keep_both.
 
@@ -263,7 +265,7 @@ def arbitrate(
     so the arbitrator prefers keep_both/reconciled across disjoint scopes. They
     are evidence only — inline heal never blocks a collision merely because
     provenance differs."""
-    if paths.is_disabled() or paths.is_in_compact():
+    if paths.is_disabled(project_path) or paths.is_in_compact():
         return {"decision": "keep_both", "reason": "arbitrator skipped (disabled/in-compact)"}
     if _arbitrator_circuit_open():
         return {"decision": "keep_both", "reason": "arbitrator circuit open (repeated model backend timeouts; id=1570)"}
@@ -289,7 +291,10 @@ def arbitrate(
     if result.error is not None or result.text is None:
         if result.timed_out:
             _note_arbitrate_timeout()
-        _log(f"arbitrate {result.backend} subprocess failed: {result.error}")
+        _log(
+            project_path,
+            f"arbitrate {result.backend} subprocess failed: {result.error}",
+        )
         return {
             "decision": "keep_both",
             "reason": f"arbitrator failed ({result.backend}): {result.error}",
@@ -384,6 +389,7 @@ NIGHTLY_VALID_DECISIONS = ("supersede_a", "supersede_b", "keep_both", "reconcile
 def _arbitrate_nightly(
     older: dict, newer: dict, similarity: float,
     *, a_repos=frozenset(), b_repos=frozenset(),
+    project_path: str | None = None,
 ) -> dict:
     """Symmetric A/B arbitrator for nightly heal. Caller must pre-sort:
     `older` is the lower-updated_at node, `newer` is the higher. The prompt
@@ -394,7 +400,7 @@ def _arbitrate_nightly(
 
     Returns {"decision": <verb>, "reason": <str>}. On any failure, defaults
     to keep_both."""
-    if paths.is_disabled() or paths.is_in_compact():
+    if paths.is_disabled(project_path) or paths.is_in_compact():
         return {"decision": "keep_both", "reason": "arbitrator skipped (disabled/in-compact)"}
     if _arbitrator_circuit_open():
         return {"decision": "keep_both", "reason": "arbitrator circuit open (repeated model backend timeouts; id=1570)"}
@@ -424,7 +430,10 @@ def _arbitrate_nightly(
     if result.error is not None or result.text is None:
         if result.timed_out:
             _note_arbitrate_timeout()
-        _log(f"arbitrate_nightly {result.backend} subprocess failed: {result.error}")
+        _log(
+            project_path,
+            f"arbitrate_nightly {result.backend} subprocess failed: {result.error}",
+        )
         return {
             "decision": "keep_both",
             "reason": f"arbitrator failed ({result.backend}): {result.error}",
@@ -546,6 +555,7 @@ def _pick_by_ref_count(a: dict, b: dict) -> dict | None:
 def three_pass_arbitrate(
     a: dict, b: dict, *, similarity: float = 0.0, use_llm: bool = True,
     tier: str = "high", a_repos=frozenset(), b_repos=frozenset(),
+    project_path: str | None = None,
 ) -> dict:
     """Nightly arbitration. Two tiers (id=871):
 
@@ -619,6 +629,7 @@ def three_pass_arbitrate(
     )
     verdict = _arbitrate_nightly(
         older, newer, similarity, a_repos=older_repos, b_repos=newer_repos,
+        project_path=project_path,
     )
     decision = verdict["decision"]
     reason = verdict.get("reason", "")
@@ -1114,6 +1125,7 @@ def insert_with_heal(
     verdict = arbitrate(
         {"kind": kind, "title": title, "body": body}, top, top_sim,
         new_repos=new_repos, old_repos=old_repos,
+        project_path=project_path,
     )
     if verdict["decision"] == "supersede":
         apply_supersede(
@@ -1134,7 +1146,7 @@ def insert_with_heal(
 
 # ---------- nightly integrity pass ----------
 
-def run_integrity_pass(conn) -> dict:
+def run_integrity_pass(conn, project_path: str | None = None) -> dict:
     """Scan for and repair common bitrot:
 
     * orphan edges — src or dst no longer exist (should be rare with FK CASCADE,
@@ -1170,7 +1182,7 @@ def run_integrity_pass(conn) -> dict:
             summary["vec_backfilled"] = len(missing)
             conn.commit()
         except Exception as e:
-            _log(f"integrity vec pass failed (non-fatal): {e}")
+            _log(project_path, f"integrity vec pass failed (non-fatal): {e}")
 
     return summary
 
@@ -1187,6 +1199,8 @@ def nightly_heal(
     high_threshold: float = NIGHTLY_SIMILARITY_THRESHOLD,
     low_threshold: float = LOW_TIER_SIMILARITY_THRESHOLD,
     top_k: int = NIGHTLY_TOP_K,
+    expected_binding_revision: str | None = None,
+    expected_kb_dir: str | None = None,
 ) -> dict:
     """Nightly healer. Three phases:
 
@@ -1218,13 +1232,13 @@ def nightly_heal(
     Adjudicated pairs are idempotent because their edges short-circuit later
     sweeps. Deferred pairs deliberately reappear until budget is available.
     """
-    if paths.is_unlatched_mode():
+    if paths.is_unlatched_mode(project_path):
         return {
             "ok": False,
             "reason": "unlatched",
             "message": paths.UNLATCHED_MESSAGE,
         }
-    if paths.is_disabled():
+    if paths.is_disabled(project_path):
         return {"ok": False, "reason": "disabled"}
 
     summary: dict = {
@@ -1259,7 +1273,7 @@ def nightly_heal(
     }
 
     if integrity:
-        summary["integrity"] = run_integrity_pass(conn)
+        summary["integrity"] = run_integrity_pass(conn, project_path)
         _debug(f"integrity pass: {summary['integrity']}")
 
     if not contradictions:
@@ -1397,6 +1411,7 @@ def nightly_heal(
             tentative = three_pass_arbitrate(
                 a, b, similarity=sim, use_llm=False, tier="high",
                 a_repos=a_repos, b_repos=b_repos,
+                project_path=project_path,
             )
             if tentative["path"] != "skip":
                 _apply_verdict(conn, summary, tentative, a_id, b_id, project_path=project_path)
@@ -1452,8 +1467,12 @@ def nightly_heal(
         verdict = three_pass_arbitrate(
             a, b, similarity=sim, use_llm=True, tier=tier,
             a_repos=a_repos, b_repos=b_repos,
+            project_path=project_path,
         )
-        _apply_verdict(conn, summary, verdict, a_id, b_id)
+        _apply_verdict(
+            conn, summary, verdict, a_id, b_id,
+            project_path=project_path,
+        )
 
     try:
         summary["log_retention"] = log_utils.maintain_log_retention(project_path)
@@ -1465,6 +1484,8 @@ def nightly_heal(
         today = datetime.now(timezone.utc).date()
         summary["correlator"] = correlator.correlate(
             project_path, today - timedelta(days=1), today,
+            expected_binding_revision=expected_binding_revision,
+            expected_kb_dir=expected_kb_dir,
         )
     except Exception as e:
         _debug(f"correlator failed: {e}")
@@ -1517,11 +1538,13 @@ def _apply_verdict(
 
 # ---------- logging ----------
 
-def _log(msg: str) -> None:
-    log_path = paths.KB_ROOT / "heal.log"
+def _log(project_path: str | None, msg: str) -> None:
     try:
-        with log_path.open("a", encoding="utf-8") as f:
-            f.write(f"[{datetime.now().isoformat(timespec='seconds')}] {msg}\n")
+        lockfile.append_project_log(
+            project_path,
+            "heal.log",
+            f"[{datetime.now().isoformat(timespec='seconds')}] {msg}\n",
+        )
     except Exception:
         pass
 

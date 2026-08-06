@@ -1601,9 +1601,9 @@ def classify_gate(
     `error` string. Callers should treat None as "no judgment available"
     rather than a fourth label.
     """
-    if paths.is_unlatched_mode():
+    if paths.is_unlatched_mode(project_path):
         return unlatched_verdict()
-    if paths.is_disabled() or paths.is_in_compact():
+    if paths.is_disabled(project_path) or paths.is_in_compact():
         return {**_classifier_error("disabled/in-compact"), "skipped": True}
     if not use_llm:
         return {**_classifier_error("use_llm=False"), "skipped": True}
@@ -1890,14 +1890,14 @@ def adversary_classify(
     verdict. Same skip/budget/subprocess shape as classify_gate; returns an
     `_adversary_error` (objection="", verdict_delta="none") on any skip/error
     so the caller can attach it uniformly."""
-    if paths.is_unlatched_mode():
+    if paths.is_unlatched_mode(project_path):
         return {
             **_adversary_error(paths.UNLATCHED_MESSAGE),
             "reason": "unlatched",
             "message": paths.UNLATCHED_MESSAGE,
             "skipped": True,
         }
-    if paths.is_disabled() or paths.is_in_compact():
+    if paths.is_disabled(project_path) or paths.is_in_compact():
         return {**_adversary_error("disabled/in-compact"), "skipped": True}
     if not use_llm:
         return {**_adversary_error("use_llm=False"), "skipped": True}
@@ -1968,7 +1968,7 @@ def _gate_receipt_summary(verdict: dict, evidence: list[dict]) -> str:
     if verdict.get("reason") == "unlatched":
         return (
             "Latch gate was skipped because Latch is currently UNLATCHED. "
-            "Run /unlatch to re-latch. If LATCH_UNLATCHED is set, unset it too."
+            "Run /latch to re-latch. If LATCH_UNLATCHED is set, unset it too."
         )
     counts = []
     if evidence:
@@ -2028,7 +2028,7 @@ def format_gate_findings(
     display_guidance = (
         "Show this as an explicit Latch gate block before acting: say Latch gate "
         "was skipped because latch is currently UNLATCHED, show the unlatched "
-        "message, and tell the user to run /unlatch to re-latch."
+        "message, and tell the user to run /latch to re-latch."
         if verdict.get("reason") == "unlatched"
         else (
             "Show this as an explicit Latch gate block before acting: say Latch "
@@ -2121,7 +2121,7 @@ def run_gate(
     stays as the raw compact cited-node list; the agent can `latch_get(<id>)`
     for full bodies.
     """
-    if paths.is_unlatched_mode():
+    if paths.is_unlatched_mode(project_path):
         verdict = unlatched_verdict()
         return {
             "request": request,

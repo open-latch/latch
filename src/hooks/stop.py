@@ -15,10 +15,18 @@ import sys
 from pathlib import Path
 
 from _common import (
-    hook_field, log, project_cwd, read_hook_input, session_id,
-    spawn_compactor_detached, transcript_path,
+    STALE_SESSION_MESSAGE,
+    current_session_revision,
+    hook_field,
+    log,
+    project_cwd,
+    read_hook_input,
+    session_id,
+    spawn_compactor_detached,
+    transcript_path,
 )
 
+import lockfile
 from paths import UNLATCHED_MESSAGE, is_in_compact, is_unlatched_mode, is_write_disabled
 
 COMPACT_EVERY_N_TURNS = 5
@@ -47,45 +55,98 @@ def _load_runtime() -> None:
 
 
 def main() -> int:
+    payload = read_hook_input()
+    cwd = project_cwd(payload)
     # is_write_disabled() implies is_disabled(); covers both kill-switches.
-    if is_unlatched_mode():
+    if is_unlatched_mode(cwd):
         _print_unlatched_context("Stop")
         return 0
-    if is_write_disabled() or is_in_compact():
+    if is_write_disabled(cwd) or is_in_compact():
         return 0
     _load_runtime()
-    payload = read_hook_input()
     sid = session_id(payload)
     if not sid:
         return 0
-    cwd = project_cwd(payload)
+    try:
+        binding_revision = current_session_revision(cwd, sid)
+    except Exception as e:
+        log(
+            f"stop hook session binding error: {e}",
+            cwd,
+            expected_revision="stale-session",
+        )
+        return 0
+    if binding_revision is None:
+        log(
+            f"stop hook skipped stale session: {STALE_SESSION_MESSAGE}",
+            cwd,
+            expected_revision="stale-session",
+        )
+        return 0
     tpath = transcript_path(payload)
 
     try:
-        conn = db.connect(cwd)
-        try:
-            db.upsert_session(conn, sid, cwd, tpath)
-            turn = db.increment_turn(conn, sid)
-            sess = db.get_session(conn, sid)
-            last = sess["last_compact_turn"] if sess else 0
-            should_compact = (turn - last) >= COMPACT_EVERY_N_TURNS
-        finally:
-            conn.close()
+        with lockfile.project_access_lock(cwd) as locked_kb:
+            if current_session_revision(cwd, sid) != binding_revision:
+                log(
+                    f"stop hook skipped stale session: {STALE_SESSION_MESSAGE}",
+                    cwd,
+                    expected_revision=binding_revision,
+                )
+                return 0
+            conn = db.connect(
+                cwd,
+                expected_binding_revision=binding_revision,
+                expected_kb_dir=str(locked_kb),
+            )
+            try:
+                db.upsert_session(conn, sid, cwd, tpath)
+                turn = db.increment_turn(conn, sid)
+                sess = db.get_session(conn, sid)
+                last = sess["last_compact_turn"] if sess else 0
+                should_compact = (turn - last) >= COMPACT_EVERY_N_TURNS
+            finally:
+                conn.close()
     except Exception as e:
-        log(f"stop hook db error: {e}")
+        log(
+            f"stop hook db error: {e}",
+            cwd,
+            expected_revision=binding_revision,
+        )
         return 0
 
     if should_compact:
-        log(f"auto-compact: session={sid} turn={turn}")
-        spawn_compactor_detached(sid, cwd, tpath, final=False)
+        log(
+            f"auto-compact: session={sid} turn={turn}",
+            cwd,
+            expected_revision=binding_revision,
+        )
+        spawn_compactor_detached(
+            sid,
+            cwd,
+            tpath,
+            final=False,
+            binding_revision=binding_revision,
+            expected_kb_dir=str(locked_kb),
+        )
 
     # Slice 3-B: deterministic cite-presence detection over the just-finished
     # turn. Isolated try/except — a detector fault must never break the Stop
     # hook (fail-open, like the rest of the pipeline).
     try:
-        _cite_presence_check(sid, cwd, tpath)
+        _cite_presence_check(
+            sid,
+            cwd,
+            tpath,
+            binding_revision=binding_revision,
+            expected_kb_dir=str(locked_kb),
+        )
     except Exception as e:
-        log(f"stop hook cite-check error: {e}")
+        log(
+            f"stop hook cite-check error: {e}",
+            cwd,
+            expected_revision=binding_revision,
+        )
 
     return 0
 
@@ -93,41 +154,60 @@ def main() -> int:
 # EXPERIMENTAL — mission-control / verification profiles. NOT recommended for use;
 # planned to be unshipped to a separate branch later (observed unhelpful on
 # pmeyer's workspace, 2026-06-10). See KB decision id=1550. Don't rely on / extend.
-def _cite_presence_check(sid: str, cwd: str, tpath: str | None) -> None:
+def _cite_presence_check(
+    sid: str,
+    cwd: str,
+    tpath: str | None,
+    *,
+    binding_revision: str | None = None,
+    expected_kb_dir: str | None = None,
+) -> None:
     """Scan the last assistant message for uncited current-value/code claims,
     but ONLY for a mission-control-bound actor (byte-identical no-op otherwise,
     KB id=1436). On a hit: emit a structural detection.log row and stash a
     pending cite-nudge for the next UserPromptSubmit to surface (advisory
     posture — no forced re-turn)."""
     _load_runtime()
-    conn = db.connect(cwd)
-    try:
-        if not profiles.claim_backing_requires_code_trace(conn):
-            return  # not mission control → no scan, no writes
-        text = _last_assistant_text(tpath)
-        if not text.strip():
-            capture_streams.emit_detection_event(
-                n_claims=0, n_flagged=0, action="none", scanned=False,
-                project_path=cwd, session_id=sid,
-            )
+    expected_revision = binding_revision or current_session_revision(cwd, sid)
+    if expected_revision is None:
+        return
+    with lockfile.project_access_lock(cwd) as locked_kb:
+        if current_session_revision(cwd, sid) != expected_revision:
             return
-        result = cite_detector.scan_message(text)
-        n_flagged = result["n_flagged"]
-        capture_streams.emit_detection_event(
-            n_claims=result["n_claims"],
-            n_flagged=n_flagged,
-            action="nudge_queued" if n_flagged else "none",
-            scanned=True,
-            transcript_hash=hashlib.sha1(
-                text.encode("utf-8", errors="replace")
-            ).hexdigest()[:12],
-            project_path=cwd,
-            session_id=sid,
+        if expected_kb_dir is not None and str(locked_kb) != expected_kb_dir:
+            return
+        conn = db.connect(
+            cwd,
+            expected_binding_revision=expected_revision,
+            expected_kb_dir=expected_kb_dir or str(locked_kb),
         )
-        if n_flagged:
-            db.set_pending_cite_nudge(conn, sid, n_flagged)
-    finally:
-        conn.close()
+        try:
+            if not profiles.claim_backing_requires_code_trace(conn):
+                return  # not mission control → no scan, no writes
+            text = _last_assistant_text(tpath)
+            if not text.strip():
+                capture_streams.emit_detection_event(
+                    n_claims=0, n_flagged=0, action="none", scanned=False,
+                    project_path=cwd, session_id=sid,
+                )
+                return
+            result = cite_detector.scan_message(text)
+            n_flagged = result["n_flagged"]
+            capture_streams.emit_detection_event(
+                n_claims=result["n_claims"],
+                n_flagged=n_flagged,
+                action="nudge_queued" if n_flagged else "none",
+                scanned=True,
+                transcript_hash=hashlib.sha1(
+                    text.encode("utf-8", errors="replace")
+                ).hexdigest()[:12],
+                project_path=cwd,
+                session_id=sid,
+            )
+            if n_flagged:
+                db.set_pending_cite_nudge(conn, sid, n_flagged)
+        finally:
+            conn.close()
 
 
 # Cap the transcript read: the last assistant message sits at the end of the

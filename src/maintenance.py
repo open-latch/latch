@@ -24,6 +24,7 @@ import lifecycle_receipts  # noqa: E402
 import lockfile  # noqa: E402
 import log_utils  # noqa: E402
 import paths  # noqa: E402
+import project_config  # noqa: E402
 import tree  # noqa: E402
 import workstream_automation  # noqa: E402
 import workstream_detector  # noqa: E402
@@ -47,19 +48,28 @@ DECAY_FLOOR = 1          # once referenced, a node survives decay indefinitely
 PROMOTION_THRESHOLD = 3  # ref_count at which staging promotes to canonical
 
 
-def run_weekly_maintenance(project_path: str | None = None) -> dict:
+def run_weekly_maintenance(
+    project_path: str | None = None,
+    *,
+    expected_binding_revision: str | None = None,
+    expected_kb_dir: str | None = None,
+) -> dict:
     """Apply decay + promotion to a project's KB. Safe to call ad-hoc; both ops
     are idempotent in the sense that running them twice in the same week just
     continues the decay curve and re-promotes nothing."""
-    if paths.is_unlatched_mode():
+    if paths.is_unlatched_mode(project_path):
         return {
             "ok": False,
             "reason": "unlatched",
             "message": paths.UNLATCHED_MESSAGE,
         }
-    if paths.is_disabled():
+    if paths.is_disabled(project_path):
         return {"ok": False, "reason": "disabled"}
-    conn = db.connect(project_path)
+    conn = db.connect(
+        project_path,
+        expected_binding_revision=expected_binding_revision,
+        expected_kb_dir=expected_kb_dir,
+    )
     try:
         if os.environ.get("CLAUDE_KB_DEBUG_LOG"):
             before = conn.execute(
@@ -107,7 +117,11 @@ def run_weekly_maintenance(project_path: str | None = None) -> dict:
             "floor": DECAY_FLOOR,
             "threshold": PROMOTION_THRESHOLD,
         }
-        _log(project_path, result)
+        _log(
+            project_path,
+            result,
+            expected_revision=expected_binding_revision,
+        )
         return result
     finally:
         conn.close()
@@ -118,20 +132,32 @@ def run_nightly_heal(
     *,
     use_llm: bool = True,
     already_locked: bool = False,
+    expected_binding_revision: str | None = None,
+    expected_kb_dir: str | None = None,
 ) -> dict:
     """Nightly sweep: integrity + 0.70+ similarity contradiction pass with
     three-pass arbitration. LLM calls (when invoked) consume the daily budget."""
-    if paths.is_unlatched_mode():
+    if paths.is_unlatched_mode(project_path):
         return {
             "ok": False,
             "reason": "unlatched",
             "message": paths.UNLATCHED_MESSAGE,
         }
-    if paths.is_disabled():
+    if paths.is_disabled(project_path):
         return {"ok": False, "reason": "disabled"}
-    conn = db.connect(project_path)
+    conn = db.connect(
+        project_path,
+        expected_binding_revision=expected_binding_revision,
+        expected_kb_dir=expected_kb_dir,
+    )
     try:
-        result = heal.nightly_heal(conn, project_path=project_path, use_llm=use_llm)
+        result = heal.nightly_heal(
+            conn,
+            project_path=project_path,
+            use_llm=use_llm,
+            expected_binding_revision=expected_binding_revision,
+            expected_kb_dir=expected_kb_dir,
+        )
         try:
             result["workstream_integrity"] = workstreams.reconcile_lifecycle_integrity(
                 conn, project_path=project_path, already_locked=already_locked,
@@ -146,27 +172,45 @@ def run_nightly_heal(
         result["retrieval_events_pruned"] = db.prune_retrieval_events(
             conn, retention_days=90,
         )
-        _log(project_path, {"op": "nightly_heal", **result})
+        _log(
+            project_path,
+            {"op": "nightly_heal", **result},
+            expected_revision=expected_binding_revision,
+        )
         return result
     finally:
         conn.close()
 
 
-def run_tree_rebuild(project_path: str | None = None, *, use_llm: bool = True) -> dict:
+def run_tree_rebuild(
+    project_path: str | None = None,
+    *,
+    use_llm: bool = True,
+    expected_binding_revision: str | None = None,
+    expected_kb_dir: str | None = None,
+) -> dict:
     """Full hierarchical rebuild — clusters leaves, promotes landmarks, builds
     one level of summary nodes. LLM calls (one per cluster) consume the budget."""
-    if paths.is_unlatched_mode():
+    if paths.is_unlatched_mode(project_path):
         return {
             "ok": False,
             "reason": "unlatched",
             "message": paths.UNLATCHED_MESSAGE,
         }
-    if paths.is_disabled():
+    if paths.is_disabled(project_path):
         return {"ok": False, "reason": "disabled"}
-    conn = db.connect(project_path)
+    conn = db.connect(
+        project_path,
+        expected_binding_revision=expected_binding_revision,
+        expected_kb_dir=expected_kb_dir,
+    )
     try:
         result = tree.build_tree(conn, project_path=project_path, use_llm=use_llm)
-        _log(project_path, {"op": "tree_rebuild", **result})
+        _log(
+            project_path,
+            {"op": "tree_rebuild", **result},
+            expected_revision=expected_binding_revision,
+        )
         return result
     finally:
         conn.close()
@@ -176,6 +220,8 @@ def run_workstream_shadow(
     project_path: str | None = None,
     *,
     already_locked: bool = False,
+    expected_binding_revision: str | None = None,
+    expected_kb_dir: str | None = None,
 ) -> dict:
     """Run the independently-cadenced, deterministic lifecycle detector.
 
@@ -184,13 +230,13 @@ def run_workstream_shadow(
     ``already_locked=True`` as an explicit fast path; same-thread lock
     ownership is also recognized safely if a composed caller omits it.
     """
-    if paths.is_unlatched_mode():
+    if paths.is_unlatched_mode(project_path):
         return {
             "ok": False,
             "reason": "unlatched",
             "message": paths.UNLATCHED_MESSAGE,
         }
-    if paths.is_disabled():
+    if paths.is_disabled(project_path):
         return {"ok": False, "reason": "disabled"}
     lock_context = (
         contextlib.nullcontext()
@@ -198,7 +244,11 @@ def run_workstream_shadow(
         else lockfile.writer_lock(project_path)
     )
     with lock_context:
-        conn = db.connect(project_path)
+        conn = db.connect(
+            project_path,
+            expected_binding_revision=expected_binding_revision,
+            expected_kb_dir=expected_kb_dir,
+        )
         try:
             baseline_reconciliation = (
                 lifecycle_receipts.reconcile_legacy_workstream_baselines(conn)
@@ -247,13 +297,22 @@ def run_workstream_shadow(
                 project_path=project_path,
                 session_id=None,
             )
-            _log(project_path, {"op": "workstream_shadow", **result})
+            _log(
+                project_path,
+                {"op": "workstream_shadow", **result},
+                expected_revision=expected_binding_revision,
+            )
             return result
         finally:
             conn.close()
 
 
-def run_workstream_governed(project_path: str | None = None) -> dict:
+def run_workstream_governed(
+    project_path: str | None = None,
+    *,
+    expected_binding_revision: str | None = None,
+    expected_kb_dir: str | None = None,
+) -> dict:
     """Apply only trust-ladder-eligible actions from the latest derivation.
 
     This entry point intentionally owns no outer compactor lock.  Each atomic
@@ -261,15 +320,19 @@ def run_workstream_governed(project_path: str | None = None) -> dict:
     perform shadow derivation while holding the maintenance lock must invoke
     this function only after releasing that lock.
     """
-    if paths.is_unlatched_mode():
+    if paths.is_unlatched_mode(project_path):
         return {
             "ok": False,
             "reason": "unlatched",
             "message": paths.UNLATCHED_MESSAGE,
         }
-    if paths.is_disabled():
+    if paths.is_disabled(project_path):
         return {"ok": False, "reason": "disabled"}
-    conn = db.connect(project_path)
+    conn = db.connect(
+        project_path,
+        expected_binding_revision=expected_binding_revision,
+        expected_kb_dir=expected_kb_dir,
+    )
     try:
         governed = workstream_automation.run_governed(
             conn, project_path=project_path,
@@ -285,7 +348,11 @@ def run_workstream_governed(project_path: str | None = None) -> dict:
             project_path=project_path,
             session_id=None,
         )
-        _log(project_path, structural)
+        _log(
+            project_path,
+            structural,
+            expected_revision=expected_binding_revision,
+        )
         return result
     finally:
         conn.close()
@@ -338,12 +405,25 @@ def _governed_structural_summary(result: dict) -> dict:
     }
 
 
-def run_workstream_cycle(project_path: str | None = None) -> dict:
+def run_workstream_cycle(
+    project_path: str | None = None,
+    *,
+    expected_binding_revision: str | None = None,
+    expected_kb_dir: str | None = None,
+) -> dict:
     """Derive current candidates, then run the governed trust ladder."""
-    shadow = run_workstream_shadow(project_path)
+    shadow = run_workstream_shadow(
+        project_path,
+        expected_binding_revision=expected_binding_revision,
+        expected_kb_dir=expected_kb_dir,
+    )
     if not shadow.get("ok"):
         return {"ok": False, "shadow": shadow, "governed": None}
-    governed = run_workstream_governed(project_path)
+    governed = run_workstream_governed(
+        project_path,
+        expected_binding_revision=expected_binding_revision,
+        expected_kb_dir=expected_kb_dir,
+    )
     return {
         "ok": bool(governed.get("ok")),
         "shadow": shadow,
@@ -351,38 +431,124 @@ def run_workstream_cycle(project_path: str | None = None) -> dict:
     }
 
 
-def _log(project_path: str | None, result: dict) -> None:
-    log_path = paths.KB_ROOT / "maintenance.log"
+def _log(
+    project_path: str | None,
+    result: dict,
+    *,
+    expected_revision: str | None = None,
+) -> None:
     try:
-        with log_path.open("a", encoding="utf-8") as f:
-            f.write(
-                f"[{datetime.now().isoformat(timespec='seconds')}] "
-                f"project={project_path} {json.dumps(result)}\n"
-            )
+        lockfile.append_project_log(
+            project_path,
+            "maintenance.log",
+            f"[{datetime.now().isoformat(timespec='seconds')}] "
+            f"{json.dumps(result)}\n",
+            expected_revision=expected_revision,
+        )
     except Exception:
         pass
 
 
-if __name__ == "__main__":
+def _cli_binding_snapshot(
+    project_path: str | None,
+    *,
+    session_id: str | None = None,
+) -> tuple[str | None, str | None]:
+    """Turn a shell caller's current-session receipt into exact DB authority."""
+    raw_session = (
+        session_id
+        if session_id is not None
+        else project_config.current_agent_session_id()
+    )
+    sid = (raw_session or "").strip()
+    if not sid:
+        if project_config.is_agent_context():
+            raise project_config.ProjectConfigError(
+                "maintenance requires the exact current agent session id"
+            )
+        return None, None
+    project = str(project_path or os.getcwd())
+    target = project_config.resolve(project)
+    revision = project_config.current_session_revision(
+        project,
+        sid,
+        resolved_target=target,
+    )
+    kb_dir = project_config.validated_bound_kb_dir(target)
+    if revision is None or kb_dir is None:
+        raise project_config.ProjectConfigError(
+            "maintenance session belongs to another or older Latch scope"
+        )
+    return revision, str(kb_dir)
+
+
+def main(argv: list[str] | None = None) -> int:
     # python maintenance.py [weekly|nightly|tree|workstreams|workstream-shadow]
-    #                       [project_path]
-    argv = sys.argv[1:]
-    op = argv[0] if argv else "weekly"
-    project = argv[1] if len(argv) > 1 else None
-    if op == "weekly":
-        print(json.dumps(run_weekly_maintenance(project), indent=2))
-    elif op == "nightly":
-        print(json.dumps(run_nightly_heal(project), indent=2))
-    elif op == "tree":
-        print(json.dumps(run_tree_rebuild(project), indent=2))
-    elif op == "workstreams":
-        print(json.dumps(run_workstream_cycle(project), indent=2))
-    elif op == "workstream-shadow":
-        print(json.dumps(run_workstream_shadow(project), indent=2))
-    else:
+    #                       [project_path] [--session-id <current-id>]
+    args = list(sys.argv[1:] if argv is None else argv)
+    explicit_session = None
+    if "--session-id" in args:
+        index = args.index("--session-id")
+        if index + 1 >= len(args):
+            print(json.dumps({
+                "ok": False,
+                "reason": "invalid_arguments",
+                "error": "--session-id requires a value",
+            }))
+            return 2
+        explicit_session = args[index + 1]
+        del args[index:index + 2]
+    op = args[0] if args else "weekly"
+    project = args[1] if len(args) > 1 else None
+    if len(args) > 2:
+        print(json.dumps({
+            "ok": False,
+            "reason": "invalid_arguments",
+            "error": "too many arguments",
+        }))
+        return 2
+    supported = {
+        "weekly", "nightly", "tree", "workstreams", "workstream-shadow",
+    }
+    if op not in supported:
         print(
             f"unknown op {op!r} — use 'weekly' | 'nightly' | 'tree' | "
             "'workstreams' | 'workstream-shadow'",
             file=sys.stderr,
         )
-        sys.exit(2)
+        return 2
+    if paths.is_unlatched_mode(project) or paths.is_disabled(project):
+        revision, kb_dir = None, None
+    else:
+        try:
+            revision, kb_dir = _cli_binding_snapshot(
+                project,
+                session_id=explicit_session,
+            )
+        except project_config.ProjectConfigError as exc:
+            print(json.dumps({
+                "ok": False,
+                "reason": "stale_session_binding",
+                "error": str(exc),
+            }))
+            return 1
+    kwargs = {
+        "expected_binding_revision": revision,
+        "expected_kb_dir": kb_dir,
+    }
+    if op == "weekly":
+        result = run_weekly_maintenance(project, **kwargs)
+    elif op == "nightly":
+        result = run_nightly_heal(project, **kwargs)
+    elif op == "tree":
+        result = run_tree_rebuild(project, **kwargs)
+    elif op == "workstreams":
+        result = run_workstream_cycle(project, **kwargs)
+    elif op == "workstream-shadow":
+        result = run_workstream_shadow(project, **kwargs)
+    print(json.dumps(result, indent=2))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

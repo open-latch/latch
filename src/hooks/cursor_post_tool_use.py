@@ -15,8 +15,14 @@ sys.path.insert(0, str(SRC))
 sys.path.insert(0, str(SRC / "hooks"))
 
 from post_tool_use import surface_message  # noqa: E402
-from _common import log, read_hook_input  # noqa: E402
+from _common import (  # noqa: E402
+    STALE_SESSION_MESSAGE,
+    current_session_revision,
+    log,
+    read_hook_input,
+)
 import cursor_gate_state  # noqa: E402
+import lockfile  # noqa: E402
 
 
 def cursor_tool_response(payload: dict):
@@ -96,35 +102,75 @@ def record_operation_success(payload: dict) -> tuple[bool, str] | None:
     )
 
 
+def _surface_stale_session(
+    cwd: str,
+    *,
+    expected_revision: str = "stale-session",
+) -> None:
+    log(
+        f"cursor_post_tool_use skipped stale session: {STALE_SESSION_MESSAGE}",
+        cwd,
+        expected_revision=expected_revision,
+    )
+    print(json.dumps({"additional_context": STALE_SESSION_MESSAGE}))
+
+
 def main() -> int:
+    cwd: str | None = None
+    binding_revision: str | None = None
     try:
         # Use the shared BOM-safe reader. Cursor sends BOM-prefixed UTF-8 hook
         # payloads; the previous inline sys.stdin.read()+json.loads decoded that
         # as cp1252 and failed at char 0, so the gate receipt never armed and
         # every post-gate Write/Shell stayed denied.
         payload = read_hook_input()
-        msg = cursor_surface_message(payload)
-        gate_record = record_gate_receipt(payload)
-        operation_record = record_operation_success(payload)
-        if gate_record is not None and not gate_record[0]:
-            mismatch = (
-                "Latch gate receipt was not armed: " + gate_record[1] + ". "
-                "Run latch_gate again with the current user request verbatim."
-            )
-            msg = f"{msg}\n\n{mismatch}" if msg else mismatch
-        if operation_record is not None and not operation_record[0]:
-            mismatch = (
-                "Latch managed-operation receipt was not advanced: "
-                + operation_record[1] + ". Rerun the preview before applying."
-            )
-            msg = f"{msg}\n\n{mismatch}" if msg else mismatch
-        if msg:
-            print(json.dumps({
-                "additional_context":
-                    "IMPORTANT: Surface this latch activity to the user now: " + msg
-            }))
+        cwd = cursor_gate_state.project_cwd(payload)
+        sid = cursor_gate_state.session_id(payload, cwd)
+        binding_revision = current_session_revision(cwd, sid)
+        if binding_revision is None:
+            _surface_stale_session(cwd)
+            return 0
+        with lockfile.project_access_lock(cwd):
+            if current_session_revision(cwd, sid) != binding_revision:
+                _surface_stale_session(
+                    cwd,
+                    expected_revision=binding_revision,
+                )
+                return 0
+            msg = cursor_surface_message(payload)
+            gate_record = record_gate_receipt(payload)
+            operation_record = record_operation_success(payload)
+            if gate_record is not None and not gate_record[0]:
+                mismatch = (
+                    "Latch gate receipt was not armed: " + gate_record[1] + ". "
+                    "Run latch_gate again with the current user request verbatim."
+                )
+                msg = f"{msg}\n\n{mismatch}" if msg else mismatch
+            if operation_record is not None and not operation_record[0]:
+                mismatch = (
+                    "Latch managed-operation receipt was not advanced: "
+                    + operation_record[1] + ". Rerun the preview before applying."
+                )
+                msg = f"{msg}\n\n{mismatch}" if msg else mismatch
+            if msg:
+                print(json.dumps({
+                    "additional_context":
+                        "IMPORTANT: Surface this latch activity to the user now: " + msg
+                }))
+    except lockfile.ProjectTargetChangedError:
+        assert cwd is not None
+        _surface_stale_session(
+            cwd,
+            expected_revision=binding_revision or "stale-session",
+        )
+        return 0
     except Exception as e:
-        log(f"cursor_post_tool_use failed open: {e}")
+        if cwd is not None and binding_revision is not None:
+            log(
+                f"cursor_post_tool_use failed open: {e}",
+                cwd,
+                expected_revision=binding_revision,
+            )
         return 0
     return 0
 

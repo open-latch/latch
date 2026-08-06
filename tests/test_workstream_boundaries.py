@@ -87,6 +87,11 @@ def test_generic_insert_locks_before_membership_resolution_and_connection(
             events.append("lock:exit")
 
     @contextmanager
+    def observed_access(project_path, *args, **kwargs):
+        assert project_path == project
+        yield Path(project)
+
+    @contextmanager
     def observed_conn():
         events.append("db:enter")
         try:
@@ -105,7 +110,8 @@ def test_generic_insert_locks_before_membership_resolution_and_connection(
         return {"ok": True}
 
     monkeypatch.setattr(mcp_server, "_project_cwd", lambda: project)
-    monkeypatch.setattr(mcp_server.paths, "is_unlatched_mode", lambda: False)
+    monkeypatch.setattr(mcp_server.paths, "is_unlatched_mode", lambda *_args: False)
+    monkeypatch.setattr(mcp_server.lockfile, "project_access_lock", observed_access)
     monkeypatch.setattr(mcp_server.lockfile, "writer_lock", observed_lock)
     monkeypatch.setattr(mcp_server, "_conn", observed_conn)
     monkeypatch.setattr(
@@ -139,16 +145,16 @@ def test_generic_insert_waits_outside_sqlite_for_lifecycle_writer(
 
     worker_attempted_lock = threading.Event()
     worker_opened_db = threading.Event()
-    original_compactor_lock = mcp_server.lockfile.compactor_lock
+    original_writer_lock = mcp_server.lockfile.writer_lock
     original_conn = mcp_server._conn
     result: dict = {}
 
     @contextmanager
-    def observed_compactor_lock(project_path):
+    def observed_writer_lock(project_path, **kwargs):
         if threading.current_thread().name == "generic-membership-writer":
             worker_attempted_lock.set()
-        with original_compactor_lock(project_path) as acquired:
-            yield acquired
+        with original_writer_lock(project_path, **kwargs):
+            yield
 
     def observed_conn():
         if threading.current_thread().name == "generic-membership-writer":
@@ -175,9 +181,9 @@ def test_generic_insert_waits_outside_sqlite_for_lifecycle_writer(
         ))
 
     monkeypatch.setattr(mcp_server, "_project_cwd", lambda: str(project))
-    monkeypatch.setattr(mcp_server.paths, "is_unlatched_mode", lambda: False)
+    monkeypatch.setattr(mcp_server.paths, "is_unlatched_mode", lambda *_args: False)
     monkeypatch.setattr(
-        mcp_server.lockfile, "compactor_lock", observed_compactor_lock,
+        mcp_server.lockfile, "writer_lock", observed_writer_lock,
     )
     monkeypatch.setattr(mcp_server, "_conn", observed_conn)
     monkeypatch.setattr(heal, "insert_with_heal", insert_without_heal)

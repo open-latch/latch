@@ -8,6 +8,7 @@ row) is exercised against an isolated temp KB / on the live MCP, not here.
 """
 from __future__ import annotations
 
+import contextlib
 import sys
 from pathlib import Path
 
@@ -70,9 +71,48 @@ def test_guard_label_sets_match_capture_streams():
     print("PASS guard_label_sets_match_capture_streams")
 
 
+def test_post_commit_log_target_change_is_skipped_truthfully():
+    originals = {
+        "is_unlatched_mode": mcp_server.paths.is_unlatched_mode,
+        "run_mutation": mcp_server._run_public_kb_mutation,
+        "project_access_lock": mcp_server.lockfile.project_access_lock,
+        "emit": mcp_server.capture_streams.emit_decision_event,
+    }
+    emitted: list[bool] = []
+
+    @contextlib.contextmanager
+    def changed_target(*_args, **_kwargs):
+        raise mcp_server.lockfile.ProjectTargetChangedError(
+            "target_changed", "repinned after commit",
+        )
+        yield  # pragma: no cover
+
+    try:
+        mcp_server.paths.is_unlatched_mode = lambda *_args: False
+        mcp_server._run_public_kb_mutation = lambda _op: ({"id": 42}, None)
+        mcp_server.lockfile.project_access_lock = changed_target
+        mcp_server.capture_streams.emit_decision_event = (
+            lambda **_kwargs: emitted.append(True) or True
+        )
+        result = mcp_server.kb_capture_decision(
+            title="decision",
+            body="body",
+            gate_request="request",
+            human_action="approve",
+        )
+        _assert(result["decision_logged"] is False, result)
+        _assert(emitted == [], "stale node id reached the replacement KB log")
+    finally:
+        mcp_server.paths.is_unlatched_mode = originals["is_unlatched_mode"]
+        mcp_server._run_public_kb_mutation = originals["run_mutation"]
+        mcp_server.lockfile.project_access_lock = originals["project_access_lock"]
+        mcp_server.capture_streams.emit_decision_event = originals["emit"]
+
+
 if __name__ == "__main__":
     test_rejects_bad_human_action()
     test_rejects_bad_confidence_tier()
     test_rejects_bad_provenance()
     test_guard_label_sets_match_capture_streams()
+    test_post_commit_log_target_change_is_skipped_truthfully()
     print("\nAll kb_capture_decision validation tests pass.")

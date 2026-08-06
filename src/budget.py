@@ -23,13 +23,15 @@ was non-heal traffic, and the legacy field is dropped on the next write.
 """
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import sys
 import tempfile
+from contextlib import contextmanager
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Iterator, Literal, Mapping
 
 if TYPE_CHECKING:
     from filelock import FileLock
@@ -37,6 +39,7 @@ if TYPE_CHECKING:
 sys.path.insert(0, str(Path(__file__).parent))
 
 import paths  # noqa: E402
+import project_config  # noqa: E402
 
 
 DEFAULT_NONHEAL_DAILY_CAP = 100
@@ -54,6 +57,10 @@ _CATEGORIES: tuple[Category, ...] = ("nonheal", "heal")
 
 class BudgetStateError(OSError):
     """Existing budget state could not be trusted for a spending decision."""
+
+
+class BudgetCliBindingError(RuntimeError):
+    """Standalone CLI could not prove authority over the selected project KB."""
 
 
 def _count_field(category: Category) -> str:
@@ -292,15 +299,114 @@ def status(
     return out
 
 
+def _cli_agent_context(env: Mapping[str, str]) -> bool:
+    return project_config.is_agent_context(env)
+
+
+def _cli_session_id(
+    explicit: str | None,
+    env: Mapping[str, str],
+) -> str | None:
+    ambient = project_config.current_agent_session_id(env)
+    if explicit is not None and not explicit.strip():
+        raise BudgetCliBindingError("--session-id requires a value")
+    requested = explicit.strip() if explicit and explicit.strip() else None
+    if requested is not None and ambient is not None and requested != ambient:
+        raise BudgetCliBindingError(
+            "--session-id does not match this agent task's session"
+        )
+    return requested or ambient
+
+
+@contextmanager
+def _cli_project_access(
+    project_path: str | None,
+    *,
+    session_id: str | None,
+    env: Mapping[str, str],
+) -> Iterator[str]:
+    """Validate one CLI task and lease its exact project target."""
+    import lockfile  # CLI-only dependency
+
+    try:
+        project = str(project_config.project_root(project_path))
+        with lockfile.project_access_lock(project):
+            sid = _cli_session_id(session_id, env)
+            target = project_config.resolve(project)
+            if _cli_agent_context(env) and sid is None:
+                raise BudgetCliBindingError(
+                    "Latch cannot verify this agent task's project KB; "
+                    "pass the current session with --session-id or start a fresh task"
+                )
+            if sid is not None:
+                if project_config.current_session_revision(
+                    project, sid,
+                ) != target.revision:
+                    raise BudgetCliBindingError(
+                        "this agent task belongs to an older or different project KB; "
+                        "start a fresh task before using latch-budget-approve"
+                    )
+            yield project
+    except BudgetCliBindingError:
+        raise
+    except lockfile.ProjectTargetChangedError as exc:
+        if exc.reason == "unlatched":
+            raise BudgetCliBindingError(
+                "Latch is Unlatched for this project; run /latch before using the budget command"
+            ) from exc
+        raise BudgetCliBindingError(
+            "the project's Latch KB changed; rerun the budget command from a fresh task"
+        ) from exc
+    except project_config.ProjectConfigError as exc:
+        raise BudgetCliBindingError(str(exc)) from exc
+
+
+def _run_cli_command(
+    subcommand: str,
+    project_path: str | None,
+    *,
+    session_id: str | None = None,
+    env: Mapping[str, str] | None = None,
+) -> dict:
+    values = os.environ if env is None else env
+    with _cli_project_access(
+        project_path,
+        session_id=session_id,
+        env=values,
+    ) as project:
+        if subcommand == "status":
+            return status(project)
+        if subcommand == "approve":
+            return approve_today(project)
+    raise ValueError(f"unknown subcommand {subcommand!r} -- use status|approve")
+
+
+def main(argv: list[str] | None = None) -> int:
+    # python budget.py <subcommand> [project_path] [--session-id ID]
+    parser = argparse.ArgumentParser(
+        description="Show or approve Latch's daily budget."
+    )
+    parser.add_argument(
+        "subcommand",
+        nargs="?",
+        choices=("status", "approve"),
+        default="status",
+    )
+    parser.add_argument("project_path", nargs="?")
+    parser.add_argument("--session-id")
+    args = parser.parse_args(argv)
+    try:
+        result = _run_cli_command(
+            args.subcommand,
+            args.project_path,
+            session_id=args.session_id,
+        )
+    except BudgetCliBindingError as exc:
+        print(f"latch-budget-{args.subcommand}: {exc}", file=sys.stderr)
+        return 1
+    print(json.dumps(result, indent=2))
+    return 0
+
+
 if __name__ == "__main__":
-    # python budget.py <subcommand> [project_path]
-    argv = sys.argv[1:]
-    sub = argv[0] if argv else "status"
-    project = argv[1] if len(argv) > 1 else None
-    if sub == "status":
-        print(json.dumps(status(project), indent=2))
-    elif sub == "approve":
-        print(json.dumps(approve_today(project), indent=2))
-    else:
-        print(f"unknown subcommand {sub!r} — use status|approve", file=sys.stderr)
-        sys.exit(2)
+    sys.exit(main())

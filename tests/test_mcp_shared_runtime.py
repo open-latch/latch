@@ -14,6 +14,7 @@ import sys
 import tempfile
 import threading
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -28,6 +29,49 @@ EPOCH_2_COMMIT = "5c9f39cdc558b98e4736ba15a7e6f5011168c7c1"
 sys.path.insert(0, str(ROOT / "src"))
 import mcp_broker  # noqa: E402
 import paths  # noqa: E402
+import project_config  # noqa: E402
+
+
+_SQLITE_SAFE_SERVER: Path | None = None
+
+
+def _write_sqlite_vec_stub(install_src: Path) -> None:
+    (install_src / "sqlite_vec.py").write_text(
+        "def load(_connection):\n"
+        "    raise RuntimeError('sqlite-vec disabled for MCP integration tests')\n",
+        encoding="utf-8",
+    )
+
+
+def _sqlite_safe_server() -> Path:
+    """Run live MCP tests from a disposable install with sqlite-vec disabled.
+
+    The host's x86 sqlite-vec dylib can hang under Rosetta before Python can
+    catch an exception.  The daemon intentionally discards inherited
+    ``PYTHONPATH``, so the usual test stub cannot reach that child process.
+    Copying the real source tree and placing the stub beside the entrypoint
+    exercises the production broker/daemon path without adding a test switch
+    to production code.  Embeddings still use the real model under ``ROOT``.
+    """
+    global _SQLITE_SAFE_SERVER
+    if _SQLITE_SAFE_SERVER is not None:
+        return _SQLITE_SAFE_SERVER
+    test_root = paths.validated_test_root()
+    assert test_root is not None
+    install = Path(
+        tempfile.mkdtemp(prefix="mcp-test-install-", dir=str(test_root))
+    )
+    install_src = install / "src"
+    shutil.copytree(
+        ROOT / "src",
+        install_src,
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+    )
+    for name in ("VERSION", "KB_SCHEMA_VERSION", "WIRING_VERSION"):
+        shutil.copy2(ROOT / name, install / name)
+    _write_sqlite_vec_stub(install_src)
+    _SQLITE_SAFE_SERVER = install_src / "mcp_server.py"
+    return _SQLITE_SAFE_SERVER
 
 
 def _assert(condition: Any, message: str) -> None:
@@ -51,6 +95,9 @@ class McpClient:
         server_path: Path | None = None,
     ):
         self.kb_dir = kb_dir
+        project = project_cwd or _scope_project(kb_dir, f"session-{session_id}")
+        project.mkdir(parents=True, exist_ok=True)
+        project_config.record_session_binding(project, session_id)
         runtime_settings = kb_dir / "runtime_settings.json"
         settings_data: dict[str, Any] = {}
         if runtime_settings.is_file():
@@ -63,6 +110,7 @@ class McpClient:
         env = os.environ.copy()
         env.update(
             {
+                "LATCH_HOME": str(ROOT),
                 "LATCH_KB_DIR": str(kb_dir),
                 "LATCH_SESSION_ID": session_id,
             }
@@ -78,8 +126,8 @@ class McpClient:
         if env_overrides:
             env.update(env_overrides)
         self.process = subprocess.Popen(
-            [sys.executable, str(server_path or SERVER)],
-            cwd=str(project_cwd or ROOT),
+            [sys.executable, str(server_path or _sqlite_safe_server())],
+            cwd=str(project),
             env=env,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
@@ -125,25 +173,17 @@ class McpClient:
                 continue
             if line is None:
                 stderr = self.stderr()
-                daemon_logs = []
-                for path in self.kb_dir.rglob("mcp-daemon.log"):
-                    try:
-                        daemon_logs.append(
-                            f"{path.name}: "
-                            + path.read_text(
-                                encoding="utf-8", errors="replace"
-                            )[-4000:]
-                        )
-                    except OSError:
-                        pass
                 raise AssertionError(
                     f"proxy exited waiting for {method}: {stderr}; "
-                    f"daemon_logs={daemon_logs}"
+                    f"daemon_logs={self.daemon_logs()}"
                 )
             message = json.loads(line.decode("utf-8"))
             if message.get("id") == request_id:
                 if "error" in message:
-                    raise AssertionError(f"{method} failed: {message['error']}")
+                    raise AssertionError(
+                        f"{method} failed: {message['error']}; "
+                        f"daemon_logs={self.daemon_logs()}"
+                    )
                 return message
         raise AssertionError(f"timeout waiting for {method}; stderr={self.stderr()}")
 
@@ -180,6 +220,18 @@ class McpClient:
             return self.process.stderr.peek(10000).decode("utf-8", errors="replace")
         except (AttributeError, OSError):
             return ""
+
+    def daemon_logs(self) -> list[str]:
+        logs: list[str] = []
+        for path in self.kb_dir.rglob("mcp-daemon.log"):
+            try:
+                logs.append(
+                    f"{path.name}: "
+                    + path.read_text(encoding="utf-8", errors="replace")[-4000:]
+                )
+            except OSError:
+                pass
+        return logs
 
     def close(self) -> None:
         try:
@@ -222,9 +274,9 @@ def _wait_for_pid_exit(pid: int, timeout_s: float = 5.0) -> None:
 
 
 def _temp_vault() -> Path:
-    scope = Path(tempfile.mkdtemp(prefix="latch_shared_mcp_scope_"))
-    vault = paths.project_dir(str(scope))
-    scope.rmdir()
+    test_root = paths.validated_test_root()
+    assert test_root is not None
+    vault = test_root / "vaults" / f"shared-mcp-{uuid.uuid4()}"
     vault.mkdir(parents=True, exist_ok=True)
     now = datetime.now(timezone.utc).isoformat()
     (vault / "maintenance_state.json").write_text(
@@ -239,6 +291,31 @@ def _temp_vault() -> Path:
         encoding="utf-8",
     )
     return vault
+
+
+_SCOPE_ROOTS: dict[Path, Path] = {}
+
+
+def _scope_root(kb_dir: Path) -> Path:
+    """Create one real Private boundary whose descendants share this vault."""
+    key = kb_dir.resolve()
+    existing = _SCOPE_ROOTS.get(key)
+    if existing is not None:
+        return existing
+    test_root = paths.validated_test_root()
+    assert test_root is not None
+    root = test_root / "projects" / f"mcp-{kb_dir.name}"
+    root.mkdir(parents=True)
+    project_config.create_scope(root, policy=project_config.POLICY_PRIVATE)
+    project_config.authorize_scope(root, kb_dir=key)
+    _SCOPE_ROOTS[key] = root
+    return root
+
+
+def _scope_project(kb_dir: Path, name: str) -> Path:
+    project = _scope_root(kb_dir) / "workspaces" / name
+    project.mkdir(parents=True, exist_ok=True)
+    return project
 
 
 def _fake_codex_classifier(path: Path, marker: Path) -> None:
@@ -287,6 +364,7 @@ def _copy_current_install_src(target: Path) -> None:
     )
     for name in ("VERSION", "KB_SCHEMA_VERSION", "WIRING_VERSION"):
         shutil.copy2(ROOT / name, target.parent / name)
+    _write_sqlite_vec_stub(target)
 
 
 def _lifecycle_rows(kb_dir: Path) -> list[dict[str, Any]]:
@@ -417,10 +495,8 @@ def test_parallel_clients_share_one_heavy_owner_and_keep_context_isolated() -> N
     kb_dir = _temp_vault()
     clients: list[McpClient] = []
     try:
-        project_a = kb_dir / "workspaces" / "a"
-        project_b = kb_dir / "workspaces" / "b"
-        project_a.mkdir(parents=True)
-        project_b.mkdir(parents=True)
+        project_a = _scope_project(kb_dir, "a")
+        project_b = _scope_project(kb_dir, "b")
         clients = [
             McpClient(
                 kb_dir,
@@ -716,6 +792,21 @@ def _copy_git_src(commit: str, target: Path) -> None:
         )
         if result.returncode == 0:
             (target.parent / relative).write_bytes(result.stdout)
+    _write_sqlite_vec_stub(target)
+
+
+def _link_runtime_assets(install: Path) -> None:
+    """Give a disposable historical install its own coherent install root."""
+    vendor = install / "vendor"
+    vendor.mkdir()
+    for source in (ROOT / "vendor").iterdir():
+        if not source.is_file():
+            continue
+        destination = vendor / source.name
+        try:
+            os.link(source, destination)
+        except OSError:
+            shutil.copy2(source, destination)
 
 
 def _require_historical_commit(commit: str) -> None:
@@ -737,9 +828,15 @@ def _assert_historical_proxy_requires_fresh_task(commit: str) -> None:
     install_src = install / "src"
     client: McpClient | None = None
     try:
+        _link_runtime_assets(install)
         _copy_git_src(commit, install_src)
         overrides = {
-            "LATCH_HOME": str(ROOT),
+            # Keep historical Python, schema, versions, and model assets under
+            # one install root. Pointing historical code at ROOT's current
+            # schema can create tables the historical runtime cannot finish,
+            # leaving the otherwise-authorized scope safely LOCKED before the
+            # replacement daemon can publish its bounded upgrade rejection.
+            "LATCH_HOME": str(install),
             "PYTHONPATH": str(install_src),
             "PYTHONDONTWRITEBYTECODE": "1",
         }
@@ -811,36 +908,23 @@ def test_fa162bd_pre_registry_proxy_requires_fresh_task_after_upgrade() -> None:
     _assert_historical_proxy_requires_fresh_task("fa162bd")
 
 
-@pytest.mark.parametrize(
-    ("pre_registry", "capability_epoch"),
-    ((False, None), (False, 1), (False, 2), (True, None)),
-    ids=(
-        "keyed-pre-capability",
-        "keyed-epoch-1",
-        "keyed-epoch-2",
-        "fa162bd-pre-registry",
-    ),
-)
-def test_historical_transport_receives_fresh_task_error_cross_platform(
-    pre_registry: bool,
-    capability_epoch: int | None,
-) -> None:
-    """Exercise both historical discovery layouts and epoch-less wire contract."""
+def test_historical_protocol_startup_publishes_fresh_task_error() -> None:
+    """An old proxy alias accepts only a bounded fresh-task rejection."""
     kb_dir = _temp_vault()
+    project = _scope_project(kb_dir, "historical-transport")
+    rejected_title = "historical protocol request must never execute"
     env = os.environ.copy()
     env.update({
         "LATCH_HOME": str(ROOT),
         "LATCH_KB_DIR": str(kb_dir),
         "LATCH_MCP_DAEMON_PROCESS": "1",
         "LATCH_MCP_RUNTIME_KEY": "historical-epochless",
-        "LATCH_MCP_INITIAL_PROJECT_CWD": str(ROOT),
+        "LATCH_MCP_INITIAL_PROJECT_CWD": str(project),
         "CLAUDE_KB_IN_MAINTENANCE": "1",
         "PYTHONPATH": str(ROOT / "src"),
     })
-    if capability_epoch is None:
-        env.pop("LATCH_MCP_PROXY_CAPABILITY_EPOCH", None)
-    else:
-        env["LATCH_MCP_PROXY_CAPABILITY_EPOCH"] = str(capability_epoch)
+    env.pop("LATCH_MCP_PROTOCOL_VERSION", None)
+    env.pop("LATCH_MCP_PROXY_CAPABILITY_EPOCH", None)
     process = subprocess.Popen(
         [sys.executable, str(ROOT / "src" / "mcp_daemon.py")],
         env=env,
@@ -848,65 +932,105 @@ def test_historical_transport_receives_fresh_task_error_cross_platform(
         stderr=subprocess.PIPE,
     )
     try:
+        started = time.monotonic()
         requested_key = "historical-epochless"
-        legacy_discovery = (
-            kb_dir / "mcp-daemon.json"
-            if pre_registry
-            else kb_dir
+        alias_marker = (
+            kb_dir
             / "runtime"
             / "mcp-runtimes"
             / requested_key
             / "mcp-daemon.json"
         )
         deadline = time.monotonic() + 15.0
-        while time.monotonic() < deadline and not legacy_discovery.exists():
-            if process.poll() is not None:
-                raise AssertionError(
-                    f"compatibility owner exited: {process.stderr.read().decode(errors='replace')}"
-                )
+        while time.monotonic() < deadline and not alias_marker.exists():
             time.sleep(0.05)
-        _assert(legacy_discovery.exists(), "pre-registry discovery was not published")
-        payload = json.loads(legacy_discovery.read_text(encoding="utf-8"))
+        _assert(alias_marker.exists(), "upgrade rejection alias was not published")
+        payload = json.loads(alias_marker.read_text(encoding="utf-8"))
+        _assert(payload.get("compatibility") == "fresh_task_required", str(payload))
+        _assert(payload.get("runtime_key") == requested_key, str(payload))
+        _assert(payload.get("owner_runtime_key") != requested_key, str(payload))
+        _assert(payload.get("protocol") == 1, str(payload))
+        _assert(process.poll() is None, "rejection owner exited before the old proxy connected")
+
         with socket.create_connection(
-            (payload["host"], int(payload["port"])), timeout=5.0
-        ) as sock:
-            stream = sock.makefile("rwb")
-            prelude = {
-                "op": "mcp",
-                "protocol": 1,
+            (str(payload["host"]), int(payload["port"])), timeout=5.0
+        ) as client:
+            client.settimeout(5.0)
+            wire = client.makefile("rwb")
+
+            def exchange(message: dict[str, Any]) -> dict[str, Any]:
+                wire.write(
+                    json.dumps(message, separators=(",", ":")).encode("utf-8")
+                    + b"\n"
+                )
+                wire.flush()
+                line = wire.readline()
+                _assert(bool(line), "fresh-task rejection socket closed early")
+                response = json.loads(line.decode("utf-8"))
+                _assert(isinstance(response, dict), str(response))
+                return response
+
+            wire.write(json.dumps({
                 "token": payload["token"],
                 "runtime_key": requested_key,
-                "connection_id": "fa162bd-wire-contract",
-                "project_cwd": str(ROOT),
-                "proxy_pid": os.getpid(),
-            }
-            if capability_epoch is not None:
-                prelude["proxy_capability_epoch"] = capability_epoch
-            stream.write(json.dumps(prelude).encode() + b"\n")
-            stream.write(json.dumps({
+                "protocol": 1,
+                "proxy_capability_epoch": 0,
+                "op": "mcp",
+                "connection_id": "historical-protocol-test",
+                "project_cwd": str(project),
+                "session_source": "historical-test",
+            }, separators=(",", ":")).encode("utf-8") + b"\n")
+            wire.flush()
+            initialized = exchange({
                 "jsonrpc": "2.0",
                 "id": 1,
                 "method": "initialize",
                 "params": {
-                    "protocolVersion": "2025-06-18",
+                    "protocolVersion": "2024-11-05",
                     "capabilities": {},
-                    "clientInfo": {"name": "fa162bd", "version": "1"},
+                    "clientInfo": {"name": "historical-test", "version": "1"},
                 },
-            }).encode() + b"\n")
-            stream.flush()
-            initialized = json.loads(stream.readline())
-            _assert("result" in initialized, str(initialized))
-            stream.write(
-                b'{"jsonrpc":"2.0","method":"notifications/initialized"}\n'
+            })
+            _assert(
+                initialized.get("result", {}).get("serverInfo", {}).get("version")
+                == "fresh-task-required",
+                str(initialized),
             )
-            stream.write(
-                b'{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}\n'
-            )
-            stream.flush()
-            rejected = json.loads(stream.readline())
-            message = str(rejected.get("error", {}).get("message", "")).lower()
+            rejected = exchange({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {
+                    "name": "latch_insert",
+                    "arguments": {
+                        "kind": "fact",
+                        "title": rejected_title,
+                        "body": "must not be written",
+                    },
+                },
+            })
+            message = str(rejected.get("error", {}).get("message") or "").lower()
             _assert("start a fresh task" in message, str(rejected))
             _assert("request was not executed" in message, str(rejected))
+            wire.close()
+
+        _assert(time.monotonic() - started < 10.0, "fresh-task rejection was not bounded")
+        _assert(process.poll() is None, "rejection owner exited after serving the error")
+        conn = sqlite3.connect(kb_dir / "kb.db")
+        try:
+            has_nodes = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='nodes'"
+            ).fetchone()
+            count = (
+                int(conn.execute(
+                    "SELECT COUNT(*) FROM nodes WHERE title = ?", (rejected_title,)
+                ).fetchone()[0])
+                if has_nodes is not None
+                else 0
+            )
+        finally:
+            conn.close()
+        _assert(count == 0, "historical request reached the Latch data plane")
     finally:
         if process.poll() is None:
             process.terminate()
@@ -1002,15 +1126,26 @@ def test_prompt_embed_activity_keeps_owner_warm() -> None:
     try:
         client = McpClient(kb_dir, "embed-activity-session", idle_ttl=1.0)
         old_pid = client.status()["process_pid"]
+        project = _scope_project(kb_dir, "embed-activity-hook")
         env = os.environ.copy()
-        env.update({"LATCH_KB_DIR": str(kb_dir), "PYTHONPATH": str(ROOT / "src")})
+        env.update({
+            "LATCH_HOME": str(ROOT),
+            "LATCH_KB_DIR": str(kb_dir),
+            "PYTHONPATH": str(ROOT / "src"),
+        })
         code = (
             "import embeddings,time\n"
             "for _ in range(4):\n"
             " assert embeddings.embed_remote('keep warm', '.', timeout=1) is not None\n"
             " time.sleep(.35)\n"
         )
-        subprocess.run([sys.executable, "-c", code], env=env, check=True, timeout=5.0)
+        subprocess.run(
+            [sys.executable, "-c", code],
+            cwd=str(project),
+            env=env,
+            check=True,
+            timeout=5.0,
+        )
         _assert(_daemon_pid(kb_dir) == old_pid, "prompt embedding did not refresh owner activity")
         print("PASS prompt_embed_activity_keeps_owner_warm")
     finally:
@@ -1036,21 +1171,24 @@ def test_prompt_after_idle_exit_wakes_owner_and_emits_truthful_bounded_receipt()
 
         env = os.environ.copy()
         env.update({
+            "LATCH_HOME": str(ROOT),
             "LATCH_KB_DIR": str(kb_dir),
             "CLAUDE_KB_IN_MAINTENANCE": "1",
             "PYTHONPATH": str(ROOT / "src"),
         })
         started = time.perf_counter()
+        project = _scope_project(kb_dir, "prompt-idle-hook")
         proc = subprocess.run(
             [sys.executable, str(PROMPT_HOOK)],
             input=json.dumps({
                 "session_id": "prompt-idle-session",
-                "cwd": str(ROOT),
+                "cwd": str(project),
                 "prompt": "what durable decisions apply to this change",
             }).encode("utf-8"),
             capture_output=True,
             timeout=5.0,
             env=env,
+            cwd=str(project),
         )
         wall_ms = (time.perf_counter() - started) * 1000
         _assert(proc.returncode == 0, proc.stderr.decode(errors="replace"))

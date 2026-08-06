@@ -12,6 +12,7 @@ sys.path.insert(0, str(ROOT / "src" / "hooks"))
 
 import compactor  # noqa: E402
 import db  # noqa: E402
+import project_config  # noqa: E402
 import session_end  # noqa: E402
 import stop  # noqa: E402
 import user_prompt_submit as prompt_hook  # noqa: E402
@@ -97,10 +98,16 @@ def test_stop_creates_missing_session_before_incrementing_turn(
     tmp_path: Path, monkeypatch,
 ):
     session_id = "lazy-stop-session"
+    binding_revision = project_config.resolve(tmp_path).revision
     assert _session(tmp_path, session_id) is None
-    monkeypatch.setattr(stop, "is_unlatched_mode", lambda: False)
-    monkeypatch.setattr(stop, "is_write_disabled", lambda: False)
+    monkeypatch.setattr(stop, "is_unlatched_mode", lambda *_args: False)
+    monkeypatch.setattr(stop, "is_write_disabled", lambda *_args: False)
     monkeypatch.setattr(stop, "is_in_compact", lambda: False)
+    monkeypatch.setattr(
+        stop,
+        "current_session_revision",
+        lambda *_args: binding_revision,
+    )
     monkeypatch.setattr(db, "_now", lambda: "2030-02-03 04:05:06")
     monkeypatch.setattr(
         stop,
@@ -128,12 +135,18 @@ def test_session_end_creates_missing_session_and_schedules_final_compaction(
     tmp_path: Path, monkeypatch,
 ):
     session_id = "lazy-session-end"
+    binding_revision = project_config.resolve(tmp_path).revision
     transcript = tmp_path / "session.jsonl"
     transcript.write_text("", encoding="utf-8")
     assert _session(tmp_path, session_id) is None
-    monkeypatch.setattr(session_end, "is_unlatched_mode", lambda: False)
-    monkeypatch.setattr(session_end, "is_write_disabled", lambda: False)
+    monkeypatch.setattr(session_end, "is_unlatched_mode", lambda *_args: False)
+    monkeypatch.setattr(session_end, "is_write_disabled", lambda *_args: False)
     monkeypatch.setattr(session_end, "is_in_compact", lambda: False)
+    monkeypatch.setattr(
+        session_end,
+        "current_session_revision",
+        lambda *_args: binding_revision,
+    )
     monkeypatch.setattr(db, "_now", lambda: "2030-03-04 05:06:07")
     monkeypatch.setattr(
         session_end,
@@ -159,7 +172,14 @@ def test_session_end_creates_missing_session_and_schedules_final_compaction(
     assert session["transcript_path"] == str(transcript)
     assert session["ended_at"] is None
     assert spawned == [
-        ((session_id, str(tmp_path), str(transcript)), {"final": True})
+        (
+            (session_id, str(tmp_path), str(transcript)),
+            {
+                "final": True,
+                "binding_revision": binding_revision,
+                "expected_kb_dir": str(db.paths.project_dir(tmp_path)),
+            },
+        )
     ]
 
 

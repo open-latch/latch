@@ -84,6 +84,11 @@ def test_public_priority_mutations_lock_before_opening_db(monkeypatch):
             events.append("lock:exit")
 
     @contextmanager
+    def observed_access(project_path, *args, **kwargs):
+        _assert(project_path == project, f"unexpected access project: {project_path}")
+        yield Path(project)
+
+    @contextmanager
     def observed_conn():
         events.append("db:enter")
         try:
@@ -110,7 +115,8 @@ def test_public_priority_mutations_lock_before_opening_db(monkeypatch):
         return {"retired": True, "id": 11}
 
     monkeypatch.setattr(mcp_server, "_project_cwd", lambda: project)
-    monkeypatch.setattr(mcp_server.paths, "is_unlatched_mode", lambda: False)
+    monkeypatch.setattr(mcp_server.paths, "is_unlatched_mode", lambda *_args: False)
+    monkeypatch.setattr(mcp_server.lockfile, "project_access_lock", observed_access)
     monkeypatch.setattr(mcp_server.lockfile, "writer_lock", observed_lock)
     monkeypatch.setattr(mcp_server, "_conn", observed_conn)
     monkeypatch.setattr(mcp_server.priorities, "add_priority", observed_add)
@@ -150,7 +156,7 @@ def test_public_priority_mutations_fail_closed_when_lifecycle_lock_is_busy(
     def forbidden_conn():
         raise AssertionError("SQLite must not open before the writer lock")
 
-    monkeypatch.setattr(mcp_server.paths, "is_unlatched_mode", lambda: False)
+    monkeypatch.setattr(mcp_server.paths, "is_unlatched_mode", lambda *_args: False)
     monkeypatch.setattr(mcp_server.lockfile, "writer_lock", busy_lock)
     monkeypatch.setattr(mcp_server, "_conn", forbidden_conn)
 
@@ -178,16 +184,16 @@ def test_public_priority_write_waits_for_shared_lifecycle_lock(
     project = str(tmp_path)
     worker_attempted_lock = threading.Event()
     worker_opened_db = threading.Event()
-    original_compactor_lock = mcp_server.lockfile.compactor_lock
+    original_writer_lock = mcp_server.lockfile.writer_lock
     original_conn = mcp_server._conn
     result: dict = {}
 
     @contextmanager
-    def observed_compactor_lock(project_path):
+    def observed_writer_lock(project_path, **kwargs):
         if threading.current_thread().name == "public-priority-writer":
             worker_attempted_lock.set()
-        with original_compactor_lock(project_path) as acquired:
-            yield acquired
+        with original_writer_lock(project_path, **kwargs):
+            yield
 
     def observed_conn():
         if threading.current_thread().name == "public-priority-writer":
@@ -198,9 +204,9 @@ def test_public_priority_write_waits_for_shared_lifecycle_lock(
         result.update(mcp_server.kb_priority_add("serialized priority"))
 
     monkeypatch.setattr(mcp_server, "_project_cwd", lambda: project)
-    monkeypatch.setattr(mcp_server.paths, "is_unlatched_mode", lambda: False)
+    monkeypatch.setattr(mcp_server.paths, "is_unlatched_mode", lambda *_args: False)
     monkeypatch.setattr(
-        mcp_server.lockfile, "compactor_lock", observed_compactor_lock,
+        mcp_server.lockfile, "writer_lock", observed_writer_lock,
     )
     monkeypatch.setattr(mcp_server, "_conn", observed_conn)
 

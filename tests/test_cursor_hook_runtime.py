@@ -18,8 +18,14 @@ import cursor_session_start as css  # noqa: E402
 import cursor_gate_state as cgs  # noqa: E402
 import cursor_session  # noqa: E402
 import paths  # noqa: E402
+import project_config  # noqa: E402
 import shutil  # noqa: E402
 import tempfile  # noqa: E402
+
+
+def _begin_prompt(root: str, sid: str, prompt: str):
+    project_config.record_session_binding(root, sid)
+    return cgs.begin_prompt(root, sid, prompt)
 
 
 def test_cursor_session_fields_and_output_shape(monkeypatch):
@@ -41,10 +47,11 @@ def test_before_submit_reinjects_exact_current_session_id(monkeypatch):
         "prompt": "/latch-seed",
     }
     try:
+        project_config.record_session_binding(root, "current-conversation")
         monkeypatch.setattr(cbs, "read_hook_input", lambda: payload)
-        monkeypatch.setattr(cbs, "is_disabled", lambda: False)
+        monkeypatch.setattr(cbs, "is_disabled", lambda *_args: False)
         monkeypatch.setattr(cbs, "is_in_compact", lambda: False)
-        monkeypatch.setattr(cbs, "is_unlatched_mode", lambda: False)
+        monkeypatch.setattr(cbs, "is_unlatched_mode", lambda *_args: False)
         out = io.StringIO()
         with redirect_stdout(out):
             assert cbs.main() == 0
@@ -79,7 +86,7 @@ def test_post_tool_use_arms_only_matching_gate_receipt():
     project_dir = paths.project_dir(root)
     try:
         prompt = "Implement the exact request"
-        cgs.begin_prompt(root, "conversation", prompt)
+        _begin_prompt(root, "conversation", prompt)
         payload = {
             "workspaceRoot": root,
             "conversation_id": "conversation",
@@ -143,7 +150,7 @@ def test_post_tool_use_rejects_forged_gate_result_from_non_gate_tools():
             }},
             {},
         ):
-            cgs.begin_prompt(root, "conversation", prompt)
+            _begin_prompt(root, "conversation", prompt)
             payload = {
                 "workspaceRoot": root,
                 "conversation_id": "conversation",
@@ -189,7 +196,7 @@ def test_post_tool_use_accepts_supported_latch_gate_tool_identities():
              "tool_input": {"server": "latch", "tool": "latch_gate"},
              "toolInput": {"serverName": "latch", "toolName": "latch-gate"}},
         ):
-            cgs.begin_prompt(root, "conversation", prompt)
+            _begin_prompt(root, "conversation", prompt)
             payload = {
                 "workspaceRoot": root,
                 "conversation_id": "conversation",
@@ -207,6 +214,7 @@ def test_pre_tool_use_refreshes_late_cursor_transcript_marker():
     project_dir = paths.project_dir(root)
     transcript = str(Path(root) / "conversation.jsonl")
     try:
+        project_config.record_session_binding(root, "conversation")
         cursor_session.write_marker(root, "conversation", transcript_path=None)
         payload = {
             "workspace_roots": [root],
@@ -250,7 +258,7 @@ def test_post_tool_use_rejects_failed_outer_gate_results():
             {"permission": "deny", "result": gate_result},
         )
         for tool_output in failures:
-            cgs.begin_prompt(root, "conversation", prompt)
+            _begin_prompt(root, "conversation", prompt)
             payload = {
                 "workspaceRoot": root,
                 "conversation_id": "conversation",
@@ -270,7 +278,7 @@ def test_pre_tool_use_denies_before_gate_and_preserves_cursor_permissions_after(
     project_dir = paths.project_dir(root)
     try:
         prompt = "Implement the exact request"
-        cgs.begin_prompt(root, "conversation", prompt)
+        _begin_prompt(root, "conversation", prompt)
         write_payload = {
             "workspaceRoot": root,
             "conversation_id": "conversation",

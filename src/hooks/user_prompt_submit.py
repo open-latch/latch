@@ -29,15 +29,24 @@ import sys
 import time
 from datetime import datetime, timezone
 
-from _common import hook_field, log, project_cwd, read_hook_input, session_id
+from _common import (
+    STALE_SESSION_MESSAGE,
+    current_session_revision,
+    hook_field,
+    log,
+    project_cwd,
+    read_hook_input,
+    session_id,
+)
 
+import lockfile
 import mcp_broker
+import project_config
 from paths import (
     UNLATCHED_MESSAGE,
     is_disabled,
     is_in_compact,
     is_unlatched_mode,
-    db_path,
 )
 
 
@@ -139,17 +148,62 @@ GUIDELINE_SIGNAL = re.compile(
     re.IGNORECASE,
 )
 
+BINDING_ERROR_MESSAGE = (
+    "_\u26a0 Latch could not verify this task's project binding, so it skipped "
+    "KB access for safety. Restart with a fresh task and do not resume this one; if "
+    "this repeats, run `latch "
+    "doctor` and inspect the hook log._"
+)
+
 
 def main() -> int:
-    if is_unlatched_mode():
+    payload = read_hook_input()
+    cwd = project_cwd(payload)
+    if is_unlatched_mode(cwd):
         _print_context(UNLATCHED_MESSAGE)
         return 0
-    if is_disabled() or is_in_compact():
+    if is_disabled(cwd) or is_in_compact():
         return 0
-    payload = read_hook_input()
     sid = session_id(payload)
-    cwd = project_cwd(payload)
     prompt = (hook_field(payload, "prompt", "user_prompt") or "").strip()
+    try:
+        binding_revision = current_session_revision(cwd, sid) if sid else None
+    except Exception as e:
+        log(
+            f"user_prompt_submit session binding error: {e}",
+            cwd,
+            expected_revision="stale-session",
+        )
+        _print_context(BINDING_ERROR_MESSAGE)
+        return 0
+    if binding_revision is None:
+        _print_context(STALE_SESSION_MESSAGE)
+        return 0
+    try:
+        with lockfile.project_access_lock(cwd) as locked_kb:
+            if sid and current_session_revision(cwd, sid) != binding_revision:
+                _print_context(STALE_SESSION_MESSAGE)
+                return 0
+            return _run_current_session(
+                cwd,
+                sid,
+                prompt,
+                binding_revision=binding_revision,
+                expected_kb_dir=str(locked_kb),
+            )
+    except lockfile.ProjectTargetChangedError:
+        _print_context(STALE_SESSION_MESSAGE)
+        return 0
+
+
+def _run_current_session(
+    cwd: str,
+    sid: str | None,
+    prompt: str,
+    *,
+    binding_revision: str | None = None,
+    expected_kb_dir: str | None = None,
+) -> int:
 
     correction_signal = bool(CORRECTION_SIGNAL.search(prompt))
     guideline_signal = (
@@ -162,8 +216,22 @@ def main() -> int:
     # survive an unavailable embedding owner. Their helpers use a lightweight
     # direct SQLite connection, so this does not reintroduce sqlite-vec/model
     # startup on the degraded path.
-    mc_directive = _mission_control_directive(cwd, prompt)
-    cite_count = _take_cite_nudge(cwd, sid) if sid else 0
+    mc_directive = _mission_control_directive(
+        cwd,
+        prompt,
+        sid=sid,
+        expected_revision=binding_revision,
+        expected_kb_dir=expected_kb_dir,
+    )
+    cite_count = (
+        _take_cite_nudge(
+            cwd,
+            sid,
+            expected_revision=binding_revision,
+            expected_kb_dir=expected_kb_dir,
+        )
+        if sid else 0
+    )
     cite_directive = (
         profiles.render_cite_correction_directive(cite_count) if cite_count else ""
     )
@@ -201,7 +269,9 @@ def main() -> int:
         )
         if nudge:
             context = nudge + "\n\n" + context
-        _emit_and_log(cwd, log_entry, context)
+        _emit_and_log(
+            cwd, log_entry, context, expected_revision=binding_revision,
+        )
         return 0
 
     # Slice 3-B: surface the advisory cite-correction nudge queued by last turn's
@@ -226,12 +296,16 @@ def main() -> int:
     if not sid:
         log_entry["skip"] = "no_session_id"
         nudge = _extra_nudges(correction_signal, guideline_signal, mc_directive, cite_directive)
-        _emit_and_log(cwd, log_entry, nudge)
+        _emit_and_log(
+            cwd, log_entry, nudge, expected_revision=binding_revision,
+        )
         return 0
     if not prompt or len(prompt.split()) < MIN_PROMPT_WORDS:
         log_entry["skip"] = "prompt_too_short"
         nudge = _extra_nudges(correction_signal, guideline_signal, mc_directive, cite_directive)
-        _emit_and_log(cwd, log_entry, nudge)
+        _emit_and_log(
+            cwd, log_entry, nudge, expected_revision=binding_revision,
+        )
         return 0
 
     t0 = time.perf_counter()
@@ -241,6 +315,8 @@ def main() -> int:
             deadline=_PROCESS_STARTED + (
                 HARD_BUDGET_MS - SUBPROCESS_BUDGET_RESERVE_MS
             ) / 1000.0,
+            binding_revision=binding_revision,
+            expected_kb_dir=expected_kb_dir,
         )
     except Exception as e:
         log_entry["error"] = f"{type(e).__name__}: {e}"
@@ -257,8 +333,14 @@ def main() -> int:
             "prompt_retrieval_degraded",
             reason="retrieval_error",
         )
-        _emit_and_log(cwd, log_entry, context)
-        log(f"user_prompt_submit error: {e}")
+        _emit_and_log(
+            cwd, log_entry, context, expected_revision=binding_revision,
+        )
+        log(
+            f"user_prompt_submit error: {e}",
+            cwd,
+            expected_revision=binding_revision,
+        )
         return 0
     elapsed_ms = (time.perf_counter() - t0) * 1000
     log_entry["elapsed_ms"] = round(elapsed_ms, 1)
@@ -279,7 +361,9 @@ def main() -> int:
     nudge = _extra_nudges(correction_signal, guideline_signal, mc_directive, cite_directive)
     if nudge:
         context = nudge + ("\n\n" + context if context else "")
-    _emit_and_log(cwd, log_entry, context)
+    _emit_and_log(
+        cwd, log_entry, context, expected_revision=binding_revision,
+    )
     return 0
 
 
@@ -293,10 +377,16 @@ def _print_context(context: str) -> None:
     print(json.dumps(out))
 
 
-def _emit_and_log(cwd: str, log_entry: dict, context: str) -> None:
+def _emit_and_log(
+    cwd: str,
+    log_entry: dict,
+    context: str,
+    *,
+    expected_revision: str | None = None,
+) -> None:
     """Record the exact prompt-context cost, then emit only non-empty context."""
     log_entry["context_chars"] = len(context)
-    _write_log(cwd, log_entry)
+    _write_log(cwd, log_entry, expected_revision=expected_revision)
     if context:
         _print_context(context)
 
@@ -331,9 +421,15 @@ def _retrieve_and_inject(
     log_entry: dict,
     *,
     deadline: float | None = None,
+    binding_revision: str | None = None,
+    expected_kb_dir: str | None = None,
 ) -> list[dict]:
     _load_runtime()
-    conn = db.connect(cwd)
+    conn = db.connect(
+        cwd,
+        expected_binding_revision=binding_revision,
+        expected_kb_dir=expected_kb_dir,
+    )
     try:
         # Determine current turn — sessions row may not yet exist if the Stop
         # hook is gated off. Default to 0; turns are still meaningful for TTL
@@ -642,7 +738,14 @@ def _format_guideline_nudge() -> str:
 # EXPERIMENTAL — mission-control / verification profiles. NOT recommended for use;
 # planned to be unshipped to a separate branch later (observed unhelpful on
 # pmeyer's workspace, 2026-06-10). See KB decision id=1550. Don't rely on / extend.
-def _mission_control_directive(cwd: str, prompt: str) -> str:
+def _mission_control_directive(
+    cwd: str,
+    prompt: str,
+    *,
+    sid: str | None = None,
+    expected_revision: str | None = None,
+    expected_kb_dir: str | None = None,
+) -> str:
     """Standing mission-control verification contract, injected when the resolved
     actor is bound to a profile with gate_surface='all_moves'. Tailored to the
     deterministic move-type of `prompt`; empty for everyone else (unbound actors
@@ -651,44 +754,113 @@ def _mission_control_directive(cwd: str, prompt: str) -> str:
     latch has no interceptor (KB id=1398)."""
     try:
         _load_light_runtime()
-        conn = _open_existing_light_connection(cwd)
-        if conn is None:
-            return ""
-        try:
-            return profiles.mission_control_directive(conn, prompt)
-        finally:
-            conn.close()
+        with lockfile.project_access_lock(cwd) as locked_kb:
+            if sid is not None and current_session_revision(cwd, sid) != expected_revision:
+                return ""
+            if expected_kb_dir is not None and os.path.normcase(
+                str(locked_kb)
+            ) != os.path.normcase(expected_kb_dir):
+                return ""
+            conn = _open_existing_light_connection(
+                cwd,
+                expected_revision=expected_revision,
+                expected_kb_dir=expected_kb_dir or str(locked_kb),
+            )
+            if conn is None:
+                return ""
+            try:
+                return profiles.mission_control_directive(conn, prompt)
+            finally:
+                conn.close()
     except Exception as e:
-        log(f"mission_control_directive error: {e}")
+        log(
+            f"mission_control_directive error: {e}",
+            cwd,
+            expected_revision=expected_revision,
+        )
         return ""
 
 
-def _take_cite_nudge(cwd: str, sid: str) -> int:
+def _take_cite_nudge(
+    cwd: str,
+    sid: str,
+    *,
+    expected_revision: str | None = None,
+    expected_kb_dir: str | None = None,
+) -> int:
     """Read + reset the pending cite-nudge marker for this session (Slice 3-B).
     Fail-open: any error -> 0 so the hook never breaks the user's prompt. Cheap:
     a single indexed read, and a write only when a nudge was actually queued."""
     try:
         _load_light_runtime()
-        conn = _open_existing_light_connection(cwd)
-        if conn is None:
+        verified_revision = expected_revision or current_session_revision(cwd, sid)
+        if verified_revision is None:
             return 0
-        try:
-            return db.take_pending_cite_nudge(conn, sid)
-        finally:
-            conn.close()
+        with lockfile.project_access_lock(cwd) as locked_kb:
+            if current_session_revision(cwd, sid) != verified_revision:
+                return 0
+            if expected_kb_dir is not None and os.path.normcase(
+                str(locked_kb)
+            ) != os.path.normcase(expected_kb_dir):
+                return 0
+            conn = _open_existing_light_connection(
+                cwd,
+                expected_revision=verified_revision,
+                expected_kb_dir=expected_kb_dir or str(locked_kb),
+            )
+            if conn is None:
+                return 0
+            try:
+                return db.take_pending_cite_nudge(conn, sid)
+            finally:
+                conn.close()
     except Exception as e:
-        log(f"take_pending_cite_nudge error: {e}")
+        log(
+            f"take_pending_cite_nudge error: {e}",
+            cwd,
+            expected_revision=expected_revision,
+        )
         return 0
 
 
-def _open_existing_light_connection(cwd: str) -> sqlite3.Connection | None:
+def _open_existing_light_connection(
+    cwd: str,
+    *,
+    expected_revision: str | None = None,
+    expected_kb_dir: str | None = None,
+) -> sqlite3.Connection | None:
     """Open the existing KB without schema migration or sqlite-vec loading."""
-    path = db_path(cwd)
+    target = project_config.resolve(cwd)
+    if expected_revision is not None and target.revision != expected_revision:
+        return None
+    selected = project_config.validated_bound_kb_dir(target)
+    if selected is None:
+        return None
+    if expected_kb_dir is not None and os.path.normcase(
+        str(selected)
+    ) != os.path.normcase(expected_kb_dir):
+        return None
+    path = db._validated_sqlite_path(selected)
     if not path.is_file():
         return None
     conn = sqlite3.connect(str(path), timeout=LIGHT_DB_BUSY_TIMEOUT_SECONDS)
-    conn.row_factory = sqlite3.Row
-    return conn
+    try:
+        current = project_config.resolve(cwd)
+        current_selected = project_config.validated_bound_kb_dir(current)
+        if (
+            current.revision != target.revision
+            or current_selected is None
+            or os.path.normcase(str(current_selected))
+            != os.path.normcase(str(selected))
+        ):
+            conn.close()
+            return None
+        conn.row_factory = sqlite3.Row
+        db._verify_opened_connection_target(conn, path, target)
+        return conn
+    except Exception:
+        conn.close()
+        raise
 
 
 def _extra_nudges(
@@ -719,7 +891,12 @@ def _phash(prompt: str) -> str:
     return hashlib.sha1(prompt.encode("utf-8", errors="replace")).hexdigest()[:12]
 
 
-def _write_log(cwd: str, entry: dict) -> None:
+def _write_log(
+    cwd: str,
+    entry: dict,
+    *,
+    expected_revision: str | None = None,
+) -> None:
     """Emit one JSONL row to the daily retrieve log (KB id=1091 conventions).
 
     The legacy `sid` field on the entry is left in place for back-compat;
@@ -735,7 +912,11 @@ def _write_log(cwd: str, entry: dict) -> None:
             session_id=entry.get("sid"),
         )
     except Exception as e:
-        log(f"retrieve.log write failed: {e}")
+        log(
+            f"retrieve.log write failed: {e}",
+            cwd,
+            expected_revision=expected_revision,
+        )
 
 
 if __name__ == "__main__":

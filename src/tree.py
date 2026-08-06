@@ -37,6 +37,7 @@ import budget  # noqa: E402
 import db  # noqa: E402
 import embeddings  # noqa: E402
 import lifecycle_signals  # noqa: E402
+import lockfile  # noqa: E402
 import log_utils  # noqa: E402
 import model_backends  # noqa: E402
 import paths  # noqa: E402
@@ -218,11 +219,13 @@ def _summary_backend() -> str:
         return "claude"
 
 
-def _invoke_summary(members: list[dict]) -> dict | None:
+def _invoke_summary(
+    members: list[dict], *, project_path: str | None = None,
+) -> dict | None:
     """Ask the selected model backend for a {title, body} JSON summary.
 
     Returns the dict or None on any parse/subprocess failure (caller falls back)."""
-    if paths.is_disabled() or paths.is_in_compact():
+    if paths.is_disabled(project_path) or paths.is_in_compact():
         return None
     payload_parts = [SUMMARY_PROMPT, "\n\n--- CLUSTER MEMBERS ---\n"]
     for m in members:
@@ -239,7 +242,10 @@ def _invoke_summary(members: list[dict]) -> dict | None:
         codex_model_env=TREE_CODEX_MODEL_ENV,
     )
     if result.error is not None or result.text is None:
-        _log(f"summary {result.backend} subprocess failed: {result.error}")
+        _log(
+            project_path,
+            f"summary {result.backend} subprocess failed: {result.error}",
+        )
         return None
 
     return _parse_summary_output(result.text)
@@ -393,13 +399,13 @@ def build_tree(
     if linkage not in ("average", "single"):
         raise ValueError(
             f"build_tree: unknown linkage {linkage!r}; expected 'average' or 'single'")
-    if paths.is_unlatched_mode():
+    if paths.is_unlatched_mode(project_path):
         return {
             "ok": False,
             "reason": "unlatched",
             "message": paths.UNLATCHED_MESSAGE,
         }
-    if paths.is_disabled():
+    if paths.is_disabled(project_path):
         return {"ok": False, "reason": "disabled"}
 
     result: dict = {
@@ -581,10 +587,13 @@ def build_tree(
             # rather than written as a giant canonical summary. (KB id=1560 Step 1;
             # bounded average-linkage + recursive re-split are Steps 2-3.)
             result["oversized_skipped"] += 1
-            _log(f"WARNING: cluster of {len(members)} members > "
-                 f"MAX_CLUSTER_MEMBERS={max_cluster_members} at "
-                 f"threshold={cluster_threshold} — refusing to summarize "
-                 f"(possible single-link collapse); members left unparented")
+            _log(
+                project_path,
+                f"WARNING: cluster of {len(members)} members > "
+                f"MAX_CLUSTER_MEMBERS={max_cluster_members} at "
+                f"threshold={cluster_threshold} — refusing to summarize "
+                f"(possible single-link collapse); members left unparented",
+            )
             _debug(f"  cluster #{cluster_i} size={len(members)} "
                    f"SKIP: exceeds max_cluster_members={max_cluster_members}")
             continue
@@ -620,7 +629,7 @@ def build_tree(
                 result["budget_blocked"] += 1
                 _debug(f"    -> SKIP: budget cap hit")
                 continue
-            summary = _invoke_summary(members)
+            summary = _invoke_summary(members, project_path=project_path)
         else:
             summary = None  # no-LLM mode: skip generation (dry-run / test)
 
@@ -680,11 +689,13 @@ def _stale_orphans(conn, existing_summaries: dict[str, int],
 
 # ---------- logging ----------
 
-def _log(msg: str) -> None:
-    log_path = paths.KB_ROOT / "tree.log"
+def _log(project_path: str | None, msg: str) -> None:
     try:
-        with log_path.open("a", encoding="utf-8") as f:
-            f.write(f"[{datetime.now().isoformat(timespec='seconds')}] {msg}\n")
+        lockfile.append_project_log(
+            project_path,
+            "tree.log",
+            f"[{datetime.now().isoformat(timespec='seconds')}] {msg}\n",
+        )
     except Exception:
         pass
 

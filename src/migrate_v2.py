@@ -108,10 +108,9 @@ if __name__ == "__main__":
     if sys.argv[1] == "--all":
         out = migrate_all()
     else:
-        # argv[1] is a project_path used to derive the project dir. We accept
-        # either the original source cwd (e.g. C:/path/to/your/project)
-        # OR the sanitized project dir itself — db.connect() uses sanitize_cwd
-        # which is stable under double-sanitization because paths do not survive
-        # re-resolution. Prefer passing the original cwd.
+        # argv[1] is the source project path used to resolve its binding. Legacy
+        # direct children of PROJECTS_ROOT remain accepted, but isolated KB
+        # directories are intentionally rejected: pass their bound Git project
+        # root so migration cannot silently fall back to another KB.
         out = migrate_one(sys.argv[1])
     print(json.dumps(out, indent=2, default=str))

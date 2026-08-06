@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import subprocess
 import sys
 import tempfile
 import threading
@@ -28,7 +29,9 @@ def _utc_date_iso(offset_days: int = 0) -> str:
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import budget  # noqa: E402
+import lockfile  # noqa: E402
 import paths  # noqa: E402
+import project_config  # noqa: E402
 
 
 def _assert(cond, msg):
@@ -367,8 +370,8 @@ def test_unreadable_budget_state_degrades_gate_without_spend(tmp_path, monkeypat
     import gate
     import paths
 
-    monkeypatch.setattr(paths, "is_unlatched_mode", lambda: False)
-    monkeypatch.setattr(paths, "is_disabled", lambda: False)
+    monkeypatch.setattr(paths, "is_unlatched_mode", lambda *_args: False)
+    monkeypatch.setattr(paths, "is_disabled", lambda *_args: False)
     monkeypatch.setattr(paths, "is_in_compact", lambda: False)
 
     def broken(*args, **kwargs):
@@ -393,17 +396,267 @@ def test_unreadable_budget_state_degrades_compaction_without_spend(
     import compactor
     import paths
 
-    monkeypatch.setattr(paths, "is_unlatched_mode", lambda: False)
-    monkeypatch.setattr(paths, "is_disabled", lambda: False)
+    monkeypatch.setattr(paths, "is_unlatched_mode", lambda *_args: False)
+    monkeypatch.setattr(paths, "is_disabled", lambda *_args: False)
     monkeypatch.setattr(paths, "is_in_compact", lambda: False)
 
     def broken(*args, **kwargs):
         raise budget.BudgetStateError("budget state at /tmp/x is unreadable")
 
     monkeypatch.setattr(budget, "check_and_record", broken)
-    result = compactor.run_compaction("sid", str(tmp_path), None)
+    project, _kb_a, _kb_b, _binding = _bound_budget_project(
+        tmp_path, "unreadable-compaction"
+    )
+    revision = project_config.record_session_binding(project, "sid")
+    result = compactor.run_compaction(
+        "sid", str(project), None, binding_revision=revision
+    )
     assert result == {
         "ok": False,
         "reason": "budget_state_error",
         "session_id": "sid",
     }
+
+
+def _bound_budget_project(
+    tmp_path: Path,
+    name: str,
+) -> tuple[Path, Path, Path, project_config.ProjectBinding]:
+    project = tmp_path / f"project-{name}"
+    project.mkdir()
+    subprocess.run(["git", "init", "-q", str(project)], check=True)
+    vaults = paths.validated_test_root() / "vaults"
+    kb_a = vaults / f"budget-{name}-a-{tmp_path.name}"
+    kb_b = vaults / f"budget-{name}-b-{tmp_path.name}"
+    for kb_dir in (kb_a, kb_b):
+        kb_dir.mkdir(parents=True)
+        project_config.mark_kb_target(kb_dir)
+    binding = project_config.write_binding(
+        project,
+        mode=project_config.MODE_LATCHED,
+        kb_dir=kb_a,
+    )
+    return project, kb_a, kb_b, binding
+
+
+def test_cli_manual_non_agent_status_keeps_legacy_compatibility(tmp_path):
+    result = budget._run_cli_command("status", str(tmp_path), env={})
+
+    assert result["approved_today"] is False
+    assert result["nonheal"]["count"] == 0
+
+
+def test_cli_current_session_supports_compatibility_global_project(
+    tmp_path, monkeypatch,
+):
+    test_root = paths.validated_test_root()
+    assert test_root is not None
+    control = test_root / "budget-compatibility" / tmp_path.name
+    home = tmp_path / "latch-home"
+    home.mkdir()
+    global_kb = test_root / "vaults" / f"budget-global-{tmp_path.name}"
+    global_kb.mkdir(parents=True)
+    (home / "kb_location.json").write_text(
+        json.dumps({"kb_dir": str(global_kb)}) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(project_config.CONTROL_ROOT_ENV, str(control))
+    monkeypatch.setenv("LATCH_HOME", str(home))
+    project_config.write_machine_policy(
+        project_config.MACHINE_POLICY_COMPATIBILITY
+    )
+    project_config.initialize_compatibility_binding()
+    project = tmp_path / "legacy-project"
+    project.mkdir()
+    subprocess.run(["git", "init", "-q", str(project)], check=True)
+    session_id = "legacy-budget-task"
+    revision = project_config.resolve(project).revision
+    assert project_config.record_session_binding(project, session_id) == revision
+
+    result = budget._run_cli_command(
+        "status",
+        str(project),
+        session_id=session_id,
+        env={},
+    )
+
+    assert result["approved_today"] is False
+
+
+def test_cli_ambient_session_must_match_explicit_session(
+    tmp_path, monkeypatch, capsys,
+):
+    project, _kb_a, _kb_b, binding = _bound_budget_project(tmp_path, "ambient")
+    session_id = "current-budget-task"
+    assert (
+        project_config.record_session_binding(project, session_id)
+        == binding.revision
+    )
+    monkeypatch.setenv("CODEX_THREAD_ID", session_id)
+
+    assert budget.main(["status", str(project)]) == 0
+    capsys.readouterr()
+    assert (
+        budget.main(
+            [
+                "approve",
+                str(project),
+                "--session-id",
+                "different-task",
+            ]
+        )
+        == 1
+    )
+    output = capsys.readouterr()
+    assert "does not match this agent task's session" in output.err
+
+
+def test_cli_stale_session_cannot_approve_replacement_kb(tmp_path, capsys):
+    project, kb_a, kb_b, binding_a = _bound_budget_project(tmp_path, "stale")
+    session_id = "old-budget-task"
+    assert (
+        project_config.record_session_binding(project, session_id)
+        == binding_a.revision
+    )
+    budget.record_invocation(str(project), category="nonheal")
+    state_a = (kb_a / "budget.json").read_bytes()
+    project_config.repin_private_scope(project, kb_b)
+
+    assert (
+        budget.main(
+            ["approve", str(project), "--session-id", session_id]
+        )
+        == 1
+    )
+    output = capsys.readouterr()
+    assert "older or different project KB" in output.err
+    assert (kb_a / "budget.json").read_bytes() == state_a
+    assert not (kb_b / "budget.json").exists()
+
+
+def test_cli_unlatched_project_cannot_approve_budget(tmp_path, capsys):
+    project, kb_a, _kb_b, binding = _bound_budget_project(tmp_path, "unlatched")
+    session_id = "unlatched-budget-task"
+    assert (
+        project_config.record_session_binding(project, session_id)
+        == binding.revision
+    )
+    budget.record_invocation(str(project), category="nonheal")
+    state_a = (kb_a / "budget.json").read_bytes()
+    project_config.write_binding(
+        project,
+        mode=project_config.MODE_UNLATCHED,
+        kb_dir=kb_a,
+    )
+
+    assert (
+        budget.main(
+            ["approve", str(project), "--session-id", session_id]
+        )
+        == 1
+    )
+    output = capsys.readouterr()
+    assert "Latch is Unlatched for this project" in output.err
+    assert (kb_a / "budget.json").read_bytes() == state_a
+
+
+def test_cli_cross_project_session_cannot_approve_other_project(
+    tmp_path, capsys,
+):
+    project_a, _kb_a, _unused, binding_a = _bound_budget_project(
+        tmp_path, "cross-a",
+    )
+    project_b, _kb_b, kb_b_replacement, _binding_b = _bound_budget_project(
+        tmp_path, "cross-b",
+    )
+    session_id = "project-a-budget-task"
+    assert (
+        project_config.record_session_binding(project_a, session_id)
+        == binding_a.revision
+    )
+
+    assert (
+        budget.main(
+            ["approve", str(project_b), "--session-id", session_id]
+        )
+        == 1
+    )
+    output = capsys.readouterr()
+    assert "older or different project KB" in output.err
+    assert not (_kb_b / "budget.json").exists()
+    assert not (kb_b_replacement / "budget.json").exists()
+
+
+def test_cli_agent_context_without_session_fails_before_budget_access(
+    tmp_path, monkeypatch, capsys,
+):
+    project, _kb_a, _kb_b, _binding = _bound_budget_project(
+        tmp_path, "missing-session",
+    )
+    monkeypatch.setenv("LATCH_ADAPTER", "cursor")
+    monkeypatch.setattr(
+        budget,
+        "approve_today",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("unverified agent task must not access budget state")
+        ),
+    )
+
+    assert budget.main(["approve", str(project)]) == 1
+    output = capsys.readouterr()
+    assert "cannot verify this agent task's project KB" in output.err
+
+
+def test_cli_approve_holds_project_access_until_write_finishes(
+    tmp_path, monkeypatch,
+):
+    project, kb_a, kb_b, binding_a = _bound_budget_project(tmp_path, "lease")
+    session_id = "leased-budget-task"
+    assert (
+        project_config.record_session_binding(project, session_id)
+        == binding_a.revision
+    )
+    approve_started = threading.Event()
+    allow_approve = threading.Event()
+    transition_started = threading.Event()
+    transition_acquired = threading.Event()
+    original_approve = budget.approve_today
+
+    def delayed_approve(project_path):
+        approve_started.set()
+        assert allow_approve.wait(timeout=5)
+        return original_approve(project_path)
+
+    def repin():
+        transition_started.set()
+        with lockfile.project_access_lock(str(project), exclusive=True):
+            transition_acquired.set()
+            project_config.write_binding(
+                project,
+                mode=project_config.MODE_LATCHED,
+                kb_dir=kb_b,
+            )
+
+    monkeypatch.setattr(budget, "approve_today", delayed_approve)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        approve_future = pool.submit(
+            budget._run_cli_command,
+            "approve",
+            str(project),
+            session_id=session_id,
+            env={},
+        )
+        assert approve_started.wait(timeout=5)
+        repin_future = pool.submit(repin)
+        assert transition_started.wait(timeout=5)
+        time.sleep(0.05)
+        assert not transition_acquired.is_set()
+        allow_approve.set()
+        result = approve_future.result(timeout=5)
+        repin_future.result(timeout=5)
+
+    assert result["approved_dates"] == [budget._today_iso()]
+    assert json.loads((kb_a / "budget.json").read_text(encoding="utf-8"))[
+        "approved_dates"
+    ] == [budget._today_iso()]
+    assert not (kb_b / "budget.json").exists()

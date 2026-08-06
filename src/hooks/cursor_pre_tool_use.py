@@ -12,7 +12,14 @@ sys.path.insert(0, str(SRC / "hooks"))
 
 import cursor_gate_state  # noqa: E402
 import cursor_session  # noqa: E402
-from _common import log, read_hook_input, transcript_path  # noqa: E402
+import lockfile  # noqa: E402
+from _common import (  # noqa: E402
+    STALE_SESSION_MESSAGE,
+    current_session_revision,
+    log,
+    read_hook_input,
+    transcript_path,
+)
 from paths import is_disabled, is_in_compact, is_unlatched_mode  # noqa: E402
 
 
@@ -27,11 +34,49 @@ OPERATION_DENY_MESSAGE = (
     "Rerun the documented preview/prepare workflow or correct the invocation; "
     "a general latch_gate receipt cannot override this narrow lane."
 )
+STALE_DENY_MESSAGE = STALE_SESSION_MESSAGE
 
 
 def decision(payload: dict) -> dict:
     cwd = cursor_gate_state.project_cwd(payload)
     sid = cursor_gate_state.session_id(payload, cwd)
+    try:
+        binding_revision = current_session_revision(cwd, sid)
+    except Exception as exc:
+        log(
+            f"cursor_pre_tool_use binding verification failed: {exc}",
+            cwd,
+            expected_revision="stale-session",
+        )
+        return {"permission": "deny", "user_message": STALE_DENY_MESSAGE}
+    if binding_revision is None:
+        log(
+            f"cursor_pre_tool_use skipped stale session: {STALE_SESSION_MESSAGE}",
+            cwd,
+            expected_revision="stale-session",
+        )
+        return {"permission": "deny", "user_message": STALE_DENY_MESSAGE}
+    try:
+        with lockfile.project_access_lock(cwd):
+            if current_session_revision(cwd, sid) != binding_revision:
+                log(
+                    "cursor_pre_tool_use skipped stale session: "
+                    + STALE_SESSION_MESSAGE,
+                    cwd,
+                    expected_revision=binding_revision,
+                )
+                return {"permission": "deny", "user_message": STALE_DENY_MESSAGE}
+            return _current_session_decision(payload, cwd, sid)
+    except lockfile.ProjectTargetChangedError:
+        log(
+            f"cursor_pre_tool_use skipped stale session: {STALE_SESSION_MESSAGE}",
+            cwd,
+            expected_revision=binding_revision,
+        )
+        return {"permission": "deny", "user_message": STALE_DENY_MESSAGE}
+
+
+def _current_session_decision(payload: dict, cwd: str, sid: str | None) -> dict:
     tpath = transcript_path(payload)
     if sid and tpath:
         cursor_session.refresh_transcript_path(cwd, sid, tpath)
@@ -54,14 +99,14 @@ def decision(payload: dict) -> dict:
 
 
 def main() -> int:
-    if is_disabled() or is_in_compact() or is_unlatched_mode():
-        print("{}")
-        return 0
     payload = read_hook_input()
     try:
+        cwd = cursor_gate_state.project_cwd(payload)
+        if is_disabled(cwd) or is_in_compact() or is_unlatched_mode(cwd):
+            print("{}")
+            return 0
         print(json.dumps(decision(payload)))
     except Exception as e:
-        log(f"cursor_pre_tool_use failed closed: {e}")
         print(json.dumps({"permission": "deny", "user_message": DENY_MESSAGE}))
     return 0
 

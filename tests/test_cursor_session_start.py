@@ -5,6 +5,10 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
+pytestmark = pytest.mark.usefixtures("compatibility_scope_env")
+
 SRC = Path(__file__).resolve().parent.parent / "src"
 sys.path.insert(0, str(SRC))
 sys.path.insert(0, str(SRC / "hooks"))
@@ -16,8 +20,8 @@ import db  # noqa: E402
 
 def _healthy_guards(monkeypatch) -> None:
     monkeypatch.setattr(css, "is_in_compact", lambda: False)
-    monkeypatch.setattr(css, "is_unlatched_mode", lambda: False)
-    monkeypatch.setattr(css, "is_disabled", lambda: False)
+    monkeypatch.setattr(css, "is_unlatched_mode", lambda *_args: False)
+    monkeypatch.setattr(css, "is_disabled", lambda *_args: False)
 
 
 def test_healthy_cursor_startup_is_silent_and_preserves_mechanics(
@@ -178,7 +182,7 @@ def test_cursor_missing_conversation_id_is_visible_degradation(
 
     assert css.main() == 0
     output = json.loads(capsys.readouterr().out)
-    assert "current-session attribution" in output["additional_context"]
+    assert "could not safely bind" in output["additional_context"]
 
 
 def test_cursor_gate_state_failure_is_visible_but_marker_still_writes(
@@ -216,7 +220,7 @@ def test_cursor_gate_state_failure_is_visible_but_marker_still_writes(
 
     assert css.main() == 0
     output = json.loads(capsys.readouterr().out)
-    assert "could not complete silent session setup" in output["additional_context"]
+    assert "could not safely bind" in output["additional_context"]
     assert "private gate-state detail" not in output["additional_context"]
     assert marker_calls == ["cursor-conversation"]
 
@@ -256,6 +260,6 @@ def test_cursor_marker_failure_is_visible_after_gate_state_initializes(
 
     assert css.main() == 0
     output = json.loads(capsys.readouterr().out)
-    assert "could not complete silent session setup" in output["additional_context"]
+    assert "could not safely bind" in output["additional_context"]
     assert "private marker detail" not in output["additional_context"]
     assert gate_calls == [(str(tmp_path), "cursor-conversation")]

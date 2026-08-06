@@ -4,7 +4,7 @@ from __future__ import annotations
 import io
 import json
 import sys
-from contextlib import redirect_stdout
+from contextlib import nullcontext, redirect_stdout
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -69,9 +69,9 @@ def test_read_hook_input_propagates_invalid_utf8_to_fail_closed_hooks(monkeypatc
 def test_cursor_fail_closed_hooks_propagate_invalid_utf8(monkeypatch, hook):
     monkeypatch.setattr(sys, "stdin", _windows_stdin(b"\xff\xfe{"))
     if hook is cursor_pre_tool_use:
-        monkeypatch.setattr(hook, "is_disabled", lambda: False)
+        monkeypatch.setattr(hook, "is_disabled", lambda *_args: False)
         monkeypatch.setattr(hook, "is_in_compact", lambda: False)
-        monkeypatch.setattr(hook, "is_unlatched_mode", lambda: False)
+        monkeypatch.setattr(hook, "is_unlatched_mode", lambda *_args: False)
 
     with pytest.raises(UnicodeDecodeError):
         hook.main()
@@ -111,6 +111,16 @@ def test_cursor_post_tool_use_arms_gate_receipt_from_bom_payload(monkeypatch):
         return True, recommendation
 
     monkeypatch.setattr(cursor_post_tool_use.cursor_gate_state, "record_gate", fake_record_gate)
+    monkeypatch.setattr(
+        cursor_post_tool_use,
+        "current_session_revision",
+        lambda *_args: "test-revision",
+    )
+    monkeypatch.setattr(
+        cursor_post_tool_use.lockfile,
+        "project_access_lock",
+        lambda *_args, **_kwargs: nullcontext(Path("/tmp/test-vault")),
+    )
 
     with redirect_stdout(io.StringIO()):
         assert cursor_post_tool_use.main() == 0
@@ -129,9 +139,19 @@ def test_cursor_pre_tool_use_allows_bom_prefixed_latch_read(monkeypatch):
     }
     encoded = b"\xef\xbb\xbf" + json.dumps(payload).encode("utf-8") + b"\n"
     monkeypatch.setattr(sys, "stdin", _windows_stdin(encoded))
-    monkeypatch.setattr(cursor_pre_tool_use, "is_disabled", lambda: False)
+    monkeypatch.setattr(cursor_pre_tool_use, "is_disabled", lambda *_args: False)
     monkeypatch.setattr(cursor_pre_tool_use, "is_in_compact", lambda: False)
-    monkeypatch.setattr(cursor_pre_tool_use, "is_unlatched_mode", lambda: False)
+    monkeypatch.setattr(cursor_pre_tool_use, "is_unlatched_mode", lambda *_args: False)
+    monkeypatch.setattr(
+        cursor_pre_tool_use,
+        "current_session_revision",
+        lambda *_args: "test-revision",
+    )
+    monkeypatch.setattr(
+        cursor_pre_tool_use.lockfile,
+        "project_access_lock",
+        lambda *_args, **_kwargs: nullcontext(Path("/tmp/test-vault")),
+    )
 
     output = io.StringIO()
     with redirect_stdout(output):

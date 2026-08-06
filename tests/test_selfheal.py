@@ -18,6 +18,7 @@ import os
 import shutil
 import sys
 import tempfile
+from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -26,6 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 import lockfile  # noqa: E402
 import mcp_runtime  # noqa: E402
 import paths  # noqa: E402
+import project_config  # noqa: E402
 import selfheal  # noqa: E402
 
 
@@ -43,8 +45,8 @@ def _iso(dt: datetime) -> str:
 
 
 def _reset_trigger() -> None:
-    selfheal._TRIGGER_CHECKED = False
-    selfheal._TRIGGER_FAILURE_SIGNATURE = None
+    selfheal._TRIGGER_CHECKED.clear()
+    selfheal._TRIGGER_FAILURE_SIGNATURE.clear()
 
 
 # ---------------- cadence math ----------------
@@ -122,6 +124,39 @@ def test_state_roundtrip_and_corrupt_tolerated():
         shutil.rmtree(proj, ignore_errors=True)
 
 
+def test_operational_log_is_project_vault_local():
+    project_a = _fresh_project()
+    project_b = _fresh_project()
+    try:
+        test_root = paths.validated_test_root()
+        _assert(test_root is not None, "pytest must provide an authenticated root")
+        vault_a = test_root / "vaults" / f"selfheal-log-{Path(project_a).name}"
+        vault_b = test_root / "vaults" / f"selfheal-log-{Path(project_b).name}"
+        vault_a.mkdir(parents=True)
+        vault_b.mkdir(parents=True)
+        project_config.create_scope(
+            project_a,
+            policy=project_config.POLICY_PRIVATE,
+        )
+        project_config.authorize_scope(project_a, kb_dir=vault_a)
+        project_config.create_scope(
+            project_b,
+            policy=project_config.POLICY_PRIVATE,
+        )
+        project_config.authorize_scope(project_b, kb_dir=vault_b)
+        selfheal._log(project_a, "only-a")
+        selfheal._log(project_b, "only-b")
+        log_a = paths.project_dir(project_a) / "maintenance.log"
+        log_b = paths.project_dir(project_b) / "maintenance.log"
+        body_a = log_a.read_text(encoding="utf-8")
+        body_b = log_b.read_text(encoding="utf-8")
+        _assert("only-a" in body_a and "only-b" not in body_a, body_a)
+        _assert("only-b" in body_b and "only-a" not in body_b, body_b)
+    finally:
+        shutil.rmtree(project_a, ignore_errors=True)
+        shutil.rmtree(project_b, ignore_errors=True)
+
+
 # ---------------- maybe_trigger guards ----------------
 
 def test_maybe_trigger_kill_switch():
@@ -132,7 +167,7 @@ def test_maybe_trigger_kill_switch():
     try:
         _reset_trigger()
         selfheal.spawn_detached = lambda p, **_kwargs: calls.append(p)
-        paths.is_disabled = lambda: True
+        paths.is_disabled = lambda *_args: True
         selfheal.maybe_trigger(proj)
         _assert(calls == [], "kill switch must prevent spawn")
         print("PASS maybe_trigger_kill_switch")
@@ -197,6 +232,45 @@ def test_maybe_trigger_due_spawns():
         shutil.rmtree(proj, ignore_errors=True)
 
 
+def test_maybe_trigger_tracks_each_project_target_independently(monkeypatch):
+    project_a = _fresh_project()
+    project_b = _fresh_project()
+    calls: list[str] = []
+    try:
+        _reset_trigger()
+        monkeypatch.setattr(selfheal, "spawn_detached", calls.append)
+        selfheal.maybe_trigger(project_a)
+        selfheal.maybe_trigger(project_b)
+        _assert(calls == [project_a, project_b], calls)
+        _assert(len(selfheal._TRIGGER_CHECKED) == 2, selfheal._TRIGGER_CHECKED)
+    finally:
+        _reset_trigger()
+        shutil.rmtree(project_a, ignore_errors=True)
+        shutil.rmtree(project_b, ignore_errors=True)
+
+
+def test_stale_expected_target_stops_before_target_sidecar_reads(monkeypatch):
+    project = _fresh_project()
+    try:
+        _reset_trigger()
+        monkeypatch.setattr(
+            selfheal,
+            "_trigger_blocked",
+            lambda *_args: (_ for _ in ()).throw(
+                AssertionError("stale trigger inspected replacement target")
+            ),
+        )
+        selfheal.maybe_trigger(
+            project,
+            expected_binding_revision="stale-session",
+            expected_kb_dir=None,
+        )
+        _assert(not selfheal._TRIGGER_CHECKED, selfheal._TRIGGER_CHECKED)
+    finally:
+        _reset_trigger()
+        shutil.rmtree(project, ignore_errors=True)
+
+
 def test_maybe_trigger_retries_only_after_vault_policy_changes(
     monkeypatch,
 ):
@@ -223,7 +297,7 @@ def test_maybe_trigger_retries_only_after_vault_policy_changes(
         policy.write_text("{}\n", encoding="utf-8")
         selfheal.maybe_trigger(proj)
         _assert(calls == [proj, proj], f"repaired policy did not retry: {calls}")
-        _assert(selfheal._TRIGGER_CHECKED is True, "successful retry not consumed")
+        _assert(bool(selfheal._TRIGGER_CHECKED), "successful retry not consumed")
     finally:
         _reset_trigger()
         shutil.rmtree(proj, ignore_errors=True)
@@ -257,7 +331,7 @@ def test_ineligible_connections_do_not_consume_trigger_check():
             with mcp_runtime.bind_connection(context):
                 selfheal.maybe_trigger(proj)
             _assert(
-                selfheal._TRIGGER_CHECKED is False,
+                not selfheal._TRIGGER_CHECKED,
                 f"{guarded} consumed the maintenance trigger",
             )
 
@@ -595,6 +669,11 @@ def test_spawn_builds_correct_command():
         _assert(args[0] == sys.executable, f"argv[0] should be python: {args}")
         _assert(args[1].endswith("selfheal.py"), f"argv[1] should be selfheal.py: {args}")
         _assert(args[2] == proj, f"argv[2] should be project path: {args}")
+        _assert(
+            args[3] == project_config.resolve(proj).revision,
+            f"missing binding snapshot: {args}",
+        )
+        _assert(args[4] == str(paths.project_dir(proj)), f"wrong KB snapshot: {args}")
         _assert(kw["env"].get(selfheal.IN_MAINTENANCE_ENV) == "1",
                 "child env must carry the reentrancy guard")
         _assert(kw["env"].get("LATCH_MAINTENANCE_BACKEND") == "codex",
@@ -620,6 +699,99 @@ def test_spawn_builds_correct_command():
         selfheal.subprocess.Popen = orig_popen
         selfheal.paths.configured_maintenance_runner = orig_runner
         shutil.rmtree(proj, ignore_errors=True)
+
+
+def test_detached_child_refuses_project_repin_before_touching_new_kb(monkeypatch):
+    root = Path(tempfile.mkdtemp(prefix="kb_selfheal_repin_"))
+    project = root / "project"
+    project.mkdir()
+    (project / ".git").mkdir()
+    kb_a = paths.validated_test_root() / "vaults" / f"selfheal-a-{root.name}"
+    kb_b = paths.validated_test_root() / "vaults" / f"selfheal-b-{root.name}"
+    kb_a.mkdir(parents=True)
+    kb_b.mkdir(parents=True)
+    captured = {}
+
+    class _FakePopen:
+        def __init__(self, args, **_kwargs):
+            captured["args"] = list(args)
+
+    try:
+        project_config.mark_kb_target(kb_a)
+        project_config.mark_kb_target(kb_b)
+        project_config.write_binding(
+            project, mode=project_config.MODE_LATCHED, kb_dir=kb_a,
+        )
+        monkeypatch.setattr(selfheal.subprocess, "Popen", _FakePopen)
+        selfheal.spawn_detached(str(project))
+        args = captured["args"]
+        project_config.repin_private_scope(project, kb_b)
+        before = {path.name for path in kb_b.iterdir()}
+
+        result = selfheal.run_selfheal(
+            args[2],
+            expected_binding_revision=args[3],
+            expected_kb_dir=args[4],
+        )
+
+        _assert(result == {"ok": False, "reason": "target_changed"}, result)
+        _assert({path.name for path in kb_b.iterdir()} == before,
+                "stale detached maintenance touched the newly pinned KB")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+        shutil.rmtree(kb_a, ignore_errors=True)
+        shutil.rmtree(kb_b, ignore_errors=True)
+
+
+def test_stale_daemon_connection_cannot_spawn_maintenance_in_repinned_kb(
+    monkeypatch,
+):
+    root = Path(tempfile.mkdtemp(prefix="kb_selfheal_stale_connection_"))
+    project = root / "project"
+    project.mkdir()
+    (project / ".git").mkdir()
+    kb_a = paths.validated_test_root() / "vaults" / f"selfheal-conn-a-{root.name}"
+    kb_b = paths.validated_test_root() / "vaults" / f"selfheal-conn-b-{root.name}"
+    kb_a.mkdir(parents=True)
+    kb_b.mkdir(parents=True)
+    popen_calls = []
+    try:
+        project_config.mark_kb_target(kb_a)
+        project_config.mark_kb_target(kb_b)
+        binding_a = project_config.write_binding(
+            project, mode=project_config.MODE_LATCHED, kb_dir=kb_a,
+        )
+        context = mcp_runtime.ConnectionContext(
+            connection_id="stale-maintenance",
+            project_cwd=str(project),
+            session_id="old-task",
+            session_source="test",
+            proxy_pid=123,
+            proxy_started_at="now",
+            runtime_key="test",
+            project_binding_revision=binding_a.revision,
+            project_kb_dir=str(kb_a),
+        )
+        project_config.write_binding(
+            project, mode=project_config.MODE_LATCHED, kb_dir=kb_b,
+        )
+        before = {path.name for path in kb_b.iterdir()}
+        monkeypatch.setattr(
+            selfheal.subprocess, "Popen",
+            lambda *args, **kwargs: popen_calls.append((args, kwargs)),
+        )
+        _reset_trigger()
+        with mcp_runtime.bind_connection(context):
+            selfheal.maybe_trigger(str(project))
+
+        _assert(popen_calls == [], "stale daemon connection spawned maintenance")
+        _assert({path.name for path in kb_b.iterdir()} == before,
+                "stale daemon connection touched the newly pinned KB")
+    finally:
+        _reset_trigger()
+        shutil.rmtree(root, ignore_errors=True)
+        shutil.rmtree(kb_a, ignore_errors=True)
+        shutil.rmtree(kb_b, ignore_errors=True)
 
 
 def test_windows_shared_spawn_preserves_broker_owned_site_packages(
@@ -650,7 +822,11 @@ def test_windows_shared_spawn_preserves_broker_owned_site_packages(
         "OPENAI_API_KEY": "codex-secret",
     })
     try:
-        monkeypatch.setattr(selfheal.sys, "platform", "win32")
+        monkeypatch.setattr(
+            selfheal,
+            "sys",
+            SimpleNamespace(platform="win32", executable=sys.executable),
+        )
         monkeypatch.setattr(selfheal.subprocess, "Popen", _FakePopen)
         monkeypatch.setattr(
             selfheal.paths,

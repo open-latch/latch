@@ -23,6 +23,7 @@ import capture_streams  # noqa: E402
 import db               # noqa: E402
 import log_utils        # noqa: E402
 import profiles         # noqa: E402
+import project_config   # noqa: E402
 import stop             # noqa: E402  (src/hooks/stop.py)
 
 
@@ -33,6 +34,11 @@ def _assert(cond, msg):
 
 def _fresh_db():
     tmp = tempfile.mkdtemp(prefix="kb_cite_")
+    test_root = Path(project_config.os.environ["LATCH_TEST_ROOT"])
+    vault = test_root / "vaults" / f"cite-{Path(tmp).name}"
+    vault.mkdir(parents=True)
+    project_config.create_scope(tmp, policy=project_config.POLICY_PRIVATE)
+    project_config.authorize_scope(tmp, kb_dir=vault)
     return tmp, db.connect(tmp)
 
 
@@ -185,6 +191,7 @@ def test_stop_scan_flags_for_mission_control():
         # Bind the resolved actor (db._ACTOR) to mission control in this temp db.
         profiles.bind_actor(conn, name="mission-control")
         db.upsert_session(conn, DEFAULT_SID, tmp, None)
+        project_config.record_session_binding(tmp, DEFAULT_SID)
         tpath = _write_transcript(tmp, "The clamp flag is set to false in the deployed config.")
         conn.close()  # the hook opens its own connection
 
@@ -206,6 +213,7 @@ def test_stop_scan_clears_when_cited():
     try:
         profiles.bind_actor(conn, name="mission-control")
         db.upsert_session(conn, DEFAULT_SID, tmp, None)
+        project_config.record_session_binding(tmp, DEFAULT_SID)
         tpath = _write_transcript(tmp, "The clamp flag is set to false in `config.toml:42`.")
         conn.close()
 
