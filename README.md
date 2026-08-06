@@ -291,28 +291,28 @@ Or, you can simply ask latch in natural language, and the agent will offer the m
 ## Using latch in more than one repo
 
 You install the Latch runtime once. For **Claude Code** and **Codex**, its tools
-and hooks are registered per-user. On a fresh install, each unscoped filesystem
-location starts LOCKED until you run `latch` there and choose:
+and hooks are registered per-user. By default, Latch remains in **Global
+Shared** mode: every repo uses the existing installed KB exactly as before.
+Installing or upgrading does not create project boundaries or change routing.
+
+Consulting mode is a deliberate, one-way opt-in. From the first root you want
+to scope, choose:
 
 - **Shared** — use the existing global KB;
 - **Private** — create or select a separate KB.
 
-An upgrade does not silently lock or repin an existing global-KB user. Those
-users enter `compatibility_global`: unscoped locations keep using the exact
-previously pinned global KB. They can still create an explicit Shared or Private
-boundary with `latch`; other unscoped locations remain compatible.
-
-To leave compatibility mode deliberately, run this from a compatibility/Shared
-location (never from inside a Private client scope):
+and explicitly enable project scopes:
 
 ```bash
-bash bin/latch.sh --confirm latch --shared --require-explicit-scopes
-# PowerShell: .\bin\latch.ps1 -Confirm latch -Shared -RequireExplicitScopes
+bash bin/latch.sh --confirm latch --enable-project-scopes --shared
+# PowerShell: .\bin\latch.ps1 -Confirm latch -EnableProjectScopes -Shared
 ```
 
-This makes the current root explicitly Shared and makes every other unscoped
-location LOCKED. It does not copy, delete, or repin KB content, and existing
-explicit scopes keep their own bindings.
+This drains active global-KB access, makes the current root explicitly Shared,
+and makes every other unscoped location LOCKED. Use `--private --new-kb`
+instead for a clean first client vault. It does not copy, delete, or repin KB
+content. Once enabled, ordinary installer reruns preserve project mode and
+cannot reopen ambient global access.
 
 That choice applies to descendants unless a nearer root creates its own Private
 scope or is explicitly unlatched. Private knowledge never appears in the global
@@ -353,13 +353,15 @@ bash bin/latch_enable.sh
 bash bin/latch_status.sh
 ```
 
-**Latch and unlatch one filesystem scope.** Scope authority is machine-local and
+**Latch and unlatch.** In Global Shared mode, `unlatch` keeps its existing
+install-wide meaning: every repo is off until `latch` restores the installation.
+In consulting mode, both commands operate on one filesystem scope. Scope authority is machine-local and
 does not depend on Git. To keep native agent instructions consistent while Latch is off, `/unlatch`
 also temporarily masks Latch-managed regions in `CLAUDE.md` / `AGENTS.md`; those working-tree edits may
 be visible to Git and should not be committed. `/latch` restores them, including an exact
 Latch-owned override found without local state. Descendants and authorized root aliases of one
-scope follow its mode, but the commands never change another scope or the existing install-level
-KB pin. Status is read-only; changing state requires the exact confirmation word:
+scope follow its mode, but project-mode commands never change another scope or the existing
+install-level KB pin. Status is read-only; changing state requires the exact confirmation word:
 
 ```bash
 bash bin/unlatch.sh
@@ -368,9 +370,7 @@ bash bin/latch.sh --confirm latch
 ```
 
 Re-latching an UNLATCHED scope with no KB option preserves its previous binding.
-On a fresh explicit-scope install, a LOCKED root must choose Shared or Private.
-An upgraded `compatibility_global` location instead reports its inherited global
-binding until the user performs the deliberate migration described above:
+In consulting mode, a LOCKED root must choose Shared or Private:
 
 ```bash
 # This repo keeps using the existing installation KB.

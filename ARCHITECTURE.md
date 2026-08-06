@@ -64,15 +64,16 @@ ${LATCH_HOME}/
 
 ## Concepts
 
-- **Selected local KB.** Runtime wiring is installed once, while the current
-  filesystem location selects a KB through the nearest explicit scope root.
+- **Selected local KB.** Runtime wiring is installed once. Global Shared mode
+  preserves the existing product: every filesystem location uses the installed
+  global pin and project scope state is not consulted. Consulting mode is a
+  deliberate, one-way opt-in; only then does the current filesystem location
+  select a KB through the nearest explicit scope root.
   Shared roots use the exact install-level global KB; Private roots use their
   own external vault; UNLATCHED roots open no KB; unsafe or unscoped locations
   under the explicit policy are LOCKED. Descendants inherit the nearest root.
-  Existing pinned global-KB installs persist a `compatibility_global` policy so
-  an upgrade does not silently lock old repositories. That compatibility ends
-  only after a deliberate Shared-root migration with
-  `--shared --require-explicit-scopes`. A direct `LATCH_KB_DIR` override remains
+  The one-way transition drains global KB access before persisting explicit
+  mode and creating the first boundary. A direct `LATCH_KB_DIR` override remains
   install-wide and therefore cannot claim project separation.
 - **Loose graph.** `nodes(kind, title, body, status, embedding)` +
   `edges(src, dst, relation)`. Relations are free-form strings; common
@@ -170,12 +171,12 @@ The engine installer (`bin/install_engine.{sh,ps1}`) is **not** a
   `~/.claude/commands/` with `<KB_HOME>` resolved (a plain `cp` would leave the
   placeholder unresolved). To (re)install only the commands after editing one:
   `bash bin/install_commands.sh` / `.\bin\install_commands.ps1` (idempotent).
-- **Persists scope migration intent before wiring.** Fresh installs select the
-  explicit-scope policy. Upgrades with an existing safe global pin preserve an
-  exact `compatibility_global` binding; they do not reinterpret the installer's
-  newly written pin as legacy state on retry. A user can later create a Shared
-  boundary and require explicit scopes everywhere else with
-  `latch --shared --require-explicit-scopes`.
+- **Preserves product mode during wiring.** Fresh installs and upgrades remain
+  Global Shared unless the user explicitly runs the consulting-mode latch
+  transition. Installers never activate project mode and cannot downgrade it
+  after activation. Global Shared has no second binding: the installed pin is
+  its single KB authority. Project mode uses only ordinary `ScopeBinding`
+  records.
 
 The interpreter is resolved automatically (`$LATCH_PYTHON`, legacy
 `$CLAUDE_KB_PYTHON`, else repo `.venv`); override with

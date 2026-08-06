@@ -23,15 +23,12 @@ This makes Cursor safe to try in one repo without touching Claude Code or Codex
 configuration. The installer merges its MCP and hook entries while preserving
 unrelated Cursor configuration.
 
-Cursor wiring and KB selection are separate decisions. A fresh Latch install
-starts unscoped locations LOCKED; run `latch` at the workspace root and choose
-Shared or Private before expecting tools or hooks to open a KB. Descendants
-inherit that root unless a nearer root creates another scope. An upgraded
-global-KB install remains `compatibility_global`, so unscoped workspaces keep
-using the exact old global KB until the user deliberately runs
-`latch --shared --require-explicit-scopes` from a compatibility/Shared root.
-That migration makes other unscoped locations LOCKED; it never changes an
-existing Private scope or moves KB content.
+Cursor wiring and KB selection are separate decisions. A normal Latch install
+remains Global Shared and keeps using the installed KB in every workspace. To
+opt into consulting mode, run `latch --enable-project-scopes --shared` (or
+`--private --new-kb`) at the first workspace root. That one-way transition
+makes other unscoped locations LOCKED. Descendants inherit the nearest root;
+the transition never moves KB content.
 
 The base adapter provides the shared latch MCP tools, a Cursor-native activation
 rule, project-local commands and workflow skills, and the shared `AGENTS.md`
