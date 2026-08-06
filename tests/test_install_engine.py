@@ -20,6 +20,7 @@ import shutil
 import sys
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
@@ -311,6 +312,7 @@ def test_install_commands_updates_existing_legacy_aliases():
             "latch-gate.md": "bash <KB_HOME>/bin/run_latch_gate.sh\n",
             "latch-gate-report.md": "bash <KB_HOME>/bin/latch_gate_report.sh\n",
             "latch-compact.md": "bash <KB_HOME>/bin/run_compact_now.sh\n",
+            "latch-decay.md": 'python "<KB_HOME>/src/maintenance.py" weekly "$(pwd)"\n',
         })
     try:
         dest.mkdir()
@@ -320,11 +322,14 @@ def test_install_commands_updates_existing_legacy_aliases():
             "bash /old/latch/bin/run_compact_now.sh\n", encoding="utf-8")
         (dest / "kb-gate-report.md").write_text(
             "bash /old/latch/bin/latch_gate_report.sh\n", encoding="utf-8")
+        (dest / "kb-decay.md").write_text(
+            'python "/old/latch/src/maintenance.py" "$(pwd)"\n', encoding="utf-8")
         level, changes = ie.install_commands(dry_run=False)
         _assert(level == "OK", f"expected OK, got {level}")
         gate_body = (dest / "kb-gate.md").read_text(encoding="utf-8")
         compact_body = (dest / "kb-compact.md").read_text(encoding="utf-8")
         report_body = (dest / "kb-gate-report.md").read_text(encoding="utf-8")
+        decay_body = (dest / "kb-decay.md").read_text(encoding="utf-8")
         _assert("/new/latch/bin/run_kb_gate.sh" in gate_body,
                 f"legacy gate alias should keep legacy wrapper path: {gate_body!r}")
         _assert("/new/latch/bin/run_latch_gate.sh" not in gate_body,
@@ -333,8 +338,11 @@ def test_install_commands_updates_existing_legacy_aliases():
                 f"non-gate legacy alias should still refresh to primary body: {compact_body!r}")
         _assert("/new/latch/bin/latch_gate_report.sh" in report_body,
                 f"newer legacy report alias should refresh to primary body: {report_body!r}")
+        _assert('maintenance.py" weekly "$(pwd)"' in decay_body,
+                f"legacy decay alias should preserve the explicit weekly operation: {decay_body!r}")
         _assert(any("updated legacy alias kb-gate.md" in c for c in changes), changes)
         _assert(any("updated legacy alias kb-gate-report.md" in c for c in changes), changes)
+        _assert(any("updated legacy alias kb-decay.md" in c for c in changes), changes)
         print("PASS install_commands_updates_existing_legacy_aliases")
     finally:
         restore()
@@ -592,6 +600,19 @@ def test_pin_kb_dir_rejects_conflicting_effective_target():
                 f"CLI/env disagreement must fail before a pin is written: {level}, {message}")
         _assert(not ie.KB_LOCATION_PATH.exists(),
                 "CLI/env conflict must not persist either competing target")
+
+        os.environ["LATCH_KB_DIR"] = str(root / "new-name")
+        os.environ["CLAUDE_KB_DIR"] = str(root / "legacy-name")
+        level, message = ie.pin_kb_dir(None, False)
+        _assert(
+            level == "ERROR" and "LATCH_KB_DIR" in message
+            and "CLAUDE_KB_DIR" in message,
+            f"conflicting environment aliases must fail closed: {level}, {message}",
+        )
+        _assert(
+            not ie.KB_LOCATION_PATH.exists(),
+            "conflicting environment aliases must not persist either target",
+        )
     finally:
         ie.KB_LOCATION_PATH = original_path
         os.environ.pop("LATCH_KB_DIR", None)
@@ -626,6 +647,112 @@ def test_pin_kb_dir_default_stays_inside_authenticated_test_root(
         recorded != ie.DEFAULT_STORE_DIR,
         "pytest must never create the real platform default production vault",
     )
+
+
+def test_scope_policy_migrates_existing_pin_and_locks_fresh_installs(
+    tmp_path, monkeypatch,
+):
+    policy_path = tmp_path / "scope-policy.json"
+    monkeypatch.setattr(
+        ie.project_config,
+        "machine_policy_path",
+        lambda: policy_path,
+    )
+
+    level, message = ie.configure_scope_policy(
+        existing_pin_before_install=False,
+        dry_run=False,
+    )
+    _assert(level == "OK" and "explicit" in message, message)
+    _assert(
+        ie.project_config.read_machine_policy()
+        == ie.project_config.MACHINE_POLICY_EXPLICIT,
+        "fresh installs must require explicit filesystem scopes",
+    )
+
+    # A retry must never reinterpret the pin created by the first run as an
+    # older compatibility install.
+    level, _message = ie.configure_scope_policy(
+        existing_pin_before_install=True,
+        dry_run=False,
+    )
+    _assert(level == "OK", "an existing safe policy should be idempotent")
+    _assert(
+        ie.project_config.read_machine_policy()
+        == ie.project_config.MACHINE_POLICY_EXPLICIT,
+        "installer retry changed the persisted migration decision",
+    )
+
+    policy_path.unlink()
+    level, message = ie.configure_scope_policy(
+        existing_pin_before_install=True,
+        dry_run=False,
+    )
+    _assert(level == "OK" and "compatibility_global" in message, message)
+    _assert(
+        ie.project_config.read_machine_policy()
+        == ie.project_config.MACHINE_POLICY_COMPATIBILITY,
+        "an already-pinned KB must remain available after upgrade",
+    )
+
+
+def test_scope_policy_dry_run_writes_nothing(tmp_path, monkeypatch):
+    policy_path = tmp_path / "scope-policy.json"
+    monkeypatch.setattr(
+        ie.project_config,
+        "machine_policy_path",
+        lambda: policy_path,
+    )
+
+    level, message = ie.configure_scope_policy(
+        existing_pin_before_install=True,
+        dry_run=True,
+    )
+    _assert(level == "DRY" and "compatibility_global" in message, message)
+    _assert(not policy_path.exists(), "dry-run persisted scope policy")
+
+
+def test_compatibility_dry_run_previews_staged_policy_and_exact_binding(
+    tmp_path, monkeypatch,
+):
+    test_root = ie.paths.validated_test_root()
+    _assert(test_root is not None, "pytest isolation root is required")
+    home = tmp_path / "latch-home"
+    home.mkdir()
+    vault = test_root / "vaults" / f"install-preview-{tmp_path.name}"
+    vault.mkdir(parents=True)
+    pin_path = home / "kb_location.json"
+    pin_path.write_text(json.dumps({"kb_dir": str(vault)}) + "\n", encoding="utf-8")
+    monkeypatch.setenv("LATCH_HOME", str(home))
+    monkeypatch.setenv(
+        ie.project_config.CONTROL_ROOT_ENV,
+        str(test_root / "install-preview-control" / tmp_path.name),
+    )
+    monkeypatch.delenv("CLAUDE_KB_HOME", raising=False)
+    monkeypatch.delenv("LATCH_KB_DIR", raising=False)
+    monkeypatch.delenv("CLAUDE_KB_DIR", raising=False)
+    monkeypatch.setattr(ie, "KB_LOCATION_PATH", pin_path)
+
+    planned = ie.scope_policy_for_install(existing_pin_before_install=True)
+    policy_level, _ = ie.configure_scope_policy(
+        existing_pin_before_install=True,
+        dry_run=True,
+    )
+    binding_level, binding_message = ie.configure_compatibility_binding(
+        dry_run=True,
+        preview_policy=planned,
+    )
+
+    _assert(planned == ie.project_config.MACHINE_POLICY_COMPATIBILITY, planned)
+    _assert(policy_level == "DRY", policy_level)
+    _assert(
+        binding_level == "DRY" and "exact existing global KB" in binding_message,
+        f"dry run hid the staged compatibility binding: {binding_level}, {binding_message}",
+    )
+    _assert(not ie.project_config.machine_policy_path().exists(),
+            "dry run persisted the staged policy")
+    _assert(not ie.project_config.compatibility_binding_path().exists(),
+            "dry run persisted the compatibility binding")
 
 
 def test_absolute_kb_dir_normalizes_git_bash_path_on_windows():
@@ -697,10 +824,16 @@ def test_offer_seed_after_install_noninteractive_does_not_run():
     calls = []
     old_tty = ie._stdio_is_tty
     old_run = ie.subprocess.run
+    old_resolve = ie.project_config.resolve
     output = io.StringIO()
     try:
         ie._stdio_is_tty = lambda: False
         ie.subprocess.run = lambda args: calls.append(args)
+        ie.project_config.resolve = lambda project: SimpleNamespace(
+            state=ie.project_config.MODE_LATCHED,
+            kb_dir=Path(project) / ".test-kb",
+            reason="test scope",
+        )
         with contextlib.redirect_stdout(output):
             ie.offer_seed_after_install(
                 python_path="/py",
@@ -712,6 +845,7 @@ def test_offer_seed_after_install_noninteractive_does_not_run():
     finally:
         ie._stdio_is_tty = old_tty
         ie.subprocess.run = old_run
+        ie.project_config.resolve = old_resolve
     text = output.getvalue()
     _assert("initial KB is pending" in text,
             f"noninteractive install must truthfully report the unbuilt initial KB:\n{text}")
@@ -722,6 +856,76 @@ def test_offer_seed_after_install_noninteractive_does_not_run():
     print("PASS offer_seed_after_install_noninteractive_does_not_run")
 
 
+def test_locked_project_prints_explicit_scope_handoff_and_never_seeds():
+    calls = []
+    old_resolve = ie.project_config.resolve
+    old_run = ie.subprocess.run
+    output = io.StringIO()
+    try:
+        ie.project_config.resolve = lambda _project: SimpleNamespace(
+            state=ie.project_config.MODE_LOCKED,
+            kb_dir=None,
+            reason="outside every authorized Latch scope",
+        )
+        ie.subprocess.run = lambda args: calls.append(args)
+        with contextlib.redirect_stdout(output):
+            ie.offer_seed_after_install(
+                python_path="/py",
+                source="auto",
+                backend="claude",
+                project=Path("/tmp/new client"),
+            )
+    finally:
+        ie.project_config.resolve = old_resolve
+        ie.subprocess.run = old_run
+
+    text = output.getvalue()
+    _assert(calls == [], f"LOCKED install must not run seed: {calls}")
+    _assert("is LOCKED" in text and "before seeding" in text, text)
+    _assert("--confirm latch --shared" in text, text)
+    _assert("--confirm latch --private --new-kb" in text, text)
+    _assert("Build latch's initial decision KB" not in text, text)
+    print("PASS locked_project_prints_explicit_scope_handoff_and_never_seeds")
+
+
+def test_unlatched_project_prints_relatched_handoff_instead_of_seed():
+    old_resolve = ie.project_config.resolve
+    try:
+        ie.project_config.resolve = lambda _project: SimpleNamespace(
+            state=ie.project_config.MODE_UNLATCHED,
+            kb_dir=None,
+            reason="explicit OFF boundary",
+        )
+        text = ie.seed_next_step_for_project(
+            project=Path("/tmp/paused client"),
+            command="unsafe seed command",
+        )
+    finally:
+        ie.project_config.resolve = old_resolve
+
+    _assert("is UNLATCHED" in text and "--confirm latch" in text, text)
+    _assert("--shared" not in text and "--new-kb" not in text, text)
+    _assert("unsafe seed command" not in text, text)
+
+
+def test_locked_scope_handoff_uses_native_powershell_commands_on_windows():
+    target = SimpleNamespace(
+        state=ie.project_config.MODE_LOCKED,
+        kb_dir=None,
+        reason="outside every authorized Latch scope",
+    )
+    text = ie.scope_first_next_step_message(
+        Path("/tmp/client's project"),
+        target=target,
+        windows=True,
+    )
+    _assert("Set-Location '" in text, text)
+    _assert("bin/latch.ps1' -Confirm latch -Shared" in text, text)
+    _assert("-Confirm latch -Private -NewKb" in text, text)
+    _assert("client''s project" in text, text)
+    _assert("bash " not in text and "--confirm" not in text, text)
+
+
 def test_no_seed_prompt_prints_seed_handoff_unless_suppressed():
     original = {
         "SETTINGS_PATH": ie.SETTINGS_PATH,
@@ -729,6 +933,7 @@ def test_no_seed_prompt_prints_seed_handoff_unless_suppressed():
         "apply_preflight_errors": ie.apply_preflight_errors,
         "install_commands": ie.install_commands,
         "pin_kb_dir": ie.pin_kb_dir,
+        "resolve": ie.project_config.resolve,
     }
     settings = _tmp_settings({})
     try:
@@ -737,6 +942,11 @@ def test_no_seed_prompt_prints_seed_handoff_unless_suppressed():
         ie.apply_preflight_errors = lambda _claude: []
         ie.install_commands = lambda _dry_run: ("OK", ["command"])
         ie.pin_kb_dir = lambda _kb_dir, _dry_run: ("OK", "pinned")
+        ie.project_config.resolve = lambda project: SimpleNamespace(
+            state=ie.project_config.MODE_LATCHED,
+            kb_dir=Path(project) / ".test-kb",
+            reason="test scope",
+        )
 
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
@@ -761,8 +971,10 @@ def test_no_seed_prompt_prints_seed_handoff_unless_suppressed():
         _assert("Build latch's initial decision KB" not in text,
                 f"--suppress-seed-output should silence installer seed handoff:\n{text}")
     finally:
+        resolve = original.pop("resolve")
         for name, value in original.items():
             setattr(ie, name, value)
+        ie.project_config.resolve = resolve
     print("PASS no_seed_prompt_prints_seed_handoff_unless_suppressed")
 
 
@@ -886,6 +1098,9 @@ if __name__ == "__main__":
     test_seed_next_step_message_names_immediate_value_and_preview()
     test_seed_command_args_use_llm_apply_and_project()
     test_offer_seed_after_install_noninteractive_does_not_run()
+    test_locked_project_prints_explicit_scope_handoff_and_never_seeds()
+    test_unlatched_project_prints_relatched_handoff_instead_of_seed()
+    test_locked_scope_handoff_uses_native_powershell_commands_on_windows()
     test_no_seed_prompt_prints_seed_handoff_unless_suppressed()
     test_apply_preflight_blocks_without_claude_cli()
     test_restart_next_step_message_names_vscode_and_claude_code()

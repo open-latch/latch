@@ -29,7 +29,7 @@ After the command returns, show an explicit **Latch gate** block. Prefer the
 returned `findings` object; it is already shaped for chat display and should be
 shown even when the recommendation is `PROCEED` or the gate was skipped. If the
 result says latch is UNLATCHED, report that latch gate was skipped, do not claim
-KB evidence was read, and tell the user to run `/unlatch` to re-latch. Otherwise,
+KB evidence was read, and tell the user to run `/latch` to re-latch. Otherwise,
 lead with provenance that Latch ran the gate on the request/plan, then show the
 verdict, summary/rationale, `receipt` / source basis when present, cited evidence
 nodes with status/current authority, `better_next_action`, and uncovered claims.

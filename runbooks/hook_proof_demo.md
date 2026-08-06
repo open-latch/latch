@@ -27,7 +27,7 @@ bash bin/latch_doctor.sh --skip-embed
 
 For the proof path, `latch_status.sh` must report `[ENABLED ]`. If it says
 `[DISABLED]`, use an enabled checkout or re-enable with `bash bin/latch_enable.sh`.
-If it says `[UNLATCHED]`, run `/unlatch` and confirm re-latching before
+If it says `[UNLATCHED]`, run `/latch` and confirm re-latching before
 continuing.
 
 ## 3-minute cold-start path

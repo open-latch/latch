@@ -49,7 +49,7 @@ function Test-LatchCommand($Path) {
     $normalized = $body -replace '\\', '/'
     if ($body.Contains('<KB_HOME>')) { return $true }
     if ($normalized.Contains($KbHome)) { return $true }
-    return ($normalized -match '/bin/(run_kb_gate|run_latch_gate|latch_baseline|unlatch|latch_gate_report|run_compact_now|run_latch_compact_now|run_kb_focus)\.sh|/bin/latch_direction\.sh|/src/(budget|maintenance)\.py|kb_profile_(active|bind)|mission-control verification profile|trust-and-go verification profile')
+    return ($normalized -match '/bin/(run_kb_gate|run_latch_gate|latch_baseline|latch|unlatch|latch_gate_report|run_compact_now|run_latch_compact_now|run_kb_focus)\.sh|/bin/latch_direction\.sh|/src/(budget|maintenance)\.py|kb_profile_(active|bind)|mission-control verification profile|trust-and-go verification profile')
 }
 
 function Update-LegacyAlias($Legacy, $Primary) {

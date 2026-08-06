@@ -44,9 +44,12 @@ function Resolve-Python {
 function Restore-UnlatchedInstructions {
   $py = Resolve-Python
   if (-not $py) {
-    throw "latch_enable: UNLATCHED is active but no Python was found to restore project instruction files. Set LATCH_PYTHON (legacy: CLAUDE_KB_PYTHON), then run bin/unlatch.ps1 -Confirm latch."
+    throw "latch_enable: UNLATCHED is active but no Python was found to restore project instruction files. Set LATCH_PYTHON (legacy: CLAUDE_KB_PYTHON), then run bin/latch.ps1 -Confirm latch."
   }
-  & $py (Join-Path $KbHome "src/unlatch.py") on --project $ProjectDir
+  & $py (Join-Path $KbHome "src/unlatch.py") on --project $ProjectDir --legacy-state
+  if ($LASTEXITCODE -ne 0) {
+    throw "latch_enable: verified legacy Unlatch recovery failed; global UNLATCHED was not removed"
+  }
 }
 
 if ((Test-Path $unlatched) -or (Test-Path $unlatchState)) {

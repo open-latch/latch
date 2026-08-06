@@ -35,10 +35,10 @@ restore_unlatched_instructions() {
   local py
   if ! py="$(resolve_python)"; then
     echo "latch_enable: UNLATCHED is active but no Python was found to restore project instruction files." >&2
-    echo "set LATCH_PYTHON (legacy: CLAUDE_KB_PYTHON), then run: bash ${KB_HOME}/bin/unlatch.sh --confirm latch" >&2
+    echo "set LATCH_PYTHON (legacy: CLAUDE_KB_PYTHON), then run: bash ${KB_HOME}/bin/latch.sh --confirm latch" >&2
     exit 1
   fi
-  "$py" "${KB_HOME}/src/unlatch.py" on --project "$PROJECT_DIR"
+  "$py" "${KB_HOME}/src/unlatch.py" on --project "$PROJECT_DIR" --legacy-state
 }
 
 if [ -e "${KB_HOME}/UNLATCHED" ] || [ -e "${KB_HOME}/UNLATCH_STATE.json" ]; then

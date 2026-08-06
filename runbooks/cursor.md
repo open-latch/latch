@@ -23,6 +23,16 @@ This makes Cursor safe to try in one repo without touching Claude Code or Codex
 configuration. The installer merges its MCP and hook entries while preserving
 unrelated Cursor configuration.
 
+Cursor wiring and KB selection are separate decisions. A fresh Latch install
+starts unscoped locations LOCKED; run `latch` at the workspace root and choose
+Shared or Private before expecting tools or hooks to open a KB. Descendants
+inherit that root unless a nearer root creates another scope. An upgraded
+global-KB install remains `compatibility_global`, so unscoped workspaces keep
+using the exact old global KB until the user deliberately runs
+`latch --shared --require-explicit-scopes` from a compatibility/Shared root.
+That migration makes other unscoped locations LOCKED; it never changes an
+existing Private scope or moves KB content.
+
 The base adapter provides the shared latch MCP tools, a Cursor-native activation
 rule, project-local commands and workflow skills, and the shared `AGENTS.md`
 behavior contract. Pass `--with-hooks` to add a silent exact current-session
@@ -101,6 +111,11 @@ receipt. Shell-backed Cursor commands read the workspace latch server's absolute
 interpreter from `.cursor/mcp.json` and set `LATCH_PYTHON` explicitly, so native
 dependencies cannot drift to a different `PATH` Python. Installer overrides
 preserve virtualenv interpreter symlinks for the same reason.
+
+The `/latch-decay`, `/latch-heal`, and `/latch-tree` shell calls and the
+`/latch-gate` shell fallback also read the exact `Latch Cursor current session
+id` re-injected in the current prompt by `beforeSubmitPrompt` and pass it as
+`LATCH_SESSION_ID`. They never omit the id or reuse one from another chat.
 
 The installed `/latch-seed` command is also current-session-only. It previews
 seed candidates as JSON from the exact marker/transcript pair. The preview

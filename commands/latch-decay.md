@@ -17,7 +17,7 @@ quietly stopped being useful fade.
 Run with the Bash tool:
 
 ```bash
-python "<KB_HOME>/src/maintenance.py" "$(pwd)"
+python "<KB_HOME>/src/maintenance.py" weekly "$(pwd)"
 ```
 
 Report back the `decayed_rows` count, `promoted_count`, and the list of

@@ -13,6 +13,7 @@ import argparse
 import copy
 import os
 import re
+import shlex
 import sys
 import tomllib
 from pathlib import Path
@@ -20,6 +21,7 @@ from pathlib import Path
 import agents_md_sync
 import codex_hooks
 import install_engine
+import project_config
 import versioning
 
 SERVER_NAME = "latch"
@@ -40,7 +42,9 @@ HOOKS_PATH = CODEX_HOME / "hooks.json"
 DEFAULT_SKILLS_DIR = Path.home() / ".agents" / "skills"
 CODEX_SKILLS_SRC = KB_HOME / ".agents" / "skills"
 CODEX_SKILL_MARKER = "<!-- latch-codex-skill: managed -->"
+CODEX_SKILL_HOME_TOKEN = "__LATCH_INSTALLED_HOME__"
 CODEX_SKILL_NAMES = (
+    "source-command-latch",
     "source-command-latch-budget-approve",
     "source-command-latch-compact",
     "source-command-latch-decay",
@@ -50,6 +54,9 @@ CODEX_SKILL_NAMES = (
     "source-command-latch-pm",
     "source-command-latch-tree",
     "source-command-unlatch",
+)
+CODEX_SKILLS_REQUIRING_HOME = tuple(
+    name for name in CODEX_SKILL_NAMES if name != "source-command-latch-pm"
 )
 
 _TABLE_RE = re.compile(r"^\s*\[([^\]]+)\]\s*(?:#.*)?$")
@@ -450,7 +457,15 @@ def _raw_codex_skill(name: str) -> str:
 
 
 def render_codex_skill(name: str) -> str:
-    body = _raw_codex_skill(name)
+    raw = _raw_codex_skill(name)
+    if name in CODEX_SKILLS_REQUIRING_HOME and CODEX_SKILL_HOME_TOKEN not in raw:
+        raise ValueError(
+            f"Codex skill {name} cannot locate its installed Latch checkout"
+        )
+    body = raw.replace(
+        CODEX_SKILL_HOME_TOKEN,
+        shlex.quote(str(KB_HOME.resolve())),
+    )
     footer = (
         "\n\n---\n\n"
         "Latch Codex user-skill sync metadata. Re-run `bin/install_codex` to "
@@ -647,7 +662,11 @@ def main(argv: list[str] | None = None) -> int:
             status = agents_md_sync.evaluate(agents_path)
             ok_agents = status == agents_md_sync.OK
             print(f"  [{'OK' if ok_agents else 'XX'}] AGENTS.md managed region: {status}")
-        return 0 if ok_config and ok_hooks and ok_skills and ok_agents else 1
+        scope_rows = install_engine.scope_configuration_status()
+        for ok, scope_label in scope_rows:
+            print(f"  [{'OK' if ok else 'XX'}] {scope_label}")
+        ok_scope = all(ok for ok, _label in scope_rows)
+        return 0 if ok_config and ok_hooks and ok_skills and ok_agents and ok_scope else 1
 
     if not args.skip_skills:
         try:
@@ -680,10 +699,37 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  AGENTS.md  : {'skipped' if args.skip_agents else agents_path}")
     print(f"  mode       : {'DRY-RUN (no writes)' if args.dry_run else 'apply'}\n")
 
+    existing_pin_before_install = install_engine._read_pin() is not None
+    try:
+        install_policy = install_engine.scope_policy_for_install(
+            existing_pin_before_install=existing_pin_before_install,
+        )
+    except project_config.ProjectConfigError as exc:
+        print(f"  [FAIL] scopes: existing scope policy is unsafe: {exc}")
+        print("\nNo Codex configuration changes were written.")
+        return 2
+    policy_level, policy_msg = install_engine.configure_scope_policy(
+        existing_pin_before_install=existing_pin_before_install,
+        dry_run=args.dry_run,
+    )
+    print(f"  [{policy_level:4}] scopes: {policy_msg}")
+    if policy_level == "FAIL":
+        print("\nNo Codex configuration changes were written.")
+        return 2
     pin_level, pin_msg = install_engine.pin_kb_dir(args.kb_dir, args.dry_run)
     print(f"  [{pin_level:4}] KB dir: {pin_msg}")
     if pin_level in {"ERROR", "FAIL"}:
         print("\nNo Codex configuration changes were written.")
+        return 2
+    compatibility_level, compatibility_msg = (
+        install_engine.configure_compatibility_binding(
+            dry_run=args.dry_run,
+            preview_policy=install_policy if args.dry_run else None,
+        )
+    )
+    print(f"  [{compatibility_level:4}] scopes: {compatibility_msg}")
+    if compatibility_level == "FAIL":
+        print("\nThe existing KB remains fail-closed; no Codex configuration changed.")
         return 2
 
     if changes:
@@ -739,9 +785,11 @@ def main(argv: list[str] | None = None) -> int:
               "restart Codex. Start a new Codex thread so the MCP roster, "
               "SessionStart hook, and AGENTS.md instruction chain reload.\n")
 
+    seed_project = agents_path.resolve().parent
     if not args.suppress_seed_output:
         if args.dry_run or args.no_seed_prompt:
-            print(install_engine.seed_next_step_message(
+            print(install_engine.seed_next_step_for_project(
+                project=seed_project,
                 command=(
                     f"{KB_HOME / 'bin' / 'latch_seed.sh'} "
                     "--source codex --backend codex --apply"
@@ -753,7 +801,7 @@ def main(argv: list[str] | None = None) -> int:
                 python_path=python_path,
                 source="codex",
                 backend="codex",
-                project=Path.cwd(),
+                project=seed_project,
             )
     return 0
 

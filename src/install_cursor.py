@@ -33,6 +33,7 @@ import agents_md_sync
 import cursor_hooks
 import cursor_rules_sync
 import install_engine
+import project_config
 from versioning import LATCH_VERSION, WIRING_VERSION
 
 SERVER_NAME = "latch"
@@ -55,6 +56,7 @@ CURSOR_PLUGIN_MANIFEST = KB_HOME / ".cursor-plugin" / "plugin.json"
 COMMAND_PLACEHOLDER = install_engine.COMMAND_PLACEHOLDER
 CURSOR_BACKEND_PLACEHOLDER = "<CURSOR_MODEL_BACKEND>"
 CURSOR_COMMAND_FILES = (
+    "latch.md",
     "latch-budget-approve.md",
     "latch-compact.md",
     "latch-decay.md",
@@ -68,6 +70,7 @@ CURSOR_COMMAND_FILES = (
 )
 UNSUPPORTED_CURSOR_COMMAND_FILES: tuple[str, ...] = ()
 CURSOR_SKILL_NAMES = (
+    "source-command-latch",
     "source-command-latch-budget-approve",
     "source-command-latch-compact",
     "source-command-latch-decay",
@@ -78,6 +81,12 @@ CURSOR_SKILL_NAMES = (
     "source-command-latch-seed",
     "source-command-latch-tree",
     "source-command-unlatch",
+)
+CURSOR_SESSION_FENCED_COMMANDS = (
+    "latch-decay.md",
+    "latch-gate.md",
+    "latch-heal.md",
+    "latch-tree.md",
 )
 
 
@@ -363,11 +372,13 @@ def render_cursor_command(
     body = body.replace('"$(pwd)"', '"$PWD"')
     body = body.replace(
         f"bash {home}/bin/run_latch_gate.sh",
+        f'LATCH_SESSION_ID="<CURRENT_CURSOR_SESSION_ID>" '
         f"LATCH_GATE_BACKEND={backend} LATCH_MODEL_BACKEND={backend} "
         f"bash {home}/bin/run_latch_gate.sh",
     )
     body = body.replace(
         f'python "{home}/src/maintenance.py"',
+        f'LATCH_SESSION_ID="<CURRENT_CURSOR_SESSION_ID>" '
         f'LATCH_PYTHON="<CURSOR_MCP_PYTHON>" '
         f'LATCH_MAINTENANCE_BACKEND={backend} LATCH_MODEL_BACKEND={backend} '
         f'"<CURSOR_MCP_PYTHON>" "{home}/src/maintenance.py"',
@@ -381,6 +392,14 @@ def render_cursor_command(
         body = body.replace(
             f'"<CURSOR_MCP_PYTHON>" "{home}/src/maintenance.py" "$PWD"',
             f'"<CURSOR_MCP_PYTHON>" "{home}/src/maintenance.py" weekly "$PWD"',
+        )
+    if name in CURSOR_SESSION_FENCED_COMMANDS:
+        body = body.rstrip() + (
+            "\n\nBefore the Shell fallback, read the exact `Latch Cursor current "
+            "session id` from the current prompt context; the "
+            "`beforeSubmitPrompt` hook re-injected it from this chat's payload. "
+            "Replace `<CURRENT_CURSOR_SESSION_ID>` with that exact value. Never "
+            "omit it or reuse an id from another chat."
         )
     if "mcpServers.latch.command" not in body:
         body = body.rstrip() + CURSOR_PYTHON_BOUNDARY_NOTE
@@ -772,6 +791,7 @@ def _print_changes(label: str, changes: list[str], *, dry_run: bool) -> None:
 
 def _check(args: argparse.Namespace, python_path: str, server_py: str) -> int:
     checks: list[tuple[bool, str]] = []
+    checks.extend(install_engine.scope_configuration_status())
     if not args.skip_mcp:
         checks.append(mcp_status(
             Path(args.mcp_json),
@@ -881,6 +901,40 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  AGENTS.md    : {'skipped' if args.skip_agents else args.agents_md}")
     print(f"  model backend: {args.model_backend or 'cursor (native default)'}")
     print(f"  mode         : {'DRY-RUN (no writes)' if args.dry_run else 'apply'}\n")
+
+    existing_pin_before_install = install_engine._read_pin() is not None
+    try:
+        install_policy = install_engine.scope_policy_for_install(
+            existing_pin_before_install=existing_pin_before_install,
+        )
+    except project_config.ProjectConfigError as exc:
+        print(f"  [FAIL] scopes: existing scope policy is unsafe: {exc}")
+        return 2
+    policy_level, policy_msg = install_engine.configure_scope_policy(
+        existing_pin_before_install=existing_pin_before_install,
+        dry_run=args.dry_run,
+    )
+    print(f"  [{policy_level:4}] scopes: {policy_msg}")
+    if policy_level == "FAIL":
+        return 2
+    pin_level, pin_msg = install_engine.pin_kb_dir(None, args.dry_run)
+    print(f"  [{pin_level:4}] KB dir: {pin_msg}")
+    if pin_level in {"ERROR", "FAIL"}:
+        print("No Cursor project wiring changed.", file=sys.stderr)
+        return 2
+    compatibility_level, compatibility_msg = (
+        install_engine.configure_compatibility_binding(
+            dry_run=args.dry_run,
+            preview_policy=install_policy if args.dry_run else None,
+        )
+    )
+    print(f"  [{compatibility_level:4}] scopes: {compatibility_msg}")
+    if compatibility_level == "FAIL":
+        print(
+            "The existing KB remains fail-closed; no Cursor project wiring changed.",
+            file=sys.stderr,
+        )
+        return 2
 
     if not args.skip_mcp:
         mcp_path = Path(args.mcp_json)

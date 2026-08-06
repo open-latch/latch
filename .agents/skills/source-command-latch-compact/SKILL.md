@@ -41,6 +41,10 @@ Steps:
    if [ -z "$latch_home" ] && [ -n "${CLAUDE_KB_HOME:-}" ]; then
      latch_home="$CLAUDE_KB_HOME"
    fi
+   installed_latch_home=__LATCH_INSTALLED_HOME__
+   if [ -z "$latch_home" ] && [ -f "$installed_latch_home/src/mcp_server.py" ]; then
+     latch_home="$installed_latch_home"
+   fi
    if [ -z "$latch_home" ]; then
      search_dir="$PWD"
      while [ "$search_dir" != "/" ]; do
@@ -61,7 +65,9 @@ Steps:
      echo "Could not find latch checkout; set LATCH_HOME to your latch install." >&2
      exit 1
    fi
-   bash "$latch_home/bin/run_codex_compact_now.sh" --background --wait
+   codex_task_id="${CODEX_THREAD_ID:-}"
+   test -n "$codex_task_id" || { echo "Current Codex task id unavailable." >&2; exit 1; }
+   bash "$latch_home/bin/run_codex_compact_now.sh" "$codex_task_id" --background --wait
    ```
 
    The parent process validates the Codex transcript before detaching, then

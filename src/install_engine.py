@@ -73,6 +73,7 @@ import sys
 from pathlib import Path
 
 import paths
+import project_config
 import versioning
 import vault_identity
 
@@ -125,6 +126,7 @@ LATCH_COMMAND_MARKERS = (
     "/bin/run_kb_gate.sh",
     "/bin/run_latch_gate.sh",
     "/bin/latch_baseline.sh",
+    "/bin/latch.sh",
     "/bin/unlatch.sh",
     "/bin/latch_gate_report.sh",
     "/bin/run_compact_now.sh",
@@ -167,6 +169,78 @@ def seed_next_step_message(
         "rejected-path catch demo is a separate post-apply check, not a prerequisite "
         "for creating the initial KB. Until this review runs, the initial KB is pending."
     )
+
+
+def scope_first_next_step_message(
+    project: Path,
+    *,
+    target: project_config.ResolvedScope | None = None,
+    error: str | None = None,
+    windows: bool | None = None,
+) -> str:
+    """Explain the explicit scope step that must precede any seed."""
+    project = project.resolve()
+    windows = os.name == "nt" if windows is None else windows
+    if windows:
+        def powershell_quote(value: object) -> str:
+            return "'" + str(value).replace("'", "''") + "'"
+
+        latch_command = f"& {powershell_quote(KB_HOME / 'bin' / 'latch.ps1')}"
+        project_command = f"Set-Location {powershell_quote(project)}"
+        confirm = "-Confirm latch"
+        shared = "-Shared"
+        private_new = "-Private -NewKb"
+    else:
+        latch_command = format_command(["bash", str(KB_HOME / "bin" / "latch.sh")])
+        project_command = format_command(["cd", str(project)])
+        confirm = "--confirm latch"
+        shared = "--shared"
+        private_new = "--private --new-kb"
+    state = target.state.upper() if target is not None else "LOCKED"
+    reason = error or (target.reason if target is not None else "no safe KB target")
+
+    if target is not None and target.state == project_config.MODE_UNLATCHED:
+        return (
+            f"Latch is installed, but {project} is UNLATCHED. Seeding is disabled "
+            "until the project is latched again.\n"
+            f"  {project_command}\n"
+            f"  {latch_command} {confirm}\n"
+            "This restores only this project's previous KB binding."
+        )
+
+    return (
+        f"Latch is installed, but {project} is {state}: {reason}\n"
+        "Choose this filesystem scope's KB before seeding:\n"
+        f"  {project_command}\n"
+        f"  # Shared: use the existing global KB\n"
+        f"  {latch_command} {confirm} {shared}\n"
+        f"  # Private: create a clean, separate KB\n"
+        f"  {latch_command} {confirm} {private_new}\n"
+        "Run one choice from that project, then start a fresh agent task. "
+        "No KB content is copied between scopes."
+    )
+
+
+def seed_next_step_for_project(
+    *,
+    project: Path,
+    command: str,
+) -> str:
+    """Return a seed handoff only when the selected project is LATCHED."""
+    project = project.resolve()
+    handoff = _scope_handoff_for_project(project)
+    return handoff or seed_next_step_message(command)
+
+
+def _scope_handoff_for_project(project: Path) -> str | None:
+    """Return the fail-closed setup handoff, or None for a safe seed target."""
+    try:
+        target = project_config.resolve(project)
+    except (OSError, project_config.ProjectConfigError) as exc:
+        return scope_first_next_step_message(project, error=str(exc))
+    if target.state != project_config.MODE_LATCHED or target.kb_dir is None:
+        return scope_first_next_step_message(project, target=target)
+    return None
 
 
 def seed_command_args(
@@ -225,6 +299,13 @@ def offer_seed_after_install(
         backend=backend,
     )
     command_text = format_command(command)
+
+    handoff = _scope_handoff_for_project(project)
+    if handoff is not None:
+        print()
+        print(handoff)
+        print()
+        return
 
     print()
     print(seed_next_step_message(command_text))
@@ -498,17 +579,18 @@ def pin_kb_dir(kb_dir_override: str | None, dry_run: bool) -> tuple[str, str]:
         migration stance of id=1556 (new installs pay nothing; existing
         multi-DB users choose their one KB once, by hand).
     """
-    environment_override = next(
-        (
-            value.strip()
-            for value in (
-                os.environ.get("LATCH_KB_DIR"),
-                os.environ.get("CLAUDE_KB_DIR"),
+    latch_override = (os.environ.get("LATCH_KB_DIR") or "").strip() or None
+    legacy_override = (os.environ.get("CLAUDE_KB_DIR") or "").strip() or None
+    if latch_override and legacy_override:
+        latch_path = absolute_kb_dir(latch_override)
+        legacy_path = absolute_kb_dir(legacy_override)
+        if _kb_path_key(latch_path) != _kb_path_key(legacy_path):
+            return "ERROR", (
+                f"LATCH_KB_DIR target {str(latch_path)!r} conflicts with "
+                f"CLAUDE_KB_DIR target {str(legacy_path)!r}; unset one or make "
+                "both name the same KB before installing."
             )
-            if value and value.strip()
-        ),
-        None,
-    )
+    environment_override = latch_override or legacy_override
     if kb_dir_override is not None and not kb_dir_override.strip():
         return "ERROR", "--kb-dir must name a non-empty directory"
     effective_override = (
@@ -590,6 +672,107 @@ def pin_kb_dir(kb_dir_override: str | None, dry_run: bool) -> tuple[str, str]:
         json.dumps({"kb_dir": target_str}, indent=2) + "\n", encoding="utf-8"
     )
     return "OK", f"pinned KB dir -> {target_str}"
+
+
+def configure_scope_policy(
+    *,
+    existing_pin_before_install: bool,
+    dry_run: bool,
+) -> tuple[str, str]:
+    """Persist one explicit migration decision; never infer it at runtime."""
+    path = project_config.machine_policy_path()
+    if path.exists() or path.is_symlink():
+        try:
+            policy = project_config.read_machine_policy()
+        except project_config.ProjectConfigError as exc:
+            return "FAIL", f"existing scope policy is unsafe: {exc}"
+        return "OK", f"already configured -> {policy} (left unchanged)"
+    policy = (
+        project_config.MACHINE_POLICY_COMPATIBILITY
+        if existing_pin_before_install
+        else project_config.MACHINE_POLICY_EXPLICIT
+    )
+    if dry_run:
+        return "DRY", f"would configure machine scope policy -> {policy}"
+    try:
+        project_config.write_machine_policy(policy)
+    except (OSError, project_config.ProjectConfigError) as exc:
+        return "FAIL", f"could not persist machine scope policy: {exc}"
+    detail = (
+        "existing global KB remains available until roots are explicitly scoped"
+        if policy == project_config.MACHINE_POLICY_COMPATIBILITY
+        else "new locations stay LOCKED until explicitly latched Shared or Private"
+    )
+    return "OK", f"configured -> {policy}; {detail}"
+
+
+def scope_policy_for_install(*, existing_pin_before_install: bool) -> str:
+    """Return the persisted or planned policy for one pre-pin install decision."""
+    path = project_config.machine_policy_path()
+    if path.exists() or path.is_symlink():
+        return project_config.read_machine_policy()
+    return (
+        project_config.MACHINE_POLICY_COMPATIBILITY
+        if existing_pin_before_install
+        else project_config.MACHINE_POLICY_EXPLICIT
+    )
+
+
+def configure_compatibility_binding(
+    *,
+    dry_run: bool,
+    preview_policy: str | None = None,
+) -> tuple[str, str]:
+    """Bind an upgraded install only after its existing pin is validated."""
+    if preview_policy is not None and not dry_run:
+        return "FAIL", "preview scope policy is valid only during a dry run"
+    if preview_policy is not None:
+        policy = preview_policy
+    else:
+        try:
+            policy = project_config.read_machine_policy()
+        except project_config.ProjectConfigError as exc:
+            return "FAIL", f"machine scope policy is unsafe: {exc}"
+    if policy not in project_config.MACHINE_POLICIES:
+        return "FAIL", f"machine scope policy is unsafe: {policy!r}"
+    if policy != project_config.MACHINE_POLICY_COMPATIBILITY:
+        return "OK", "not required for explicit-scope installs"
+    path = project_config.compatibility_binding_path()
+    if dry_run and not (path.exists() or path.is_symlink()):
+        try:
+            project_config._global_kb_dir(
+                required=True,
+                check_private_collision=True,
+            )
+        except project_config.ProjectConfigError as exc:
+            return "FAIL", f"could not validate the existing global KB: {exc}"
+        return "DRY", "would bind the exact existing global KB"
+    try:
+        binding = project_config.initialize_compatibility_binding()
+    except (OSError, project_config.ProjectConfigError) as exc:
+        return "FAIL", f"could not bind the existing global KB: {exc}"
+    return "OK", f"bound exact existing global KB -> {binding.kb_dir}"
+
+
+def scope_configuration_status() -> list[tuple[bool, str]]:
+    """Return check rows for the persisted policy and exact legacy binding."""
+    path = project_config.machine_policy_path()
+    if not (path.exists() or path.is_symlink()):
+        return [(False, "machine scope policy is not persisted; re-run install")]
+    try:
+        policy = project_config.read_machine_policy()
+    except project_config.ProjectConfigError as exc:
+        return [(False, f"machine scope policy is unsafe: {exc}")]
+    rows = [(True, f"machine scope policy -> {policy}")]
+    if policy == project_config.MACHINE_POLICY_COMPATIBILITY:
+        try:
+            binding = project_config._load_compatibility_binding()
+            project_config._validate_live_compatibility_binding(binding)
+        except project_config.ProjectConfigError as exc:
+            rows.append((False, f"compatibility KB binding is unsafe: {exc}"))
+        else:
+            rows.append((True, f"compatibility KB bound -> {binding.kb_dir}"))
+    return rows
 
 
 # --------------------------------------------------------------------------- #
@@ -867,6 +1050,7 @@ def check(python_path: str, server_py: str) -> int:
                                 "KBs (wrong-DB bug class live - pin with --kb-dir; id=1556)"))
         else:
             rows.append((True, "KB not pinned yet (fresh install — pin defaults outside source)"))
+    rows.extend(scope_configuration_status())
 
     failed = 0
     for ok, label in rows:
@@ -928,10 +1112,40 @@ def main(argv: list[str] | None = None) -> int:
         print("\nNo changes written.")
         return 2
 
+    # Capture this once before any pin write.  A quickstart or retry must not
+    # turn a fresh install into compatibility mode merely because this same
+    # invocation just created its pin.
+    existing_pin_before_install = _read_pin() is not None
+    try:
+        install_policy = scope_policy_for_install(
+            existing_pin_before_install=existing_pin_before_install,
+        )
+    except project_config.ProjectConfigError as exc:
+        print(f"  [FAIL] scopes: existing scope policy is unsafe: {exc}")
+        print("\nNo changes written.")
+        return 2
+    policy_level, policy_msg = configure_scope_policy(
+        existing_pin_before_install=existing_pin_before_install,
+        dry_run=args.dry_run,
+    )
+    print(f"  [{policy_level:4}] scopes: {policy_msg}")
+    if policy_level == "FAIL":
+        print("\nNo changes written.")
+        return 2
     pin_level, pin_msg = pin_kb_dir(args.kb_dir, args.dry_run)
     print(f"  [{pin_level:4}] KB dir: {pin_msg}")
     if pin_level in {"ERROR", "FAIL"}:
-        print("\nNo changes written.")
+        print("\nScope policy is safely persisted; no further changes written.")
+        return 2
+    compatibility_level, compatibility_msg = configure_compatibility_binding(
+        dry_run=args.dry_run,
+        preview_policy=install_policy if args.dry_run else None,
+    )
+    print(
+        f"  [{compatibility_level:4}] scopes: {compatibility_msg}"
+    )
+    if compatibility_level == "FAIL":
+        print("\nThe existing KB remains fail-closed; no further changes written.")
         return 2
 
     # --- 2. MCP registration -------------------------------------------------
@@ -984,12 +1198,16 @@ def main(argv: list[str] | None = None) -> int:
         if not args.suppress_seed_output:
             if args.no_seed_prompt:
                 print()
-                print(seed_next_step_message(format_command(seed_command_args(
-                    python_path=python_path,
-                    project=Path.cwd(),
-                    source="auto",
-                    backend="claude",
-                ))))
+                project = Path.cwd().resolve()
+                print(seed_next_step_for_project(
+                    project=project,
+                    command=format_command(seed_command_args(
+                        python_path=python_path,
+                        project=project,
+                        source="auto",
+                        backend="claude",
+                    )),
+                ))
                 print()
             else:
                 offer_seed_after_install(

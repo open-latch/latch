@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -32,12 +33,29 @@ def _run(args: list[str], *, cwd: Path, env: dict[str, str]) -> subprocess.Compl
 def test_cursor_project_install_doctor_uninstall_round_trip(tmp_path: Path) -> None:
     project = tmp_path / "project"
     home = tmp_path / "home"
+    install_home = tmp_path / "latch-home"
     cursor = project / ".cursor"
     commands = cursor / "commands"
     skills = cursor / "skills"
     commands.mkdir(parents=True)
     (skills / "mine").mkdir(parents=True)
     home.mkdir()
+    install_home.mkdir()
+    for directory in (
+        "src",
+        "bin",
+        "commands",
+        "cursor_commands",
+        "cursor_skills",
+        ".cursor-plugin",
+    ):
+        shutil.copytree(ROOT / directory, install_home / directory)
+    for filename in (
+        "settings_snippet.json",
+        "claude_md_snippet.md",
+        "cursor_rule_snippet.mdc",
+    ):
+        shutil.copy2(ROOT / filename, install_home / filename)
 
     # uninstall_engine's legacy all-host check also verifies that no Claude MCP
     # registration remains. Supply a hermetic CLI stub so this Cursor lifecycle
@@ -70,13 +88,17 @@ def test_cursor_project_install_doctor_uninstall_round_trip(tmp_path: Path) -> N
     user_skill.write_bytes(b"---\nname: mine\ndescription: user skill\n---\n")
 
     env = os.environ.copy()
+    test_root = Path(env["LATCH_TEST_ROOT"])
     env.update({
         "HOME": str(home),
         "USERPROFILE": str(home),
         "CLAUDE_CONFIG_DIR": str(home / ".claude"),
         "CLAUDE_COMMANDS_DIR": str(home / ".claude" / "commands"),
-        "LATCH_HOME": str(ROOT),
-        "CLAUDE_KB_HOME": str(ROOT),
+        "LATCH_HOME": str(install_home),
+        "CLAUDE_KB_HOME": str(install_home),
+        "LATCH_SCOPE_STATE_ROOT": str(
+            test_root / "cursor-lifecycle-control" / tmp_path.name
+        ),
         "LATCH_PYTHON": sys.executable,
         "CLAUDE_KB_PYTHON": sys.executable,
         "PATH": str(tool_bin) + os.pathsep + os.environ.get("PATH", ""),

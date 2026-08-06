@@ -98,9 +98,9 @@ paths, rationale, and evidence in a local KB, then puts a go/no-go verdict in th
 **before files change** — and shows you the receipt. That is decision continuity, not a bigger
 transcript or a generic recall layer.
 
-It runs locally on one SQLite KB, needs no cloud account, and targets macOS, Windows, and Linux.
-Claude Code, Codex, and Cursor share the same KB, so judgment captured through one agent can gate
-another.
+It runs locally on SQLite, needs no cloud account, and targets macOS, Windows, and Linux. Claude
+Code, Codex, and Cursor share the KB selected for the current project, so judgment captured through
+one agent can gate another.
 
 How the check reaches the agent is host-dependent, and latch is honest about it: on hosts with
 lifecycle hooks (Claude Code, and Cursor with hooks enabled) the gate runs before edits as part of
@@ -127,7 +127,8 @@ and repro scripts are in [Safety and control](#safety-and-control).
 
 ## What you get on day one
 
-Install and seed once, and from the next session on:
+Install the runtime once, explicitly latch the project, and seed it. From the
+next session on:
 
 - **Every decision on file is one you ratified.** Seeding is review-first — `--apply` writes only the
   candidates you approve, so nothing is kept that you didn't sign off on.
@@ -137,8 +138,10 @@ Install and seed once, and from the next session on:
   records whether it actually did.
 - **You get a receipt, not an assurance.** latch shows a short foreground receipt when it shapes an
   answer or a gate fires, and `/latch-gate-report` audits recent gate activity without writing.
-- **Shared across your agents.** A decision captured through Claude Code gates Codex and Cursor too —
-  install per repo to give each one its contract, but the judgment is shared.
+- **Shared across your agents, separate across client scopes.** On a fresh install, an unscoped
+  location is LOCKED until you choose Shared (the existing global KB) or Private (a clean separate
+  KB). Descendants inherit the nearest scope. Upgraded global-KB installs keep their old shared
+  behavior until explicitly migrated; no automatic lookup, copy, or import crosses KBs.
 - **Your session start stays quiet.** A healthy session start injects no standing project brief — at
   most five compact pointers, when they're relevant.
 - **Today's judgment carries into tomorrow, when you ask for it.** `/latch-compact` at a stopping
@@ -170,8 +173,9 @@ Windows PowerShell:
 irm https://raw.githubusercontent.com/open-latch/latch/main/install.ps1 | iex
 ```
 
-That's the install. The quickstart wires your agent and then prompts you to
-seed. **Restart the agent** afterward so its tools and hooks load.
+That's the install. The quickstart wires your agent, asks whether this project
+is Shared or Private, and offers seed only after the project is LATCHED.
+**Restart the agent** afterward so its tools and hooks load.
 
 **Then seed — this is the real first step, not an optional demo.** From here latch captures decisions
 as you work; seeding is how you skip the wait. It backfills what your project already settled, so the
@@ -258,9 +262,9 @@ The guided quickstart wires whichever you choose.
 | Agent | What latch installs | Boundary |
 | --- | --- | --- |
 | Claude Code | MCP tools, hooks, slash commands, `/latch-compact`, managed `CLAUDE.md` contract | Restart after install so tools and hooks load |
-| Codex | Shared MCP tools + KB, user skills, `AGENTS.md`, silent startup hook, Codex backend defaults | Start a new task after install; compaction is manual |
+| Codex | Shared MCP tools + selected project KB, user skills, `AGENTS.md`, silent startup hook, Codex backend defaults | Start a new task after install; compaction is manual |
 | Cursor | Project MCP, Rule, commands, skills, `AGENTS.md`; optional session/gate/activity hooks | Current-session seed/compact; opt-in project-local IDE history backfill |
-| Multiple agents | One shared local latch KB | A decision captured through one agent can gate the others |
+| Multiple agents | The KB selected for the current project | A decision captured through one agent can gate the others in that project |
 
 Cursor also needs three user-controlled live steps: authenticate with `agent login`, approve the
 project MCP server, and enable **latch** in **Cursor Settings > Tools & MCP**. Static doctor success
@@ -286,15 +290,35 @@ Or, you can simply ask latch in natural language, and the agent will offer the m
 
 ## Using latch in more than one repo
 
-You install latch once. The runtime and your KB are shared, and for **Claude Code** and **Codex** the
-tools and hooks are registered per-user — so the engine is already reachable in every repo on your
-machine. What each repo still needs is its own **contract**: the managed `CLAUDE.md` / `AGENTS.md`
-block that tells the agent to actually consult latch and run the gate before it acts. (**Cursor** is
-wired entirely per-repo — its MCP server, rule, and commands all live in the project.)
+You install the Latch runtime once. For **Claude Code** and **Codex**, its tools
+and hooks are registered per-user. On a fresh install, each unscoped filesystem
+location starts LOCKED until you run `latch` there and choose:
 
-So to protect another repo, run the install command — or `/path/to/latch/bin/latch_quickstart.sh` —
-**from inside that repo**. It reuses the same pinned KB and just writes that repo's contract; then
-restart the agent. Without this step a new repo may show latch's tools but never be told to use them.
+- **Shared** — use the existing global KB;
+- **Private** — create or select a separate KB.
+
+An upgrade does not silently lock or repin an existing global-KB user. Those
+users enter `compatibility_global`: unscoped locations keep using the exact
+previously pinned global KB. They can still create an explicit Shared or Private
+boundary with `latch`; other unscoped locations remain compatible.
+
+To leave compatibility mode deliberately, run this from a compatibility/Shared
+location (never from inside a Private client scope):
+
+```bash
+bash bin/latch.sh --confirm latch --shared --require-explicit-scopes
+# PowerShell: .\bin\latch.ps1 -Confirm latch -Shared -RequireExplicitScopes
+```
+
+This makes the current root explicitly Shared and makes every other unscoped
+location LOCKED. It does not copy, delete, or repin KB content, and existing
+explicit scopes keep their own bindings.
+
+That choice applies to descendants unless a nearer root creates its own Private
+scope or is explicitly unlatched. Private knowledge never appears in the global
+KB, and the global KB never reads a Private KB. Run the quickstart from another
+repo when it also needs the managed `CLAUDE.md` / `AGENTS.md` contract. Cursor
+wiring remains per-repo.
 
 ## Safety and control
 
@@ -329,15 +353,47 @@ bash bin/latch_enable.sh
 bash bin/latch_status.sh
 ```
 
-**Unlatch.** Turn the automatic judgment layer off for this install, then back on. It masks latch's
-managed `CLAUDE.md` / `AGENTS.md` regions while off; it does not delete the KB, uninstall latch, or
-disable the agent's native tools:
+**Latch and unlatch one filesystem scope.** Scope authority is machine-local and
+does not depend on Git. To keep native agent instructions consistent while Latch is off, `/unlatch`
+also temporarily masks Latch-managed regions in `CLAUDE.md` / `AGENTS.md`; those working-tree edits may
+be visible to Git and should not be committed. `/latch` restores them, including an exact
+Latch-owned override found without local state. Descendants and authorized root aliases of one
+scope follow its mode, but the commands never change another scope or the existing install-level
+KB pin. Status is read-only; changing state requires the exact confirmation word:
 
 ```bash
 bash bin/unlatch.sh
 bash bin/unlatch.sh --confirm unlatch
-bash bin/unlatch.sh --confirm latch
+bash bin/latch.sh --confirm latch
 ```
+
+Re-latching an UNLATCHED scope with no KB option preserves its previous binding.
+On a fresh explicit-scope install, a LOCKED root must choose Shared or Private.
+An upgraded `compatibility_global` location instead reports its inherited global
+binding until the user performs the deliberate migration described above:
+
+```bash
+# This repo keeps using the existing installation KB.
+bash bin/latch.sh --confirm latch --shared
+
+# This client repo gets a fresh external KB with no knowledge data.
+bash bin/latch.sh --confirm latch --private --new-kb
+
+# Or bind only this repo to an existing absolute KB directory.
+bash bin/latch.sh --confirm latch --private --kb-dir "/absolute/path/to/client-kb"
+```
+
+Every `--new-kb` call creates a new directory containing only Latch routing/continuity metadata;
+it does not create `kb.db` or seed, copy, or port anything from the primary KB. Start a fresh
+agent task in that repo (do not resume the old one) after changing its mode or binding. A legacy
+`LATCH_UNLATCHED` environment variable or old install-wide sentinel is reported as global and must
+be cleared before project-local mode can be trusted.
+
+This is a **project KB boundary**, not a complete NDA clean room. Agent/provider histories,
+opt-in external debug output, and operating-system temporary artifacts can exist outside the
+selected KB. Cursor chats in the same repo also share that repo's KB; Cursor does not currently
+provide Latch a per-conversation MCP identity. Start a fresh chat after a mode or KB change, and do
+not use project KB selection as the only boundary for regulated or client-confidential work.
 
 **Uninstall.** Preview or remove latch wiring. Production KB data and protected
 backups are always retained. `--purge` removes only kill-switch files; it has no
@@ -406,9 +462,11 @@ Details in [benchmarks/README.md](./benchmarks/README.md).
 **What the installer does.** The bootstrap preserves your project path and installs a private,
 isolated [`uv`](https://docs.astral.sh/uv/) + Python 3.11 runtime — it does not touch your shell
 profile or require a system Python. It asks which agent surfaces to wire, runs
-their doctor checks, and offers a bounded initial-KB review: selected transcripts
-are listed and redacted before any model call, and nothing is written until you
-approve it. Rerunning the command repairs and reconciles the existing install
+their doctor checks, and offers a bounded initial-KB review only after the
+selected project is LATCHED. A LOCKED project instead gets the exact Shared and
+Private `latch` commands. Selected transcripts are listed and redacted before
+any model call, and nothing is written until you approve it. Rerunning the
+command repairs and reconciles the existing install
 while keeping its current Latch source revision; it never silently switches to
 a newer release or commit. One installation serves many repos; `--install-dir
 PATH` (PowerShell `-InstallDir PATH`) picks an alternate location. Install

@@ -7,6 +7,11 @@ description: Run nightly latch heal and contradiction resolution. Use when the u
 
 Latch operation id: latch-heal run
 
+Read the exact `Latch Cursor current session id` from the current prompt context;
+the `beforeSubmitPrompt` hook re-injected it from this chat's payload.
+Set `LATCH_SESSION_ID` to that value. Never omit it or reuse an id from another
+chat.
+
 Before any Shell call, read the workspace `.cursor/mcp.json` and use
 `mcpServers.latch.env.LATCH_PYTHON` when present, otherwise
 `mcpServers.latch.command`, as `<CURSOR_MCP_PYTHON>` and `LATCH_PYTHON`. Never fall back to a
@@ -19,6 +24,6 @@ Latch Cursor skill boundary: resolve `latch_home` as `${CURSOR_PLUGIN_ROOT}`
 when set, otherwise use the absolute checkout in the project-sync footer.
 Select native `cursor` for plugin installs or the backend in that footer. Run
 `<CURSOR_MCP_PYTHON> "$latch_home/src/maintenance.py" nightly "$PWD"` with
-`LATCH_PYTHON` set to that same absolute interpreter and
+`LATCH_SESSION_ID=<CURRENT_CURSOR_SESSION_ID>`, `LATCH_PYTHON` set to that same absolute interpreter, and
 `LATCH_MAINTENANCE_BACKEND` and `LATCH_MODEL_BACKEND` set. Report `examined`,
 `collisions`, `superseded`, `kept_both`, per-path counts, and `budget_blocked`.

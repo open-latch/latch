@@ -19,6 +19,8 @@ from typing import Callable, Mapping, Sequence
 
 import install_engine
 import paths
+import project_config
+import project_mode
 import versioning
 
 KB_HOME = Path(
@@ -28,6 +30,7 @@ KB_HOME = Path(
 )
 
 AGENT_CHOICES = ("claude", "codex", "cursor", "both", "all")
+SCOPE_CHOICES = (project_config.POLICY_SHARED, project_config.POLICY_PRIVATE)
 
 
 @dataclass(frozen=True)
@@ -50,6 +53,80 @@ def _prompt_yes_no(prompt: str, *, default: bool) -> bool:
     if not raw:
         return default
     return raw in {"y", "yes"}
+
+
+def resolve_scope_choice(
+    project: Path,
+    requested: str | None,
+    *,
+    dry_run: bool,
+    is_tty: bool | None = None,
+    input_fn: Callable[[str], str] = input,
+) -> tuple[str | None, project_config.ResolvedScope]:
+    """Choose a first explicit boundary without repairing unsafe state.
+
+    An already-LATCHED explicit scope (including an inherited one) is the
+    user's durable choice and is left alone.  Compatibility/global access is
+    intentionally not enough for quickstart: selecting this project must add
+    an explicit Shared or Private boundary while siblings keep compatibility.
+    """
+    try:
+        target = project_config.resolve(project)
+    except project_config.ProjectConfigError as exc:
+        raise ValueError(f"could not safely resolve this project: {exc}") from exc
+
+    if (
+        target.state == project_config.MODE_LATCHED
+        and target.source == project_config.SOURCE_EXPLICIT
+    ):
+        if requested is not None and requested != target.policy:
+            raise ValueError(
+                f"this project already uses an explicit {target.policy} scope at "
+                f"{target.project_root}; use `latch` separately to create or change "
+                "a project boundary"
+            )
+        return None, target
+
+    if target.state == project_config.MODE_UNLATCHED:
+        raise ValueError(
+            f"this project is UNLATCHED at {target.project_root}; re-latch it "
+            "explicitly before running quickstart"
+        )
+    if (
+        target.state == project_config.MODE_LOCKED
+        and target.reason_code != project_config.LOCK_OUTSIDE_SCOPE
+    ):
+        raise ValueError(
+            f"this project is LOCKED by unsafe existing scope state: "
+            f"{target.reason or 'unknown scope error'}"
+        )
+
+    if requested is not None:
+        return requested, target
+    if dry_run:
+        raise ValueError(
+            "choose this project's KB scope for dry-run: "
+            "--scope shared or --scope private"
+        )
+    if is_tty is None:
+        is_tty = _stdio_is_tty()
+    if not is_tty:
+        raise ValueError(
+            "choose this project's KB scope: --scope shared or --scope private"
+        )
+
+    while True:
+        try:
+            raw = input_fn(
+                "Project KB scope [shared/private] (required; no default): "
+            ).strip().lower()
+        except (EOFError, KeyboardInterrupt) as exc:
+            raise ValueError(
+                "scope choice cancelled; re-run with --scope shared or --scope private"
+            ) from exc
+        if raw in SCOPE_CHOICES:
+            return raw, target
+        print("Please enter shared or private; there is no default.")
 
 
 def detect_agent_context(env: Mapping[str, str] | None = None) -> str | None:
@@ -398,8 +475,16 @@ def format_command(command: Sequence[str]) -> str:
     return " ".join(shlex.quote(str(part)) for part in command)
 
 
-def print_plan(steps: Sequence[Step], seed_command: Sequence[str] | None) -> None:
+def print_plan(
+    steps: Sequence[Step],
+    seed_command: Sequence[str] | None,
+    *,
+    scope_summary: str | None = None,
+) -> None:
     print("\nlatch guided quickstart plan\n")
+    if scope_summary:
+        print(f"Scope: {scope_summary}")
+        print()
     for idx, step in enumerate(steps, start=1):
         print(f"{idx}. {step.label}")
         print(f"   cwd: {step.cwd}")
@@ -484,6 +569,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                     help=("pin this installation to one explicit KB directory; "
                           "fresh installs otherwise use the platform data root "
                           "outside the source checkout"))
+    ap.add_argument(
+        "--scope",
+        choices=SCOPE_CHOICES,
+        help=(
+            "KB boundary for this project: shared uses the global pin; "
+            "private creates a new isolated KB"
+        ),
+    )
     ap.add_argument("--lookback-days", type=int, default=90,
                     help="history horizon for initial-KB seeding (default: 90)")
     ap.add_argument("--last-sessions", type=int, default=50,
@@ -515,11 +608,25 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     project = Path(args.project).expanduser().resolve()
-    if not project.exists():
-        print(f"error: project path does not exist: {project}", file=sys.stderr)
+    if not project.is_dir():
+        print(f"error: project path is not a directory: {project}", file=sys.stderr)
         return 2
     if args.lookback_days <= 0 or args.last_sessions <= 0:
         print("error: --lookback-days and --last-sessions must be positive", file=sys.stderr)
+        return 2
+
+    try:
+        scope_choice, initial_scope = resolve_scope_choice(
+            project,
+            args.scope,
+            dry_run=args.dry_run,
+        )
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        print(
+            "No scope, agent configuration, doctor, or seed changes were written.",
+            file=sys.stderr,
+        )
         return 2
 
     python_path = install_engine.resolve_python(args.python)
@@ -645,19 +752,94 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  Cursor history: {'opted in' if cursor_history else 'not selected'}")
     print(f"  session cap  : {args.last_sessions}")
     print("  initial KB   : pending review")
+    if scope_choice is None:
+        print(
+            "  project scope: preserve "
+            f"{initial_scope.policy} at {initial_scope.project_root}"
+        )
+    else:
+        print(f"  project scope: create explicit {scope_choice}")
     print(f"  mode         : {'DRY-RUN (no writes)' if args.dry_run else 'apply'}")
+
+    # Capture the migration decision before this invocation can create a pin.
+    # Child host installers then see the persisted decision instead of
+    # reclassifying a fresh machine as an upgraded global-KB install.
+    existing_pin_before_install = install_engine._read_pin() is not None
+    try:
+        install_policy = install_engine.scope_policy_for_install(
+            existing_pin_before_install=existing_pin_before_install,
+        )
+    except project_config.ProjectConfigError as exc:
+        print(f"  scope policy : [FAIL] existing policy is unsafe: {exc}")
+        return 2
+    policy_level, policy_msg = install_engine.configure_scope_policy(
+        existing_pin_before_install=existing_pin_before_install,
+        dry_run=args.dry_run,
+    )
+    print(f"  scope policy : [{policy_level}] {policy_msg}")
+    if policy_level == "FAIL":
+        return 2
 
     pin_level, pin_msg = pin_kb_for_quickstart(args.kb_dir, dry_run=args.dry_run)
     print(f"  KB pin       : [{pin_level}] {pin_msg}")
     if pin_level in {"ERROR", "FAIL"}:
         print("Quickstart stopped before agent configuration or seed writes.", file=sys.stderr)
         return 2
+    compatibility_level, compatibility_msg = (
+        install_engine.configure_compatibility_binding(
+            dry_run=args.dry_run,
+            preview_policy=install_policy if args.dry_run else None,
+        )
+    )
+    print(f"  scope binding: [{compatibility_level}] {compatibility_msg}")
+    if compatibility_level == "FAIL":
+        print("Quickstart stopped with the existing KB fail-closed.", file=sys.stderr)
+        return 2
     if not args.dry_run:
         paths.refresh_pinned_dir()
 
     if args.dry_run:
-        print_plan(steps, seed_cmd)
+        scope_summary = (
+            f"preserve existing explicit {initial_scope.policy} scope at "
+            f"{initial_scope.project_root}"
+            if scope_choice is None
+            else f"create an explicit {scope_choice} boundary at {project}"
+        )
+        print_plan(steps, seed_cmd, scope_summary=scope_summary)
         return 0
+
+    if scope_choice is not None:
+        try:
+            scope_rc = project_mode.apply_latch(
+                project,
+                policy=scope_choice,
+                new_kb=(scope_choice == project_config.POLICY_PRIVATE),
+            )
+        except (OSError, project_config.ProjectConfigError) as exc:
+            print(f"error: could not create the project scope: {exc}", file=sys.stderr)
+            print("Quickstart stopped before agent wiring, doctor, or seed.", file=sys.stderr)
+            return 2
+        if scope_rc != 0:
+            print("error: project scope setup did not complete", file=sys.stderr)
+            return 2
+
+    try:
+        active_scope = project_config.require_latched(project)
+    except project_config.ProjectConfigError as exc:
+        print(f"error: project is not safely LATCHED: {exc}", file=sys.stderr)
+        print("Quickstart stopped before agent wiring, doctor, or seed.", file=sys.stderr)
+        return 2
+    if scope_choice is not None and (
+        active_scope.source != project_config.SOURCE_EXPLICIT
+        or active_scope.project_root != project
+        or active_scope.policy != scope_choice
+    ):
+        print(
+            "error: quickstart did not establish the requested exact project scope",
+            file=sys.stderr,
+        )
+        print("Quickstart stopped before agent wiring, doctor, or seed.", file=sys.stderr)
+        return 2
 
     try:
         runtime_settings_path = paths.write_maintenance_runner(

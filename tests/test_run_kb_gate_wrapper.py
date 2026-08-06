@@ -24,6 +24,7 @@ def _assert(cond, msg):
 
 def test_gate_wrappers_honor_configured_python():
     env = dict(os.environ)
+    env["LATCH_HOME"] = str(KB_HOME)
     env.pop("LATCH_PYTHON", None)
     env["CLAUDE_KB_PYTHON"] = "echo"
     for script in SCRIPTS:
@@ -50,6 +51,7 @@ def test_legacy_wrapper_does_not_require_latch_wrapper_executable_bit():
     legacy = KB_HOME / "bin" / "run_kb_gate.sh"
     original_mode = target.stat().st_mode
     env = dict(os.environ)
+    env["LATCH_HOME"] = str(KB_HOME)
     env.pop("LATCH_PYTHON", None)
     env["CLAUDE_KB_PYTHON"] = "echo"
     try:

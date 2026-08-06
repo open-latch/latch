@@ -1,40 +1,37 @@
 ---
 name: source-command-unlatch
-description: Confirmed toggle for latch Unlatched mode. Use when the user invokes $source-command-unlatch, unlatch, /unlatch, or wants to latch/re-latch the current install.
+description: Confirmed scope-local toggle for Latch Unlatched mode. Use for unlatch, /unlatch, or turning Latch off for the current filesystem scope.
 ---
 
 # source-command-unlatch
 
-Use this skill when the user wants to turn latch's project-judgment layer off,
-compare against vanilla agent behavior, or re-latch after using the escape
-hatch.
+Unlatch is scope-local. It turns off Latch guidance, tools, hooks, maintenance,
+and automatic writes for the current scope. Descendants and any authorized root
+aliases of that same scope follow its mode; other scopes and all KBs are
+unchanged. It does not uninstall Latch, delete/copy/import KB content, or change
+the install-level KB pin.
 
-Unlatched mode is in-place and install-level. It is not a controlled benchmark
-harness, uninstall, cloud flow, telemetry flow, or disposable project clone. It
-uses latch's existing full-disable sentinel plus an UNLATCHED receipt so future
-hooks show that latch influence is off for this latch install until the user
-re-latches. If the user changes repos before re-latching, latch remains off and
-should say so loudly. It also masks latch's managed `CLAUDE.md` / `AGENTS.md`
-regions in the current project/ancestor files while unlatched, then restores
-them when the user re-latches.
-
-## Command Template
-
-First locate the latch checkout:
+First locate the full Latch checkout. Prefer `LATCH_HOME`, then
+`CLAUDE_KB_HOME`, then this installed skill's baked-in checkout, then the
+`Details: .../docs/agent-contract-reference.md` line in an ancestor `AGENTS.md`
+or `CLAUDE.md`, then the current Git root when it contains `src/mcp_server.py`
+and `commands/`. Refuse the action if the checkout cannot be proved.
 
 ```bash
 latch_home="${LATCH_HOME:-}"
 if [ -z "$latch_home" ] && [ -n "${CLAUDE_KB_HOME:-}" ]; then
   latch_home="$CLAUDE_KB_HOME"
 fi
+installed_latch_home=__LATCH_INSTALLED_HOME__
+if [ -z "$latch_home" ] && [ -f "$installed_latch_home/src/mcp_server.py" ]; then
+  latch_home="$installed_latch_home"
+fi
 if [ -z "$latch_home" ]; then
   search_dir="$PWD"
   while [ "$search_dir" != "/" ]; do
     for instruction_file in "$search_dir/AGENTS.md" "$search_dir/CLAUDE.md"; do
       if [ -f "$instruction_file" ]; then
-        latch_home="$(sed -n 's|^UNLATCHED_LATCH_HOME=\(.*\)$|\1|p' "$instruction_file" | head -n 1)"
-        [ -n "$latch_home" ] && break
-        latch_home="$(sed -n 's|.*Follow `\([^`]*\)/README\.md` per-user setup.*|\1|p' "$instruction_file" | head -n 1)"
+        latch_home="$(sed -n 's|.*Details: \(.*\)/docs/agent-contract-reference\.md\..*|\1|p' "$instruction_file" | head -n 1)"
         [ -n "$latch_home" ] && break
       fi
     done
@@ -54,54 +51,46 @@ if [ -z "$latch_home" ] || [ ! -f "$latch_home/src/mcp_server.py" ]; then
 fi
 ```
 
-Then inspect state:
+Inspect without mutation:
 
 ```bash
 bash "$latch_home/bin/unlatch.sh"
 ```
 
-Never run a state-changing command immediately, even in dangerous/yolo
-permission modes.
-
-If the output says LATCHED, ask:
+If this project is LATCHED, ask:
 
 ```text
-Latch is currently LATCHED.
+Latch is currently LATCHED for this project.
 
-Switch to UNLATCHED mode?
-This turns latch's project-judgment layer off for this latch install, masks latch-managed CLAUDE.md/AGENTS.md regions in this project, and leaves KB data intact.
-Latch remains off for this latch install, even if you change repos, until you re-latch.
-To re-latch later, run /unlatch again.
+Switch this filesystem scope to UNLATCHED mode?
+Its descendants and authorized aliases follow the same mode.
+Other scopes and every KB remain unchanged.
 
 Reply exactly: unlatch
 ```
 
-If the output says UNLATCHED, ask:
+If this project is UNLATCHED, ask:
 
 ```text
-Latch is currently UNLATCHED.
+Latch is currently UNLATCHED for this project.
 
-Switch back to LATCHED mode?
-Latch hooks will resume on the next prompt unless LATCH_UNLATCHED is set.
-If LATCH_UNLATCHED is set, unset it too.
+Switch this project back to LATCHED mode using its previous KB binding?
 
 Reply exactly: latch
 ```
 
-Stop there. Only after the user replies exactly `unlatch`, run:
+Never mutate immediately. Only after the exact reply, run one command:
 
 ```bash
 bash "$latch_home/bin/unlatch.sh" --confirm unlatch
+bash "$latch_home/bin/latch.sh" --confirm latch
 ```
 
-Only after the user replies exactly `latch`, run:
-
-```bash
-bash "$latch_home/bin/unlatch.sh" --confirm latch
-```
-
-Show the command output plainly. If latch is unlatched, say: "Latch is currently
-UNLATCHED. Run /unlatch to re-latch. If LATCH_UNLATCHED is set, unset it too."
-If latch is latched again, say latch hooks resume on the next prompt unless an
-environment disable flag remains set. Do not call it a controlled benchmark or
-statistical A/B test.
+Show the complete receipt. If the mode changed, tell the user to start a fresh
+agent task in this project and not resume the old one so the instruction mask
+takes effect; an idempotent receipt explicitly says no new task is needed. If an install-wide
+legacy sentinel or environment override is active, do not claim project separation; follow the command's
+recovery guidance. To select a separate or existing KB, use the `latch` command
+skill instead. Warn that temporary managed instruction-file edits may appear in
+Git and should not be committed; `/latch` restores them. Project-local mode does
+not claim a complete NDA clean room for install-level artifacts.
