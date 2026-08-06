@@ -1121,12 +1121,10 @@ def _finalize_initial_target(
             vault_uuid=identity.vault_uuid,
             continuity_root=project,
         )
-    elif target.source == project_config.SOURCE_COMPATIBILITY:
-        finalized = project_config.finalize_compatibility_vault_identity(
-            expected_target_revision=target.target_revision,
-            vault_uuid=identity.vault_uuid,
-            continuity_root=project,
-        )
+    elif target.source == project_config.SOURCE_GLOBAL:
+        # Global Shared mode intentionally has no second machine binding. The
+        # immutable UUID lives in the vault itself, so re-resolution is enough.
+        finalized = project_config.resolve(project)
     else:
         raise ProjectTargetChangedError(
             "project target cannot finalize a new vault identity"

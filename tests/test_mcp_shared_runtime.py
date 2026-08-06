@@ -306,6 +306,7 @@ def _scope_root(kb_dir: Path) -> Path:
     assert test_root is not None
     root = test_root / "projects" / f"mcp-{kb_dir.name}"
     root.mkdir(parents=True)
+    project_config.write_machine_policy(project_config.MACHINE_POLICY_EXPLICIT)
     project_config.create_scope(root, policy=project_config.POLICY_PRIVATE)
     project_config.authorize_scope(root, kb_dir=key)
     _SCOPE_ROOTS[key] = root

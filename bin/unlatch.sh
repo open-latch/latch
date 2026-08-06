@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Read-only status by default; confirmed project-local OFF boundary on request.
+# Read-only status by default; confirmed OFF transition on request.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -30,8 +30,9 @@ Usage: bash bin/unlatch.sh
        bash bin/unlatch.sh --confirm unlatch
 
 With no arguments, unlatch only shows the effective root, state, policy, and
-KB. Confirmed unlatch turns Latch off at this root and below without deleting
-or changing its remembered KB. Other scopes remain unchanged.
+KB. In Global Shared mode, confirmed unlatch retains the existing install-wide
+behavior. In project-scoped mode, it turns off only this scope and its
+descendants. No KB is deleted or changed.
 EOF
 }
 

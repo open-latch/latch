@@ -93,12 +93,9 @@ def scope_harness(
     monkeypatch.setattr(paths, "KB_LOCATION_FILE", pin)
     monkeypatch.setattr(paths, "_PINNED_DIR", False)
 
-    # Model an upgraded Rob-style install: the installer has explicitly
-    # persisted the exact existing global KB as compatibility authority.
-    project_config.write_machine_policy(
-        project_config.MACHINE_POLICY_COMPATIBILITY
-    )
-    project_config.initialize_compatibility_binding()
+    # Model an existing Rob-style install before consulting mode is enabled:
+    # the global pin is still the only KB routing authority.
+    project_config.write_machine_policy(project_config.MACHINE_POLICY_SHARED)
     return ScopeHarness(
         home=home,
         control=control,
@@ -171,7 +168,7 @@ def _assert_global_unchanged(harness: ScopeHarness) -> None:
     ) == "existing global knowledge stays intact\n"
 
 
-def test_bare_status_is_read_only_and_reports_exact_compatibility_binding(
+def test_bare_status_is_read_only_and_reports_unchanged_global_shared_pin(
     scope_harness: ScopeHarness,
 ) -> None:
     before_root = _snapshot(scope_harness.root)
@@ -182,7 +179,7 @@ def test_bare_status_is_read_only_and_reports_exact_compatibility_binding(
 
     assert target.state == project_config.MODE_LATCHED
     assert target.policy == project_config.POLICY_SHARED
-    assert target.source == project_config.SOURCE_COMPATIBILITY
+    assert target.source == project_config.SOURCE_GLOBAL
     assert target.scope_id is None
     assert target.kb_dir == scope_harness.shared_kb
     assert "LATCHED" in result.stdout
@@ -268,15 +265,14 @@ def test_global_overrides_cannot_create_or_change_a_scope(
         "latch",
         "--private",
         "--new-kb",
+        "--enable-project-scopes",
         check=False,
         env_extra={variable: "1"},
     )
 
     assert result.returncode == 2
     assert "global" in result.stderr.lower()
-    assert project_config.resolve(scope_harness.root).source == (
-        project_config.SOURCE_COMPATIBILITY
-    )
+    assert project_config.resolve(scope_harness.root).source == project_config.SOURCE_GLOBAL
     assert not (scope_harness.root / ".latch").exists()
 
 
@@ -291,23 +287,11 @@ def test_global_disable_file_blocks_latch_but_write_off_still_allows_unlatch(
         scope_harness.root,
         "--confirm",
         "latch",
-        "--shared",
         check=False,
     )
     assert blocked.returncode == 2
     disable.unlink()
 
-    write_blocked = _run(
-        "latch.sh",
-        scope_harness,
-        scope_harness.root,
-        "--confirm",
-        "latch",
-        "--shared",
-        check=False,
-        env_extra={"LATCH_DISABLE_WRITE": "1"},
-    )
-    assert write_blocked.returncode == 2
     turned_off = _run(
         "unlatch.sh",
         scope_harness,
@@ -317,12 +301,12 @@ def test_global_disable_file_blocks_latch_but_write_off_still_allows_unlatch(
         env_extra={"LATCH_DISABLE_WRITE": "1"},
     )
     assert "UNLATCHED" in turned_off.stdout
-    assert project_config.resolve(scope_harness.root).state == (
-        project_config.MODE_UNLATCHED
-    )
+    assert (scope_harness.home / "UNLATCHED").is_file()
+    status = _run("latch.sh", scope_harness, scope_harness.root)
+    assert "UNLATCHED" in status.stdout
 
 
-def test_compatibility_binding_never_follows_a_changed_global_pin(
+def test_global_shared_mode_follows_an_explicitly_changed_global_pin(
     scope_harness: ScopeHarness,
 ) -> None:
     original = project_config.resolve(scope_harness.root)
@@ -339,18 +323,13 @@ def test_compatibility_binding_never_follows_a_changed_global_pin(
         scope_harness.root,
         check=False,
     )
-    locked = project_config.resolve(scope_harness.root)
+    changed = project_config.resolve(scope_harness.root)
 
-    assert status.returncode == 2
-    assert "LOCKED" in status.stdout
-    assert locked.state == project_config.MODE_LOCKED
-    assert locked.source == project_config.SOURCE_COMPATIBILITY
-    assert locked.kb_dir is None
-    assert locked.remembered_kb_dir == scope_harness.shared_kb
-    binding = json.loads(
-        project_config.compatibility_binding_path().read_text(encoding="utf-8")
-    )
-    assert Path(str(binding["kb_dir"])) == scope_harness.shared_kb
+    assert status.returncode == 0
+    assert "LATCHED" in status.stdout
+    assert changed.state == project_config.MODE_LATCHED
+    assert changed.source == project_config.SOURCE_GLOBAL
+    assert changed.kb_dir == replacement
     assert not (replacement / "kb.db").exists()
     _assert_global_unchanged(scope_harness)
 
@@ -368,7 +347,7 @@ def test_existing_global_user_can_require_explicit_filesystem_scopes(
         "--confirm",
         "latch",
         "--shared",
-        "--require-explicit-scopes",
+        "--enable-project-scopes",
     )
 
     root = project_config.resolve(scope_harness.root)
@@ -389,7 +368,7 @@ def test_existing_global_user_can_require_explicit_filesystem_scopes(
     _assert_global_unchanged(scope_harness)
 
 
-def test_existing_global_user_can_add_one_private_client_without_migrating_all_roots(
+def test_existing_global_user_can_opt_into_one_private_client_and_lock_other_roots(
     scope_harness: ScopeHarness,
 ) -> None:
     client = _directory(scope_harness.root / "nico")
@@ -404,13 +383,14 @@ def test_existing_global_user_can_add_one_private_client_without_migrating_all_r
         "latch",
         "--private",
         "--new-kb",
+        "--enable-project-scopes",
     )
 
     private = project_config.resolve(client)
     inherited = project_config.resolve(nested)
-    global_other = project_config.resolve(other)
+    locked_other = project_config.resolve(other)
     assert project_config.read_machine_policy() == (
-        project_config.MACHINE_POLICY_COMPATIBILITY
+        project_config.MACHINE_POLICY_EXPLICIT
     )
     assert private.state == project_config.MODE_LATCHED
     assert private.policy == project_config.POLICY_PRIVATE
@@ -421,8 +401,8 @@ def test_existing_global_user_can_add_one_private_client_without_migrating_all_r
     assert inherited.project_root == client
     assert inherited.scope_id == private.scope_id
     assert inherited.kb_dir == private.kb_dir
-    assert global_other.source == project_config.SOURCE_COMPATIBILITY
-    assert global_other.kb_dir == scope_harness.shared_kb
+    assert locked_other.state == project_config.MODE_LOCKED
+    assert locked_other.kb_dir is None
     _assert_global_unchanged(scope_harness)
 
 
@@ -436,6 +416,7 @@ def test_git_metadata_does_not_define_or_split_a_filesystem_scope(
         "--confirm",
         "latch",
         "--shared",
+        "--enable-project-scopes",
     )
     nested_repo = _directory(scope_harness.root / "vendor" / "nested-repo")
     subprocess.run(["git", "init", "-q", str(nested_repo)], check=True)
@@ -465,6 +446,7 @@ def test_private_existing_and_new_vault_choices_never_mutate_a_vault(
         "--private",
         "--kb-dir",
         str(existing_kb),
+        "--enable-project-scopes",
     )
     _run(
         "latch.sh",
@@ -496,6 +478,7 @@ def test_downstream_unlatch_is_an_off_boundary_not_a_new_vault(
         "--confirm",
         "latch",
         "--shared",
+        "--enable-project-scopes",
     )
     parent = project_config.resolve(scope_harness.root)
     child = _directory(scope_harness.root / "paused")
@@ -555,6 +538,7 @@ def test_private_unlatch_and_latch_restore_the_exact_scope_and_kb(
         "--private",
         "--kb-dir",
         str(kb),
+        "--enable-project-scopes",
     )
     before = project_config.resolve(client)
     marker_before = (client / ".latch" / "scope.json").read_bytes()
@@ -602,7 +586,8 @@ def test_unlatch_is_scope_local_across_two_private_clients(
     kb_b = _private_vault(scope_harness, "private-b")
     (kb_a / "a.txt").write_text("A\n", encoding="utf-8")
     (kb_b / "b.txt").write_text("B\n", encoding="utf-8")
-    for client, kb in ((client_a, kb_a), (client_b, kb_b)):
+    for index, (client, kb) in enumerate(((client_a, kb_a), (client_b, kb_b))):
+        extra = ("--enable-project-scopes",) if index == 0 else ()
         _run(
             "latch.sh",
             scope_harness,
@@ -612,6 +597,7 @@ def test_unlatch_is_scope_local_across_two_private_clients(
             "--private",
             "--kb-dir",
             str(kb),
+            *extra,
         )
 
     _run(
@@ -626,9 +612,7 @@ def test_unlatch_is_scope_local_across_two_private_clients(
     active = project_config.resolve(client_b)
     assert active.state == project_config.MODE_LATCHED
     assert active.kb_dir == kb_b
-    assert project_config.resolve(scope_harness.root).kb_dir == (
-        scope_harness.shared_kb
-    )
+    assert project_config.resolve(scope_harness.root).state == project_config.MODE_LOCKED
     assert (kb_a / "a.txt").read_text(encoding="utf-8") == "A\n"
     assert (kb_b / "b.txt").read_text(encoding="utf-8") == "B\n"
     _assert_global_unchanged(scope_harness)
@@ -649,6 +633,7 @@ def test_private_scope_never_falls_back_or_nests_a_shared_scope(
         "--private",
         "--kb-dir",
         str(kb),
+        "--enable-project-scopes",
     )
     before = project_config.resolve(client)
 
@@ -659,6 +644,7 @@ def test_private_scope_never_falls_back_or_nests_a_shared_scope(
         "--confirm",
         "latch",
         "--shared",
+        "--enable-project-scopes",
         check=False,
     )
     nested_shared = _run(
@@ -668,6 +654,7 @@ def test_private_scope_never_falls_back_or_nests_a_shared_scope(
         "--confirm",
         "latch",
         "--shared",
+        "--enable-project-scopes",
         check=False,
     )
 
@@ -693,6 +680,7 @@ def test_repeated_latch_and_unlatch_are_idempotent(
         "--confirm",
         "latch",
         "--shared",
+        "--enable-project-scopes",
     )
     latched = project_config.resolve(scope_harness.root)
     _run(
@@ -748,6 +736,7 @@ def test_unlatched_hook_receipt_is_bounded_to_its_filesystem_subtree(
         "--confirm",
         "latch",
         "--shared",
+        "--enable-project-scopes",
     )
     paused = _directory(scope_harness.root / "paused")
     active = _directory(scope_harness.root / "active")

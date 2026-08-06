@@ -1,13 +1,14 @@
 ---
-description: Confirmed project-local Unlatch toggle
+description: Confirmed Latch Unlatched-mode toggle
 argument-hint: ""
 ---
 
 Latch operation id: unlatch inspect
 
-Unlatch turns Latch off for the current scope. Descendants and any authorized
-root aliases of that same scope follow its mode; every other scope, every KB,
-and the installation remain unchanged. It never copies, imports, or deletes KB
+In Global Shared mode, Unlatch retains its install-wide behavior: every repo is
+off until `latch` restores the installation. In project mode, it turns Latch off
+only for the current scope; descendants and authorized aliases follow it while
+other scopes remain unchanged. Neither mode copies, imports, or deletes KB
 content.
 
 Inspect first:
@@ -16,8 +17,8 @@ Inspect first:
 bash "<KB_HOME>/bin/unlatch.sh"
 ```
 
-If LATCHED, ask the user to reply exactly `unlatch`; explain the same-scope
-descendant/alias effect before confirmation. If UNLATCHED, ask for exactly
+If LATCHED, ask the user to reply exactly `unlatch`; explain the reported
+install-wide or same-scope effect before confirmation. If UNLATCHED, ask for exactly
 `latch`; explain that its previous KB binding will be preserved. Stop until the
 exact confirmation.
 
@@ -36,8 +37,8 @@ After `latch`:
 bash "<KB_HOME>/bin/latch.sh" --confirm latch
 ```
 
-Show the full receipt. If a legacy install-wide sentinel or environment
-override is reported, do not claim project separation. Do not describe
+Show the full receipt. If an install-wide sentinel or environment override is
+reported, do not claim project separation. Do not describe
 project-local mode as a complete NDA clean room for install-level artifacts.
 When the mode changed, tell the user to start a fresh agent task and not resume
 the old one so the instruction mask takes effect; an idempotent receipt needs

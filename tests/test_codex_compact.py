@@ -221,6 +221,9 @@ def test_wait_for_background_result_reports_no_json_on_child_exit():
 
 
 def _bound_project(prefix: str, *, session_id: str = "sid"):
+    cc.project_config.write_machine_policy(
+        cc.project_config.MACHINE_POLICY_EXPLICIT
+    )
     root = _tmp()
     project = root / "project"
     project.mkdir()

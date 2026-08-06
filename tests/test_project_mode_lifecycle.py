@@ -290,35 +290,42 @@ def test_interrupted_off_replacement_retries_same_explicit_choice(
     assert target.scope_id == scope_id
 
 
-def test_require_explicit_scopes_rejects_private_origin(
+def test_project_scopes_require_one_explicit_opt_in_and_then_fail_closed(
     lifecycle_env: Path,
     tmp_path: Path,
 ) -> None:
-    _pin_global(lifecycle_env, tmp_path)
-    project_config.write_machine_policy(
-        project_config.MACHINE_POLICY_COMPATIBILITY
-    )
-    project_config.initialize_compatibility_binding()
+    global_kb = _pin_global(lifecycle_env, tmp_path)
+    project_config.machine_policy_path().unlink()
+    project_config.write_machine_policy(project_config.MACHINE_POLICY_SHARED)
     root = _directory(tmp_path / "private-client")
+    sibling = _directory(tmp_path / "unselected-client")
     private_kb = _directory(tmp_path / "private-vault")
+
+    before = project_config.resolve(root)
+    assert before.source == project_config.SOURCE_GLOBAL
+    assert before.kb_dir == global_kb
+
+    with pytest.raises(project_config.ProjectConfigError, match="explicitly enable"):
+        project_mode.apply_latch(
+            root,
+            policy=project_config.POLICY_PRIVATE,
+            kb_dir=str(private_kb),
+        )
+    assert project_config.read_machine_policy() == project_config.MACHINE_POLICY_SHARED
+    assert project_config.resolve(root).source == project_config.SOURCE_GLOBAL
+
     project_mode.apply_latch(
         root,
         policy=project_config.POLICY_PRIVATE,
         kb_dir=str(private_kb),
+        enable_project_scopes=True,
     )
-    before = project_config.resolve(root)
-
-    with pytest.raises(project_config.ProjectConfigError, match="not from a Private"):
-        project_mode.apply_latch(root, require_explicit_scopes=True)
-
-    after = project_config.resolve(root)
-    assert project_config.read_machine_policy() == (
-        project_config.MACHINE_POLICY_COMPATIBILITY
-    )
-    assert after.state == project_config.MODE_LATCHED
-    assert after.policy == project_config.POLICY_PRIVATE
-    assert after.scope_id == before.scope_id
-    assert after.kb_dir == private_kb
+    target = project_config.resolve(root)
+    assert project_config.read_machine_policy() == project_config.MACHINE_POLICY_EXPLICIT
+    assert target.state == project_config.MODE_LATCHED
+    assert target.policy == project_config.POLICY_PRIVATE
+    assert target.kb_dir == private_kb
+    assert project_config.resolve(sibling).state == project_config.MODE_LOCKED
 
 
 def test_private_scope_selects_existing_vault_without_mutating_it(

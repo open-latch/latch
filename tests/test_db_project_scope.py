@@ -638,7 +638,7 @@ def test_private_identity_row_crash_recovers_only_the_exact_bound_vault(
     assert not receipt.exists()
 
 
-def test_compatibility_first_identity_adoption_keeps_same_session_valid(
+def test_global_shared_first_identity_adoption_keeps_same_session_valid(
     compatibility_scope_env: dict[str, Path],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -647,7 +647,7 @@ def test_compatibility_first_identity_adoption_keeps_same_session_valid(
     root.mkdir()
     vault = compatibility_scope_env["vault"]
     initial = project_config.resolve(root)
-    assert initial.source == project_config.SOURCE_COMPATIBILITY
+    assert initial.source == project_config.SOURCE_GLOBAL
     assert initial.vault_uuid is None
     project_config.record_session_binding(root, "legacy-task")
     monkeypatch.setenv("CODEX_THREAD_ID", "legacy-task")
@@ -666,58 +666,7 @@ def test_compatibility_first_identity_adoption_keeps_same_session_valid(
     second.close()
 
 
-def test_compatibility_identity_row_crash_recovers_exact_global_vault(
-    compatibility_scope_env: dict[str, Path],
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    root = tmp_path / "legacy-row-crash"
-    root.mkdir()
-    vault = compatibility_scope_env["vault"]
-    initial = project_config.resolve(root)
-    original_finalize = project_config.finalize_compatibility_vault_identity
-
-    def crash_before_binding(*args, **kwargs):
-        raise RuntimeError(
-            "simulated crash before compatibility binding finalization"
-        )
-
-    monkeypatch.setattr(
-        project_config,
-        "finalize_compatibility_vault_identity",
-        crash_before_binding,
-    )
-    with pytest.raises(RuntimeError, match="compatibility binding finalization"):
-        db.connect(str(root))
-    monkeypatch.setattr(
-        project_config,
-        "finalize_compatibility_vault_identity",
-        original_finalize,
-    )
-
-    rows_before = _identity_rows(vault)
-    assert len(rows_before) == 1
-    pending = project_config.resolve(root)
-    assert pending.state == project_config.MODE_LOCKED
-    assert pending.reason_code == project_config.LOCK_VAULT_IDENTITY_PENDING
-    receipt = db._initialization_receipt_path(initial, vault)
-    assert receipt.is_file()
-
-    recovered = db.connect(str(root))
-    try:
-        assert recovered._kb_vault_identity.vault_uuid == rows_before[0][0]
-    finally:
-        recovered.close()
-
-    finalized = project_config.resolve(root)
-    assert finalized.state == project_config.MODE_LATCHED
-    assert finalized.revision == initial.revision
-    assert finalized.vault_uuid == rows_before[0][0]
-    assert _identity_rows(vault) == rows_before
-    assert not receipt.exists()
-
-
-def test_compatibility_agent_without_session_receipt_cannot_open_kb(
+def test_global_shared_agent_without_session_receipt_cannot_open_kb(
     compatibility_scope_env: dict[str, Path],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -778,7 +727,7 @@ def test_zero_row_recovery_preserves_original_vault_classification(
     assert not receipt.exists()
 
 
-def test_compatibility_zero_row_receipt_recovers_exact_global_vault(
+def test_global_shared_zero_row_receipt_recovers_exact_vault(
     compatibility_scope_env: dict[str, Path],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -918,64 +867,6 @@ def test_recovery_refuses_replaced_private_directory_fingerprint(
 
     assert not (vault / "kb.db").exists()
     assert _identity_rows(parked) == []
-    assert receipt.is_file()
-
-
-def test_recovery_refuses_compatibility_pin_change(
-    compatibility_scope_env: dict[str, Path],
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    root = tmp_path / "compatibility-pin-change"
-    root.mkdir()
-    vault = compatibility_scope_env["vault"]
-    initial = project_config.resolve(root)
-    original_finalize = project_config.finalize_compatibility_vault_identity
-
-    def crash_before_binding(*args, **kwargs):
-        raise RuntimeError(
-            "simulated crash before compatibility binding finalization"
-        )
-
-    monkeypatch.setattr(
-        project_config,
-        "finalize_compatibility_vault_identity",
-        crash_before_binding,
-    )
-    with pytest.raises(RuntimeError, match="compatibility binding finalization"):
-        db.connect(str(root))
-    monkeypatch.setattr(
-        project_config,
-        "finalize_compatibility_vault_identity",
-        original_finalize,
-    )
-    pending = project_config.resolve(root)
-    assert pending.state == project_config.MODE_LOCKED
-    assert pending.reason_code == project_config.LOCK_VAULT_IDENTITY_PENDING
-    receipt = db._initialization_receipt_path(initial, vault)
-    assert receipt.is_file()
-    rows_before = _identity_rows(vault)
-    binding_path = project_config.compatibility_binding_path()
-    binding_before = binding_path.read_bytes()
-    test_root = paths.validated_test_root()
-    assert test_root is not None
-    replacement = (
-        test_root / "vaults" / f"replacement-global-{tmp_path.name}"
-    )
-    replacement.mkdir(parents=True)
-    monkeypatch.setenv("LATCH_KB_DIR", str(replacement))
-
-    with pytest.raises(
-        lockfile.ProjectTargetChangedError,
-        match="scope changed",
-    ):
-        db._recover_interrupted_identity(str(root), pending)
-    with pytest.raises(db.ProjectTargetChangedError, match="project is locked"):
-        db.connect(str(root))
-
-    assert binding_path.read_bytes() == binding_before
-    assert _identity_rows(vault) == rows_before
-    assert not (replacement / "kb.db").exists()
     assert receipt.is_file()
 
 

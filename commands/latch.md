@@ -5,12 +5,11 @@ argument-hint: ""
 
 Latch operation id: latch inspect
 
-Latch only the current filesystem scope. The runtime is installed once. On a
-fresh explicit-scope install, an unscoped location is LOCKED until its Shared or
-Private KB is chosen, and descendants inherit the nearest scope. An upgraded
-global-KB install instead reports `compatibility_global` and keeps using its
-exact previous global KB until the user deliberately migrates. Do not change
-another scope or the install-level pin.
+The runtime is installed once. In Global Shared mode, every repo keeps using
+the installed global KB and this command changes nothing unless the user
+explicitly enables project scopes. In project mode, latch only the current
+filesystem scope; unscoped locations are LOCKED and descendants inherit the
+nearest scope. Do not change another scope or the install-level pin.
 
 Resolve `<KB_HOME>` to the installed Latch checkout, then inspect first:
 
@@ -31,17 +30,17 @@ bash "<KB_HOME>/bin/latch.sh" --confirm latch --private --kb-dir "/absolute/kb/p
 bash "<KB_HOME>/bin/latch.sh" --confirm latch --private --new-kb
 ```
 
-If status reports `compatibility_global` and the user explicitly wants every
-other unscoped location to become LOCKED, explain the effect and ask for the
-same exact `latch` confirmation before running this from a compatibility/Shared
-location (never from a Private scope):
+If status reports `shared_global` and the user explicitly wants consulting
+mode, explain that the choice is one-way and every other unscoped location
+becomes LOCKED. Ask for the same exact `latch` confirmation, then run one
+explicit first-root choice:
 
 ```bash
-bash "<KB_HOME>/bin/latch.sh" --confirm latch --shared --require-explicit-scopes
+bash "<KB_HOME>/bin/latch.sh" --confirm latch --enable-project-scopes --shared
+bash "<KB_HOME>/bin/latch.sh" --confirm latch --enable-project-scopes --private --new-kb
 ```
 
-This migration creates the current Shared boundary. It does not move content or
-change any existing explicit scope.
+This transition creates the current boundary. It does not move content.
 
 A new KB starts clean. Never copy or import KB content automatically. When the
 binding changed, tell the user to start a fresh agent task in this project and

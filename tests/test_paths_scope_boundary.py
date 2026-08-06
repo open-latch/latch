@@ -26,7 +26,7 @@ def _resolved(
         policy=project_config.POLICY_PRIVATE,
         scope_id=(
             None
-            if source == project_config.SOURCE_COMPATIBILITY
+            if source == project_config.SOURCE_GLOBAL
             else str(uuid.uuid4())
         ),
         target_revision="1" * 32,
@@ -145,7 +145,7 @@ def test_explicit_latched_scope_selects_only_resolved_target(
     assert paths.db_path(project) == selected / "kb.db"
 
 
-def test_compatibility_target_uses_resolvers_exact_global_pin(
+def test_global_shared_target_uses_resolvers_exact_installed_pin(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ):
@@ -159,7 +159,7 @@ def test_compatibility_target_uses_resolvers_exact_global_pin(
             project,
             state=project_config.MODE_LATCHED,
             kb_dir=selected,
-            source=project_config.SOURCE_COMPATIBILITY,
+            source=project_config.SOURCE_GLOBAL,
         ),
     )
     _forbid_fallbacks(monkeypatch)

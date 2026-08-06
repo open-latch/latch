@@ -14,7 +14,7 @@ states have no KB path and cannot fall through to an environment or install
 pin.  A persisted compatibility policy may still resolve an existing user's
 global pin when no explicit project boundary exists.
 
-``_resolve_pinned_dir`` remains the compatibility pin reader used by installer
+``_resolve_pinned_dir`` remains the global pin reader used by installer
 and refresh flows.  It is not a second runtime routing algorithm: data-plane
 callers enter through ``project_dir`` and therefore through the resolved scope.
 """
@@ -639,9 +639,8 @@ def project_dir(cwd: str | os.PathLike | None = None) -> Path:
     ``project_config.resolve`` is the sole authority for selecting a vault.
     In particular, an explicit LOCKED or UNLATCHED boundary must fail before
     consulting an environment pin, the install pin, or legacy cwd routing.
-    Compatibility is represented by a LATCHED resolved scope too, but only
-    when the resolver found no explicit boundary and the persisted machine
-    policy permits the existing global pin.
+    Global Shared mode is represented by a LATCHED resolved scope too. Project
+    boundaries are consulted only after the user explicitly enables project mode.
     """
     scope = cwd or os.getcwd()
     target = project_config.resolve(scope)

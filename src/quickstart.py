@@ -63,17 +63,44 @@ def resolve_scope_choice(
     is_tty: bool | None = None,
     input_fn: Callable[[str], str] = input,
 ) -> tuple[str | None, project_config.ResolvedScope]:
-    """Choose a first explicit boundary without repairing unsafe state.
-
-    An already-LATCHED explicit scope (including an inherited one) is the
-    user's durable choice and is left alone.  Compatibility/global access is
-    intentionally not enough for quickstart: selecting this project must add
-    an explicit Shared or Private boundary while siblings keep compatibility.
-    """
+    """Preserve global Shared mode unless project scoping is explicitly chosen."""
     try:
         target = project_config.resolve(project)
     except project_config.ProjectConfigError as exc:
         raise ValueError(f"could not safely resolve this project: {exc}") from exc
+
+    machine_policy = project_config.read_machine_policy()
+    if machine_policy == project_config.MACHINE_POLICY_SHARED:
+        if requested is not None:
+            return requested, target
+        if dry_run:
+            return None, target
+        if is_tty is None:
+            is_tty = _stdio_is_tty()
+        if not is_tty:
+            return None, target
+        while True:
+            try:
+                raw_mode = input_fn(
+                    "Latch KB mode [global/projects] (default global): "
+                ).strip().lower()
+            except (EOFError, KeyboardInterrupt) as exc:
+                raise ValueError("KB mode choice cancelled") from exc
+            if raw_mode in {"", "global", "shared"}:
+                return None, target
+            if raw_mode in {"project", "projects", "scoped"}:
+                break
+            print("Please enter global or projects.")
+        while True:
+            try:
+                raw_scope = input_fn(
+                    "This project's scope [shared/private] (required): "
+                ).strip().lower()
+            except (EOFError, KeyboardInterrupt) as exc:
+                raise ValueError("project scope choice cancelled") from exc
+            if raw_scope in SCOPE_CHOICES:
+                return raw_scope, target
+            print("Please enter shared or private.")
 
     if (
         target.state == project_config.MODE_LATCHED
@@ -105,14 +132,15 @@ def resolve_scope_choice(
         return requested, target
     if dry_run:
         raise ValueError(
-            "choose this project's KB scope for dry-run: "
+            "project-scoped mode requires this root's scope for dry-run: "
             "--scope shared or --scope private"
         )
     if is_tty is None:
         is_tty = _stdio_is_tty()
     if not is_tty:
         raise ValueError(
-            "choose this project's KB scope: --scope shared or --scope private"
+            "project-scoped mode requires this root's scope: "
+            "--scope shared or --scope private"
         )
 
     while True:
@@ -752,28 +780,23 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  Cursor history: {'opted in' if cursor_history else 'not selected'}")
     print(f"  session cap  : {args.last_sessions}")
     print("  initial KB   : pending review")
-    if scope_choice is None:
+    if scope_choice is None and initial_scope.source == project_config.SOURCE_EXPLICIT:
         print(
             "  project scope: preserve "
             f"{initial_scope.policy} at {initial_scope.project_root}"
         )
+    elif scope_choice is None:
+        print("  project scope: global Shared mode (unchanged)")
     else:
         print(f"  project scope: create explicit {scope_choice}")
     print(f"  mode         : {'DRY-RUN (no writes)' if args.dry_run else 'apply'}")
 
-    # Capture the migration decision before this invocation can create a pin.
-    # Child host installers then see the persisted decision instead of
-    # reclassifying a fresh machine as an upgraded global-KB install.
-    existing_pin_before_install = install_engine._read_pin() is not None
     try:
-        install_policy = install_engine.scope_policy_for_install(
-            existing_pin_before_install=existing_pin_before_install,
-        )
+        install_engine.scope_policy_for_install()
     except project_config.ProjectConfigError as exc:
         print(f"  scope policy : [FAIL] existing policy is unsafe: {exc}")
         return 2
     policy_level, policy_msg = install_engine.configure_scope_policy(
-        existing_pin_before_install=existing_pin_before_install,
         dry_run=args.dry_run,
     )
     print(f"  scope policy : [{policy_level}] {policy_msg}")
@@ -785,16 +808,6 @@ def main(argv: list[str] | None = None) -> int:
     if pin_level in {"ERROR", "FAIL"}:
         print("Quickstart stopped before agent configuration or seed writes.", file=sys.stderr)
         return 2
-    compatibility_level, compatibility_msg = (
-        install_engine.configure_compatibility_binding(
-            dry_run=args.dry_run,
-            preview_policy=install_policy if args.dry_run else None,
-        )
-    )
-    print(f"  scope binding: [{compatibility_level}] {compatibility_msg}")
-    if compatibility_level == "FAIL":
-        print("Quickstart stopped with the existing KB fail-closed.", file=sys.stderr)
-        return 2
     if not args.dry_run:
         paths.refresh_pinned_dir()
 
@@ -802,6 +815,9 @@ def main(argv: list[str] | None = None) -> int:
         scope_summary = (
             f"preserve existing explicit {initial_scope.policy} scope at "
             f"{initial_scope.project_root}"
+            if scope_choice is None
+            and initial_scope.source == project_config.SOURCE_EXPLICIT
+            else "preserve global Shared mode"
             if scope_choice is None
             else f"create an explicit {scope_choice} boundary at {project}"
         )
@@ -814,6 +830,7 @@ def main(argv: list[str] | None = None) -> int:
                 project,
                 policy=scope_choice,
                 new_kb=(scope_choice == project_config.POLICY_PRIVATE),
+                enable_project_scopes=True,
             )
         except (OSError, project_config.ProjectConfigError) as exc:
             print(f"error: could not create the project scope: {exc}", file=sys.stderr)

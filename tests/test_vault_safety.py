@@ -45,6 +45,7 @@ def test_new_vault_is_test_and_identity_is_sqlite_immutable(tmp_path):
 
 
 def test_unidentified_existing_database_is_adopted_as_production(tmp_path):
+    project_config.write_machine_policy(project_config.MACHINE_POLICY_EXPLICIT)
     test_root = paths.validated_test_root()
     assert test_root is not None
     vault = test_root / "vaults" / f"legacy-adoption-{tmp_path.name}"

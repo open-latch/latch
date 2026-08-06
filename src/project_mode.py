@@ -24,6 +24,9 @@ import unlatch
 import vault_identity
 
 
+GLOBAL_UNLATCH_ROOT_PREFIX = "UNLATCHED_PROJECT_ROOT="
+
+
 def _selected_root(value: str | os.PathLike[str]) -> Path:
     root = Path(value).expanduser().resolve(strict=True)
     if not root.is_dir():
@@ -95,6 +98,118 @@ def _assert_local_transition_allowed(*, enabling: bool) -> None:
         raise project_config.ProjectConfigError(
             "Latch writes are globally disabled; recover that switch before latching"
         )
+
+
+def _global_unlatch_root() -> Path | None:
+    path = paths.UNLATCHED_FILE
+    if not (path.exists() or path.is_symlink()):
+        return None
+    if path.is_symlink() or not path.is_file():
+        raise project_config.ProjectConfigError(
+            f"global Unlatch receipt is unsafe: {path}"
+        )
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        raise project_config.ProjectConfigError(
+            f"global Unlatch receipt is unreadable: {path}: {exc}"
+        ) from exc
+    raw = next(
+        (
+            line[len(GLOBAL_UNLATCH_ROOT_PREFIX):]
+            for line in lines
+            if line.startswith(GLOBAL_UNLATCH_ROOT_PREFIX)
+        ),
+        None,
+    )
+    if raw is None:
+        return None
+    candidate = Path(raw).expanduser()
+    if not candidate.is_absolute():
+        raise project_config.ProjectConfigError(
+            f"global Unlatch receipt has a non-absolute project root: {path}"
+        )
+    try:
+        root = candidate.resolve(strict=True)
+    except OSError as exc:
+        raise project_config.ProjectConfigError(
+            f"global Unlatch project root no longer resolves: {candidate}"
+        ) from exc
+    if not root.is_dir() or root == Path(root.anchor):
+        raise project_config.ProjectConfigError(
+            f"global Unlatch receipt has an unsafe project root: {root}"
+        )
+    return root
+
+
+def _apply_global_unlatch(root: Path) -> int:
+    if paths.UNLATCHED_FILE.exists() or paths.UNLATCHED_FILE.is_symlink():
+        print("Latch is already UNLATCHED for this Shared installation.")
+        print("KB data is unchanged; every project remains off until re-latched.")
+        return 0
+    if os.environ.get("LATCH_UNLATCHED"):
+        raise project_config.ProjectConfigError(
+            "LATCH_UNLATCHED is already set; unset it before changing file state"
+        )
+    if paths.DISABLE_FILE.exists() or paths.DISABLE_FILE.is_symlink():
+        raise project_config.ProjectConfigError(
+            f"a global kill switch already exists without an Unlatch receipt: "
+            f"{paths.DISABLE_FILE}; recover it before running unlatch"
+        )
+    project_config.atomic_text(
+        paths.UNLATCHED_FILE,
+        "\n".join(
+            (
+                "latch unlatched mode - created by project_mode.py",
+                "Latch is currently UNLATCHED for this Shared installation.",
+                f"{GLOBAL_UNLATCH_ROOT_PREFIX}{root}",
+                "KB data is not deleted.",
+                "",
+            )
+        ),
+    )
+    project_config.atomic_text(
+        paths.DISABLE_FILE,
+        "latch kill switch - Shared installation is UNLATCHED\n",
+    )
+    messages = unlatch.disable(root)
+    for message in messages:
+        print(f"  {message}")
+    print("Latch is UNLATCHED for this Shared installation.")
+    print("All projects are off; the global KB and installation are unchanged.")
+    print("Start a fresh agent task; do not resume the old task.")
+    return 0
+
+
+def _apply_global_latch(root: Path) -> int:
+    if not (paths.UNLATCHED_FILE.exists() or paths.UNLATCHED_FILE.is_symlink()):
+        print("Latch is already LATCHED in global Shared mode. No state changed.")
+        return 0
+    recorded_root = _global_unlatch_root()
+    if recorded_root is None:
+        messages = unlatch.enable(root, legacy_state=True)
+    else:
+        messages = unlatch.enable(recorded_root)
+    for message in messages:
+        print(f"  {message}")
+    for path in (paths.UNLATCHED_FILE, paths.DISABLE_FILE, paths.DISABLE_WRITE_FILE):
+        if path.exists() or path.is_symlink():
+            project_config.durable_unlink(path)
+            print(f"  removed {path}")
+    print("Latch is LATCHED in global Shared mode.")
+    if any(
+        os.environ.get(name)
+        for name in (
+            "LATCH_UNLATCHED",
+            "LATCH_DISABLE",
+            "CLAUDE_KB_DISABLE",
+        )
+    ):
+        print("An environment override still keeps Latch off; unset it explicitly.")
+    else:
+        print("Hooks resume on the next prompt in every project.")
+    print("Start a fresh agent task; do not resume the old task.")
+    return 0
 
 
 def status_payload(project: str | os.PathLike[str]) -> dict[str, object]:
@@ -314,38 +429,17 @@ def _configure_or_change_scope(
         raise
 
 
-def apply_latch(
-    project: str | os.PathLike[str],
+def _apply_project_latch(
+    root: Path,
     *,
     policy: str | None = None,
     kb_dir: str | None = None,
     new_kb: bool = False,
-    require_explicit_scopes: bool = False,
 ) -> int:
-    root = _selected_root(project)
     _assert_local_transition_allowed(enabling=True)
     with project_config.transition_lock(root):
         with lockfile.project_access_lock(str(root), exclusive=True):
             before = project_config.resolve(root)
-            if require_explicit_scopes and before.policy == project_config.POLICY_PRIVATE:
-                raise project_config.ProjectConfigError(
-                    "--require-explicit-scopes must be run from a Shared or "
-                    "compatibility-global location, not from a Private scope"
-                )
-            if (
-                require_explicit_scopes
-                and project_config.read_machine_policy()
-                == project_config.MACHINE_POLICY_COMPATIBILITY
-                and (
-                    before.state != project_config.MODE_LATCHED
-                    or before.policy != project_config.POLICY_SHARED
-                    or before.lock_key != "shared-global"
-                )
-            ):
-                raise project_config.ProjectConfigError(
-                    "--require-explicit-scopes migration requires a healthy "
-                    "Shared or compatibility-global location"
-                )
             roots_to_enable = (
                 [root]
                 if before.source == "off-boundary"
@@ -371,15 +465,6 @@ def apply_latch(
                     target = project_config.set_scope_mode(
                         root, project_config.MODE_LATCHED
                     )
-                if require_explicit_scopes:
-                    if target.source != "explicit" or target.state != project_config.MODE_LATCHED:
-                        raise project_config.ProjectConfigError(
-                            "authorize this root as Shared or Private before requiring explicit scopes"
-                        )
-                    project_config.write_machine_policy(
-                        project_config.MACHINE_POLICY_EXPLICIT
-                    )
-                    target = project_config.resolve(root)
             except Exception:
                 if before.state == project_config.MODE_UNLATCHED:
                     with contextlib.suppress(Exception):
@@ -397,8 +482,101 @@ def apply_latch(
         return 0
 
 
+def apply_latch(
+    project: str | os.PathLike[str],
+    *,
+    policy: str | None = None,
+    kb_dir: str | None = None,
+    new_kb: bool = False,
+    enable_project_scopes: bool = False,
+) -> int:
+    root = _selected_root(project)
+    if project_config.read_machine_policy() != project_config.MACHINE_POLICY_SHARED:
+        return _apply_project_latch(
+            root,
+            policy=policy,
+            kb_dir=kb_dir,
+            new_kb=new_kb,
+        )
+
+    with project_config.machine_policy_transition_lock():
+        # Re-read under the machine-wide transition lock. A concurrent root may
+        # have completed the one-way activation while this caller was waiting.
+        if project_config.read_machine_policy() != project_config.MACHINE_POLICY_SHARED:
+            return _apply_project_latch(
+                root,
+                policy=policy,
+                kb_dir=kb_dir,
+                new_kb=new_kb,
+            )
+        if enable_project_scopes:
+            if policy not in project_config.POLICIES:
+                raise project_config.ProjectConfigError(
+                    "enabling project scopes requires an explicit Shared or Private choice"
+                )
+            _assert_local_transition_allowed(enabling=True)
+            global_target = project_config.resolve(root)
+            # Drain every user of the install-wide KB before changing routing.
+            # Once policy flips, an interruption is deliberately fail-closed.
+            with lockfile.project_access_lock(
+                str(root),
+                exclusive=True,
+                resolved_target=global_target,
+            ):
+                project_config.write_machine_policy(
+                    project_config.MACHINE_POLICY_EXPLICIT
+                )
+                return _apply_project_latch(
+                    root,
+                    policy=policy,
+                    kb_dir=kb_dir,
+                    new_kb=new_kb,
+                )
+        if policy is not None or kb_dir is not None or new_kb:
+            raise project_config.ProjectConfigError(
+                "this installation is in global Shared mode; explicitly enable "
+                "project scopes before choosing a project KB"
+            )
+        global_target = project_config.resolve(root)
+        with lockfile.project_access_lock(
+            str(root),
+            exclusive=True,
+            resolved_target=global_target,
+        ):
+            if paths.UNLATCHED_FILE.exists() or paths.UNLATCHED_FILE.is_symlink():
+                return _apply_global_latch(root)
+            override = _global_override()
+            if override:
+                raise project_config.ProjectConfigError(
+                    f"a {override} is active; recover it explicitly before latching"
+                )
+            print("Latch is already LATCHED in global Shared mode. No state changed.")
+            return 0
+
+
 def apply_unlatch(project: str | os.PathLike[str]) -> int:
     root = _selected_root(project)
+    if project_config.read_machine_policy() == project_config.MACHINE_POLICY_SHARED:
+        with project_config.machine_policy_transition_lock():
+            if project_config.read_machine_policy() == project_config.MACHINE_POLICY_SHARED:
+                if any(
+                    os.environ.get(name)
+                    for name in (
+                        "LATCH_UNLATCHED",
+                        "LATCH_DISABLE",
+                        "CLAUDE_KB_DISABLE",
+                    )
+                ):
+                    raise project_config.ProjectConfigError(
+                        "an environment override is active; file state cannot safely replace it"
+                    )
+                global_target = project_config.resolve(root)
+                with lockfile.project_access_lock(
+                    str(root),
+                    exclusive=True,
+                    resolved_target=global_target,
+                ):
+                    return _apply_global_unlatch(root)
     _assert_local_transition_allowed(enabling=False)
     with project_config.transition_lock(root):
         with lockfile.project_access_lock(str(root), exclusive=True):
@@ -454,7 +632,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     choice.add_argument("--private", action="store_true")
     latch_parser.add_argument("--kb-dir")
     latch_parser.add_argument("--new-kb", action="store_true")
-    latch_parser.add_argument("--require-explicit-scopes", action="store_true")
+    latch_parser.add_argument("--enable-project-scopes", action="store_true")
 
     unlatch_parser = sub.add_parser("unlatch")
     unlatch_parser.add_argument("--project", default=os.getcwd())
@@ -503,7 +681,7 @@ def main(argv: list[str] | None = None) -> int:
             policy=policy,
             kb_dir=args.kb_dir,
             new_kb=args.new_kb,
-            require_explicit_scopes=args.require_explicit_scopes,
+            enable_project_scopes=args.enable_project_scopes,
         )
     except (project_config.ProjectConfigError, OSError) as exc:
         print(f"error: {exc}", file=sys.stderr)

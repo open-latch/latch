@@ -195,12 +195,13 @@ def test_disabled_and_compactor_startup_are_silent(
     assert capsys.readouterr().out == ""
 
 
-def test_resumed_unlatched_or_legacy_session_cannot_bind_new_project_kb(
+def test_resumed_unlatched_or_locked_session_cannot_bind_new_project_kb(
     tmp_path: Path,
     monkeypatch,
     capsys,
 ) -> None:
-    for initial in ("unlatched", "legacy"):
+    project_config.write_machine_policy(project_config.MACHINE_POLICY_EXPLICIT)
+    for initial in ("unlatched", "locked"):
         project = tmp_path / initial
         project.mkdir()
         (project / ".git").mkdir()
@@ -241,9 +242,7 @@ def test_resumed_unlatched_or_legacy_session_cannot_bind_new_project_kb(
             project_config.set_scope_mode(project, project_config.MODE_LATCHED)
             project_config.repin_private_scope(project, kb_b)
         else:
-            assert project_config.current_session_revision(project, sid) == (
-                project_config.resolve(project).revision
-            )
+            assert project_config.current_session_revision(project, sid) is None
             project_config.create_scope(
                 project,
                 policy=project_config.POLICY_PRIVATE,

@@ -201,24 +201,48 @@ def test_private_below_shared_is_allowed_but_shared_below_private_is_not(
         project_config.create_scope(forbidden, policy=project_config.POLICY_SHARED)
 
 
-def test_compatibility_requires_a_persisted_migration_policy(
+def test_untouched_install_defaults_to_global_shared_without_policy_file(
     scope_env: Path, tmp_path: Path,
 ) -> None:
     global_kb = _pin_shared(scope_env, tmp_path)
     project = _directory(tmp_path / "old-project")
 
-    # A pin cannot grant compatibility by itself; deleting policy fails closed.
+    # Existing Shared users do not need a migration record. The persisted pin
+    # remains the single authority until project mode is explicitly enabled.
     project_config.machine_policy_path().unlink()
-    assert project_config.resolve(project).state == project_config.MODE_LOCKED
-
-    project_config.write_machine_policy(
-        project_config.MACHINE_POLICY_COMPATIBILITY
-    )
-    project_config.initialize_compatibility_binding()
     target = project_config.resolve(project)
     assert target.state == project_config.MODE_LATCHED
-    assert target.source == "compatibility"
+    assert target.source == project_config.SOURCE_GLOBAL
     assert target.kb_dir == global_kb
+
+
+def test_global_shared_mode_ignores_project_scope_files(
+    compatibility_scope_env: dict[str, Path],
+    tmp_path: Path,
+) -> None:
+    project = _directory(tmp_path / "ordinary-shared-project")
+    marker = project / ".latch" / "scope.json"
+    marker.parent.mkdir()
+    marker.write_text("{}\n", encoding="utf-8")
+
+    target = project_config.resolve(project)
+
+    assert target.state == project_config.MODE_LATCHED
+    assert target.source == project_config.SOURCE_GLOBAL
+    assert target.kb_dir == compatibility_scope_env["vault"]
+    assert project_config.discover(project) is None
+
+
+def test_missing_policy_fails_closed_after_project_state_exists(
+    scope_env: Path, tmp_path: Path,
+) -> None:
+    _pin_shared(scope_env, tmp_path)
+    root = _directory(tmp_path / "client")
+    _shared_scope(root)
+
+    project_config.machine_policy_path().unlink()
+    with pytest.raises(project_config.ProjectConfigError, match="policy.*missing|mode.*missing"):
+        project_config.resolve(root)
 
 
 def test_explicit_policy_locks_unknown_and_missing_paths(
@@ -581,8 +605,13 @@ def test_global_pin_cannot_be_redirected_to_a_private_vault(
     private_kb = _directory(tmp_path / "private-vault")
     _private_scope(private_root, private_kb)
     legacy_root = _directory(tmp_path / "legacy-root")
-    project_config.write_machine_policy(
-        project_config.MACHINE_POLICY_COMPATIBILITY
+    # Returning to global mode is intentionally unsupported after project
+    # scopes exist, so inspect the global resolver directly through a fresh
+    # Shared-mode control plane containing the copied Private reservation.
+    project_config.machine_policy_path().unlink()
+    project_config.atomic_json(
+        project_config.machine_policy_path(),
+        {"format": 1, "policy": project_config.MACHINE_POLICY_SHARED},
     )
     (scope_env / "kb_location.json").write_text(
         json.dumps({"kb_dir": str(private_kb)}) + "\n", encoding="utf-8"
@@ -593,12 +622,13 @@ def test_global_pin_cannot_be_redirected_to_a_private_vault(
     assert "collides with Private scope" in (target.reason or "")
 
 
-def test_compatibility_policy_without_a_pin_is_locked(
+def test_global_shared_mode_without_a_pin_is_locked(
     scope_env: Path, tmp_path: Path,
 ) -> None:
     root = _directory(tmp_path / "legacy-root")
-    project_config.write_machine_policy(
-        project_config.MACHINE_POLICY_COMPATIBILITY
+    project_config.atomic_json(
+        project_config.machine_policy_path(),
+        {"format": 1, "policy": project_config.MACHINE_POLICY_SHARED},
     )
 
     target = project_config.resolve(root)

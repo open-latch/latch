@@ -7,7 +7,7 @@ param(
   [switch]$Private,
   [string]$KbDir,
   [switch]$NewKb,
-  [switch]$RequireExplicitScopes
+  [switch]$EnableProjectScopes
 )
 
 $ErrorActionPreference = "Stop"
@@ -38,8 +38,8 @@ if (-not $PSBoundParameters.ContainsKey("Confirm")) {
 }
 if ($Confirm -cne "latch") { throw "latch: confirmation must be exactly 'latch'" }
 if ($Shared -and $Private) { throw "latch: choose Shared or Private, not both" }
-if ($RequireExplicitScopes -and -not $Shared) {
-  throw "latch: -RequireExplicitScopes is an existing-global migration and requires -Shared"
+if ($EnableProjectScopes -and -not ($Shared -or $Private)) {
+  throw "latch: -EnableProjectScopes requires an explicit -Shared or -Private choice"
 }
 
 $ModeArgs = @("latch", "--project", $ProjectInput, "--confirm", "latch")
@@ -47,6 +47,6 @@ if ($Shared) { $ModeArgs += "--shared" }
 if ($Private) { $ModeArgs += "--private" }
 if ($KbDir) { $ModeArgs += @("--kb-dir", $KbDir) }
 if ($NewKb) { $ModeArgs += "--new-kb" }
-if ($RequireExplicitScopes) { $ModeArgs += "--require-explicit-scopes" }
+if ($EnableProjectScopes) { $ModeArgs += "--enable-project-scopes" }
 & $Python $Controller @ModeArgs
 exit $LASTEXITCODE

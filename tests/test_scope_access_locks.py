@@ -356,10 +356,7 @@ def test_new_scope_handoff_drains_old_access_and_stays_locked_until_authorized(
     monkeypatch.delenv("CLAUDE_KB_DIR", raising=False)
     monkeypatch.setattr(project_mode, "_disable_instructions", lambda _roots: [])
     monkeypatch.setattr(project_mode, "_enable_instructions", lambda _roots: [])
-    project_config.write_machine_policy(
-        project_config.MACHINE_POLICY_COMPATIBILITY
-    )
-    project_config.initialize_compatibility_binding()
+    project_config.write_machine_policy(project_config.MACHINE_POLICY_SHARED)
     root = tmp_path / "new-client"
     root.mkdir()
 
@@ -392,6 +389,7 @@ def test_new_scope_handoff_drains_old_access_and_stays_locked_until_authorized(
                 root,
                 policy=project_config.POLICY_PRIVATE,
                 kb_dir=str(private_kb),
+                enable_project_scopes=True,
             )
         except BaseException as exc:  # pragma: no cover - asserted below
             errors.append(exc)
@@ -443,10 +441,7 @@ def test_explicit_scope_migration_drains_shared_global_access_before_policy_flip
     monkeypatch.delenv("CLAUDE_KB_DIR", raising=False)
     monkeypatch.setattr(project_mode, "_disable_instructions", lambda _roots: [])
     monkeypatch.setattr(project_mode, "_enable_instructions", lambda _roots: [])
-    project_config.write_machine_policy(
-        project_config.MACHINE_POLICY_COMPATIBILITY
-    )
-    project_config.initialize_compatibility_binding()
+    project_config.write_machine_policy(project_config.MACHINE_POLICY_SHARED)
     active_root = tmp_path / "active-global-session"
     migration_root = tmp_path / "migration-root"
     active_root.mkdir()
@@ -462,7 +457,7 @@ def test_explicit_scope_migration_drains_shared_global_access_before_policy_flip
             project_mode.apply_latch(
                 migration_root,
                 policy=project_config.POLICY_SHARED,
-                require_explicit_scopes=True,
+                enable_project_scopes=True,
             )
         except BaseException as exc:  # pragma: no cover - asserted below
             errors.append(exc)
@@ -474,7 +469,7 @@ def test_explicit_scope_migration_drains_shared_global_access_before_policy_flip
     assert not finished.wait(timeout=0.2)
     assert (
         project_config.read_machine_policy()
-        == project_config.MACHINE_POLICY_COMPATIBILITY
+        == project_config.MACHINE_POLICY_SHARED
     )
 
     old_access.__exit__(None, None, None)

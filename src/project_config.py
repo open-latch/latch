@@ -42,7 +42,6 @@ PORTABLE_DIR_NAME = ".latch"
 PORTABLE_FILE_NAME = "scope.json"
 CONTROL_ROOT_ENV = "LATCH_SCOPE_STATE_ROOT"
 POLICY_FILE_NAME = "policy.json"
-COMPATIBILITY_BINDING_FILE_NAME = "compatibility-global.json"
 ROOTS_DIR_NAME = "roots"
 SCOPES_DIR_NAME = "scopes"
 LOCKS_DIR_NAME = "locks"
@@ -75,13 +74,11 @@ LOCK_INTERRUPTED_OFF_REPLACEMENT = "interrupted-off-replacement"
 
 SOURCE_EXPLICIT = "explicit"
 SOURCE_OFF_BOUNDARY = "off-boundary"
-SOURCE_COMPATIBILITY = "compatibility"
+SOURCE_GLOBAL = "global-shared"
 
 MACHINE_POLICY_EXPLICIT = "explicit"
-MACHINE_POLICY_COMPATIBILITY = "compatibility_global"
-MACHINE_POLICIES = frozenset(
-    {MACHINE_POLICY_EXPLICIT, MACHINE_POLICY_COMPATIBILITY}
-)
+MACHINE_POLICY_SHARED = "shared_global"
+MACHINE_POLICIES = frozenset({MACHINE_POLICY_EXPLICIT, MACHINE_POLICY_SHARED})
 
 TEST_ROOT_ENV = "LATCH_TEST_ROOT"
 TEST_CAPABILITY_ENV = "LATCH_TEST_CAPABILITY"
@@ -155,17 +152,6 @@ class ScopeBinding:
     record_path: Path
     policy: str
     mode: str
-    kb_dir: Path
-    kb_fingerprint: str
-    vault_uuid: str | None
-    revision: str
-
-
-@dataclass(frozen=True)
-class CompatibilityBinding:
-    """Exact machine-local identity for an upgraded global-KB install."""
-
-    record_path: Path
     kb_dir: Path
     kb_fingerprint: str
     vault_uuid: str | None
@@ -393,10 +379,6 @@ def scope_binding_path(scope_id: str) -> Path:
 
 def machine_policy_path() -> Path:
     return control_root() / POLICY_FILE_NAME
-
-
-def compatibility_binding_path() -> Path:
-    return control_root() / COMPATIBILITY_BINDING_FILE_NAME
 
 
 def state_dir(project_root: str | os.PathLike[str]) -> Path:
@@ -805,43 +787,6 @@ def _load_scope_binding(scope_id: str) -> ScopeBinding:
     )
 
 
-def _load_compatibility_binding() -> CompatibilityBinding:
-    path = compatibility_binding_path()
-    payload = _read_regular_json(path, label="compatibility KB binding")
-    expected = {
-        "format",
-        "kb_dir",
-        "kb_fingerprint",
-        "vault_uuid",
-        "revision",
-    }
-    if set(payload) != expected or payload.get("format") != FORMAT_VERSION:
-        raise ProjectConfigError(
-            f"compatibility KB binding has unsupported fields: {path}"
-        )
-    raw_kb = payload.get("kb_dir")
-    if not isinstance(raw_kb, str) or not Path(raw_kb).is_absolute():
-        raise ProjectConfigError(
-            f"compatibility KB binding has an invalid KB path: {path}"
-        )
-    raw_vault = payload.get("vault_uuid")
-    return CompatibilityBinding(
-        record_path=path,
-        kb_dir=Path(os.path.normpath(raw_kb)),
-        kb_fingerprint=_hex(
-            payload.get("kb_fingerprint"), 64, label="KB fingerprint"
-        ),
-        vault_uuid=(
-            _canonical_uuid(raw_vault, label="vault_uuid")
-            if raw_vault is not None
-            else None
-        ),
-        revision=_hex(
-            payload.get("revision"), 32, label="compatibility revision"
-        ),
-    )
-
-
 def _pin_file() -> Path:
     return _install_home() / "kb_location.json"
 
@@ -886,10 +831,18 @@ def _global_kb_dir(
     selected = validated_kb_path(candidate)
     if check_private_collision:
         fingerprint = _directory_fingerprint(selected)
+        try:
+            collision_vault_uuid = _read_vault_uuid(selected)
+        except ProjectConfigError as exc:
+            if exc.code != LOCK_VAULT_IDENTITY_INITIALIZING:
+                raise
+            # Path/fingerprint reservations remain enforceable while a new
+            # vault has a durable identity table but no committed row yet.
+            collision_vault_uuid = None
         owner = _target_reservation_owner(
             selected,
             fingerprint,
-            vault_uuid=_read_vault_uuid(selected),
+            vault_uuid=collision_vault_uuid,
             reserved_policies=frozenset({POLICY_PRIVATE}),
         )
         if owner is not None:
@@ -900,15 +853,25 @@ def _global_kb_dir(
 
 
 def read_machine_policy() -> str:
-    """Return the persisted policy; absence is always strict/fail-closed.
+    """Return the mutually exclusive global-shared or project-scoped mode.
 
-    The installer writes ``compatibility_global`` once when it detects an
-    existing install.  Runtime inference from a pin would make deletion of this
-    policy file silently reopen global access.
+    An install with no project-scope state is an untouched Shared installation,
+    which preserves the pre-scoping product.  Once project state exists, losing
+    the mode receipt must fail closed instead of silently reopening global access.
     """
     path = machine_policy_path()
     if not (path.exists() or path.is_symlink()):
-        return MACHINE_POLICY_EXPLICIT
+        roots = control_root() / ROOTS_DIR_NAME
+        scopes = control_root() / SCOPES_DIR_NAME
+        if any(
+            directory.exists() or directory.is_symlink()
+            for directory in (roots, scopes)
+        ):
+            raise ProjectConfigError(
+                "machine scope mode is missing while project-scope state exists; "
+                "re-run the installer to repair it"
+            )
+        return MACHINE_POLICY_SHARED
     payload = _read_regular_json(path, label="machine scope policy")
     if set(payload) != {"format", "policy"} or payload.get("format") != FORMAT_VERSION:
         raise ProjectConfigError(f"machine scope policy has unsupported fields: {path}")
@@ -921,107 +884,24 @@ def read_machine_policy() -> str:
 def write_machine_policy(policy: str) -> None:
     if policy not in MACHINE_POLICIES:
         raise ProjectConfigError(f"unsupported machine scope policy: {policy!r}")
+    path = machine_policy_path()
+    if path.exists() or path.is_symlink():
+        current = read_machine_policy()
+        if current == MACHINE_POLICY_EXPLICIT and policy == MACHINE_POLICY_SHARED:
+            raise ProjectConfigError(
+                "project-scoped mode cannot be downgraded to global Shared mode"
+            )
+    elif policy == MACHINE_POLICY_SHARED:
+        roots = control_root() / ROOTS_DIR_NAME
+        scopes = control_root() / SCOPES_DIR_NAME
+        if any(
+            directory.exists() or directory.is_symlink()
+            for directory in (roots, scopes)
+        ):
+            raise ProjectConfigError(
+                "cannot create global Shared mode while project-scope state exists"
+            )
     atomic_json(machine_policy_path(), {"format": FORMAT_VERSION, "policy": policy})
-
-
-def _write_compatibility_binding(
-    kb_dir: Path,
-    kb_fingerprint: str,
-    vault_uuid: str | None,
-    *,
-    revision: str | None = None,
-) -> CompatibilityBinding:
-    path = compatibility_binding_path()
-    atomic_json(
-        path,
-        {
-            "format": FORMAT_VERSION,
-            "kb_dir": str(kb_dir),
-            "kb_fingerprint": kb_fingerprint,
-            "vault_uuid": vault_uuid,
-            "revision": revision or secrets.token_hex(16),
-        },
-    )
-    return _load_compatibility_binding()
-
-
-def _validate_live_compatibility_binding(
-    binding: CompatibilityBinding,
-) -> tuple[Path, str]:
-    selected = _global_kb_dir(required=True, check_private_collision=True)
-    assert selected is not None
-    if not _same_path(selected, binding.kb_dir):
-        raise ProjectConfigError(
-            "the global KB pin changed; explicitly re-authorize the compatibility binding",
-            code=LOCK_GLOBAL_PIN_CHANGED,
-        )
-    fingerprint = _directory_fingerprint(selected)
-    if not hmac.compare_digest(fingerprint, binding.kb_fingerprint):
-        raise ProjectConfigError(
-            "the compatibility KB directory identity changed; explicitly re-authorize it",
-            code=LOCK_GLOBAL_PIN_CHANGED,
-        )
-    observed_uuid = _read_vault_uuid(selected)
-    if binding.vault_uuid is None and observed_uuid is not None:
-        raise ProjectConfigError(
-            "the compatibility KB established an immutable vault identity; finalization is pending",
-            code=LOCK_VAULT_IDENTITY_PENDING,
-        )
-    if binding.vault_uuid is not None and observed_uuid is None:
-        raise ProjectConfigError(
-            "the compatibility KB immutable vault identity is missing"
-        )
-    if (
-        binding.vault_uuid is not None
-        and observed_uuid is not None
-        and not hmac.compare_digest(binding.vault_uuid, observed_uuid)
-    ):
-        raise ProjectConfigError(
-            "the compatibility KB immutable vault identity changed"
-        )
-    return selected, fingerprint
-
-
-def initialize_compatibility_binding() -> CompatibilityBinding:
-    """Bind an upgraded install to its exact existing global KB.
-
-    This is installer wiring, not runtime inference.  An existing binding is
-    only accepted when its path, directory identity, and immutable vault UUID
-    still match exactly.
-    """
-    if read_machine_policy() != MACHINE_POLICY_COMPATIBILITY:
-        raise ProjectConfigError(
-            "compatibility binding is only valid in compatibility mode"
-        )
-    with scope_registry_lock():
-        path = compatibility_binding_path()
-        if path.exists() or path.is_symlink():
-            binding = _load_compatibility_binding()
-            _validate_live_compatibility_binding(binding)
-            return binding
-        selected = _global_kb_dir(required=True, check_private_collision=True)
-        assert selected is not None
-        return _write_compatibility_binding(
-            selected,
-            _directory_fingerprint(selected),
-            _read_vault_uuid(selected),
-        )
-
-
-def reauthorize_compatibility_binding() -> CompatibilityBinding:
-    """Explicitly bind compatibility mode to the current global KB pin."""
-    if read_machine_policy() != MACHINE_POLICY_COMPATIBILITY:
-        raise ProjectConfigError(
-            "compatibility binding is only valid in compatibility mode"
-        )
-    with scope_registry_lock():
-        selected = _global_kb_dir(required=True, check_private_collision=True)
-        assert selected is not None
-        return _write_compatibility_binding(
-            selected,
-            _directory_fingerprint(selected),
-            _read_vault_uuid(selected),
-        )
 
 
 def _candidate_flags(root: Path) -> tuple[bool, bool]:
@@ -1154,38 +1034,30 @@ def _locked(
     )
 
 
-def _locked_compatibility(
+def _locked_global(
     root: Path,
     reason: str,
     *,
-    binding: CompatibilityBinding | None = None,
     reason_code: str | None = None,
+    remembered_kb_dir: Path | None = None,
+    target_fingerprint: str | None = None,
+    target_revision: str | None = None,
 ) -> ResolvedScope:
-    """Return a fail-closed compatibility target without losing its identity."""
-    target_revision = (
-        _target_revision(
-            binding.revision,
-            binding.kb_dir,
-            binding.kb_fingerprint,
-        )
-        if binding is not None
-        else _root_key(root)[:32]
-    )
+    """Return a fail-closed target for the unchanged global Shared product."""
+    revision = target_revision or _root_key(root)[:32]
     target = ResolvedScope(
         project_root=root,
         state=MODE_LOCKED,
         policy=POLICY_SHARED,
         scope_id=None,
-        target_revision=target_revision,
-        revision=target_revision,
+        target_revision=revision,
+        revision=revision,
         kb_dir=None,
-        remembered_kb_dir=(binding.kb_dir if binding is not None else None),
-        target_fingerprint=(
-            binding.kb_fingerprint if binding is not None else None
-        ),
-        vault_uuid=binding.vault_uuid if binding is not None else None,
+        remembered_kb_dir=remembered_kb_dir,
+        target_fingerprint=target_fingerprint,
+        vault_uuid=None,
         marker_path=None,
-        source=SOURCE_COMPATIBILITY,
+        source=SOURCE_GLOBAL,
         lock_key="shared-global",
         reason=reason,
         reason_code=reason_code,
@@ -1469,55 +1341,67 @@ def _resolve_candidates(entries: list[Path]) -> ResolvedScope | None:
 
 
 def resolve(start: str | os.PathLike[str] | None = None) -> ResolvedScope:
-    """Resolve the nearest explicit boundary, failing closed on every gap."""
+    """Resolve either unchanged global Shared mode or explicit project mode."""
     current = _canonical_start(start)
+    if read_machine_policy() == MACHINE_POLICY_SHARED:
+        try:
+            kb_dir = _global_kb_dir(
+                required=True,
+                check_private_collision=True,
+            )
+            assert kb_dir is not None
+            fingerprint = _directory_fingerprint(kb_dir)
+            base_revision = hashlib.sha256(
+                ("global-shared\0" + os.path.normcase(str(kb_dir))).encode("utf-8")
+            ).hexdigest()[:32]
+            revision = _target_revision(base_revision, kb_dir, fingerprint)
+        except ProjectConfigError as exc:
+            return _locked_global(
+                current,
+                f"the install-wide Shared KB is unsafe: {exc}",
+                reason_code=exc.code,
+            )
+        try:
+            vault_uuid = _read_vault_uuid(kb_dir)
+        except ProjectConfigError as exc:
+            return _locked_global(
+                current,
+                f"the install-wide Shared KB is unsafe: {exc}",
+                reason_code=exc.code,
+                remembered_kb_dir=kb_dir,
+                target_fingerprint=fingerprint,
+                target_revision=revision,
+            )
+        try:
+            target = ResolvedScope(
+                project_root=current,
+                state=MODE_LATCHED,
+                policy=POLICY_SHARED,
+                scope_id=None,
+                target_revision=revision,
+                revision=revision,
+                kb_dir=kb_dir,
+                remembered_kb_dir=kb_dir,
+                target_fingerprint=fingerprint,
+                vault_uuid=vault_uuid,
+                marker_path=None,
+                source=SOURCE_GLOBAL,
+                lock_key="shared-global",
+                reason="install-wide Shared KB mode",
+            )
+            effective = _with_effective_revision(target, current)
+            assert effective is not None
+            return effective
+        except ProjectConfigError as exc:
+            return _locked_global(
+                current,
+                f"the install-wide Shared KB is unsafe: {exc}",
+                reason_code=exc.code,
+            )
+
     explicit = _resolve_candidates([current, *current.parents])
     if explicit is not None:
         return explicit
-    if read_machine_policy() == MACHINE_POLICY_COMPATIBILITY:
-        try:
-            binding = _load_compatibility_binding()
-        except ProjectConfigError as binding_error:
-            # A missing receipt never grants authority.  Still inspect the pin
-            # read-only so an absent pin or Private collision is named clearly.
-            try:
-                _global_kb_dir(required=True, check_private_collision=True)
-            except ProjectConfigError as pin_error:
-                binding_error = pin_error
-            return _locked_compatibility(
-                current,
-                f"global KB compatibility binding is unsafe: {binding_error}",
-                reason_code=binding_error.code,
-            )
-        try:
-            kb_dir, fingerprint = _validate_live_compatibility_binding(binding)
-            revision = _target_revision(binding.revision, kb_dir, fingerprint)
-        except ProjectConfigError as exc:
-            return _locked_compatibility(
-                current,
-                f"global KB compatibility binding is unsafe: {exc}",
-                binding=binding,
-                reason_code=exc.code,
-            )
-        target = ResolvedScope(
-            project_root=current,
-            state=MODE_LATCHED,
-            policy=POLICY_SHARED,
-            scope_id=None,
-            target_revision=revision,
-            revision=revision,
-            kb_dir=kb_dir,
-            remembered_kb_dir=kb_dir,
-            target_fingerprint=fingerprint,
-            vault_uuid=binding.vault_uuid,
-            marker_path=None,
-            source=SOURCE_COMPATIBILITY,
-            lock_key="shared-global",
-            reason="legacy install-level global KB behavior",
-        )
-        effective = _with_effective_revision(target, current)
-        assert effective is not None
-        return effective
     return _locked(
         current,
         "this location is outside every authorized Latch scope",
@@ -1541,12 +1425,12 @@ def require_latched(start: str | os.PathLike[str] | None = None) -> ResolvedScop
 def discover(start: str | os.PathLike[str] | None = None) -> ProjectBinding | None:
     """Compatibility adapter; new code should call :func:`resolve`.
 
-    Legacy/global compatibility remains ``None`` so untouched pre-PR callers
+    Global Shared mode remains ``None`` so untouched pre-PR callers
     retain their historical pin path until they are migrated.  Explicit
     LATCHED/UNLATCHED/LOCKED roots always return their full target.
     """
     target = resolve(start)
-    return None if target.source == "compatibility" else target
+    return None if target.source == SOURCE_GLOBAL else target
 
 
 def project_root(start: str | os.PathLike[str] | None = None) -> Path:
@@ -1745,10 +1629,6 @@ def _reserved_kb_targets() -> list[Path]:
                 _read_regular_json(path, label="machine scope binding"),
             )
             targets.append(binding.kb_dir)
-
-    compatibility_path = compatibility_binding_path()
-    if compatibility_path.exists() or compatibility_path.is_symlink():
-        targets.append(_load_compatibility_binding().kb_dir)
 
     global_target = _global_kb_dir(required=False)
     if global_target is not None:
@@ -2085,18 +1965,6 @@ def _finalize_shared_global_bindings(
     retain their revisions and pending records are completed.
     """
     bindings = _matching_shared_bindings(kb_dir, fingerprint)
-    compatibility: CompatibilityBinding | None = None
-    compatibility_path = compatibility_binding_path()
-    if compatibility_path.exists() or compatibility_path.is_symlink():
-        compatibility = _load_compatibility_binding()
-        if not (
-            _same_path(compatibility.kb_dir, kb_dir)
-            and hmac.compare_digest(
-                compatibility.kb_fingerprint, fingerprint
-            )
-        ):
-            compatibility = None
-
     for binding in bindings:
         if binding.vault_uuid is not None and not hmac.compare_digest(
             binding.vault_uuid, vault_uuid
@@ -2104,15 +1972,6 @@ def _finalize_shared_global_bindings(
             raise ProjectConfigError(
                 f"Shared scope {binding.scope_id} records a different vault identity"
             )
-    if (
-        compatibility is not None
-        and compatibility.vault_uuid is not None
-        and not hmac.compare_digest(compatibility.vault_uuid, vault_uuid)
-    ):
-        raise ProjectConfigError(
-            "the compatibility binding records a different vault identity"
-        )
-
     for binding in bindings:
         if binding.vault_uuid is None:
             _write_scope_binding(
@@ -2124,13 +1983,6 @@ def _finalize_shared_global_bindings(
                 vault_uuid=vault_uuid,
                 revision=binding.revision,
             )
-    if compatibility is not None and compatibility.vault_uuid is None:
-        _write_compatibility_binding(
-            kb_dir,
-            fingerprint,
-            vault_uuid,
-            revision=compatibility.revision,
-        )
 
 
 def finalize_scope_vault_identity(
@@ -2207,56 +2059,6 @@ def finalize_scope_vault_identity(
                 revision=binding.revision,
             )
         return resolve(continuity_root or root)
-
-
-def finalize_compatibility_vault_identity(
-    *,
-    expected_target_revision: str,
-    vault_uuid: str,
-    continuity_root: str | os.PathLike[str] | None = None,
-) -> ResolvedScope:
-    """Finalize first identity adoption for the exact compatibility vault."""
-    expected = _hex(
-        expected_target_revision,
-        32,
-        label="expected compatibility revision",
-    )
-    requested_uuid = _canonical_uuid(vault_uuid, label="vault_uuid")
-    with scope_registry_lock():
-        binding = _load_compatibility_binding()
-        current = validated_kb_path(binding.kb_dir)
-        fingerprint = _directory_fingerprint(current)
-        if not hmac.compare_digest(fingerprint, binding.kb_fingerprint):
-            raise ProjectConfigError(
-                "compatibility KB directory identity changed before finalization"
-            )
-        live_revision = _target_revision(binding.revision, current, fingerprint)
-        if not hmac.compare_digest(live_revision, expected):
-            raise ProjectConfigError(
-                "compatibility binding changed before vault identity finalization"
-            )
-        global_kb = _global_kb_dir(
-            required=True,
-            check_private_collision=True,
-        )
-        assert global_kb is not None
-        if not _same_path(global_kb, current):
-            raise ProjectConfigError(
-                "the global KB pin changed before vault identity finalization"
-            )
-        observed_uuid = _read_vault_uuid(current)
-        if observed_uuid is None or not hmac.compare_digest(
-            observed_uuid, requested_uuid
-        ):
-            raise ProjectConfigError(
-                "new vault identity does not match the compatibility KB"
-            )
-        _finalize_shared_global_bindings(
-            current,
-            fingerprint,
-            requested_uuid,
-        )
-        return resolve(continuity_root or os.getcwd())
 
 
 def authorized_scope_roots(scope_id: str) -> list[Path]:
@@ -2599,6 +2401,10 @@ def write_binding(
     kb_dir: str | os.PathLike[str] | None,
 ) -> ResolvedScope:
     """Compatibility helper for old tests/callers; public flows choose policy."""
+    if read_machine_policy() != MACHINE_POLICY_EXPLICIT:
+        raise ProjectConfigError(
+            "write_binding requires project-scoped mode; activate it through latch first"
+        )
     root = _require_scope_root(root_value)
     marker_path = portable_marker_path(root)
     if not (marker_path.exists() or marker_path.is_symlink()):
@@ -2761,6 +2567,18 @@ def scope_registry_lock():
     with _transition_file_lock(
         directory / "scope-registry.lock",
         "another Latch scope binding transition is already running",
+    ):
+        yield
+
+
+@contextlib.contextmanager
+def machine_policy_transition_lock():
+    """Serialize the one-way switch from global Shared to project mode."""
+    directory = control_root() / LOCKS_DIR_NAME
+    _ensure_real_directory(directory)
+    with _transition_file_lock(
+        directory / "machine-policy.lock",
+        "another Latch product-mode transition is already running",
     ):
         yield
 

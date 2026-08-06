@@ -442,7 +442,7 @@ def test_quickstart_pin_uses_explicit_or_environment_override():
     print("PASS quickstart_pin_uses_explicit_or_environment_override")
 
 
-def test_quickstart_persists_transient_env_pin_without_ambient_access():
+def test_quickstart_persists_transient_env_pin_for_global_shared_access():
     root = Path(tempfile.mkdtemp(prefix="latch-quickstart-durable-pin-"))
     target = (
         qs.paths.validated_test_root()
@@ -496,20 +496,21 @@ def test_quickstart_persists_transient_env_pin_without_ambient_access():
             persisted == str(target),
             f"later process must see the persisted target: {persisted}",
         )
-        denied = subprocess.run(
+        resolved = subprocess.run(
             [sys.executable, "-c", "import paths; print(paths.db_path())"],
             cwd=mcp_cwd,
             env=env,
             text=True,
             capture_output=True,
         )
+        _assert(resolved.returncode == 0, resolved.stderr)
         _assert(
-            denied.returncode != 0 and "LOCKED" in denied.stderr,
-            "a durable pin alone must not grant ambient KB access",
+            resolved.stdout.strip() == str(target / "kb.db"),
+            "ordinary Shared mode no longer followed its installed global pin",
         )
     finally:
         shutil.rmtree(root, ignore_errors=True)
-    print("PASS quickstart_persists_transient_env_pin_without_ambient_access")
+    print("PASS quickstart_persists_transient_env_pin_for_global_shared_access")
 
 
 def test_quickstart_pins_after_preflight_before_wiring():
@@ -520,12 +521,8 @@ def test_quickstart_pins_after_preflight_before_wiring():
         "resolve_python": qs.install_engine.resolve_python,
         "agent_preflight_errors": qs.agent_preflight_errors,
         "pin_kb_for_quickstart": qs.pin_kb_for_quickstart,
-        "read_pin": qs.install_engine._read_pin,
         "scope_policy_for_install": qs.install_engine.scope_policy_for_install,
         "configure_scope_policy": qs.install_engine.configure_scope_policy,
-        "configure_compatibility_binding": (
-            qs.install_engine.configure_compatibility_binding
-        ),
         "build_install_steps": qs.build_install_steps,
         "build_doctor_steps": qs.build_doctor_steps,
         "run_steps": qs.run_steps,
@@ -547,18 +544,12 @@ def test_quickstart_pins_after_preflight_before_wiring():
         qs.pin_kb_for_quickstart = lambda value, *, dry_run: (
             events.append(("pin", (value, dry_run))) or ("OK", "pinned")
         )
-        qs.install_engine._read_pin = lambda: (
-            events.append(("classify", "fresh")) or None
-        )
         qs.install_engine.scope_policy_for_install = lambda **kwargs: (
-            events.append(("plan_policy", kwargs["existing_pin_before_install"]))
+            events.append(("plan_policy", kwargs))
             or qs.project_config.MACHINE_POLICY_EXPLICIT
         )
         qs.install_engine.configure_scope_policy = lambda **kwargs: (
             events.append(("policy", kwargs)) or ("OK", "explicit")
-        )
-        qs.install_engine.configure_compatibility_binding = lambda **kwargs: (
-            events.append(("binding", kwargs)) or ("OK", "not required")
         )
         qs.paths.refresh_pinned_dir = lambda: events.append(("refresh", None))
         qs.project_mode.apply_latch = lambda project, **kwargs: (
@@ -589,21 +580,23 @@ def test_quickstart_pins_after_preflight_before_wiring():
             "--no-seed",
         ])
         _assert(rc == 0, f"quickstart should complete, got {rc}")
-        _assert(events[:9] == [
-            ("classify", "fresh"),
-            ("plan_policy", False),
+        _assert(events[:7] == [
+            ("plan_policy", {}),
             (
                 "policy",
-                {"existing_pin_before_install": False, "dry_run": False},
+                {"dry_run": False},
             ),
             ("pin", (str(root / "isolated kb"), False)),
-            ("binding", {"dry_run": False, "preview_policy": None}),
             ("refresh", None),
             (
                 "scope",
                 (
                     project.resolve(),
-                    {"policy": "shared", "new_kb": False},
+                    {
+                        "policy": "shared",
+                        "new_kb": False,
+                        "enable_project_scopes": True,
+                    },
                 ),
             ),
             ("runtime_settings", project.resolve()),
@@ -613,15 +606,11 @@ def test_quickstart_pins_after_preflight_before_wiring():
         qs.install_engine.resolve_python = original["resolve_python"]
         qs.agent_preflight_errors = original["agent_preflight_errors"]
         qs.pin_kb_for_quickstart = original["pin_kb_for_quickstart"]
-        qs.install_engine._read_pin = original["read_pin"]
         qs.install_engine.scope_policy_for_install = original[
             "scope_policy_for_install"
         ]
         qs.install_engine.configure_scope_policy = original[
             "configure_scope_policy"
-        ]
-        qs.install_engine.configure_compatibility_binding = original[
-            "configure_compatibility_binding"
         ]
         qs.build_install_steps = original["build_install_steps"]
         qs.build_doctor_steps = original["build_doctor_steps"]
@@ -705,10 +694,6 @@ def test_fresh_quickstart_creates_explicit_shared_scope_with_global_pin(
         == qs.project_config.MACHINE_POLICY_EXPLICIT,
         "the pin created by this invocation reclassified a fresh install",
     )
-    _assert(
-        not qs.project_config.compatibility_binding_path().exists(),
-        "fresh install received an ambient compatibility binding",
-    )
     target = qs.project_config.resolve(project)
     _assert(target.state == qs.project_config.MODE_LATCHED, target)
     _assert(target.source == qs.project_config.SOURCE_EXPLICIT, target)
@@ -757,7 +742,7 @@ def test_fresh_quickstart_creates_new_explicit_private_vault(
     _assert(pin["kb_dir"] == str(global_vault.resolve()), pin)
 
 
-def test_existing_pin_quickstart_scopes_selected_project_but_not_sibling(
+def test_existing_pin_project_opt_in_scopes_selected_project_and_locks_sibling(
     monkeypatch, tmp_path,
 ):
     test_root = qs.paths.validated_test_root()
@@ -792,11 +777,9 @@ def test_existing_pin_quickstart_scopes_selected_project_but_not_sibling(
     _assert(rc == 0, f"existing-install quickstart failed with {rc}")
     _assert(
         qs.project_config.read_machine_policy()
-        == qs.project_config.MACHINE_POLICY_COMPATIBILITY,
-        "existing global pin lost compatibility policy",
+        == qs.project_config.MACHINE_POLICY_EXPLICIT,
+        "explicit --scope choice did not activate project mode",
     )
-    binding = qs.project_config._load_compatibility_binding()
-    _assert(binding.kb_dir == vault.resolve(), "compatibility binding drifted")
     target = qs.project_config.resolve(project)
     _assert(
         target.state == qs.project_config.MODE_LATCHED
@@ -807,33 +790,30 @@ def test_existing_pin_quickstart_scopes_selected_project_but_not_sibling(
     )
     sibling_target = qs.project_config.resolve(sibling)
     _assert(
-        sibling_target.state == qs.project_config.MODE_LATCHED
-        and sibling_target.source == qs.project_config.SOURCE_COMPATIBILITY
-        and sibling_target.kb_dir == vault.resolve(),
-        "quickstart changed compatibility behavior for an unselected sibling",
+        sibling_target.state == qs.project_config.MODE_LOCKED
+        and sibling_target.kb_dir is None,
+        "project-mode activation left an unselected sibling globally accessible",
     )
 
 
-def test_compatibility_access_still_requires_deliberate_scope(
+def test_global_shared_access_needs_no_project_scope_choice(
     compatibility_scope_env, tmp_path,
 ):
-    project = tmp_path / "compatibility-project"
+    project = tmp_path / "global-project"
     project.mkdir()
-    try:
-        qs.resolve_scope_choice(
-            project,
-            None,
-            dry_run=False,
-            is_tty=False,
-        )
-    except ValueError as exc:
-        _assert("--scope shared or --scope private" in str(exc), str(exc))
-    else:
-        raise AssertionError("compatibility access bypassed the explicit scope choice")
+    choice, target = qs.resolve_scope_choice(
+        project,
+        None,
+        dry_run=False,
+        is_tty=False,
+    )
+    _assert(choice is None, choice)
+    _assert(target.source == qs.project_config.SOURCE_GLOBAL, target)
+    _assert(target.state == qs.project_config.MODE_LATCHED, target)
 
 
-def test_missing_scope_stops_before_preflight_wiring_or_writes(
-    monkeypatch, tmp_path, capsys,
+def test_quickstart_without_scope_keeps_global_shared_mode(
+    monkeypatch, tmp_path,
 ):
     test_root = qs.paths.validated_test_root()
     _assert(test_root is not None, "pytest isolation root is required")
@@ -847,32 +827,24 @@ def test_missing_scope_stops_before_preflight_wiring_or_writes(
     monkeypatch.delenv("LATCH_KB_DIR", raising=False)
     monkeypatch.delenv("CLAUDE_KB_DIR", raising=False)
     monkeypatch.setattr(qs.install_engine, "KB_LOCATION_PATH", home / "kb_location.json")
-    calls: list[str] = []
-    monkeypatch.setattr(
-        qs,
-        "agent_preflight_errors",
-        lambda *_args, **_kwargs: calls.append("preflight") or [],
-    )
-    monkeypatch.setattr(
-        qs,
-        "run_steps",
-        lambda *_args, **_kwargs: calls.append("wiring") or 0,
+    vault = test_root / "vaults" / f"global-default-{tmp_path.name}"
+    rc = _run_scope_only_quickstart(
+        monkeypatch,
+        project,
+        vault,
+        scope=None,
     )
 
-    rc = qs.main([
-        "--agents", "codex",
-        "--project", str(project),
-        "--skip-doctor",
-        "--no-seed",
-    ])
-
-    captured = capsys.readouterr()
-    _assert(rc == 2, rc)
-    _assert("--scope shared or --scope private" in captured.err, captured.err)
-    _assert(calls == [], calls)
-    _assert(list(project.iterdir()) == [], "missing choice wrote into the project")
-    _assert(list(home.iterdir()) == [], "missing choice wrote install state")
-    _assert(not control.exists(), "missing choice wrote scope control state")
+    _assert(rc == 0, rc)
+    _assert(
+        qs.project_config.read_machine_policy()
+        == qs.project_config.MACHINE_POLICY_SHARED,
+        "ordinary quickstart unexpectedly activated project mode",
+    )
+    target = qs.project_config.resolve(project)
+    _assert(target.source == qs.project_config.SOURCE_GLOBAL, target)
+    _assert(target.kb_dir == vault.resolve(), target)
+    _assert(not (project / ".latch").exists(), "global mode wrote a project boundary")
 
 
 def test_dry_run_scope_plan_writes_nothing(
@@ -924,7 +896,7 @@ def test_dry_run_scope_plan_writes_nothing(
     _assert(not global_vault.exists(), "dry-run created the global KB directory")
 
 
-def test_dry_run_without_scope_has_no_plan_or_writes(
+def test_dry_run_without_scope_previews_unchanged_global_mode(
     monkeypatch, tmp_path, capsys,
 ):
     test_root = qs.paths.validated_test_root()
@@ -945,9 +917,9 @@ def test_dry_run_without_scope_has_no_plan_or_writes(
     ])
 
     captured = capsys.readouterr()
-    _assert(rc == 2, rc)
-    _assert("guided quickstart plan" not in captured.out, captured.out)
-    _assert("scope for dry-run" in captured.err, captured.err)
+    _assert(rc == 0, rc)
+    _assert("guided quickstart plan" in captured.out, captured.out)
+    _assert("preserve global Shared mode" in captured.out, captured.out)
     _assert(list(project.iterdir()) == [], "failed dry-run wrote into project")
     _assert(list(home.iterdir()) == [], "failed dry-run wrote install state")
     _assert(not control.exists(), "failed dry-run wrote scope control state")
@@ -1008,6 +980,7 @@ def test_scope_prompt_has_no_default(monkeypatch, tmp_path):
         qs.project_config.CONTROL_ROOT_ENV,
         str(test_root / "prompt-control" / tmp_path.name),
     )
+    qs.project_config.write_machine_policy(qs.project_config.MACHINE_POLICY_EXPLICIT)
     responses = iter(["", "private"])
     prompts: list[str] = []
 
@@ -1162,7 +1135,7 @@ if __name__ == "__main__":
     test_run_steps_stops_before_later_steps_on_failure()
     test_quickstart_seed_handoff_prints_once_noninteractive()
     test_quickstart_pin_uses_explicit_or_environment_override()
-    test_quickstart_persists_transient_env_pin_without_ambient_access()
+    test_quickstart_persists_transient_env_pin_for_global_shared_access()
     test_quickstart_pins_after_preflight_before_wiring()
     test_quickstart_preflight_failure_does_not_pin()
     test_quickstart_pin_conflict_stops_before_wiring()

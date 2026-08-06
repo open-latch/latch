@@ -174,6 +174,7 @@ def test_project_session_id_interleaved_cursor_conversations_are_unattributed():
 
 
 def test_legacy_binding_snapshot_rejects_old_or_unattributed_agent_task():
+    project_config.write_machine_policy(project_config.MACHINE_POLICY_EXPLICIT)
     root = Path(tempfile.mkdtemp(prefix="mcp_legacy_binding_"))
     project = root / "project"
     project.mkdir()

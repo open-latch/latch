@@ -683,36 +683,25 @@ def test_pin_conflict_stops_before_codex_config_write():
     print("PASS pin_conflict_stops_before_codex_config_write")
 
 
-def test_codex_installer_preserves_pre_pin_scope_decision_order():
+def test_codex_installer_preserves_global_mode_before_pin():
     d = Path(tempfile.mkdtemp(prefix="latch-codex-scope-order-"))
     original = {
-        "_read_pin": ic.install_engine._read_pin,
         "scope_policy_for_install": ic.install_engine.scope_policy_for_install,
         "configure_scope_policy": ic.install_engine.configure_scope_policy,
         "pin_kb_dir": ic.install_engine.pin_kb_dir,
-        "configure_compatibility_binding": (
-            ic.install_engine.configure_compatibility_binding
-        ),
     }
     events: list[tuple[str, object]] = []
     try:
-        ic.install_engine._read_pin = lambda: (
-            events.append(("classify", "existing")) or "/existing"
-        )
         ic.install_engine.scope_policy_for_install = lambda **kwargs: (
-            events.append(("plan", kwargs["existing_pin_before_install"]))
-            or ic.project_config.MACHINE_POLICY_COMPATIBILITY
+            events.append(("plan", kwargs))
+            or ic.project_config.MACHINE_POLICY_SHARED
         )
         ic.install_engine.configure_scope_policy = lambda **kwargs: (
-            events.append(("policy", kwargs)) or ("OK", "compatibility")
+            events.append(("policy", kwargs)) or ("OK", "shared")
         )
         ic.install_engine.pin_kb_dir = lambda value, dry_run: (
             events.append(("pin", (value, dry_run))) or ("OK", "validated")
         )
-        ic.install_engine.configure_compatibility_binding = lambda **kwargs: (
-            events.append(("binding", kwargs)) or ("OK", "bound")
-        )
-
         rc = ic.main([
             "--python", sys.executable,
             "--config", str(d / "config.toml"),
@@ -725,15 +714,10 @@ def test_codex_installer_preserves_pre_pin_scope_decision_order():
 
         _assert(rc == 0, f"Codex scope wiring should complete: {events}")
         _assert(events == [
-            ("classify", "existing"),
-            ("plan", True),
-            (
-                "policy",
-                {"existing_pin_before_install": True, "dry_run": False},
-            ),
+            ("plan", {}),
+            ("policy", {"dry_run": False}),
             ("pin", (None, False)),
-            ("binding", {"dry_run": False, "preview_policy": None}),
-        ], f"Codex did not preserve policy -> pin -> binding order: {events}")
+        ], f"Codex did not preserve global policy -> pin order: {events}")
     finally:
         for name, value in original.items():
             setattr(ic.install_engine, name, value)
@@ -764,4 +748,5 @@ if __name__ == "__main__":
     test_locked_codex_project_prints_scope_handoff_instead_of_seed()
     test_interactive_seed_offer_uses_codex_backend()
     test_pin_conflict_stops_before_codex_config_write()
+    test_codex_installer_preserves_global_mode_before_pin()
     print("\nAll install_codex tests pass.")

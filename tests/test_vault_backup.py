@@ -106,6 +106,7 @@ def test_prune_deletes_only_expired_verified_pair_and_keeps_newest(tmp_path):
 def test_prune_holds_exact_project_lease_through_destructive_unlinks(
     tmp_path, monkeypatch
 ):
+    project_config.write_machine_policy(project_config.MACHINE_POLICY_EXPLICIT)
     project = tmp_path / "project"
     (project / ".git").mkdir(parents=True)
     test_root = paths.validated_test_root()
@@ -351,6 +352,7 @@ def test_test_runtime_ignores_durability_root_spoof(tmp_path, monkeypatch):
 
 
 def test_production_classified_legacy_copy_still_backs_up_inside_test_root(tmp_path):
+    project_config.write_machine_policy(project_config.MACHINE_POLICY_EXPLICIT)
     test_root = paths.validated_test_root()
     assert test_root is not None
     vault = test_root / "vaults" / f"legacy-backup-{tmp_path.name}"
@@ -385,6 +387,7 @@ def test_production_classified_legacy_copy_still_backs_up_inside_test_root(tmp_p
 
 
 def test_real_restore_recreates_missing_production_registry(tmp_path, monkeypatch):
+    project_config.write_machine_policy(project_config.MACHINE_POLICY_EXPLICIT)
     source = tmp_path / "source"
     source.mkdir()
     test_root = paths.validated_test_root()

@@ -549,7 +549,7 @@ def _run_selfheal_locked(
         if ran and os.environ.get("CLAUDE_KB_GIT_SNAPSHOT") == "1":
             if (
                 project_config.resolve(project_path).source
-                == project_config.SOURCE_COMPATIBILITY
+                == project_config.SOURCE_GLOBAL
             ):
                 _git_snapshot(project_path)
             else:

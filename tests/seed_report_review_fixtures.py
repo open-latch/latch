@@ -176,8 +176,7 @@ def run_seed(cmd: list[str]) -> str:
             (
                 "import project_config; "
                 "project_config.write_machine_policy("
-                "project_config.MACHINE_POLICY_COMPATIBILITY); "
-                "project_config.initialize_compatibility_binding()"
+                "project_config.MACHINE_POLICY_SHARED)"
             ),
         ],
         text=True,

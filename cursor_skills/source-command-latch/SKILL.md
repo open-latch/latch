@@ -9,11 +9,11 @@ Latch operation id: latch inspect
 
 Latch Cursor skill boundary: resolve `latch_home` as `${CURSOR_PLUGIN_ROOT}`
 when set, otherwise use the absolute checkout in the project-sync footer. This
-workflow changes only the current filesystem scope. Latch's runtime is installed
-once; on a fresh explicit-scope install an unscoped location is LOCKED until the
-user explicitly chooses Shared or Private. An upgraded global-KB install instead
-reports `compatibility_global` and keeps using the exact old global KB until the
-user deliberately migrates. Descendants inherit the nearest scope.
+workflow changes only the current filesystem scope after consulting mode is
+enabled. Latch's runtime is installed once; Global Shared mode keeps the
+installed KB available in every workspace. Project mode is an explicit,
+one-way opt-in; unscoped locations are LOCKED and descendants inherit the
+nearest scope.
 
 Before any Shell call, read the workspace `.cursor/mcp.json` and use
 `mcpServers.latch.env.LATCH_PYTHON` when present, otherwise
@@ -45,21 +45,21 @@ In PowerShell, use the native wrapper instead:
 & "$latch_home/bin/latch.ps1" -Confirm latch -Private -NewKb
 ```
 
-If status reports `compatibility_global` and the user explicitly wants every
-other unscoped location to become LOCKED, explain the effect and require the
-same exact `latch` confirmation. Run only from a compatibility/Shared location,
-never from a Private client scope:
+If status reports `shared_global` and the user explicitly wants consulting
+mode, explain that the choice is one-way and every other unscoped location
+becomes LOCKED. Require the same exact `latch` confirmation:
 
 ```bash
-bash "$latch_home/bin/latch.sh" --confirm latch --shared --require-explicit-scopes
+bash "$latch_home/bin/latch.sh" --confirm latch --enable-project-scopes --shared
+bash "$latch_home/bin/latch.sh" --confirm latch --enable-project-scopes --private --new-kb
 ```
 
 ```powershell
-& "$latch_home/bin/latch.ps1" -Confirm latch -Shared -RequireExplicitScopes
+& "$latch_home/bin/latch.ps1" -Confirm latch -EnableProjectScopes -Shared
+& "$latch_home/bin/latch.ps1" -Confirm latch -EnableProjectScopes -Private -NewKb
 ```
 
-The migration creates the current Shared boundary and changes no existing
-explicit scope or KB content.
+The transition creates the current boundary and changes no KB content.
 
 This is project-local. Never change the install-level KB pin or move/copy/import
 content. Show the complete receipt and, when the binding changed, tell the user

@@ -25,17 +25,18 @@ def isolated_scope_control(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Give every test its own supported compatibility-global scope.
+    """Give every test its own unchanged global Shared installation.
 
-    Scope policy and compatibility records are intentionally machine-wide in
-    production.  Sharing them across otherwise isolated pytest cases makes one
-    scope test silently change the routing policy of hundreds of unit tests, so
-    keep that control plane as isolated as the disposable vaults.  Tests which
-    need strict explicit behavior replace this policy in their own fixture.
+    Scope mode is intentionally machine-wide in production.  Sharing it across
+    otherwise isolated pytest cases makes one scope test silently change the
+    routing policy of hundreds of unit tests, so keep that control plane as
+    isolated as the disposable vaults.  Tests which need project-scoped behavior
+    replace this mode in their own fixture.
 
-    This is deliberately normal product wiring: a persisted install pin plus a
-    compatibility binding.  The suite must not depend on a test-only data-plane
-    route that production callers could activate with environment variables.
+    This is deliberately normal pre-scoping product wiring: one persisted
+    install pin and no project binding.  The suite must not depend on a test-only
+    data-plane route that production callers could activate with environment
+    variables.
     """
     import paths
     import project_config
@@ -64,10 +65,7 @@ def isolated_scope_control(
         json.dumps({"kb_dir": str(vault)}) + "\n",
         encoding="utf-8",
     )
-    project_config.write_machine_policy(
-        project_config.MACHINE_POLICY_COMPATIBILITY
-    )
-    project_config.initialize_compatibility_binding()
+    project_config.write_machine_policy(project_config.MACHINE_POLICY_SHARED)
 
 
 @pytest.fixture
@@ -75,7 +73,11 @@ def compatibility_scope_env(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> dict[str, Path]:
-    """Provide the persisted global policy used by upgraded existing installs."""
+    """Provide the unchanged global Shared policy used by existing installs.
+
+    The fixture name is retained temporarily because many runtime suites consume
+    it only as an isolated global KB; it no longer creates compatibility state.
+    """
     import paths
     import project_config
 
@@ -95,8 +97,5 @@ def compatibility_scope_env(
     monkeypatch.delenv("CLAUDE_KB_HOME", raising=False)
     monkeypatch.delenv("LATCH_KB_DIR", raising=False)
     monkeypatch.delenv("CLAUDE_KB_DIR", raising=False)
-    project_config.write_machine_policy(
-        project_config.MACHINE_POLICY_COMPATIBILITY
-    )
-    project_config.initialize_compatibility_binding()
+    project_config.write_machine_policy(project_config.MACHINE_POLICY_SHARED)
     return {"control": control, "home": home, "vault": vault}

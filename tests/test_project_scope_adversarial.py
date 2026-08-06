@@ -247,7 +247,7 @@ def test_shared_target_cannot_nest_below_private_target(
         project_config.authorize_scope(shared_root)
 
 
-@pytest.mark.parametrize("target_kind", ["private", "shared", "compatibility"])
+@pytest.mark.parametrize("target_kind", ["private", "shared", "global"])
 @pytest.mark.parametrize("root_relation", ["equal", "ancestor", "descendant"])
 def test_project_root_cannot_overlap_a_later_reserved_kb_target(
     scope_env: Path,
@@ -284,10 +284,6 @@ def test_project_root_cannot_overlap_a_later_reserved_kb_target(
         _shared_scope(owner_root)
     else:
         _pin_shared(scope_env, reserved)
-        project_config.write_machine_policy(
-            project_config.MACHINE_POLICY_COMPATIBILITY
-        )
-        project_config.initialize_compatibility_binding()
 
     candidate_kb = _directory(tmp_path / "candidate-kb")
     with pytest.raises(project_config.ProjectConfigError, match="reserved KB target"):
@@ -478,7 +474,7 @@ def test_git_metadata_cannot_change_explicit_scope_resolution(
     assert resolved.kb_dir == kb
 
 
-def test_authorized_root_missing_marker_stays_locked_in_compatibility_mode(
+def test_authorized_root_missing_marker_stays_locked_in_project_mode(
     scope_env: Path,
     tmp_path: Path,
 ) -> None:
@@ -488,10 +484,6 @@ def test_authorized_root_missing_marker_stays_locked_in_compatibility_mode(
     _private_scope(root, private_kb)
     (root / ".git").mkdir()
     (root / ".latch" / "scope.json").unlink()
-    project_config.write_machine_policy(
-        project_config.MACHINE_POLICY_COMPATIBILITY
-    )
-
     resolved = project_config.resolve(root)
     assert resolved.state == project_config.MODE_LOCKED
     assert resolved.kb_dir is None
@@ -514,17 +506,10 @@ def test_linked_checkout_git_metadata_does_not_create_an_implicit_boundary(
         encoding="utf-8",
     )
     _private_scope(main, private_kb)
-    project_config.write_machine_policy(
-        project_config.MACHINE_POLICY_COMPATIBILITY
-    )
-    project_config.initialize_compatibility_binding()
-
     assert project_config.git_root(linked) == linked
     resolved = project_config.resolve(linked)
-    assert resolved.state == project_config.MODE_LATCHED
-    assert resolved.policy == project_config.POLICY_SHARED
-    assert resolved.source == project_config.SOURCE_COMPATIBILITY
-    assert resolved.kb_dir == global_kb
+    assert resolved.state == project_config.MODE_LOCKED
+    assert resolved.kb_dir is None
 
 
 def test_cross_process_duplicate_private_target_has_one_winner(

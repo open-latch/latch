@@ -22,6 +22,8 @@ import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import install_engine as ie  # noqa: E402
@@ -649,7 +651,7 @@ def test_pin_kb_dir_default_stays_inside_authenticated_test_root(
     )
 
 
-def test_scope_policy_migrates_existing_pin_and_locks_fresh_installs(
+def test_scope_policy_defaults_shared_and_installer_retries_preserve_mode(
     tmp_path, monkeypatch,
 ):
     policy_path = tmp_path / "scope-policy.json"
@@ -660,39 +662,24 @@ def test_scope_policy_migrates_existing_pin_and_locks_fresh_installs(
     )
 
     level, message = ie.configure_scope_policy(
-        existing_pin_before_install=False,
         dry_run=False,
     )
-    _assert(level == "OK" and "explicit" in message, message)
+    _assert(level == "OK" and "shared_global" in message, message)
     _assert(
         ie.project_config.read_machine_policy()
-        == ie.project_config.MACHINE_POLICY_EXPLICIT,
-        "fresh installs must require explicit filesystem scopes",
+        == ie.project_config.MACHINE_POLICY_SHARED,
+        "ordinary install changed the global Shared product mode",
     )
 
-    # A retry must never reinterpret the pin created by the first run as an
-    # older compatibility install.
-    level, _message = ie.configure_scope_policy(
-        existing_pin_before_install=True,
-        dry_run=False,
-    )
-    _assert(level == "OK", "an existing safe policy should be idempotent")
-    _assert(
-        ie.project_config.read_machine_policy()
-        == ie.project_config.MACHINE_POLICY_EXPLICIT,
-        "installer retry changed the persisted migration decision",
-    )
-
-    policy_path.unlink()
+    # A normal installer retry does not reinterpret or change the product mode.
     level, message = ie.configure_scope_policy(
-        existing_pin_before_install=True,
         dry_run=False,
     )
-    _assert(level == "OK" and "compatibility_global" in message, message)
+    _assert(level == "OK" and "left unchanged" in message, message)
     _assert(
         ie.project_config.read_machine_policy()
-        == ie.project_config.MACHINE_POLICY_COMPATIBILITY,
-        "an already-pinned KB must remain available after upgrade",
+        == ie.project_config.MACHINE_POLICY_SHARED,
+        "installer retry changed global Shared mode",
     )
 
 
@@ -705,54 +692,53 @@ def test_scope_policy_dry_run_writes_nothing(tmp_path, monkeypatch):
     )
 
     level, message = ie.configure_scope_policy(
-        existing_pin_before_install=True,
         dry_run=True,
     )
-    _assert(level == "DRY" and "compatibility_global" in message, message)
+    _assert(level == "DRY" and "shared_global" in message, message)
     _assert(not policy_path.exists(), "dry-run persisted scope policy")
 
 
-def test_compatibility_dry_run_previews_staged_policy_and_exact_binding(
+def test_scope_policy_plan_preserves_installed_mode():
+    _assert(
+        ie.scope_policy_for_install() == ie.project_config.MACHINE_POLICY_SHARED,
+        "ordinary installation must preserve global Shared routing",
+    )
+
+
+def test_installer_does_not_reopen_project_state_when_mode_receipt_is_missing(
     tmp_path, monkeypatch,
 ):
-    test_root = ie.paths.validated_test_root()
-    _assert(test_root is not None, "pytest isolation root is required")
-    home = tmp_path / "latch-home"
-    home.mkdir()
-    vault = test_root / "vaults" / f"install-preview-{tmp_path.name}"
-    vault.mkdir(parents=True)
-    pin_path = home / "kb_location.json"
-    pin_path.write_text(json.dumps({"kb_dir": str(vault)}) + "\n", encoding="utf-8")
-    monkeypatch.setenv("LATCH_HOME", str(home))
-    monkeypatch.setenv(
-        ie.project_config.CONTROL_ROOT_ENV,
-        str(test_root / "install-preview-control" / tmp_path.name),
-    )
-    monkeypatch.delenv("CLAUDE_KB_HOME", raising=False)
-    monkeypatch.delenv("LATCH_KB_DIR", raising=False)
-    monkeypatch.delenv("CLAUDE_KB_DIR", raising=False)
-    monkeypatch.setattr(ie, "KB_LOCATION_PATH", pin_path)
+    control = tmp_path / "scope-control"
+    (control / ie.project_config.ROOTS_DIR_NAME).mkdir(parents=True)
+    monkeypatch.setattr(ie.project_config, "control_root", lambda: control)
 
-    planned = ie.scope_policy_for_install(existing_pin_before_install=True)
-    policy_level, _ = ie.configure_scope_policy(
-        existing_pin_before_install=True,
-        dry_run=True,
-    )
-    binding_level, binding_message = ie.configure_compatibility_binding(
-        dry_run=True,
-        preview_policy=planned,
-    )
+    level, message = ie.configure_scope_policy(dry_run=False)
 
-    _assert(planned == ie.project_config.MACHINE_POLICY_COMPATIBILITY, planned)
-    _assert(policy_level == "DRY", policy_level)
+    _assert(level == "FAIL" and "unsafe" in message, message)
     _assert(
-        binding_level == "DRY" and "exact existing global KB" in binding_message,
-        f"dry run hid the staged compatibility binding: {binding_level}, {binding_message}",
+        not ie.project_config.machine_policy_path().exists(),
+        "installer recreated global Shared mode over existing project state",
     )
-    _assert(not ie.project_config.machine_policy_path().exists(),
-            "dry run persisted the staged policy")
-    _assert(not ie.project_config.compatibility_binding_path().exists(),
-            "dry run persisted the compatibility binding")
+    with pytest.raises(ie.project_config.ProjectConfigError):
+        ie.scope_policy_for_install()
+
+
+def test_shared_mode_cannot_be_recreated_over_existing_project_state(
+    tmp_path, monkeypatch,
+):
+    control = tmp_path / "scope-control"
+    (control / ie.project_config.SCOPES_DIR_NAME).mkdir(parents=True)
+    monkeypatch.setattr(ie.project_config, "control_root", lambda: control)
+
+    with pytest.raises(ie.project_config.ProjectConfigError):
+        ie.project_config.write_machine_policy(
+            ie.project_config.MACHINE_POLICY_SHARED
+        )
+
+    _assert(
+        not ie.project_config.machine_policy_path().exists(),
+        "unsafe global Shared receipt was persisted",
+    )
 
 
 def test_absolute_kb_dir_normalizes_git_bash_path_on_windows():

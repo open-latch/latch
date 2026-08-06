@@ -23,6 +23,7 @@ def _init_repo(path: Path) -> Path:
 
 
 def _bound_project(tmp_path: Path) -> tuple[Path, Path, Path]:
+    project_config.write_machine_policy(project_config.MACHINE_POLICY_EXPLICIT)
     project = _init_repo(tmp_path / "project")
     vaults = paths.validated_test_root() / "vaults"
     kb_a = vaults / f"seed-a-{tmp_path.name}"
@@ -124,7 +125,7 @@ def test_seed_main_rejects_repin_during_source_discovery(
     assert not list(kb_b.glob("seed_preview.*.json"))
 
 
-def test_first_binding_after_legacy_access_never_redirects_preview(
+def test_first_project_binding_after_global_access_never_redirects_preview(
     tmp_path, monkeypatch,
 ):
     project = _init_repo(tmp_path / "legacy-project")
@@ -141,10 +142,7 @@ def test_first_binding_after_legacy_access_never_redirects_preview(
     )
     monkeypatch.setenv(project_config.CONTROL_ROOT_ENV, str(control))
     monkeypatch.setenv("LATCH_HOME", str(home))
-    project_config.write_machine_policy(
-        project_config.MACHINE_POLICY_COMPATIBILITY
-    )
-    project_config.initialize_compatibility_binding()
+    project_config.write_machine_policy(project_config.MACHINE_POLICY_SHARED)
     kb_b = paths.validated_test_root() / "vaults" / f"first-bind-{tmp_path.name}"
     kb_b.mkdir(parents=True)
     snapshot = seed.snapshot_seed_binding(str(project))
@@ -160,6 +158,9 @@ def test_first_binding_after_legacy_access_never_redirects_preview(
     def bind_new_target():
         transition_started.set()
         with lockfile.project_access_lock(str(project), exclusive=True):
+            project_config.write_machine_policy(
+                project_config.MACHINE_POLICY_EXPLICIT
+            )
             project_config.create_scope(
                 project, policy=project_config.POLICY_PRIVATE
             )

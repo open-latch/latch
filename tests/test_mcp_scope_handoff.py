@@ -19,6 +19,7 @@ import project_config
 
 
 def _private_scope(tmp_path: Path) -> tuple[Path, Path, project_config.ResolvedScope]:
+    project_config.write_machine_policy(project_config.MACHINE_POLICY_EXPLICIT)
     project = tmp_path / f"project-{uuid.uuid4()}"
     project.mkdir()
     test_root = paths.validated_test_root()

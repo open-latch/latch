@@ -422,6 +422,7 @@ def _bound_budget_project(
     tmp_path: Path,
     name: str,
 ) -> tuple[Path, Path, Path, project_config.ProjectBinding]:
+    project_config.write_machine_policy(project_config.MACHINE_POLICY_EXPLICIT)
     project = tmp_path / f"project-{name}"
     project.mkdir()
     subprocess.run(["git", "init", "-q", str(project)], check=True)
@@ -439,19 +440,19 @@ def _bound_budget_project(
     return project, kb_a, kb_b, binding
 
 
-def test_cli_manual_non_agent_status_keeps_legacy_compatibility(tmp_path):
+def test_cli_manual_non_agent_status_keeps_global_shared_behavior(tmp_path):
     result = budget._run_cli_command("status", str(tmp_path), env={})
 
     assert result["approved_today"] is False
     assert result["nonheal"]["count"] == 0
 
 
-def test_cli_current_session_supports_compatibility_global_project(
+def test_cli_current_session_supports_global_shared_project(
     tmp_path, monkeypatch,
 ):
     test_root = paths.validated_test_root()
     assert test_root is not None
-    control = test_root / "budget-compatibility" / tmp_path.name
+    control = test_root / "budget-global-shared" / tmp_path.name
     home = tmp_path / "latch-home"
     home.mkdir()
     global_kb = test_root / "vaults" / f"budget-global-{tmp_path.name}"
@@ -462,10 +463,7 @@ def test_cli_current_session_supports_compatibility_global_project(
     )
     monkeypatch.setenv(project_config.CONTROL_ROOT_ENV, str(control))
     monkeypatch.setenv("LATCH_HOME", str(home))
-    project_config.write_machine_policy(
-        project_config.MACHINE_POLICY_COMPATIBILITY
-    )
-    project_config.initialize_compatibility_binding()
+    project_config.write_machine_policy(project_config.MACHINE_POLICY_SHARED)
     project = tmp_path / "legacy-project"
     project.mkdir()
     subprocess.run(["git", "init", "-q", str(project)], check=True)

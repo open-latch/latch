@@ -1,6 +1,6 @@
 ---
 name: source-command-unlatch
-description: Confirmed project-local toggle for Latch Unlatched mode.
+description: Confirmed toggle for Latch Unlatched mode.
 ---
 
 # source-command-unlatch
@@ -8,9 +8,10 @@ description: Confirmed project-local toggle for Latch Unlatched mode.
 Latch operation id: unlatch inspect
 
 Latch Cursor skill boundary: resolve `latch_home` as `${CURSOR_PLUGIN_ROOT}`
-when set, otherwise use the absolute checkout in the project-sync footer. This
-workflow changes only the current filesystem scope's mode/binding. Descendants
-and authorized root aliases of that same scope follow its mode.
+when set, otherwise use the absolute checkout in the project-sync footer. In
+Global Shared mode the workflow turns Latch off install-wide. In project
+mode it changes only the current filesystem scope; descendants and authorized
+root aliases of that same scope follow its mode.
 
 Before any Shell call, read the workspace `.cursor/mcp.json` and use
 `mcpServers.latch.env.LATCH_PYTHON` when present, otherwise
@@ -20,9 +21,8 @@ construct the absolute script path. Do not export `LATCH_HOME` or
 `CLAUDE_KB_HOME` in the Shell call.
 
 Run `bash "$latch_home/bin/unlatch.sh"` to inspect on POSIX/Git Bash, or
-`& "$latch_home/bin/unlatch.ps1"` in PowerShell. Explain that Unlatch affects
-only the current scope (including descendants/authorized aliases) and does not
-change any other scope or KB. Require an
+`& "$latch_home/bin/unlatch.ps1"` in PowerShell. Explain the status receipt's
+install-wide or project-local effect before confirmation. Require an
 exact `unlatch` reply before running the matching wrapper with
 `--confirm unlatch` / `-Confirm unlatch`, or exact `latch` before running the
 Latch wrapper with `--confirm latch` / `-Confirm latch`. Show the full receipt.

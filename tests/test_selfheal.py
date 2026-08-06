@@ -125,6 +125,7 @@ def test_state_roundtrip_and_corrupt_tolerated():
 
 
 def test_operational_log_is_project_vault_local():
+    project_config.write_machine_policy(project_config.MACHINE_POLICY_EXPLICIT)
     project_a = _fresh_project()
     project_b = _fresh_project()
     try:
@@ -702,6 +703,7 @@ def test_spawn_builds_correct_command():
 
 
 def test_detached_child_refuses_project_repin_before_touching_new_kb(monkeypatch):
+    project_config.write_machine_policy(project_config.MACHINE_POLICY_EXPLICIT)
     root = Path(tempfile.mkdtemp(prefix="kb_selfheal_repin_"))
     project = root / "project"
     project.mkdir()
@@ -746,6 +748,7 @@ def test_detached_child_refuses_project_repin_before_touching_new_kb(monkeypatch
 def test_stale_daemon_connection_cannot_spawn_maintenance_in_repinned_kb(
     monkeypatch,
 ):
+    project_config.write_machine_policy(project_config.MACHINE_POLICY_EXPLICIT)
     root = Path(tempfile.mkdtemp(prefix="kb_selfheal_stale_connection_"))
     project = root / "project"
     project.mkdir()

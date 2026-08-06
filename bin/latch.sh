@@ -29,15 +29,15 @@ usage() {
 Usage: bash bin/latch.sh
        bash bin/latch.sh --confirm latch [--shared | --private]
        bash bin/latch.sh --confirm latch --private [--new-kb | --kb-dir ABSOLUTE_PATH]
-       bash bin/latch.sh --confirm latch --shared --require-explicit-scopes
+       bash bin/latch.sh --confirm latch --enable-project-scopes --shared
 
 With no arguments, latch only shows the effective root, state, policy, and KB.
 Confirmed changes affect that filesystem root and its descendants. No KB
 content is copied, merged, imported, or deleted.
 
-For an upgraded global-KB install, --shared --require-explicit-scopes creates
-a Shared boundary here and makes every other unscoped location LOCKED. Run it
-from a compatibility/Shared location, not from a Private client scope.
+Global Shared mode is unchanged unless --enable-project-scopes is explicitly
+confirmed with Shared or Private. That one-way choice creates a boundary here
+and makes every other unscoped location LOCKED.
 EOF
 }
 

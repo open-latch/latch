@@ -13,6 +13,7 @@ import seed
 
 
 def _bound_project(tmp_path):
+    project_config.write_machine_policy(project_config.MACHINE_POLICY_EXPLICIT)
     project = tmp_path / "project"
     project.mkdir()
     subprocess.run(["git", "init", "-q", str(project)], check=True)
@@ -91,17 +92,17 @@ def test_stale_codex_task_id_cannot_access_replacement_kb(
     assert not (kb_b / "budget.json").exists()
 
 
-def test_compatibility_global_codex_context_uses_persisted_revision(tmp_path):
+def test_global_shared_codex_context_uses_persisted_revision(tmp_path):
     project = tmp_path / "legacy-project"
     project.mkdir()
     subprocess.run(["git", "init", "-q", str(project)], check=True)
 
     snapshot = seed.snapshot_seed_binding(str(project))
     target = project_config.require_latched(project)
-    assert target.source == project_config.SOURCE_COMPATIBILITY
+    assert target.source == project_config.SOURCE_GLOBAL
     assert snapshot.revision == target.revision
     assert snapshot.kb_dir == target.kb_dir
-    # Compatibility preserves the existing global KB for manual invocations;
+    # Global Shared preserves the existing KB for manual invocations;
     # an actual Codex context still needs its task receipt just like Private.
     result = budget._run_cli_command("status", str(project), env={})
     assert result["approved_today"] is False

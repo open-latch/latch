@@ -521,6 +521,9 @@ def test_daemon_owner_fence_survives_broker_death_and_releases_with_owner(
     project.mkdir()
     vault = mcp_broker.paths.ensure_project_dir(str(project))
     mcp_broker.project_config.mark_kb_target(vault)
+    mcp_broker.project_config.write_machine_policy(
+        mcp_broker.project_config.MACHINE_POLICY_EXPLICIT
+    )
     mcp_broker.project_config.write_binding(
         project,
         mode=mcp_broker.project_config.MODE_LATCHED,
@@ -590,6 +593,9 @@ def test_incompatible_upgrade_fails_before_owner_fence_and_heavy_imports(
     project.mkdir()
     vault = mcp_broker.paths.ensure_project_dir(str(project))
     mcp_broker.project_config.mark_kb_target(vault)
+    mcp_broker.project_config.write_machine_policy(
+        mcp_broker.project_config.MACHINE_POLICY_EXPLICIT
+    )
     mcp_broker.project_config.write_binding(
         project,
         mode=mcp_broker.project_config.MODE_LATCHED,
@@ -642,7 +648,7 @@ def test_incompatible_upgrade_fails_before_owner_fence_and_heavy_imports(
     monkeypatch.setattr(mcp_broker, "runtime_dir", lambda: vault)
     monkeypatch.setattr(mcp_broker, "RUNTIME_KEY", requested_key)
     try:
-        mcp_broker.ensure_daemon(str(ROOT))
+        mcp_broker.ensure_daemon(str(project))
     except mcp_broker.BrokerError as exc:
         assert "Start a fresh task" in str(exc)
     else:

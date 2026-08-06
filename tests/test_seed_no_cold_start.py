@@ -1199,6 +1199,7 @@ def test_cross_batch_workstream_reuse_and_ambiguous_or_stale_parent_fail_closed(
     assert test_root is not None
     ambiguous_vault = test_root / "vaults" / f"ambiguous-{tmp_path.name}"
     ambiguous_vault.mkdir(parents=True)
+    project_config.write_machine_policy(project_config.MACHINE_POLICY_EXPLICIT)
     project_config.create_scope(
         ambiguous_project,
         policy=project_config.POLICY_PRIVATE,

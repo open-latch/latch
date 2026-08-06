@@ -287,6 +287,7 @@ def test_resumed_old_task_tombstones_new_task_marker_after_repin(
     capsys,
 ) -> None:
     _healthy_guards(monkeypatch)
+    project_config.write_machine_policy(project_config.MACHINE_POLICY_EXPLICIT)
     project = tmp_path / "project"
     project.mkdir()
     (project / ".git").mkdir()

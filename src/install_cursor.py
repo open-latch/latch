@@ -902,16 +902,12 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  model backend: {args.model_backend or 'cursor (native default)'}")
     print(f"  mode         : {'DRY-RUN (no writes)' if args.dry_run else 'apply'}\n")
 
-    existing_pin_before_install = install_engine._read_pin() is not None
     try:
-        install_policy = install_engine.scope_policy_for_install(
-            existing_pin_before_install=existing_pin_before_install,
-        )
+        install_engine.scope_policy_for_install()
     except project_config.ProjectConfigError as exc:
         print(f"  [FAIL] scopes: existing scope policy is unsafe: {exc}")
         return 2
     policy_level, policy_msg = install_engine.configure_scope_policy(
-        existing_pin_before_install=existing_pin_before_install,
         dry_run=args.dry_run,
     )
     print(f"  [{policy_level:4}] scopes: {policy_msg}")
@@ -922,20 +918,6 @@ def main(argv: list[str] | None = None) -> int:
     if pin_level in {"ERROR", "FAIL"}:
         print("No Cursor project wiring changed.", file=sys.stderr)
         return 2
-    compatibility_level, compatibility_msg = (
-        install_engine.configure_compatibility_binding(
-            dry_run=args.dry_run,
-            preview_policy=install_policy if args.dry_run else None,
-        )
-    )
-    print(f"  [{compatibility_level:4}] scopes: {compatibility_msg}")
-    if compatibility_level == "FAIL":
-        print(
-            "The existing KB remains fail-closed; no Cursor project wiring changed.",
-            file=sys.stderr,
-        )
-        return 2
-
     if not args.skip_mcp:
         mcp_path = Path(args.mcp_json)
         existing = mcp_path.read_text(encoding="utf-8") if mcp_path.exists() else ""

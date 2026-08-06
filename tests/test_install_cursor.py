@@ -836,35 +836,24 @@ def test_with_hooks_installs_and_check_requires_hooks():
         shutil.rmtree(d, ignore_errors=True)
 
 
-def test_cursor_installer_preserves_pre_pin_scope_decision_order():
+def test_cursor_installer_preserves_global_mode_before_pin():
     original = {
-        "_read_pin": ic.install_engine._read_pin,
         "scope_policy_for_install": ic.install_engine.scope_policy_for_install,
         "configure_scope_policy": ic.install_engine.configure_scope_policy,
         "pin_kb_dir": ic.install_engine.pin_kb_dir,
-        "configure_compatibility_binding": (
-            ic.install_engine.configure_compatibility_binding
-        ),
     }
     events: list[tuple[str, object]] = []
     try:
-        ic.install_engine._read_pin = lambda: (
-            events.append(("classify", "fresh")) or None
-        )
         ic.install_engine.scope_policy_for_install = lambda **kwargs: (
-            events.append(("plan", kwargs["existing_pin_before_install"]))
-            or ic.project_config.MACHINE_POLICY_EXPLICIT
+            events.append(("plan", kwargs))
+            or ic.project_config.MACHINE_POLICY_SHARED
         )
         ic.install_engine.configure_scope_policy = lambda **kwargs: (
-            events.append(("policy", kwargs)) or ("OK", "explicit")
+            events.append(("policy", kwargs)) or ("OK", "shared")
         )
         ic.install_engine.pin_kb_dir = lambda value, dry_run: (
             events.append(("pin", (value, dry_run))) or ("OK", "validated")
         )
-        ic.install_engine.configure_compatibility_binding = lambda **kwargs: (
-            events.append(("binding", kwargs)) or ("OK", "not required")
-        )
-
         rc = ic.main([
             "--python", sys.executable,
             "--skip-mcp",
@@ -876,15 +865,10 @@ def test_cursor_installer_preserves_pre_pin_scope_decision_order():
 
         _assert(rc == 0, f"Cursor scope wiring should complete: {events}")
         _assert(events == [
-            ("classify", "fresh"),
-            ("plan", False),
-            (
-                "policy",
-                {"existing_pin_before_install": False, "dry_run": False},
-            ),
+            ("plan", {}),
+            ("policy", {"dry_run": False}),
             ("pin", (None, False)),
-            ("binding", {"dry_run": False, "preview_policy": None}),
-        ], f"Cursor did not preserve policy -> pin -> binding order: {events}")
+        ], f"Cursor did not preserve global policy -> pin order: {events}")
     finally:
         for name, value in original.items():
             setattr(ic.install_engine, name, value)

@@ -40,6 +40,7 @@ def _begin_prompt(root: str | Path, sid: str, prompt: str):
 
 
 def _repinned_cursor_project(tmp_path: Path, sid: str):
+    project_config.write_machine_policy(project_config.MACHINE_POLICY_EXPLICIT)
     project = tmp_path / "project"
     project.mkdir()
     (project / ".git").mkdir()

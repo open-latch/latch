@@ -145,6 +145,7 @@ def test_cursor_compact_current_binding_works_but_repin_fails_before_new_kb(
     transcript = project / "empty-cursor.jsonl"
     transcript.write_text("", encoding="utf-8")
     try:
+        project_config.write_machine_policy(project_config.MACHINE_POLICY_EXPLICIT)
         project_config.mark_kb_target(kb_a)
         project_config.mark_kb_target(kb_b)
         binding = project_config.write_binding(

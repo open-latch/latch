@@ -43,6 +43,8 @@ DEFAULT_SKILLS_DIR = Path.home() / ".agents" / "skills"
 CODEX_SKILLS_SRC = KB_HOME / ".agents" / "skills"
 CODEX_SKILL_MARKER = "<!-- latch-codex-skill: managed -->"
 CODEX_SKILL_HOME_TOKEN = "__LATCH_INSTALLED_HOME__"
+CODEX_POSIX_WRAPPER_TOKEN = "__LATCH_POSIX_WRAPPER__"
+CODEX_POWERSHELL_WRAPPER_TOKEN = "__LATCH_POWERSHELL_WRAPPER__"
 CODEX_SKILL_NAMES = (
     "source-command-latch",
     "source-command-latch-budget-approve",
@@ -56,8 +58,19 @@ CODEX_SKILL_NAMES = (
     "source-command-unlatch",
 )
 CODEX_SKILLS_REQUIRING_HOME = tuple(
-    name for name in CODEX_SKILL_NAMES if name != "source-command-latch-pm"
+    name
+    for name in CODEX_SKILL_NAMES
+    if name
+    not in {
+        "source-command-latch-pm",
+        "source-command-latch",
+        "source-command-unlatch",
+    }
 )
+CODEX_NATIVE_WRAPPERS = {
+    "source-command-latch": ("latch.sh", "latch.ps1"),
+    "source-command-unlatch": ("unlatch.sh", "unlatch.ps1"),
+}
 
 _TABLE_RE = re.compile(r"^\s*\[([^\]]+)\]\s*(?:#.*)?$")
 _ARRAY_TABLE_RE = re.compile(r"^\s*\[\[([^\]]+)\]\]\s*(?:#.*)?$")
@@ -466,6 +479,24 @@ def render_codex_skill(name: str) -> str:
         CODEX_SKILL_HOME_TOKEN,
         shlex.quote(str(KB_HOME.resolve())),
     )
+    if name in CODEX_NATIVE_WRAPPERS:
+        posix_name, powershell_name = CODEX_NATIVE_WRAPPERS[name]
+        posix_path = KB_HOME.resolve() / "bin" / posix_name
+        powershell_path = KB_HOME.resolve() / "bin" / powershell_name
+        if (
+            CODEX_POSIX_WRAPPER_TOKEN not in body
+            or CODEX_POWERSHELL_WRAPPER_TOKEN not in body
+        ):
+            raise ValueError(
+                f"Codex skill {name} lacks native platform wrapper tokens"
+            )
+        body = body.replace(
+            CODEX_POSIX_WRAPPER_TOKEN,
+            shlex.quote(str(posix_path)),
+        ).replace(
+            CODEX_POWERSHELL_WRAPPER_TOKEN,
+            "'" + str(powershell_path).replace("'", "''") + "'",
+        )
     footer = (
         "\n\n---\n\n"
         "Latch Codex user-skill sync metadata. Re-run `bin/install_codex` to "
@@ -699,17 +730,13 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  AGENTS.md  : {'skipped' if args.skip_agents else agents_path}")
     print(f"  mode       : {'DRY-RUN (no writes)' if args.dry_run else 'apply'}\n")
 
-    existing_pin_before_install = install_engine._read_pin() is not None
     try:
-        install_policy = install_engine.scope_policy_for_install(
-            existing_pin_before_install=existing_pin_before_install,
-        )
+        install_engine.scope_policy_for_install()
     except project_config.ProjectConfigError as exc:
         print(f"  [FAIL] scopes: existing scope policy is unsafe: {exc}")
         print("\nNo Codex configuration changes were written.")
         return 2
     policy_level, policy_msg = install_engine.configure_scope_policy(
-        existing_pin_before_install=existing_pin_before_install,
         dry_run=args.dry_run,
     )
     print(f"  [{policy_level:4}] scopes: {policy_msg}")
@@ -721,17 +748,6 @@ def main(argv: list[str] | None = None) -> int:
     if pin_level in {"ERROR", "FAIL"}:
         print("\nNo Codex configuration changes were written.")
         return 2
-    compatibility_level, compatibility_msg = (
-        install_engine.configure_compatibility_binding(
-            dry_run=args.dry_run,
-            preview_policy=install_policy if args.dry_run else None,
-        )
-    )
-    print(f"  [{compatibility_level:4}] scopes: {compatibility_msg}")
-    if compatibility_level == "FAIL":
-        print("\nThe existing KB remains fail-closed; no Codex configuration changed.")
-        return 2
-
     if changes:
         if args.dry_run:
             print("  [DRY ] Codex config would change:")
@@ -785,7 +801,9 @@ def main(argv: list[str] | None = None) -> int:
               "restart Codex. Start a new Codex thread so the MCP roster, "
               "SessionStart hook, and AGENTS.md instruction chain reload.\n")
 
-    seed_project = agents_path.resolve().parent
+    # AGENTS.md may itself be a symlink. The install target is its containing
+    # directory, not the directory containing the link target.
+    seed_project = agents_path.parent.resolve()
     if not args.suppress_seed_output:
         if args.dry_run or args.no_seed_prompt:
             print(install_engine.seed_next_step_for_project(

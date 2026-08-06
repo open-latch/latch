@@ -196,7 +196,7 @@ def test_vault_daemon_ttl_is_scoped_and_invalid_policy_fails_soft(
         paths.configured_maintenance_runner(settings)
 
 
-def test_pin_refresh_requires_explicit_compatibility_reauthorization(
+def test_pin_refresh_updates_global_shared_target_without_second_authority(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -211,25 +211,15 @@ def test_pin_refresh_requires_explicit_compatibility_reauthorization(
     project = tmp_path / "project"
     project.mkdir()
 
-    # Refresh sees the installer pin, but the data plane stays fail-closed until
-    # the machine-local compatibility binding explicitly authorizes that exact
-    # replacement vault.
+    # In unchanged global Shared mode, the installed pin remains the single
+    # source of truth. There is no compatibility binding to reauthorize.
     assert paths.project_dir(project) != vault
     pin.write_text(json.dumps({"kb_dir": str(vault)}) + "\n", encoding="utf-8")
     assert paths.refresh_pinned_dir() == vault
-    locked = project_config.resolve(project)
-    assert locked.state == project_config.MODE_LOCKED
-    assert locked.reason_code == project_config.LOCK_GLOBAL_PIN_CHANGED
-    with pytest.raises(lockfile.ProjectTargetChangedError, match="locked"):
-        paths.write_maintenance_runner(
-            backend="codex",
-            executable=str(executable),
-            home=str(tmp_path),
-            search_path=str(tmp_path),
-            project_path=project,
-        )
-
-    project_config.reauthorize_compatibility_binding()
+    target = project_config.resolve(project)
+    assert target.state == project_config.MODE_LATCHED
+    assert target.source == project_config.SOURCE_GLOBAL
+    assert target.kb_dir == vault
 
     written = paths.write_maintenance_runner(
         backend="codex",

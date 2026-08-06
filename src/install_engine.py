@@ -676,86 +676,41 @@ def pin_kb_dir(kb_dir_override: str | None, dry_run: bool) -> tuple[str, str]:
 
 def configure_scope_policy(
     *,
-    existing_pin_before_install: bool,
     dry_run: bool,
 ) -> tuple[str, str]:
-    """Persist one explicit migration decision; never infer it at runtime."""
+    """Persist one mutually exclusive product mode.
+
+    Global Shared is the default and preserves the existing product. Project
+    scoping is one-way and is activated only by an explicit user choice.
+    """
     path = project_config.machine_policy_path()
-    if path.exists() or path.is_symlink():
-        try:
-            policy = project_config.read_machine_policy()
-        except project_config.ProjectConfigError as exc:
-            return "FAIL", f"existing scope policy is unsafe: {exc}"
-        return "OK", f"already configured -> {policy} (left unchanged)"
-    policy = (
-        project_config.MACHINE_POLICY_COMPATIBILITY
-        if existing_pin_before_install
-        else project_config.MACHINE_POLICY_EXPLICIT
-    )
-    if dry_run:
-        return "DRY", f"would configure machine scope policy -> {policy}"
     try:
-        project_config.write_machine_policy(policy)
+        current = project_config.read_machine_policy()
+    except project_config.ProjectConfigError as exc:
+        return "FAIL", f"existing scope policy is unsafe: {exc}"
+    if path.exists() or path.is_symlink():
+        return "OK", f"already configured -> {current} (left unchanged)"
+    if dry_run:
+        return "DRY", f"would configure machine scope policy -> {current}"
+    try:
+        project_config.write_machine_policy(current)
     except (OSError, project_config.ProjectConfigError) as exc:
         return "FAIL", f"could not persist machine scope policy: {exc}"
     detail = (
-        "existing global KB remains available until roots are explicitly scoped"
-        if policy == project_config.MACHINE_POLICY_COMPATIBILITY
-        else "new locations stay LOCKED until explicitly latched Shared or Private"
+        "the existing global KB remains available in every project"
+        if current == project_config.MACHINE_POLICY_SHARED
+        else "unscoped locations stay LOCKED until explicitly latched Shared or Private"
     )
-    return "OK", f"configured -> {policy}; {detail}"
+    return "OK", f"configured -> {current}; {detail}"
 
 
-def scope_policy_for_install(*, existing_pin_before_install: bool) -> str:
-    """Return the persisted or planned policy for one pre-pin install decision."""
-    path = project_config.machine_policy_path()
-    if path.exists() or path.is_symlink():
-        return project_config.read_machine_policy()
-    return (
-        project_config.MACHINE_POLICY_COMPATIBILITY
-        if existing_pin_before_install
-        else project_config.MACHINE_POLICY_EXPLICIT
-    )
-
-
-def configure_compatibility_binding(
-    *,
-    dry_run: bool,
-    preview_policy: str | None = None,
-) -> tuple[str, str]:
-    """Bind an upgraded install only after its existing pin is validated."""
-    if preview_policy is not None and not dry_run:
-        return "FAIL", "preview scope policy is valid only during a dry run"
-    if preview_policy is not None:
-        policy = preview_policy
-    else:
-        try:
-            policy = project_config.read_machine_policy()
-        except project_config.ProjectConfigError as exc:
-            return "FAIL", f"machine scope policy is unsafe: {exc}"
-    if policy not in project_config.MACHINE_POLICIES:
-        return "FAIL", f"machine scope policy is unsafe: {policy!r}"
-    if policy != project_config.MACHINE_POLICY_COMPATIBILITY:
-        return "OK", "not required for explicit-scope installs"
-    path = project_config.compatibility_binding_path()
-    if dry_run and not (path.exists() or path.is_symlink()):
-        try:
-            project_config._global_kb_dir(
-                required=True,
-                check_private_collision=True,
-            )
-        except project_config.ProjectConfigError as exc:
-            return "FAIL", f"could not validate the existing global KB: {exc}"
-        return "DRY", "would bind the exact existing global KB"
-    try:
-        binding = project_config.initialize_compatibility_binding()
-    except (OSError, project_config.ProjectConfigError) as exc:
-        return "FAIL", f"could not bind the existing global KB: {exc}"
-    return "OK", f"bound exact existing global KB -> {binding.kb_dir}"
+def scope_policy_for_install() -> str:
+    """Return the installed mode; installers never activate project scoping."""
+    return project_config.read_machine_policy()
 
 
 def scope_configuration_status() -> list[tuple[bool, str]]:
-    """Return check rows for the persisted policy and exact legacy binding."""
+    """Return check rows for the persisted mutually exclusive product mode."""
     path = project_config.machine_policy_path()
     if not (path.exists() or path.is_symlink()):
         return [(False, "machine scope policy is not persisted; re-run install")]
@@ -763,16 +718,7 @@ def scope_configuration_status() -> list[tuple[bool, str]]:
         policy = project_config.read_machine_policy()
     except project_config.ProjectConfigError as exc:
         return [(False, f"machine scope policy is unsafe: {exc}")]
-    rows = [(True, f"machine scope policy -> {policy}")]
-    if policy == project_config.MACHINE_POLICY_COMPATIBILITY:
-        try:
-            binding = project_config._load_compatibility_binding()
-            project_config._validate_live_compatibility_binding(binding)
-        except project_config.ProjectConfigError as exc:
-            rows.append((False, f"compatibility KB binding is unsafe: {exc}"))
-        else:
-            rows.append((True, f"compatibility KB bound -> {binding.kb_dir}"))
-    return rows
+    return [(True, f"machine scope policy -> {policy}")]
 
 
 # --------------------------------------------------------------------------- #
@@ -1112,20 +1058,13 @@ def main(argv: list[str] | None = None) -> int:
         print("\nNo changes written.")
         return 2
 
-    # Capture this once before any pin write.  A quickstart or retry must not
-    # turn a fresh install into compatibility mode merely because this same
-    # invocation just created its pin.
-    existing_pin_before_install = _read_pin() is not None
     try:
-        install_policy = scope_policy_for_install(
-            existing_pin_before_install=existing_pin_before_install,
-        )
+        scope_policy_for_install()
     except project_config.ProjectConfigError as exc:
         print(f"  [FAIL] scopes: existing scope policy is unsafe: {exc}")
         print("\nNo changes written.")
         return 2
     policy_level, policy_msg = configure_scope_policy(
-        existing_pin_before_install=existing_pin_before_install,
         dry_run=args.dry_run,
     )
     print(f"  [{policy_level:4}] scopes: {policy_msg}")
@@ -1137,17 +1076,6 @@ def main(argv: list[str] | None = None) -> int:
     if pin_level in {"ERROR", "FAIL"}:
         print("\nScope policy is safely persisted; no further changes written.")
         return 2
-    compatibility_level, compatibility_msg = configure_compatibility_binding(
-        dry_run=args.dry_run,
-        preview_policy=install_policy if args.dry_run else None,
-    )
-    print(
-        f"  [{compatibility_level:4}] scopes: {compatibility_msg}"
-    )
-    if compatibility_level == "FAIL":
-        print("\nThe existing KB remains fail-closed; no further changes written.")
-        return 2
-
     # --- 2. MCP registration -------------------------------------------------
     if not claude:
         print("  [WARN] claude CLI not found on PATH — cannot register the MCP server.")
@@ -1196,9 +1124,9 @@ def main(argv: list[str] | None = None) -> int:
         print(restart_next_step_message())
         print("Verify env + wiring any time with: bash bin/latch_doctor.sh")
         if not args.suppress_seed_output:
+            project = Path.cwd().resolve()
             if args.no_seed_prompt:
                 print()
-                project = Path.cwd().resolve()
                 print(seed_next_step_for_project(
                     project=project,
                     command=format_command(seed_command_args(
@@ -1214,6 +1142,7 @@ def main(argv: list[str] | None = None) -> int:
                     python_path=python_path,
                     source="auto",
                     backend="claude",
+                    project=project,
                 )
     return 0
 

@@ -219,8 +219,8 @@ def _access_lock_path(project_path: str) -> Path:
 
 def _target_snapshot(target: project_config.ResolvedScope) -> tuple[object, ...]:
     """Immutable fields whose change invalidates an acquired access lease."""
-    # ``project_root`` is caller context, not target identity: compatibility-
-    # global callers intentionally share one exact vault from unrelated roots.
+    # ``project_root`` is caller context, not target identity: global Shared
+    # callers intentionally share one exact vault from unrelated roots.
     return (
         target.state,
         target.policy,

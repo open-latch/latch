@@ -1,4 +1,4 @@
-<# Read-only status by default; confirmed project-local OFF boundary on request. #>
+<# Read-only status by default; confirmed OFF transition on request. #>
 [CmdletBinding()]
 param(
   [ValidateSet("unlatch")]
