@@ -66,6 +66,14 @@
       "expected": ["no contract-driven latch_gate call", "no implementation receipt claim", "honor any narrower managed-operation or host mutation boundary"]
     },
     {
+      "id": "gate_contextual_approval",
+      "tier": "deterministic",
+      "hosts": ["claude", "codex", "cursor"],
+      "stimulus": "Approve implementation using a phrase whose referent exists only in the foreground conversation.",
+      "expected": ["verbatim request retained", "self-contained task_context passed separately", "missing context returns no verdict before retrieval or model spend"],
+      "evidence_tests": ["tests/test_gate.py::test_contextual_approvals_fail_closed_without_task_context", "tests/test_gate_classify.py::test_unresolved_scope_returns_before_budget_or_model"]
+    },
+    {
       "id": "gate_planning_transition",
       "tier": "live_host",
       "hosts": ["claude", "codex", "cursor"],

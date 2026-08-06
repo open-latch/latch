@@ -1558,6 +1558,11 @@ def _gate_status(verdict: dict) -> str:
             "SKIPPED - Latch is currently UNLATCHED. Run /unlatch to re-latch. "
             "If LATCH_UNLATCHED is set, unset it too."
         )
+    if verdict.get("reason") == "unresolved_scope":
+        return (
+            "BLOCKED — task context is unresolved; no gate judgment was issued. "
+            "Retry the same request with task_context."
+        )
     if verdict.get("timed_out"):
         return ("DEGRADED — classifier timed out; no gate judgment this call. "
                 "Proceed on KB-first context and tell the user the gate was "
@@ -1572,7 +1577,12 @@ def _gate_status(verdict: dict) -> str:
 
 @mcp.tool(name="latch_gate")
 @mcp.tool(name="kb_gate")
-def kb_gate(request: str, max_chains: int = 5, verbose: bool = False) -> dict:
+def kb_gate(
+    request: str,
+    max_chains: int = 5,
+    verbose: bool = False,
+    task_context: str | None = None,
+) -> dict:
     """Gate judgment on a coding/build/implement/refactor request.
 
     Hybrid-searches the KB (including stale nodes), seeds traversal from
@@ -1591,6 +1601,10 @@ def kb_gate(request: str, max_chains: int = 5, verbose: bool = False) -> dict:
     DO_NOT_PROCEED, surface the recommendation and cited nodes to the user
     before acting (side-note v1 — the agent does not auto-redirect).
 
+    Keep `request` verbatim. If it is a conversational approval or follow-up,
+    pass a concise, self-contained `task_context` naming the work it refers to.
+    Missing required context returns BLOCKED with no verdict or model call.
+
     Skip this tool for: explanation requests, status questions, search
     queries, debugging an error in code you already wrote, or any
     non-implementation prompt.
@@ -1598,7 +1612,8 @@ def kb_gate(request: str, max_chains: int = 5, verbose: bool = False) -> dict:
     Returns (compact form, default — fits well under MCP tool-result cap):
       {
         "request": <str>,
-        "gate_status": <str>,                 # "OK", else "SKIPPED/DEGRADED — ..." when verdict is None — surface it; never read None as PROCEED (id=1415)
+        "scope_status": "request_only" | "explicit_context" | "unresolved" | "unlatched",
+        "gate_status": <str>,                 # "OK", else "BLOCKED/SKIPPED/DEGRADED — ..." when verdict is None — surface it; never read None as PROCEED (id=1415)
         "verdict": {                          # see parse_classifier_output
           "recommendation": "PROCEED" | "MODIFY" | "DO_NOT_PROCEED" | "NEEDS_HUMAN_JUDGMENT" | None,
           "summary": <str>, "decision_chain": [<id>...],
@@ -1668,18 +1683,24 @@ def kb_gate(request: str, max_chains: int = 5, verbose: bool = False) -> dict:
                 "seed_ids": [],
                 "reachable_ids": [],
             },
+            "scope_status": "unlatched",
         }
     with _conn() as conn:
         full = gate.run_gate(
             conn, request, project_path=_project_cwd(), max_chains=max_chains,
             session_id=_project_session_id(),
+            task_context=task_context,
         )
+    verdict = full.get("verdict") or {}
+    gate_status = _gate_status(verdict)
+    full["gate_status"] = gate_status
+    full["findings"] = gate.format_gate_findings(
+        verdict, full.get("evidence") or [], gate_status=gate_status,
+    )
     if verbose:
         return full
     chains_assembly = full.get("chains") or {}
     seeds = chains_assembly.get("seeds") or []
-    verdict = full.get("verdict") or {}
-    gate_status = _gate_status(verdict)
     return {
         "request": full.get("request", request),
         "gate_status": gate_status,
@@ -1688,6 +1709,7 @@ def kb_gate(request: str, max_chains: int = 5, verbose: bool = False) -> dict:
             verdict, full.get("evidence") or [], gate_status=gate_status,
         ),
         "evidence": full.get("evidence") or [],
+        "scope_status": full.get("scope_status", "request_only"),
         "chain_summary": {
             "seed_count": len(seeds),
             "seed_ids": [s["id"] for s in seeds],

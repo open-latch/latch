@@ -15,6 +15,10 @@ Codex MCP `latch_gate`/`kb_gate` tool when it is available. If you use the shell
 fallback, explicitly substitute the user's request text; Codex does not populate
 Claude slash-command argument placeholders.
 
+Keep the MCP `request` verbatim. For a contextual approval/follow-up, also pass
+a concise, self-contained `task_context`. The shell fallback cannot carry that
+field, so ask for a self-contained request instead.
+
 ```bash
 latch_home="${LATCH_HOME:-}"
 if [ -z "$latch_home" ] && [ -n "${CLAUDE_KB_HOME:-}" ]; then

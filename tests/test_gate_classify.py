@@ -110,6 +110,21 @@ def test_prompt_echoes_request():
     print("PASS prompt_echoes_request")
 
 
+def test_prompt_separates_task_context_from_request_and_evidence():
+    chain = {
+        "query": "go with your recommendation",
+        "task_context": "Add the existing health endpoint design.",
+        "seeds": [],
+        "chains": [],
+    }
+    prompt = gate.build_classifier_prompt(chain)
+    _assert("--- TASK CONTEXT ---" in prompt, prompt)
+    _assert("Add the existing health endpoint design." in prompt, prompt)
+    _assert("REQUEST: go with your recommendation" in prompt, prompt)
+    _assert("not as KB evidence" in prompt, prompt)
+    print("PASS prompt_separates_task_context_from_request_and_evidence")
+
+
 def test_prompt_renders_seeds_and_evidence():
     chain = {
         "query": "do a thing",
@@ -315,6 +330,40 @@ def test_classify_skipped_when_budget_cap_hit():
     print("PASS classify_skipped_when_budget_cap_hit")
 
 
+def test_unresolved_scope_returns_before_budget_or_model():
+    original = budget.check_and_record
+    budget.check_and_record = lambda *args, **kwargs: (_ for _ in ()).throw(
+        AssertionError("unresolved scope must not consume budget")
+    )
+    try:
+        out = gate.classify_gate(
+            {
+                "query": "go with your recommendation",
+                "scope_status": "unresolved",
+                "seeds": [],
+                "chains": [],
+            },
+            project_path=None,
+            use_llm=True,
+        )
+        _assert(out["recommendation"] is None, out)
+        _assert(out["reason"] == "unresolved_scope", out)
+        _assert(out["scope_blocked"] is True, out)
+        _assert(out.get("skipped") is not True, out)
+        print("PASS unresolved_scope_returns_before_budget_or_model")
+    finally:
+        budget.check_and_record = original
+
+
+def test_unresolved_scope_findings_do_not_claim_a_verdict():
+    verdict = gate._unresolved_scope_verdict()
+    findings = gate.format_gate_findings(verdict, [], gate_status="BLOCKED")
+    _assert(findings["recommendation"] is None, findings)
+    _assert("No classifier verdict has authority" in findings["receipt"]["authority"], findings)
+    _assert("retry with task_context" in findings["display_guidance"], findings)
+    print("PASS unresolved_scope_findings_do_not_claim_a_verdict")
+
+
 def test_error_findings_keep_displayable_summary():
     verdict = gate._classifier_error("budget cap hit")
     findings = gate.format_gate_findings(verdict, [], gate_status="SKIPPED")
@@ -425,7 +474,7 @@ def test_run_gate_appends_jsonl_log_line():
             "ts", "project", "query_hash", "query_chars",
             "recommendation", "skipped", "evidence_ids", "decision_chain",
             "seed_count", "seed_ids", "reachable_count", "elapsed_ms",
-            "budget_count", "seeds", "chain_lane_contacts",
+            "budget_count", "seeds", "chain_lane_contacts", "scope_status",
         ):
             _assert(k in entry, f"required field {k!r} missing: {entry}")
         _assert("intensity" not in entry, entry)
@@ -520,6 +569,32 @@ def test_run_gate_log_raw_query_opt_in():
         print("PASS run_gate_log_raw_query_opt_in")
     finally:
         gate.LOG_RAW_QUERY = _prev
+        _cleanup(tmp, conn)
+
+
+def test_run_gate_log_records_scope_without_task_context_text():
+    tmp, conn = _fresh_db()
+    previous = gate.LOG_RAW_QUERY
+    gate.LOG_RAW_QUERY = False
+    try:
+        context = "private client task details must not enter gate.log"
+        gate.run_gate(
+            conn,
+            "go with your recommendation",
+            task_context=context,
+            project_path=tmp,
+            use_llm=False,
+        )
+        line = (
+            log_utils.today_log_path(gate.LOG_STREAM, tmp)
+            .read_text(encoding="utf-8").strip().splitlines()[-1]
+        )
+        entry = json.loads(line)
+        _assert(entry["scope_status"] == "explicit_context", entry)
+        _assert(context not in line, line)
+        print("PASS run_gate_log_records_scope_without_task_context_text")
+    finally:
+        gate.LOG_RAW_QUERY = previous
         _cleanup(tmp, conn)
 
 
@@ -775,6 +850,7 @@ if __name__ == "__main__":
     test_prompt_anti_hedge_rule_present()
     test_prompt_teaches_graded_authority_and_closed_vs_merged()
     test_prompt_echoes_request()
+    test_prompt_separates_task_context_from_request_and_evidence()
     test_prompt_renders_seeds_and_evidence()
     test_prompt_handles_empty_chain()
     test_prompt_caps_chain_assembly_to_max_chains()
@@ -790,11 +866,14 @@ if __name__ == "__main__":
     test_classify_skipped_when_use_llm_false()
     test_classify_skipped_when_in_compact_env()
     test_classify_skipped_when_budget_cap_hit()
+    test_unresolved_scope_returns_before_budget_or_model()
+    test_unresolved_scope_findings_do_not_claim_a_verdict()
     test_error_findings_keep_displayable_summary()
     test_run_gate_with_use_llm_false_assembles_chain_and_skips_classify()
     test_run_gate_hydrates_cited_evidence_when_verdict_returns()
     test_run_gate_appends_jsonl_log_line()
     test_run_gate_log_truncates_long_query()
+    test_run_gate_log_records_scope_without_task_context_text()
     test_run_gate_log_propagates_session_id()
     test_run_gate_log_session_id_defaults_to_none()
     test_prompt_includes_citation_gap_schema()

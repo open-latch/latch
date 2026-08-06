@@ -15,6 +15,7 @@ which shares ``mcp_proxy.is_hidden_from_listing`` so the two paths cannot drift.
 """
 from __future__ import annotations
 
+import inspect
 import json
 import sys
 from pathlib import Path
@@ -234,6 +235,12 @@ def test_gate_tool_schema_uses_the_implementation_mutation_boundary():
             description)
     _assert("BEFORE committing to an implementation plan" not in description,
             description)
+    _assert("Keep `request` verbatim" in description, description)
+    _assert("task_context" in inspect.signature(mcp_server.kb_gate).parameters,
+            inspect.signature(mcp_server.kb_gate))
+    blocked = mcp_server._gate_status({"reason": "unresolved_scope"})
+    _assert(blocked.startswith("BLOCKED"), blocked)
+    _assert("no gate judgment" in blocked, blocked)
     print("PASS gate_tool_schema_uses_the_implementation_mutation_boundary")
 
 

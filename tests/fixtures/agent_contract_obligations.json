@@ -56,9 +56,9 @@
     },
     {
       "id": "coding_gate",
-      "description": "Gate material implementation mutations once on the current user request and display a sourced receipt.",
-      "markers": {"shared_contract": ["Call `latch_gate` once on the user's current request verbatim", "code/config/test/runtime behavior or docs implementing the request", "Show each non-skipped **Latch gate** first", "receipt/source"]},
-      "scenario_ids": ["gate_proceed", "gate_stop", "gate_implementation_boundary", "cursor_current_prompt_gate"]
+      "description": "Gate material implementation mutations once on the current user request, resolving contextual approvals explicitly, and display a sourced receipt.",
+      "markers": {"shared_contract": ["Call `latch_gate` once on the user's current request verbatim", "code/config/test/runtime behavior or docs implementing the request", "Contextual requests", "self-contained `task_context`", "without it, no verdict", "Show each non-skipped **Latch gate** first", "receipt/source"]},
+      "scenario_ids": ["gate_proceed", "gate_stop", "gate_implementation_boundary", "gate_contextual_approval", "cursor_current_prompt_gate"]
     },
     {
       "id": "gate_scope_exclusions",

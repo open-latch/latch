@@ -19,6 +19,10 @@ instructions and docs.
 Budget-gated (counts against the daily LLM cap shared with `/latch-compact`
 and nightly heal). Skip and report the budget message if the cap is hit.
 
+With MCP, keep the request verbatim and add a concise, self-contained
+`task_context` when it refers to prior conversation. The shell command cannot
+carry that field, so use a self-contained request there.
+
 ## Run
 
 ```bash
