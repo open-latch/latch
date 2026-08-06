@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from datetime import datetime
 import hashlib
+import hmac
 import json
 import os
 from pathlib import Path
@@ -25,6 +26,77 @@ import project_proof
 
 
 LINEAGE_CHECKPOINT_SCHEMA = "latch-outcome-lineage-v2"
+
+# The frozen contract ships in-tree as an immutable versioned artifact so a
+# canonical report is reachable without the caller supplying its bytes from
+# outside the runtime. Latch 4164 remains the ratification authority for these
+# semantics; shipping them is distribution, not re-ratification.
+PACKAGED_CONTRACT_RELPATH = "artifacts/outcome-measurement/contract-v2.6.md"
+
+# The checkpoint carries admitted receipt authority between runs, so it is
+# authenticated under the same vault identity that mints project proofs. Its
+# plaintext fields describe the file itself and prove nothing about its origin.
+LINEAGE_CHECKPOINT_MAC_DOMAIN = (
+    b"latch/outcome-measurement/lineage-checkpoint-mac\x00"
+)
+CHECKPOINT_PATH_TOKEN_DOMAIN = (
+    b"latch/outcome-measurement/checkpoint-path-token\x00"
+)
+
+
+def lineage_checkpoint_mac_key(
+    project_path: str | os.PathLike[str], *, key_epoch: str
+) -> bytes:
+    """Derive this project's checkpoint authentication key from its vault."""
+
+    conn = db.connect_readonly(os.fspath(project_path))
+    try:
+        context = project_proof.ProjectProofContext.from_vault_identity(
+            conn._kb_vault_identity,
+            key_epoch=key_epoch,
+        )
+    finally:
+        conn.close()
+    return context.derive_subkey(LINEAGE_CHECKPOINT_MAC_DOMAIN)
+
+
+def _checkpoint_mac(payload: Mapping[str, object], mac_key: bytes) -> str:
+    """Authenticate the full checkpoint body, excluding the MAC field itself."""
+
+    if not isinstance(mac_key, bytes) or len(mac_key) < 32:
+        raise ValueError("lineage checkpoint MAC key material is invalid")
+    body = {name: value for name, value in payload.items() if name != "mac"}
+    encoded = json.dumps(
+        body, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return hmac.new(mac_key, encoded, hashlib.sha256).hexdigest()
+
+
+def packaged_contract_path() -> Path:
+    """Return the in-tree path of the frozen contract artifact."""
+
+    return Path(__file__).resolve().parent.parent / PACKAGED_CONTRACT_RELPATH
+
+
+def packaged_contract_bytes() -> bytes:
+    """Return the frozen contract bytes, failing closed if they ever drift.
+
+    The pinned digest is the authority: a packaged artifact that does not hash
+    to it is a tampered or mis-versioned runtime, not a usable default.
+    """
+
+    path = packaged_contract_path()
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        raise ValueError(
+            f"packaged outcome-measurement contract is unavailable at {path}"
+        ) from exc
+    if hashlib.sha256(data).hexdigest() != outcome_measurement.CONTRACT_SHA256:
+        raise ValueError(
+            "packaged outcome-measurement contract does not match the frozen capture"
+        )
+    return data
 
 
 def lineage_checkpoint_coordinate(
@@ -66,6 +138,7 @@ def load_lineage_checkpoint(
     path: str | os.PathLike[str],
     *,
     coordinate_sha256: str,
+    mac_key: bytes,
     contract_sha256: str = outcome_measurement.CONTRACT_SHA256,
     allow_missing: bool = False,
 ) -> tuple[outcome_measurement.InvocationReceipt, ...]:
@@ -75,6 +148,11 @@ def load_lineage_checkpoint(
     Once a window has state, deletion must fail closed instead of silently
     resetting admission history.  The checkpoint contains normalized receipt
     metadata only, never source bytes, prompts, results, or database content.
+
+    The file is authenticated under ``mac_key`` before any field is trusted: its
+    plaintext schema/coordinate values describe the file itself and prove
+    nothing about its origin, so on their own they let anyone edit an outcome or
+    clone receipts under fake nonces and have the result believed.
     """
 
     if re.fullmatch(r"[0-9a-f]{64}", coordinate_sha256) is None:
@@ -87,17 +165,23 @@ def load_lineage_checkpoint(
         raise ValueError("lineage checkpoint is missing") from None
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise ValueError("lineage checkpoint is unavailable or invalid") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("lineage checkpoint schema or coordinate is invalid")
+    if set(payload) != {
+        "schema", "contract_sha256", "coordinate_sha256", "receipts", "mac",
+    }:
+        raise ValueError("lineage checkpoint fields are invalid")
+    presented = payload.get("mac")
+    if not isinstance(presented, str) or not hmac.compare_digest(
+        presented, _checkpoint_mac(payload, mac_key)
+    ):
+        raise ValueError("lineage checkpoint authentication failed")
     if (
-        not isinstance(payload, dict)
-        or payload.get("schema") != LINEAGE_CHECKPOINT_SCHEMA
+        payload.get("schema") != LINEAGE_CHECKPOINT_SCHEMA
         or payload.get("contract_sha256") != contract_sha256
         or payload.get("coordinate_sha256") != coordinate_sha256
     ):
         raise ValueError("lineage checkpoint schema or coordinate is invalid")
-    if set(payload) != {
-        "schema", "contract_sha256", "coordinate_sha256", "receipts",
-    }:
-        raise ValueError("lineage checkpoint fields are invalid")
     rows = payload.get("receipts")
     if not isinstance(rows, list):
         raise ValueError("lineage checkpoint receipts must be a list")
@@ -295,10 +379,35 @@ def _iso(value: datetime | None) -> str | None:
     return value.isoformat().replace("+00:00", "Z")
 
 
-def _observation_checkpoint_row(row: outcome_measurement.Observation) -> dict[str, object]:
+def _opaque_checkpoint_file(source: str, file: str, mac_key: bytes) -> str:
+    """Return a stable opaque stand-in for a recoverable source path.
+
+    ``run_pinned_audit`` promises that recoverable project paths never enter a
+    receipt, but the checkpoint persisted raw absolute vault and transcript
+    paths.  The token is deterministic under this project's own key, so a path
+    always maps to the same value and nothing downstream sees a moving target.
+
+    Only the path is suppressed.  ``session_id`` and ``project_proof`` stay in
+    cleartext on purpose: ``_conflict_reasons`` compares them across runs
+    against freshly parsed observations, so a token here would disagree with the
+    real value there and manufacture ``session_mismatch`` /
+    ``project_proof_mismatch`` on every subsequent run.
+    """
+
+    digest = hmac.new(
+        mac_key,
+        CHECKPOINT_PATH_TOKEN_DOMAIN + file.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    return f"{source}-file-{digest[:32]}"
+
+
+def _observation_checkpoint_row(
+    row: outcome_measurement.Observation, mac_key: bytes
+) -> dict[str, object]:
     return {
         "source": row.source,
-        "file": row.file,
+        "file": _opaque_checkpoint_file(row.source, row.file, mac_key),
         "byte_offset": row.byte_offset,
         "nonce": row.nonce,
         "ts": _iso(row.ts),
@@ -337,13 +446,13 @@ def _observation_checkpoint_row(row: outcome_measurement.Observation) -> dict[st
 
 
 def _receipt_checkpoint_row(
-    row: outcome_measurement.InvocationReceipt,
+    row: outcome_measurement.InvocationReceipt, mac_key: bytes
 ) -> dict[str, object]:
     return {
         "nonce": row.nonce,
         "measurement_protocol_version": row.measurement_protocol_version,
         "observations": [
-            _observation_checkpoint_row(item) for item in row.observations
+            _observation_checkpoint_row(item, mac_key) for item in row.observations
         ],
         "disposition": row.disposition,
         "admitted": row.admitted,
@@ -360,13 +469,36 @@ def _receipt_checkpoint_row(
         "window_end": _iso(row.window_end),
         "prefix_member": row.prefix_member,
         "boundary_evidence": [
-            _observation_checkpoint_row(item) for item in row.boundary_evidence
+            _observation_checkpoint_row(item, mac_key)
+            for item in row.boundary_evidence
         ],
     }
 
 
+def _mkdir_private(directory: Path) -> None:
+    """Create ``directory`` and every missing ancestor at 0o700.
+
+    ``Path.mkdir(parents=True, mode=...)`` applies the mode to the leaf only;
+    intermediate parents are created with the default umask, which can leave a
+    world-readable directory above a private checkpoint.
+    """
+
+    missing: list[Path] = []
+    probe = directory
+    while not probe.exists():
+        missing.append(probe)
+        if probe == probe.parent:
+            break
+        probe = probe.parent
+    for parent in reversed(missing):
+        try:
+            parent.mkdir(mode=0o700)
+        except FileExistsError:
+            continue
+
+
 def _atomic_private_text(path: Path, text: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    _mkdir_private(path.parent)
     temporary = path.with_name(
         f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
     )
@@ -402,6 +534,7 @@ def write_lineage_checkpoint(
     state: outcome_measurement.AuditState,
     *,
     coordinate_sha256: str,
+    mac_key: bytes,
     contract_sha256: str = outcome_measurement.CONTRACT_SHA256,
 ) -> None:
     """Atomically persist admitted structural receipt authority.
@@ -424,7 +557,7 @@ def write_lineage_checkpoint(
             raise ValueError("audit state contains conflicting receipt authority")
         by_identity[receipt.identity] = receipt
     rows = [
-        _receipt_checkpoint_row(row)
+        _receipt_checkpoint_row(row, mac_key)
         for row in sorted(
             by_identity.values(),
             key=lambda item: (
@@ -440,6 +573,7 @@ def write_lineage_checkpoint(
         "coordinate_sha256": coordinate_sha256,
         "receipts": rows,
     }
+    payload["mac"] = _checkpoint_mac(payload, mac_key)
     _atomic_private_text(
         Path(path),
         json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))

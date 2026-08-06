@@ -244,6 +244,18 @@ class ProjectProofContext:
             vault_id=vault_uuid,
         )
 
+    def derive_subkey(self, domain: bytes) -> bytes:
+        """Derive a domain-separated subkey from this epoch key.
+
+        Lets callers authenticate their own artifacts under the vault identity
+        without handling the epoch key itself, and keeps every such use in a
+        separate domain from project proofs and key ids.
+        """
+
+        if not isinstance(domain, bytes) or not domain:
+            raise ValueError("subkey domain must be non-empty bytes")
+        return hmac.new(self._key, domain, hashlib.sha256).digest()
+
     def prove(self, project_path: str | os.PathLike) -> dict[str, str]:
         canonical = canonical_project_path(project_path)
         fingerprint = hmac.new(

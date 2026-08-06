@@ -10,6 +10,7 @@ from datetime import datetime
 import json
 import os
 from pathlib import Path
+import sqlite3
 import sys
 from typing import Any, Mapping
 
@@ -141,11 +142,29 @@ def _same_path(left: Path, right: Path) -> bool:
         return True
     try:
         return os.path.samefile(left, right)
-    except (FileNotFoundError, OSError):
+    except FileNotFoundError:
+        # One side does not exist yet; that is an ordinary first-run state and
+        # genuinely means "not the same file".
         return False
+    except OSError as exc:
+        # Anything else (EACCES, ELOOP, ENOTDIR) leaves aliasing undecided.
+        # Undecided must never read as "safe to write here".
+        raise ValueError(
+            f"cannot determine whether {left} and {right} are the same file"
+        ) from exc
 
 
 def _inside_root(path: Path, root: Path) -> bool:
+    """Report containment without trusting byte-exact path spelling.
+
+    ``resolve()`` does not case-fold, and APFS/NTFS are case-insensitive, so a
+    lexical prefix compare accepts ``.../HOST/report.jsonl`` as outside
+    ``.../host`` and lets an audit write its own report into the corpus it is
+    measuring.  Comparing real directory identity via ``os.path.samefile``
+    settles it on any filesystem: on a case-insensitive one the two spellings
+    are the same directory, on a case-sensitive one they genuinely are not.
+    """
+
     resolved_path = path.expanduser().resolve()
     resolved_root = root.expanduser().resolve()
     if resolved_path == resolved_root:
@@ -154,9 +173,17 @@ def _inside_root(path: Path, root: Path) -> bool:
         return False
     try:
         resolved_path.relative_to(resolved_root)
+        return True
     except ValueError:
-        return False
-    return True
+        pass
+    # The output usually does not exist yet, so walk up to the ancestors that do
+    # and compare directory identity rather than spelling.
+    for ancestor in resolved_path.parents:
+        if _same_path(ancestor, resolved_root):
+            return True
+        if ancestor == ancestor.parent:
+            break
+    return False
 
 
 def _validate_output_paths(
@@ -200,16 +227,23 @@ def _run_locked(
     """Run one audit while the caller holds this checkpoint's writer lock."""
 
     manifest = loaded["manifest"]
-    if args.initialize_empty_lineage and args.report.exists():
+    # Guard the object the flag actually governs. Keying this on the report path
+    # both blocked the legitimate recovery from a half-committed run and left
+    # the reset itself open, since the caller supplies both paths.
+    if args.initialize_empty_lineage and args.lineage.exists():
         raise ValueError(
-            "cannot initialize empty lineage when a prior report exists"
+            "cannot initialize empty lineage when a lineage checkpoint exists"
         )
     coordinate = runner.lineage_checkpoint_coordinate(
         loaded["config"], manifest
     )
+    mac_key = runner.lineage_checkpoint_mac_key(
+        args.project, key_epoch=loaded["config"].key_epoch
+    )
     prior = runner.load_lineage_checkpoint(
         args.lineage,
         coordinate_sha256=coordinate,
+        mac_key=mac_key,
         contract_sha256=manifest.contract_sha256,
         allow_missing=args.initialize_empty_lineage,
     )
@@ -228,12 +262,23 @@ def _run_locked(
         raise ValueError("canonical report invalidation state is malformed")
     runner.write_canonical_report(args.report, result.report)
     if not invalidated:
-        runner.write_lineage_checkpoint(
-            args.lineage,
-            result.state,
-            coordinate_sha256=coordinate,
-            contract_sha256=manifest.contract_sha256,
-        )
+        try:
+            runner.write_lineage_checkpoint(
+                args.lineage,
+                result.state,
+                coordinate_sha256=coordinate,
+                mac_key=mac_key,
+                contract_sha256=manifest.contract_sha256,
+            )
+        except BaseException:
+            # A committed report whose lineage never advanced would leave this
+            # window unrunnable. Roll the pair back so the run is retryable
+            # instead of requiring an operator to re-initialize lineage.
+            try:
+                args.report.unlink()
+            except OSError:
+                pass
+            raise
     sys.stdout.write(
         json.dumps(
             {
@@ -264,14 +309,25 @@ def main(argv: list[str] | None = None) -> int:
         description="Run one explicit, offline canonical outcome audit.",
     )
     parser.add_argument("--project", required=True)
-    for name in ("envelope", "contract", "lineage", "report"):
+    for name in ("envelope", "lineage", "report"):
         parser.add_argument(f"--{name}", required=True, type=Path)
+    parser.add_argument(
+        "--contract",
+        type=Path,
+        default=None,
+        help=(
+            "frozen contract bytes; defaults to the packaged artifact at "
+            f"{runner.PACKAGED_CONTRACT_RELPATH}"
+        ),
+    )
     parser.add_argument(
         "--initialize-empty-lineage",
         action="store_true",
         help="allow a missing lineage checkpoint for an explicit first run",
     )
     args = parser.parse_args(argv)
+    if args.contract is None:
+        args.contract = runner.packaged_contract_path()
     try:
         loaded = load_envelope(args.envelope)
         fixture_paths = loaded.pop("fixture_paths")
@@ -287,7 +343,7 @@ def main(argv: list[str] | None = None) -> int:
         lock_path = str(args.lineage.expanduser().resolve()) + ".lock"
         with FileLock(lock_path, timeout=0):
             return _run_locked(args, loaded, fixture_paths)
-    except (OSError, TypeError, ValueError) as exc:
+    except (OSError, TypeError, ValueError, sqlite3.Error) as exc:
         sys.stderr.write(
             json.dumps(
                 {

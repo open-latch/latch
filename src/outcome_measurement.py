@@ -1335,6 +1335,42 @@ def fold_observations(
             row.session_id for row in provisional_rows if row.session_id
         }
         session_id = next(iter(session_ids)) if len(session_ids) == 1 else None
+        # Admission inheritance carries the same tamper detection as the
+        # finalized path below. Preserving lineage must never let evidence that
+        # changed content or moved outside [T0, cap) ride a prior admission into
+        # a clean run: an honest re-read is content-identical and collapses, so
+        # this fires only when the evidence backing the admission actually moved.
+        provisional_candidates = tuple(
+            observation
+            for row in provisional_rows
+            for observation in row.observations
+        ) + tuple(
+            observation
+            for generation_rows in grouped[nonce].values()
+            for observation in generation_rows
+        )
+        candidate_conflicts = _conflict_reasons(provisional_candidates)
+        if candidate_conflicts and not _is_proven_foreign(
+            provisional_candidates, config,
+        ):
+            marker_rows.append(
+                LossMarker(
+                    reason="admitted_candidate_conflict",
+                    session_id=session_id,
+                    nonce=nonce,
+                    ts=min(
+                        (
+                            observation.ts
+                            for generation_rows in grouped[nonce].values()
+                            for observation in generation_rows
+                            if observation.ts is not None
+                        ),
+                        default=None,
+                    ),
+                    in_scope=True,
+                    detail="|".join(candidate_conflicts),
+                )
+            )
         for missing_source in sorted(prior_sources - current_sources):
             marker_rows.append(
                 LossMarker(

@@ -1889,13 +1889,143 @@ def test_unfinalized_prior_preserves_lineage_without_freezing_outcome():
     assert receipt.fresh_ts == outside
     assert receipt.outcome == "OVERRIDDEN"
     assert receipt.outcome != provisional.outcome
+    # Admission and ordering are preserved (that is defect 1's repair), but
+    # evidence that moved outside the window is never laundered into a clean
+    # run: the candidate-conflict check that guards finalized lineage applies
+    # to provisional lineage too.
+    assert [marker.reason for marker in state.loss_markers] == [
+        "admitted_candidate_conflict"
+    ]
+
+
+def _lineage_probe_state(*, mutate: bool, finalize_prior: bool):
+    """29 genuine in-window pairs plus one nonce whose evidence can move.
+
+    ``mutate`` moves the 30th nonce's current evidence to CAP+5min while its
+    prior receipt was admitted at T0+100min.  ``finalize_prior`` decides whether
+    that prior is finalized or provisional, so the two lineage classes can be
+    driven through the identical mutation.
+    """
+
+    config = _config(fresh=True)
+
+    def _snaps(rows):
+        return [
+            om.SnapshotReceipt(
+                source=row.source,
+                file=row.file,
+                first_sha256="a" * 64,
+                second_sha256="a" * 64,
+                snapshot_taken=row.ts + timedelta(seconds=om.FRESHNESS_SECONDS),
+            )
+            for row in rows
+        ]
+
+    genuine = []
+    for index in range(29):
+        nonce = f"genuine-{index}"
+        genuine.extend(
+            replace(row, file=f"{row.file}.{nonce}") for row in _pair(nonce, index)
+        )
+    genuine_snapshots = _snaps(genuine)
+
+    prior_pair = [replace(row, file=f"{row.file}.moved") for row in _pair("moved", 100)]
+    prior_state = _state(
+        [*genuine, *prior_pair],
+        config=config,
+        snapshots=[*genuine_snapshots, *(_snaps(prior_pair) if finalize_prior else [])],
+    )
+    prior_moved = next(row for row in prior_state.receipts if row.nonce == "moved")
+    assert prior_moved.admitted is True
+    assert prior_moved.finalized is finalize_prior
+
+    if mutate:
+        current_moved = [
+            replace(row, file=f"{row.file}.moved", ts=CAP + timedelta(minutes=5))
+            for row in _pair("moved", 100)
+        ]
+    else:
+        current_moved = prior_pair
+    state = _state(
+        [*genuine, *current_moved],
+        config=config,
+        prior=prior_state.receipts,
+        snapshots=[*genuine_snapshots, *_snaps(current_moved)],
+    )
+    return state, om.compute_oracles(state)
+
+
+def test_provisional_lineage_cannot_admit_out_of_window_evidence_into_green():
+    """The reproduced false green in Latch 4427 finding 1.
+
+    A nonce whose current evidence sits at CAP+5min inherited admission and the
+    in-window ``lineage_order_key`` from an admitted-but-unfinalized prior, and
+    reached ``v1_green`` with zero loss markers.
+    """
+
+    state, result = _lineage_probe_state(mutate=True, finalize_prior=False)
+
+    conflicts = [
+        marker
+        for marker in state.loss_markers
+        if marker.reason == "admitted_candidate_conflict"
+    ]
+    assert [marker.nonce for marker in conflicts] == ["moved"]
+    assert "timestamp_mismatch" in (conflicts[0].detail or "")
+    assert result.o2 == "indeterminate"
+    assert "loss_markers_present" in result.o2_reasons
+    assert result.v1_green is False
+
+
+def test_provisional_and_finalized_lineage_agree_under_the_same_mutation():
+    """Admission inheritance carries the same tamper detection in both classes."""
+
+    provisional_state, provisional = _lineage_probe_state(
+        mutate=True, finalize_prior=False
+    )
+    finalized_state, finalized = _lineage_probe_state(mutate=True, finalize_prior=True)
+
+    for state in (provisional_state, finalized_state):
+        moved = next(row for row in state.receipts if row.nonce == "moved")
+        # Lineage is still preserved in both classes -- this is not a revert of
+        # defect 1's repair.
+        assert moved.admitted is True
+        assert moved.lineage_order_key == T0 + timedelta(minutes=100)
+
+    assert provisional.v1_green is finalized.v1_green is False
+    assert provisional.o2 == finalized.o2 == "indeterminate"
+    assert provisional.o2_reasons == finalized.o2_reasons
+    assert provisional.eligible_n == finalized.eligible_n
+    assert provisional.marker_count == finalized.marker_count == 1
+
+    detail = {
+        marker.nonce: marker.detail
+        for state in (provisional_state, finalized_state)
+        for marker in state.loss_markers
+    }
+    assert set(detail) == {"moved"}
+
+
+def test_unmutated_provisional_rerun_stays_green_with_no_markers():
+    """The conflict check must not fire on an honest re-read of the same evidence."""
+
+    state, result = _lineage_probe_state(mutate=False, finalize_prior=False)
+    assert state.loss_markers == ()
+    assert result.eligible_n == result.d_min == 30
+    assert result.o2 == "pass"
+    assert result.o2_reasons == ()
+    assert result.v1_green is True
 
 
 def test_unfinalized_prior_partial_source_loss_is_explicit_and_monotone():
     provisional = replace(
         _state(_pair("partial-provisional", 1)).receipts[0], finalized=False
     )
-    current = [_obs("partial-provisional", om.SOURCE_GATE, 2)]
+    # The surviving source is the *same* gate row re-read, not a new one: one
+    # gate call writes one row per nonce, so its coordinates may shift but its
+    # content cannot. A genuinely different S1 row for an admitted nonce is a
+    # candidate conflict, covered separately above.
+    current = [_obs("partial-provisional", om.SOURCE_GATE, 1)]
     state = _state(current, prior=(provisional,))
     receipt = state.receipts[0]
 
