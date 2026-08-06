@@ -49,9 +49,6 @@ jobs:
           TRANSFORMERS_OFFLINE: "1"
         run: python -m pytest -q tests/test_proof_packet.py
 
-      - name: Install focused test runner
-        run: python -m pip install pytest
-
       - name: Run public release hygiene
         run: bash bin/latch_public_release_check.sh
 

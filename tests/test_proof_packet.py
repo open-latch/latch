@@ -28,6 +28,9 @@ RELEASE_ONLY_REASON = (
     "packet-currency check runs only at release; "
     "set LATCH_PROOF_RELEASE_CHECK=1 to enforce it"
 )
+# Release-only tests carry both a `skipif` mark and an in-body guard.  That is
+# deliberate, not redundant: the `__main__` block at the bottom calls every test
+# directly, and pytest marks do not apply on that path.
 
 
 def _assert(condition, message):
@@ -526,7 +529,7 @@ def test_readme_selects_seeded_canonical_evidence():
         "title": "Supporting staging evidence",
         "status": "staging",
     })
-    results = proof_packet.build_public_results(receipt)
+    results = proof_packet.build_public_results(receipt, verify_runtime=False)
     rendered = proof_packet.render_readme(results)
     expected = receipt["fixture"]["seeded_decision_id"]
     _assert(f"Cited canonical decision id={expected}" in rendered, rendered)
@@ -536,7 +539,7 @@ def test_readme_selects_seeded_canonical_evidence():
 
 def test_readme_derives_fixture_count():
     receipt = proof_packet.load_live_receipt()
-    results = proof_packet.build_public_results(receipt)
+    results = proof_packet.build_public_results(receipt, verify_runtime=False)
     results["wedge_v1"]["cases"] = 11
     rendered = proof_packet.render_readme(results)
     _assert("add value on these 11 fixtures" in rendered, rendered)
@@ -628,7 +631,9 @@ def test_failed_directory_swap_restores_last_good_packet():
             proof_packet.os, "replace", side_effect=fail_new_directory_swap
         ):
             try:
-                proof_packet.publish_packet(receipt, output_dir=output_dir)
+                proof_packet.publish_packet(
+                    receipt, output_dir=output_dir, verify_runtime=False,
+                )
             except OSError:
                 pass
             else:
@@ -643,7 +648,7 @@ def test_failed_directory_swap_restores_last_good_packet():
 
 def test_generated_packet_matches_derived_eval_results():
     receipt = proof_packet.load_live_receipt()
-    results = proof_packet.build_public_results(receipt)
+    results = proof_packet.build_public_results(receipt, verify_runtime=False)
     _assert(results["wedge_v1"]["ok"] is True, results["wedge_v1"])
     _assert(results["wedge_v1"]["modes"]["latch_evidence"]["passed"] ==
             results["wedge_v1"]["cases"], results["wedge_v1"])
@@ -656,6 +661,40 @@ def test_generated_packet_matches_derived_eval_results():
             results["wedge_v1"]["baseline_boundary"], results["wedge_v1"])
     proof_packet.assert_public_safe(results, label="test results")
     print("PASS generated_packet_matches_derived_eval_results")
+
+
+def test_derivation_survives_runtime_drift_but_release_still_enforces():
+    """Everyday CI must survive a routine runtime-bundle edit (PR #86 review).
+
+    Packet *currency* is a release gate.  Derivation and rendering run on every
+    merge, so they must not re-bind the receipt to the working tree: a VERSION
+    bump or a ``bin/`` wrapper change would otherwise turn CI red and force a
+    live gate recapture, which is the loop release-gating exists to break.  The
+    release path must keep enforcing it, so this pins both halves.
+    """
+    receipt = proof_packet.load_live_receipt()
+    drifted = mock.Mock(side_effect=proof_packet.ProofPacketError(
+        "proof runtime changed since the live receipt; recapture the live proof",
+    ))
+    with mock.patch.object(proof_packet, "assert_tested_runtime_matches", drifted):
+        results = proof_packet.build_public_results(receipt, verify_runtime=False)
+        _assert(
+            drifted.call_count == 0,
+            "everyday derivation must not re-verify the working tree",
+        )
+        _assert(
+            results["source_commit"] == receipt["source_commit"],
+            results["source_commit"],
+        )
+        try:
+            proof_packet.build_public_results(receipt)
+        except proof_packet.ProofPacketError:
+            pass
+        else:
+            raise AssertionError(
+                "release derivation must still enforce runtime currency",
+            )
+    print("PASS derivation_survives_runtime_drift_but_release_still_enforces")
 
 
 @pytest.mark.skipif(not RELEASE_CHECK_ENABLED, reason=RELEASE_ONLY_REASON)
@@ -707,13 +746,15 @@ def test_windows_workflow_propagates_proof_command_failures():
     proof_job = workflow.split("  proof-packet-windows:", 1)[1].split(
         "\n  cursor-cumulative-full-suite:", 1,
     )[0]
-    # Everyday CI runs only the drift-independent proof tests here; the
-    # packet-currency `--check` moved to the release workflow, leaving one
-    # guarded PowerShell command (the pytest run) in this job.
+    # Everyday CI runs the drift-independent proof tests plus a `--help` smoke
+    # of the PowerShell wrapper; the packet-currency `--check` moved to the
+    # release workflow.  Both commands stay guarded, so neither can fail
+    # silently the way the Windows proof job once did.
     _assert(
-        proof_job.count("if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }") == 1,
+        proof_job.count("if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }") == 2,
         proof_job,
     )
+    _assert("latch_proof_packet.ps1 --help" in proof_job, proof_job)
     print("PASS windows_workflow_propagates_proof_command_failures")
 
 
@@ -738,6 +779,7 @@ if __name__ == "__main__":
     test_failed_publication_preserves_last_good_packet()
     test_failed_directory_swap_restores_last_good_packet()
     test_generated_packet_matches_derived_eval_results()
+    test_derivation_survives_runtime_drift_but_release_still_enforces()
     test_packet_files_are_reproducible()
     test_wrapper_uses_configured_python()
     test_powershell_wrapper_forwards_interpreter_and_args()

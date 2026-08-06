@@ -427,11 +427,22 @@ def compact_mode(mode: dict[str, Any]) -> dict[str, Any]:
 
 
 def build_public_results(
-    live_receipt: dict[str, Any], *, root: Path = ROOT,
+    live_receipt: dict[str, Any], *, root: Path = ROOT, verify_runtime: bool = True,
 ) -> dict[str, Any]:
+    """Derive the public results payload from an observed live receipt.
+
+    ``verify_runtime`` re-binds the receipt to the current working tree.  It
+    stays on for every production caller — ``generate_packet`` and through it
+    ``publish_packet`` and ``check_generated`` — which is what makes the
+    release-time packet-currency guarantee real.  Tests that exercise
+    derivation or rendering pass ``False``, so a routine runtime-bundle edit (a
+    VERSION bump, a ``bin/`` wrapper change) does not turn everyday CI red and
+    force a live gate recapture.
+    """
     validate_live_receipt(live_receipt)
     tested_commit = live_receipt["source_commit"]
-    assert_tested_runtime_matches(live_receipt, root=root)
+    if verify_runtime:
+        assert_tested_runtime_matches(live_receipt, root=root)
     wedge = evals.run_cases(evals.load_cases([evals.DEFAULT_FIXTURE]))
     seed_report = seed_report_evals.run_seed_report_eval()
     comparison = wedge["summary"]["comparisons"]["latch_evidence_vs_memory_like"]
@@ -672,8 +683,11 @@ def write_json(path: Path, value: dict[str, Any]) -> None:
 
 def generate_packet(
     live_receipt: dict[str, Any], *, output_dir: Path = PROOF_DIR, root: Path = ROOT,
+    verify_runtime: bool = True,
 ) -> tuple[dict[str, Any], str]:
-    results = build_public_results(live_receipt, root=root)
+    results = build_public_results(
+        live_receipt, root=root, verify_runtime=verify_runtime,
+    )
     readme = render_readme(results)
     write_json(output_dir / "results.json", results)
     (output_dir / "README.md").write_text(readme, encoding="utf-8")
@@ -682,8 +696,14 @@ def generate_packet(
 
 def publish_packet(
     live_receipt: dict[str, Any], *, output_dir: Path = PROOF_DIR, root: Path = ROOT,
+    verify_runtime: bool = True,
 ) -> None:
-    """Build and validate the complete packet before swapping artifact directories."""
+    """Build and validate the complete packet before swapping artifact directories.
+
+    ``verify_runtime`` forwards to :func:`build_public_results`; tests covering
+    the atomic swap and restore semantics pass ``False`` so they exercise
+    directory handling rather than packet currency.
+    """
     output_dir.parent.mkdir(parents=True, exist_ok=True)
     temp_dir = Path(tempfile.mkdtemp(prefix=".latch-proof-publish-", dir=output_dir.parent))
     backup_root = Path(tempfile.mkdtemp(prefix=".latch-proof-backup-", dir=output_dir.parent))
@@ -691,7 +711,10 @@ def publish_packet(
     expected_names = {"live_gate_receipt.json", "results.json", "README.md"}
     try:
         write_json(temp_dir / "live_gate_receipt.json", live_receipt)
-        generate_packet(live_receipt, output_dir=temp_dir, root=root)
+        generate_packet(
+            live_receipt, output_dir=temp_dir, root=root,
+            verify_runtime=verify_runtime,
+        )
         load_live_receipt(temp_dir / "live_gate_receipt.json")
         json.loads((temp_dir / "results.json").read_text(encoding="utf-8"))
         rendered = (temp_dir / "README.md").read_text(encoding="utf-8")
