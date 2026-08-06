@@ -9,8 +9,6 @@ import tempfile
 from pathlib import Path
 from unittest import mock
 
-import pytest
-
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import proof_packet  # noqa: E402
@@ -18,19 +16,14 @@ import proof_packet  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 
-# Packet *currency* (the committed proof/ matching the current tree and directly
-# following its source commit) is enforced only at release, not on every merge.
-# The release workflow sets LATCH_PROOF_RELEASE_CHECK=1; everyday CI keeps every
-# other proof guard (receipt shape, safety, CRLF, reproducible generation logic)
-# running but skips the drift-sensitive currency assertions below.
-RELEASE_CHECK_ENABLED = os.environ.get("LATCH_PROOF_RELEASE_CHECK") == "1"
-RELEASE_ONLY_REASON = (
-    "packet-currency check runs only at release; "
-    "set LATCH_PROOF_RELEASE_CHECK=1 to enforce it"
-)
-# Release-only tests carry both a `skipif` mark and an in-body guard.  That is
-# deliberate, not redundant: the `__main__` block at the bottom calls every test
-# directly, and pytest marks do not apply on that path.
+# Packet *currency* — the committed proof/ being byte-current with the tree and
+# a direct child of its source commit — is enforced only at release, via the
+# fail-closed `bin/latch_proof_packet.sh --check` CLI wired into release.yml (and
+# the manual release-readiness workflow). It is deliberately NOT a mode of this
+# test module: a skipped test exits 0, so an env-gated currency check would fail
+# open if the flag were ever dropped. Everyday CI runs every proof guard here
+# unconditionally, including the drift-independent README/packet consistency
+# check; only the genuinely drift-sensitive regeneration lives behind `--check`.
 
 
 def _assert(condition, message):
@@ -547,7 +540,6 @@ def test_readme_derives_fixture_count():
     print("PASS readme_derives_fixture_count")
 
 
-@pytest.mark.skipif(not RELEASE_CHECK_ENABLED, reason=RELEASE_ONLY_REASON)
 def test_root_readme_gate_verdict_matches_proof_packet():
     """Cross-surface guard (PR #37 review, node 2553).
 
@@ -556,10 +548,11 @@ def test_root_readme_gate_verdict_matches_proof_packet():
     the live gate recommendation silently leaves ``README.md`` advertising a
     stale verdict.  This asserts the root README's live-gate row matches the
     generated packet.
+
+    It only compares two committed files, so it is drift-independent and runs on
+    every merge — a PR must not be able to change the public README's advertised
+    verdict without CI noticing.
     """
-    if not RELEASE_CHECK_ENABLED:
-        print("SKIP root_readme_gate_verdict_matches_proof_packet (release-only)")
-        return
     import json
     import re
 
@@ -697,15 +690,6 @@ def test_derivation_survives_runtime_drift_but_release_still_enforces():
     print("PASS derivation_survives_runtime_drift_but_release_still_enforces")
 
 
-@pytest.mark.skipif(not RELEASE_CHECK_ENABLED, reason=RELEASE_ONLY_REASON)
-def test_packet_files_are_reproducible():
-    if not RELEASE_CHECK_ENABLED:
-        print("SKIP packet_files_are_reproducible (release-only)")
-        return
-    proof_packet.check_generated(proof_packet.load_live_receipt())
-    print("PASS packet_files_are_reproducible")
-
-
 def test_wrapper_uses_configured_python():
     bash = shutil.which("bash")
     _assert(bash is not None, "bash is required for the shell wrapper test")
@@ -773,8 +757,32 @@ def test_release_readiness_workflow_is_check_only():
     _assert("pull_request" not in workflow, workflow)
     _assert("push:" not in workflow, workflow)
     _assert("gh release create" not in workflow, workflow)
-    _assert("LATCH_PROOF_RELEASE_CHECK" in workflow, workflow)
+    _assert("bin/latch_proof_packet.sh --check" in workflow, workflow)
     print("PASS release_readiness_workflow_is_check_only")
+
+
+def test_release_workflow_enforces_packet_currency():
+    """The release job must run the fail-closed currency gate (PR #86 review).
+
+    Currency enforcement moved off every-merge CI, so the release workflow is the
+    load-bearing gate. It must invoke the `--check` CLI — which cannot silently
+    no-op the way a skipped, env-gated test can — before it publishes. Guarding
+    the wiring here means deleting or bypassing the gate breaks CI, mirroring
+    test_windows_workflow_propagates_proof_command_failures.
+    """
+    workflow = (
+        ROOT / ".github" / "workflows" / "release.yml"
+    ).read_text(encoding="utf-8")
+    verify_job = workflow.split("  verify-and-publish:", 1)[1]
+    check_index = verify_job.find("bin/latch_proof_packet.sh --check")
+    publish_index = verify_job.find("gh release create")
+    _assert(check_index != -1, "release job must run bin/latch_proof_packet.sh --check")
+    _assert(publish_index != -1, "release job must publish with gh release create")
+    _assert(
+        check_index < publish_index,
+        "the currency gate must run before the publish step",
+    )
+    print("PASS release_workflow_enforces_packet_currency")
 
 
 if __name__ == "__main__":
@@ -799,9 +807,9 @@ if __name__ == "__main__":
     test_failed_directory_swap_restores_last_good_packet()
     test_generated_packet_matches_derived_eval_results()
     test_derivation_survives_runtime_drift_but_release_still_enforces()
-    test_packet_files_are_reproducible()
     test_wrapper_uses_configured_python()
     test_powershell_wrapper_forwards_interpreter_and_args()
     test_windows_workflow_propagates_proof_command_failures()
     test_release_readiness_workflow_is_check_only()
+    test_release_workflow_enforces_packet_currency()
     print("\nAll proof packet tests pass.")

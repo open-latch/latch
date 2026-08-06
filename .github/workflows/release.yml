@@ -41,13 +41,15 @@ jobs:
       - name: Verify the public proof packet is current for this release
         # Release is the single point where the committed proof/ must be
         # byte-current with the tagged tree and directly follow its source
-        # commit. Everyday merges skip this; a stale packet blocks the release,
-        # so recapture (bin/latch_proof_packet.sh --capture-live) before tagging.
+        # commit. This is the fail-closed `--check` CLI, not an env-gated test
+        # subset: it regenerates the packet and errors on any drift, so it cannot
+        # silently no-op. A stale packet blocks the release; recapture with
+        # bin/latch_proof_packet.sh --capture-live before tagging. The wiring is
+        # pinned by test_release_workflow_enforces_packet_currency.
         env:
-          LATCH_PROOF_RELEASE_CHECK: "1"
           HF_HUB_OFFLINE: "1"
           TRANSFORMERS_OFFLINE: "1"
-        run: python -m pytest -q tests/test_proof_packet.py
+        run: bash bin/latch_proof_packet.sh --check
 
       - name: Run public release hygiene
         run: bash bin/latch_public_release_check.sh
