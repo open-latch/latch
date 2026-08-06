@@ -1,6 +1,6 @@
 # V2 — "genuine rejection" rubric (pre-registered)
 
-Roadmap item **V2** (decision 3948) introduces a typed `rejected` status with fields
+Phase V item **V2** (decision 3948) introduces a typed `rejected` status with fields
 `{option, reason, ratifier, date, scope predicate}` and backfills existing decisions.
 Its PASS bar is **≥20 genuine rejections**; below 20 fires the RETHINK branch
 (wedge is steering-only; claim ladder repositions per 3938).
@@ -36,7 +36,7 @@ sampling, no top-N.
 ## Disqualifiers (explicit, because the current detector trips on all of them)
 
 - **D1 — Self-reference.** The node mentions Latch's own rejection machinery
-  (`typed rejected`, `rejected-path catch`, `ratified/rejected`, roadmap text
+  (`typed rejected`, `rejected-path catch`, `ratified/rejected`, plan text
   describing V2) rather than recording a rejection. Sampling found this to be the
   dominant false-positive class: 3948, 3950, 3952, 3938, 3939, 3931, 3926 all match
   the current substring detector on self-reference alone.

@@ -22,6 +22,7 @@ DOCS_MARKDOWN_ALLOW = {
     "docs/agent-contract-reference.md",
     "docs/first_run_mission.md",
     "docs/mcp_resource_architecture.md",
+    "docs/v2_rejection_rubric.md",
 }
 
 GUARD_IMPLEMENTATION_FILES = {
