@@ -1870,16 +1870,133 @@ def test_m5_protocol_bump_reprocesses_while_same_generation_is_immutable():
     assert new.disposition == "pilot"
 
 
-def test_unfinalized_prior_receipt_is_not_lineage_authority():
+def test_unfinalized_prior_preserves_lineage_without_freezing_outcome():
     provisional = replace(
         _state(_pair("provisional", 1)).receipts[0], finalized=False
     )
     outside = CAP + timedelta(minutes=1)
-    current = _pair("provisional", 1, ts=outside)
+    current = _pair(
+        "provisional",
+        1,
+        ts=outside,
+        verdict="DO_NOT_PROCEED",
+        progress=1,
+    )
     state = _state(current, prior=(provisional,))
     receipt = state.receipts[0]
-    assert receipt.admitted is False
-    assert receipt.lineage_order_key == outside
+    assert receipt.admitted is True
+    assert receipt.lineage_order_key == provisional.lineage_order_key
+    assert receipt.fresh_ts == outside
+    assert receipt.outcome == "OVERRIDDEN"
+    assert receipt.outcome != provisional.outcome
+
+
+def test_unfinalized_prior_partial_source_loss_is_explicit_and_monotone():
+    provisional = replace(
+        _state(_pair("partial-provisional", 1)).receipts[0], finalized=False
+    )
+    current = [_obs("partial-provisional", om.SOURCE_GATE, 2)]
+    state = _state(current, prior=(provisional,))
+    receipt = state.receipts[0]
+
+    assert receipt.admitted is True
+    assert receipt.lineage_order_key == provisional.lineage_order_key
+    assert receipt.disposition == "loss_signal"
+    assert receipt.loss_reasons == ("gate_only",)
+    assert [
+        (marker.reason, marker.source, marker.nonce)
+        for marker in state.loss_markers
+    ] == [
+        (
+            "admitted_source_deleted",
+            om.SOURCE_HOST,
+            "partial-provisional",
+        )
+    ]
+
+
+def test_missing_admitted_unfinalized_prior_receipts_cannot_improve_verdict():
+    config = _config(fresh=True)
+    provisional_rows = []
+    retained_rows = []
+    retained_snapshots = []
+    for index in range(35):
+        nonce = (
+            f"provisional-loss-{index}"
+            if index < 5
+            else f"retained-{index}"
+        )
+        pair = [
+            replace(row, file=f"{row.file}.{nonce}")
+            for row in _pair(nonce, index)
+        ]
+        if index < 5:
+            provisional_rows.extend(pair)
+            continue
+        retained_rows.extend(pair)
+        retained_snapshots.extend(
+            om.SnapshotReceipt(
+                source=row.source,
+                file=row.file,
+                first_sha256="a" * 64,
+                second_sha256="a" * 64,
+                snapshot_taken=row.ts + timedelta(seconds=om.FRESHNESS_SECONDS),
+            )
+            for row in pair
+        )
+
+    prior_state = _state(
+        [*provisional_rows, *retained_rows],
+        config=config,
+        snapshots=retained_snapshots,
+    )
+    by_nonce = {row.nonce: row for row in prior_state.receipts}
+    assert all(
+        not by_nonce[f"provisional-loss-{index}"].finalized
+        for index in range(5)
+    )
+    assert all(
+        by_nonce[f"retained-{index}"].finalized
+        for index in range(5, 35)
+    )
+    prior_result = om.compute_oracles(prior_state)
+    assert prior_result.o2 == "indeterminate"
+    assert prior_result.v1_green is False
+    assert "unfinalized_receipts" in prior_result.o2_reasons
+
+    current_state = _state(
+        retained_rows,
+        config=config,
+        prior=prior_state.receipts,
+        snapshots=retained_snapshots,
+    )
+    current_result = om.compute_oracles(current_state)
+
+    assert current_result.eligible_n == current_result.d_min == 30
+    assert current_result.marker_count == 10
+    assert current_state.hard_invalidations == ()
+    assert current_result.o2 == "indeterminate"
+    assert current_result.v1_green is False
+    assert "loss_markers_present" in current_result.o2_reasons
+    assert "unfinalized_receipts" in current_result.o2_reasons
+    assert {
+        marker.nonce
+        for marker in current_state.loss_markers
+        if marker.reason == "admitted_source_deleted"
+    } == {f"provisional-loss-{index}" for index in range(5)}
+    missing = {
+        row.nonce: row
+        for row in current_state.receipts
+        if row.nonce.startswith("provisional-loss-")
+    }
+    assert set(missing) == {
+        f"provisional-loss-{index}" for index in range(5)
+    }
+    assert all(row.admitted and row.prefix_member for row in missing.values())
+    assert all(not row.finalized for row in missing.values())
+    assert all(row.disposition == "loss_signal" for row in missing.values())
+    assert all(row.outcome == "CENSORED" for row in missing.values())
+    assert all(row.verdict is None for row in missing.values())
 
 
 def test_impossible_stored_receipts_hard_invalidate_before_arithmetic():
@@ -2075,6 +2192,141 @@ def test_exact_s2_receipt_evidence_propagates_to_s1_without_session_id():
     assert final.receipts[0].disposition == "confirmatory"
     assert final.receipts[0].outcome == "ACCEPTED"
     assert final.receipts[0].censored_reason is None
+
+
+@pytest.mark.parametrize("coordinate_axis", ("file", "byte_offset"))
+def test_duplicate_physical_coordinates_cannot_manufacture_o2_failure(
+    coordinate_axis,
+):
+    rows = []
+    for index in range(30):
+        nonce = f"coordinate-alias-{coordinate_axis}-{index}"
+        session = f"coordinate-session-{index}"
+        pair = _pair(
+            nonce,
+            index,
+            session=session,
+            observable=None,
+            evidence_available=False,
+            progress=0,
+        )
+        rows.extend(pair)
+        if index >= 10:
+            continue
+        if coordinate_axis == "file":
+            alias = replace(
+                pair[0],
+                file=f"{pair[0].file}.physical-alias-{index}",
+            )
+        else:
+            alias = replace(
+                pair[0],
+                byte_offset=pair[0].byte_offset + 10_000,
+            )
+        rows.append(alias)
+
+    preliminary = _state(rows)
+    assert len(preliminary.receipts) == 30
+
+    applied, markers = om._apply_outcome_evidence(
+        rows,
+        preliminary.receipts,
+        {},
+        _config(),
+        lambda receipts, _stable_bytes, _config: tuple(
+            om.OutcomeEvidence(
+                nonce=receipt.nonce,
+                session_id=receipt.session_id,
+                observable=True,
+                evidence_available=True,
+                adapter="codex",
+                project_fingerprint=_proof()["fingerprint"],
+                progress_inserts=1,
+            )
+            for receipt in receipts
+        ),
+    )
+    assert not markers
+
+    final = _state(applied)
+    result = om.compute_oracles(final)
+    assert all(
+        receipt.disposition == "confirmatory"
+        and receipt.outcome == "ACCEPTED"
+        and not receipt.conflict_reasons
+        for receipt in final.receipts
+    )
+    assert (result.eligible_n, result.d_min) == (30, 30)
+    assert result.o2 == "pass"
+    assert result.v1_green is True
+
+
+def test_shifted_offsets_rejoin_evidence_for_immutable_receipts():
+    rows = [
+        row
+        for index in range(30)
+        for row in _pair(
+            f"immutable-offset-shift-{index}",
+            index,
+            session=f"immutable-offset-session-{index}",
+            observable=None,
+            evidence_available=False,
+            progress=0,
+        )
+    ]
+
+    def resolve(receipts, _stable_bytes, _config):
+        return tuple(
+            om.OutcomeEvidence(
+                nonce=receipt.nonce,
+                session_id=receipt.session_id,
+                observable=True,
+                evidence_available=True,
+                adapter="codex",
+                project_fingerprint=_proof()["fingerprint"],
+                progress_inserts=1,
+            )
+            for receipt in receipts
+        )
+
+    preliminary = _state(rows)
+    applied, markers = om._apply_outcome_evidence(
+        rows,
+        preliminary.receipts,
+        {},
+        _config(),
+        resolve,
+    )
+    assert not markers
+    prior_state = _state(applied)
+    assert om.compute_oracles(prior_state).v1_green is True
+
+    shifted = [
+        replace(row, byte_offset=row.byte_offset + 10_000)
+        for row in rows
+    ]
+    shifted_preliminary = _state(
+        shifted,
+        prior=prior_state.receipts,
+    )
+    reapplied, markers = om._apply_outcome_evidence(
+        shifted,
+        shifted_preliminary.receipts,
+        {},
+        _config(),
+        resolve,
+    )
+    assert not markers
+
+    final = _state(reapplied, prior=prior_state.receipts)
+    result = om.compute_oracles(final)
+    assert not any(
+        marker.reason == "finalized_candidate_conflict"
+        for marker in final.loss_markers
+    )
+    assert (result.eligible_n, result.d_min) == (30, 30)
+    assert result.o2 == "pass"
+    assert result.v1_green is True
 
 
 def test_malformed_receipt_evidence_is_isolated_by_exact_identity():

@@ -532,43 +532,80 @@ def _marker_is_proven_foreign(
     )
 
 
+def _observation_content_key(row: Observation) -> tuple[Any, ...]:
+    """Return the coordinate-independent identity used for exact deduplication."""
+
+    return (
+        row.source,
+        row.adapter,
+        row.nonce,
+        _iso(row.ts),
+        row.session_id,
+        row.attestation,
+        row.measurement_protocol_version,
+        tuple(sorted((row.project_proof or {}).items())),
+        tuple(sorted((row.host_scope_project_proof or {}).items())),
+        row.key_epoch,
+        row.runtime_version,
+        row.verdict,
+        tuple(
+            sorted(
+                (name, tuple(value))
+                for name, value in (row.verdict_id_lists or {}).items()
+            )
+        ),
+        row.skipped,
+        row.observable,
+        row.evidence_available,
+        row.progress_inserts,
+        row.inserts,
+        row.linked_cited_insert,
+        row.cited_edge_activity,
+        row.touches,
+        row.embedded_conflict_reasons,
+        row.legacy_project,
+        row.hash_annotated,
+        row.pre_nonce,
+        row.raw_sha256,
+    )
+
+
+def _observation_evidence_join_key(row: Observation) -> tuple[Any, ...]:
+    """Return source identity without coordinates or resolver-owned outputs."""
+
+    return (
+        row.source,
+        row.adapter,
+        row.nonce,
+        _iso(row.ts),
+        row.session_id,
+        row.attestation,
+        row.measurement_protocol_version,
+        tuple(sorted((row.project_proof or {}).items())),
+        tuple(sorted((row.host_scope_project_proof or {}).items())),
+        row.key_epoch,
+        row.runtime_version,
+        row.verdict,
+        tuple(
+            sorted(
+                (name, tuple(value))
+                for name, value in (row.verdict_id_lists or {}).items()
+            )
+        ),
+        row.skipped,
+        row.embedded_conflict_reasons,
+        row.legacy_project,
+        row.hash_annotated,
+        row.pre_nonce,
+        row.raw_sha256,
+    )
+
+
 def _deduplicate_identical(observations: Sequence[Observation]) -> tuple[Observation, ...]:
     seen: set[tuple[Any, ...]] = set()
     result: list[Observation] = []
     for row in observations:
-        key = (
-            row.source,
-            row.adapter,
-            row.nonce,
-            _iso(row.ts),
-            row.session_id,
-            row.attestation,
-            row.measurement_protocol_version,
-            tuple(sorted((row.project_proof or {}).items())),
-            tuple(sorted((row.host_scope_project_proof or {}).items())),
-            row.key_epoch,
-            row.runtime_version,
-            row.verdict,
-            tuple(
-                sorted(
-                    (name, tuple(value))
-                    for name, value in (row.verdict_id_lists or {}).items()
-                )
-            ),
-            row.skipped,
-            row.observable,
-            row.evidence_available,
-            row.progress_inserts,
-            row.inserts,
-            row.linked_cited_insert,
-            row.cited_edge_activity,
-            row.touches,
-            row.embedded_conflict_reasons,
-            row.legacy_project,
-            row.hash_annotated,
-            row.pre_nonce,
-            row.raw_sha256,
-        )
+        key = _observation_content_key(row)
         if key in seen:
             continue
         seen.add(key)
@@ -968,9 +1005,6 @@ def _lineage_by_nonce(
 ) -> dict[str, ReceiptLineage]:
     result: dict[str, ReceiptLineage] = {}
     for row in prior_receipts:
-        if isinstance(row, InvocationReceipt) and not row.finalized:
-            # Provisional/pre-drain rows are not monotone lineage authority.
-            continue
         lineage = row.lineage if isinstance(row, InvocationReceipt) else row
         existing = result.get(lineage.nonce)
         if existing is None:
@@ -1267,6 +1301,51 @@ def fold_observations(
     finalized_prior_by_nonce: dict[str, list[InvocationReceipt]] = defaultdict(list)
     for prior_receipt in all_finalized_rows:
         finalized_prior_by_nonce[prior_receipt.nonce].append(prior_receipt)
+    full_prior_by_nonce: dict[str, list[InvocationReceipt]] = defaultdict(list)
+    for prior_receipt in prior_rows:
+        if isinstance(prior_receipt, InvocationReceipt):
+            full_prior_by_nonce[prior_receipt.nonce].append(prior_receipt)
+
+    # Admission is any-source monotone even before finalization. If only part
+    # of a provisional receipt survives reprocessing, retain its lineage and
+    # make each previously observed source deletion explicit. Total deletion
+    # is handled by the synthesis loop below.
+    for nonce, authority_rows in full_prior_by_nonce.items():
+        provisional_rows = tuple(
+            row
+            for row in authority_rows
+            if not row.finalized
+            and row.admitted
+            and row.disposition != "foreign_project"
+        )
+        if not provisional_rows or nonce not in grouped:
+            continue
+        prior_sources = {
+            observation.source
+            for row in provisional_rows
+            for observation in row.observations + row.boundary_evidence
+            if observation.source in SOURCES
+        }
+        current_sources = {
+            observation.source
+            for generation_rows in grouped[nonce].values()
+            for observation in generation_rows
+        }
+        session_ids = {
+            row.session_id for row in provisional_rows if row.session_id
+        }
+        session_id = next(iter(session_ids)) if len(session_ids) == 1 else None
+        for missing_source in sorted(prior_sources - current_sources):
+            marker_rows.append(
+                LossMarker(
+                    reason="admitted_source_deleted",
+                    source=missing_source,
+                    session_id=session_id,
+                    nonce=nonce,
+                    ts=prior[nonce].lineage_order_key,
+                    in_scope=True,
+                )
+            )
     for (nonce, protocol), receipt in immutable.items():
         current_candidates = [
             row
@@ -1400,10 +1479,11 @@ def fold_observations(
             )
         )
 
-    # M5: a protocol bump reprocesses admitted lineage even when every current
-    # source observation has disappeared. A full finalized prior receipt is
-    # still identity/classification authority; carry its admission/order into
-    # a new-generation receipt and make the two deleted sources explicit.
+    # M5: admitted lineage survives reprocessing even when every current source
+    # observation has disappeared. A full prior receipt supplies structural
+    # boundary authority, but a provisional prior never makes its old outcome
+    # immutable: it becomes an unfinalized censored loss receipt that can be
+    # re-evaluated when evidence returns.
     for nonce, ancestor in prior.items():
         if (
             not ancestor.admitted
@@ -1411,7 +1491,7 @@ def fold_observations(
             or (nonce, config.measurement_protocol_version) in immutable
         ):
             continue
-        authority_rows = finalized_prior_by_nonce.get(nonce, [])
+        authority_rows = full_prior_by_nonce.get(nonce, [])
         if not authority_rows:
             # Bare ReceiptLineage proves no target-local disposition. Keep
             # deletion visible without inflating D_min or claiming foreignness.
@@ -1428,8 +1508,10 @@ def fold_observations(
         for row in authority_rows:
             by_protocol[row.measurement_protocol_version].append(row)
         if any(len(rows) != 1 for rows in by_protocol.values()):
-            # Duplicate finalized authority was already hard-invalidated above;
-            # do not pick an arbitrary row for M5 synthesis.
+            # Never pick arbitrary authority when one generation has multiple
+            # full receipts. Finalized duplicates were hard-invalidated above;
+            # provisional duplicates fail closed here as well.
+            invalidation_rows.add("ambiguous_prior_generation_authority")
             continue
         protocols = tuple(by_protocol)
         if len(protocols) == 1:
@@ -1459,13 +1541,19 @@ def fold_observations(
             authority = by_protocol[latest[0]][0]
         non_target = authority.disposition in {"skipped", "foreign_project"}
         if authority.disposition != "foreign_project":
+            deletion_reason = (
+                "finalized_source_deleted"
+                if authority.finalized
+                else "admitted_source_deleted"
+            )
             for source in SOURCES:
                 marker_rows.append(
                     LossMarker(
-                        reason="finalized_source_deleted",
+                        reason=deletion_reason,
                         source=source,
                         session_id=authority.session_id,
                         nonce=nonce,
+                        ts=authority.fresh_ts or ancestor.lineage_order_key,
                         in_scope=True,
                     )
                 )
@@ -1483,7 +1571,7 @@ def fold_observations(
                 outcome=None if non_target else "CENSORED",
                 censored_reason=(None if non_target else "instrument_unavailable"),
                 loss_reasons=(() if non_target else ("gate_only", "host_only")),
-                finalized=True,
+                finalized=authority.finalized,
                 window_start=None,
                 window_end=None,
                 boundary_evidence=(
@@ -3962,10 +4050,13 @@ def _apply_outcome_evidence(
             # to match; it must not abort evidence application for its peers.
             continue
 
-    evidence_by_observation: dict[
-        tuple[str, str, int], OutcomeEvidence
-    ] = {}
-    invalid_observations: set[tuple[str, str, int]] = set()
+    # Preliminary receipts intentionally deduplicate identical observations
+    # without considering file/offset. Reapply evidence over a matching
+    # coordinate-independent source identity that also excludes resolver-owned
+    # outputs: an immutable receipt contains the prior run's resolved values,
+    # while newly parsed rows still contain their unresolved defaults.
+    evidence_by_observation: dict[tuple[Any, ...], OutcomeEvidence] = {}
+    invalid_observations: set[tuple[Any, ...]] = set()
     for receipt in preliminary_receipts:
         candidates = {
             (
@@ -3993,18 +4084,21 @@ def _apply_outcome_evidence(
         if evidence is None:
             continue
         for observation in receipt.observations:
-            if observation.obs_id in invalid_observations:
+            observation_key = _observation_evidence_join_key(observation)
+            if observation_key in invalid_observations:
                 continue
-            prior = evidence_by_observation.get(observation.obs_id)
+            prior = evidence_by_observation.get(observation_key)
             if prior is not None and prior != evidence:
-                evidence_by_observation.pop(observation.obs_id, None)
-                invalid_observations.add(observation.obs_id)
+                evidence_by_observation.pop(observation_key, None)
+                invalid_observations.add(observation_key)
                 continue
-            evidence_by_observation[observation.obs_id] = evidence
+            evidence_by_observation[observation_key] = evidence
 
     result: list[Observation] = []
     for row in rows:
-        evidence = evidence_by_observation.get(row.obs_id)
+        evidence = evidence_by_observation.get(
+            _observation_evidence_join_key(row)
+        )
         if evidence is None:
             result.append(replace(row, observable=None, evidence_available=False))
             continue

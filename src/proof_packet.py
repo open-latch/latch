@@ -43,6 +43,7 @@ RUNTIME_BUNDLE_FILES = (
     "bin/latch_proof_packet.sh",
     "bin/latch_proof_packet.ps1",
     "bin/latch_seed_report_eval.sh",
+    "bin/run_latch_outcome_audit.sh",
 )
 NO_EDIT_PROOF_FIELDS = (
     "command",
