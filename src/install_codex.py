@@ -40,6 +40,9 @@ CONFIG_PATH = CODEX_HOME / "config.toml"
 HOOKS_PATH = CODEX_HOME / "hooks.json"
 DEFAULT_SKILLS_DIR = Path.home() / ".agents" / "skills"
 CODEX_SKILLS_SRC = KB_HOME / ".agents" / "skills"
+CODEX_REVIEW_SKILL_SRC = (
+    KB_HOME / "templates" / "codex" / "source-command-latch-review"
+)
 CODEX_SKILL_MARKER = "<!-- latch-codex-skill: managed -->"
 CODEX_SKILL_NAMES = (
     "source-command-latch-budget-approve",
@@ -66,6 +69,12 @@ class CodexSkillCollisionError(RuntimeError):
 
 class CodexConfigMergeError(RuntimeError):
     pass
+
+
+def _codex_skill_source_dir(name: str) -> Path:
+    if name == "source-command-latch-review":
+        return CODEX_REVIEW_SKILL_SRC
+    return CODEX_SKILLS_SRC / name
 
 
 def _toml_string(value: str) -> str:
@@ -473,7 +482,7 @@ def config_status(path: Path, python_path: str, server_py: str) -> tuple[bool, s
 def _raw_codex_skill(name: str) -> str:
     if name not in CODEX_SKILL_NAMES:
         raise ValueError(f"unsupported Codex skill: {name}")
-    source = CODEX_SKILLS_SRC / name / "SKILL.md"
+    source = _codex_skill_source_dir(name) / "SKILL.md"
     if not source.is_file():
         raise FileNotFoundError(source)
     return source.read_text(encoding="utf-8")
@@ -494,7 +503,7 @@ def render_codex_skill(name: str) -> str:
 
 
 def _desired_codex_skill_files(name: str) -> dict[Path, str]:
-    source_dir = CODEX_SKILLS_SRC / name
+    source_dir = _codex_skill_source_dir(name)
     if not source_dir.is_dir():
         raise FileNotFoundError(source_dir)
     desired: dict[Path, str] = {}

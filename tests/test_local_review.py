@@ -28,6 +28,22 @@ SCHEMA_CANARY = json.loads(
 )
 
 
+def test_review_wrappers_use_fixed_interpreter_order_and_runner_exit_contract():
+    bash = (ROOT / "bin" / "latch-review").read_text(encoding="utf-8")
+    powershell = (ROOT / "bin" / "latch-review.ps1").read_text(encoding="utf-8")
+    assert "${LATCH_PYTHON" not in bash
+    assert "${CLAUDE_KB_PYTHON" not in bash
+    assert "command -v python3" in bash
+    assert "command -v python" in bash
+    assert "Python 3.11 or newer" in bash
+    assert "exit 2" in bash
+    assert "$env:LATCH_PYTHON" not in powershell
+    assert "$env:CLAUDE_KB_PYTHON" not in powershell
+    assert "Get-Command python3, python" in powershell
+    assert "Python 3.11 or newer" in powershell
+    assert powershell.count("exit 2") >= 3
+
+
 def _schema_patterns(value):
     if isinstance(value, dict):
         pattern = value.get("pattern")
@@ -528,6 +544,59 @@ def test_range_and_commit_scope_are_immutable(tmp_path: Path):
     assert commit_scope.head_sha == head
 
 
+@pytest.mark.parametrize(
+    "revision",
+    ["-HEAD", "HEAD;touch", "HEAD $(id)", "HEAD\nmain", "HEAD\\main"],
+)
+def test_revision_scope_rejects_shell_and_option_syntax_before_git(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    revision: str,
+):
+    called = False
+
+    def forbidden(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("git must not receive an invalid revision")
+
+    monkeypatch.setattr(local_review, "_git", forbidden)
+    with pytest.raises(ValueError, match="unsupported characters"):
+        local_review._rev_parse(tmp_path, revision, "fixture")
+    assert called is False
+
+
+def test_revision_scope_uses_git_end_of_options(tmp_path: Path, monkeypatch):
+    observed: list[str] = []
+
+    def fake_git(_repo, *args, **_kwargs):
+        observed.extend(args)
+        return subprocess.CompletedProcess(args, 0, "a" * 40 + "\n", "")
+
+    monkeypatch.setattr(local_review, "_git", fake_git)
+    assert local_review._rev_parse(tmp_path, "main", "fixture") == "a" * 40
+    assert observed == [
+        "rev-parse",
+        "--verify",
+        "--end-of-options",
+        "main^{commit}",
+    ]
+
+
+def test_pull_request_scope_rejects_nonpositive_number_before_gh(
+    tmp_path: Path, monkeypatch
+):
+    monkeypatch.setattr(
+        local_review,
+        "_run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("gh must not run")
+        ),
+    )
+    with pytest.raises(ValueError, match="positive integer"):
+        local_review._resolve_pr(tmp_path, 0, "owner/repo", tmp_path / "work")
+
+
 def test_root_commit_uses_the_empty_tree(tmp_path: Path):
     repo = tmp_path / "root-repo"
     repo.mkdir()
@@ -792,6 +861,8 @@ def test_provider_commands_pin_models_and_isolate_provider_tools(tmp_path: Path)
     )
     codex_schema = json.loads(codex_schema_path.read_text(encoding="utf-8"))
     assert claude_schema == codex_schema
+    assert "normalization_dropped_findings" not in claude_schema["properties"]
+    assert "normalization_dropped_findings" not in claude_schema["required"]
     assert claude_schema["$schema"] == SCHEMA_CANARY["claude"][
         "compatible_schema_uri"
     ]
@@ -1205,31 +1276,23 @@ def test_fake_providers_reject_the_live_canary_schema_failures(
     assert expected in result.detail
 
 
-def test_fake_codex_rejects_an_optional_object_property_in_strict_schema(
+def test_provider_schema_excludes_trusted_normalization_fields(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    schema = json.loads(local_review.SCHEMA_PATH.read_text(encoding="utf-8"))
-    schema["required"].remove("normalization_dropped_findings")
-    schema_path = tmp_path / "review.schema.json"
-    schema_path.write_text(json.dumps(schema), encoding="utf-8")
-    monkeypatch.setattr(local_review, "SCHEMA_PATH", schema_path)
-
-    fake = tmp_path / "codex"
-    _fake_provider(fake, "codex")
     raw = tmp_path / "raw"
     raw.mkdir()
     prompt = tmp_path / "prompt.md"
     prompt.write_text("review", encoding="utf-8")
     lane = local_review.Lane("codex", "fixture", prompt, raw / "result.json", raw)
-    result = local_review._invoke_lane(
-        lane,
-        tmp_path,
-        _provider_runtime(fake, fake),
-        local_review.sanitized_environment(),
+    command = local_review._provider_command(
+        lane, tmp_path, _provider_runtime("/trusted/claude", "/trusted/codex")
     )
-    assert result.success is False
-    assert "object properties must all be required" in result.detail
+    schema_path = Path(command[command.index("--output-schema") + 1])
+    schema = json.loads(schema_path.read_text(encoding="utf-8"))
+    assert "normalization_dropped_findings" not in schema["properties"]
+    assert "normalization_dropped_findings" not in schema["required"]
+    assert set(schema["properties"]) == set(schema["required"])
 
 
 def test_fake_codex_reproduces_the_unsupported_view_image_override(
@@ -1271,7 +1334,7 @@ def test_fake_codex_reproduces_the_unsupported_view_image_override(
         ("source.py", True, False, False, 3, 5),
         ("source.py", True, True, True, 3, 5),
         ("commands/latch-review.md", False, False, False, 0, 6),
-        ("src/seed.py", False, False, True, 1, 6),
+        ("src/seed.py", False, False, False, 0, 6),
     ],
 )
 def test_end_to_end_local_panel_with_fake_subscription_clis(

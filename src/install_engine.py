@@ -104,16 +104,21 @@ SNIPPET_PATH = KB_HOME / "settings_snippet.json"
 # Slash-command install (step 4): commands/*.md -> Claude Code's commands dir,
 # with the <KB_HOME> placeholder resolved to this clone's path.
 COMMANDS_SRC = KB_HOME / "commands"
+REVIEW_TARGET_CONTRACT_PATH = (
+    Path(__file__).resolve().parent.parent / "templates" / "review-target-contract.md"
+)
 COMMANDS_DEST = Path(os.environ.get("CLAUDE_COMMANDS_DIR") or (Path.home() / ".claude" / "commands"))
 COMMAND_PLACEHOLDER = "<KB_HOME>"
 KB_HOME_POSIX_LITERAL_PLACEHOLDER = "<KB_HOME_POSIX_LITERAL>"
 LATCH_REVIEW_POSIX_LITERAL_PLACEHOLDER = "<LATCH_REVIEW_POSIX_LITERAL>"
 LATCH_REVIEW_POWERSHELL_LITERAL_PLACEHOLDER = "<LATCH_REVIEW_POWERSHELL_LITERAL>"
+LATCH_REVIEW_TARGET_CONTRACT_PLACEHOLDER = "<LATCH_REVIEW_TARGET_CONTRACT>"
 COMMAND_PLACEHOLDERS = (
     COMMAND_PLACEHOLDER,
     KB_HOME_POSIX_LITERAL_PLACEHOLDER,
     LATCH_REVIEW_POSIX_LITERAL_PLACEHOLDER,
     LATCH_REVIEW_POWERSHELL_LITERAL_PLACEHOLDER,
+    LATCH_REVIEW_TARGET_CONTRACT_PLACEHOLDER,
 )
 COMMAND_PLACEHOLDER_RE = re.compile(
     "|".join(re.escape(value) for value in sorted(COMMAND_PLACEHOLDERS, key=len, reverse=True))
@@ -704,6 +709,13 @@ def render_command_template(body: str, *, kb_home: str | Path | None = None) -> 
         )
     review_posix = f"{normalized_home}/bin/latch-review"
     review_powershell = f"{normalized_home}/bin/latch-review.ps1"
+    target_contract = ""
+    if LATCH_REVIEW_TARGET_CONTRACT_PLACEHOLDER in body:
+        if not REVIEW_TARGET_CONTRACT_PATH.is_file():
+            raise FileNotFoundError(REVIEW_TARGET_CONTRACT_PATH)
+        target_contract = REVIEW_TARGET_CONTRACT_PATH.read_text(
+            encoding="utf-8"
+        ).strip()
     replacements = {
         COMMAND_PLACEHOLDER: normalized_home,
         KB_HOME_POSIX_LITERAL_PLACEHOLDER: shlex.quote(normalized_home),
@@ -711,6 +723,7 @@ def render_command_template(body: str, *, kb_home: str | Path | None = None) -> 
         LATCH_REVIEW_POWERSHELL_LITERAL_PLACEHOLDER: _powershell_literal(
             review_powershell
         ),
+        LATCH_REVIEW_TARGET_CONTRACT_PLACEHOLDER: target_contract,
     }
     return COMMAND_PLACEHOLDER_RE.sub(
         lambda match: replacements[match.group(0)],
@@ -770,9 +783,10 @@ def install_commands(dry_run: bool) -> tuple[str, list[str]]:
     Claude Code only discovers commands under ``~/.claude/commands/`` (or a
     project ``.claude/commands/``) — it does NOT scan this repo's ``commands/``
     folder. So the source must be copied there, with the ``<KB_HOME>``
-    placeholder resolved to this clone's path. Mirrors
-    ``bin/install_commands.{sh,ps1}`` (kept for commands-only re-installs) so the
-    one engine install also wires the commands — without this step ``/latch-compact``
+    placeholder resolved to this clone's path. The standalone
+    ``bin/install_commands.{sh,ps1}`` launchers delegate here for commands-only
+    re-installs, so this function is the single policy owner. The full engine
+    install also wires the commands — without this step ``/latch-compact``
     et al. error ``Unknown skill`` even though the engine + MCP are fully wired
     (the gap that bit the 2026-06-07 Mac install, id=1468 #1). Overwrite-always,
     matching the shell installers. Honors ``CLAUDE_COMMANDS_DIR`` via
@@ -959,7 +973,30 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--no-seed-prompt", action="store_true",
                     help="leave the initial KB pending and print its review command")
     ap.add_argument("--suppress-seed-output", action="store_true", help=argparse.SUPPRESS)
+    ap.add_argument(
+        "--commands-only",
+        action="store_true",
+        help="install only the Claude slash commands using the shared policy",
+    )
     args = ap.parse_args(argv)
+
+    if args.commands_only:
+        level, changes = install_commands(args.dry_run)
+        for change in changes:
+            print(change)
+        if level != "OK":
+            return 1
+        if args.dry_run:
+            print(
+                f"Done — {len(changes)} planned command change(s) in "
+                f"{COMMANDS_DEST}"
+            )
+        else:
+            print(
+                f"Done — updated slash commands in {COMMANDS_DEST} "
+                f"({_command_change_summary(changes)})"
+            )
+        return 0
 
     python_path = resolve_python(args.python)
     server_py = str((KB_HOME / "src" / "mcp_server.py")).replace("\\", "/")

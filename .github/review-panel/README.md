@@ -102,9 +102,11 @@ The runner:
 - fetches PR ancestry into a temporary bare repository, then binds review to
   the merge-base and exact head; the fetch has a five-minute timeout and never
   writes refs or `FETCH_HEAD` in the user's repository
-- builds bounded prompts containing precomputed diff, blobs, identifier
-  matches, and a path index once per immutable scope, then reuses that exact
-  evidence frame for every applicable specialist lane
+- builds bounded prompts containing a path-prioritized diff, bounded head
+  context, identifier matches, and path indexes once per immutable scope, then
+  reuses that exact evidence frame for every applicable specialist lane; core
+  runner, policy, installer, and regression-test changes receive evidence
+  budget before peripheral files
 - runs all applicable lanes in parallel with shell, web, connectors, MCP, and
   subagents disabled; Codex receives explicit `web_search="disabled"` and
   `tools.web_search=false` configuration plus a strict custom permission
@@ -118,7 +120,8 @@ The runner:
 - runs the conditional artifact/output lane against the same immutable static
   evidence; conclusions requiring a build or rendered output become coverage
   gaps because project code and recipes are never executed; path-owned runtime
-  evidence requirements become deterministic human-resolution signals
+  evidence requirements remain explicit coverage gaps but do not turn an
+  otherwise clean static review into a permanent nonzero exit
 - validates each receipt with the shared schema and aggregates with the shared
   deterministic policy; the provider-facing schema deliberately uses JSON
   Schema draft-07 and avoids regex lookaround, while trusted post-generation
@@ -146,3 +149,8 @@ No provider Actions secrets or model variables are required. Do not configure
 `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` for this panel. There is no automatic
 PR or push trigger and no required status check; starting a review is always a
 local user action.
+
+When migrating from the retired Actions panel, remove `AI Review Panel /
+panel-policy` (and any `panel-schema` entry) from required repository checks.
+Also delete unused `OPENAI_API_KEY` and `ANTHROPIC_API_KEY` Actions secrets plus
+the old `REVIEW_PANEL_*`, `CODEX_REVIEW_*`, and `CLAUDE_REVIEW_MODEL` variables.

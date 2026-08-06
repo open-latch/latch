@@ -301,7 +301,8 @@ app path and do not require a persistent `LATCH_HOME` variable.
 
 The panel runs two Claude and three Codex specialist lanes in parallel, adding
 the artifact/output lane when user-facing files change. It uses the CLIs'
-subscription logins, refuses provider auth or endpoint overrides, and saves
+subscription logins, refuses API-key/alternate-token auth and endpoint
+overrides, and saves
 its consolidated report inside the target repository's local Git metadata,
 where it cannot be committed. Nothing is posted to GitHub unless you add
 `--post-pr`. The GitHub CLI is used only for `--pr`, automatic PR detection,

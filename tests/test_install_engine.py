@@ -278,6 +278,34 @@ def test_install_commands_copies_and_substitutes():
         restore()
 
 
+def test_standalone_command_installers_delegate_policy_to_install_engine():
+    bash = (ROOT / "bin" / "install_commands.sh").read_text(encoding="utf-8")
+    powershell = (ROOT / "bin" / "install_commands.ps1").read_text(
+        encoding="utf-8"
+    )
+    for body in (bash, powershell):
+        _assert("src/install_engine.py" in body, body)
+        _assert("--commands-only" in body, body)
+        _assert("Update-LegacyAlias" not in body, body)
+        _assert("Test-LatchCommand" not in body, body)
+    _assert("is_latch_command" not in bash, bash)
+
+
+def test_commands_only_cli_uses_shared_installer_without_engine_preflight():
+    _src, dest, restore = _tmp_commands_env(
+        "/opt/latch", {"latch-review.md": "run <KB_HOME>\n"}
+    )
+    try:
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            result = ie.main(["--commands-only", "--dry-run"])
+        _assert(result == 0, output.getvalue())
+        _assert("1 planned command change(s)" in output.getvalue(), output.getvalue())
+        _assert(not dest.exists(), "commands-only dry run must not write")
+    finally:
+        restore()
+
+
 def _adversarial_latch_home(root: Path) -> Path:
     return root / 'Latch Space $cash $(touch SHOULD_NOT_EXIST) "double" `tick` apostrophe\'s 雪'
 

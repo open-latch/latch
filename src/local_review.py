@@ -26,7 +26,9 @@ from typing import Any
 LATCH_HOME = Path(__file__).resolve().parent.parent
 PANEL_SCRIPT = LATCH_HOME / ".github" / "scripts" / "review_panel.py"
 SCHEMA_PATH = LATCH_HOME / ".github" / "review-panel" / "review.schema.json"
+TRUSTED_RECEIPT_FIELDS = ("normalization_dropped_findings",)
 REPORT_MARKER = "<!-- ai-review-panel-report -->"
+REVISION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/@{}~^+\-]*$")
 API_KEY_ENV_VARS = ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "CODEX_API_KEY")
 PROVIDER_OVERRIDE_ENV_VARS = (
     "ANTHROPIC_AUTH_TOKEN",
@@ -511,10 +513,16 @@ def _repository_name(repo: Path, explicit: str) -> str:
 
 
 def _rev_parse(repo: Path, revision: str, label: str) -> str:
-    if not revision.strip():
-        raise ValueError(f"{label} revision is empty")
+    if not REVISION_RE.fullmatch(revision):
+        raise ValueError(f"{label} revision contains unsupported characters")
     return _sha(
-        _git(repo, "rev-parse", "--verify", f"{revision}^{{commit}}").stdout,
+        _git(
+            repo,
+            "rev-parse",
+            "--verify",
+            "--end-of-options",
+            f"{revision}^{{commit}}",
+        ).stdout,
         label,
     )
 
@@ -576,6 +584,8 @@ def _resolve_pr(
     repository: str,
     workspace: Path,
 ) -> ReviewScope:
+    if number < 1:
+        raise ValueError("pull-request number must be a positive integer")
     fields = "number,baseRefOid,headRefOid,headRepository,url"
     command = ["gh", "pr", "view", str(number), "--json", fields]
     if repository:
@@ -996,8 +1006,8 @@ def preflight_auth(repo: Path, *, require_gh: bool = True) -> ProviderRuntime:
     present = [name for name in BLOCKED_PROVIDER_ENV_VARS if os.environ.get(name)]
     if present:
         raise ValueError(
-            "refusing to start while provider authentication or endpoint "
-            "override environment variables are "
+            "refusing to start while provider API-key/alternate-token auth or "
+            "endpoint override environment variables are "
             f"set: {', '.join(present)}. Unset them and retry."
         )
     claude_executable = _resolve_provider_executable("claude")
@@ -1034,8 +1044,11 @@ def preflight_auth(repo: Path, *, require_gh: bool = True) -> ProviderRuntime:
         or not claude_status.get("subscriptionType")
     ):
         raise ValueError(
-            "Claude Code is not using a claude.ai subscription login. Run "
-            "`claude auth login`, and ensure ANTHROPIC_API_KEY is unset."
+            "Claude Code did not expose a claude.ai subscription login. If this "
+            "runner was started by Codex Desktop, rerun it outside the filesystem "
+            "sandbox before concluding that Claude is logged out; the sandbox "
+            "cannot read Claude's saved login. Otherwise run `claude auth login`, "
+            "and ensure ANTHROPIC_API_KEY is unset."
         )
     codex = _run(
         [codex_executable, "login", "status"],
@@ -1205,9 +1218,24 @@ def _provider_command(
     workspace: Path,
     runtime: ProviderRuntime,
 ) -> list[str]:
+    provider_schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    for field in TRUSTED_RECEIPT_FIELDS:
+        provider_schema["properties"].pop(field, None)
+        if field in provider_schema["required"]:
+            provider_schema["required"].remove(field)
+    provider_schema_path = workspace / "provider-review.schema.json"
+    schema_body = json.dumps(provider_schema, indent=2, sort_keys=True) + "\n"
+    temporary_schema = workspace / (
+        f".provider-review.schema.{threading.get_ident()}.{secrets.token_hex(4)}"
+    )
+    temporary_schema.write_text(
+        schema_body,
+        encoding="utf-8",
+    )
+    os.replace(temporary_schema, provider_schema_path)
     if lane.provider == "claude":
         schema = json.dumps(
-            json.loads(SCHEMA_PATH.read_text(encoding="utf-8")),
+            provider_schema,
             sort_keys=True,
             separators=(",", ":"),
         )
@@ -1235,7 +1263,7 @@ def _provider_command(
     return _codex_exec_command(
         runtime.codex_executable,
         workspace,
-        SCHEMA_PATH,
+        provider_schema_path,
         "-",
     )
 

@@ -314,6 +314,61 @@ def test_changed_path_index_records_unclassifiable_filenames_without_aborting(
     assert classification["path_classification_coverage_gap_count"] == 1
 
 
+@pytest.mark.parametrize(
+    "result",
+    [
+        review_panel.BoundedProcessResult(
+            ["git"], -9, b"src/partial.py\0", b"x", False, True
+        ),
+        review_panel.BoundedProcessResult(
+            ["git"], 1, b"src/partial.py\0", b"failed", False, False
+        ),
+    ],
+)
+def test_changed_path_index_fails_closed_on_incomplete_git_result(
+    monkeypatch,
+    result,
+):
+    monkeypatch.setattr(review_panel, "_bare_git", lambda *_args, **_kwargs: result)
+    with pytest.raises(ValueError, match="could not be classified completely"):
+        review_panel._changed_paths(
+            "review-target", base_sha=BASE_SHA, head_sha=HEAD_SHA
+        )
+
+
+def test_core_review_files_receive_evidence_budget_before_peripheral_files():
+    paths = [
+        "README.md",
+        "tests/test_review_panel.py",
+        "src/local_review.py",
+    ]
+    ordered = sorted(paths, key=review_panel._evidence_path_priority)
+    budgets = review_panel._weighted_path_budgets(paths, 30_000)
+    assert ordered == [
+        "src/local_review.py",
+        "tests/test_review_panel.py",
+        "README.md",
+    ]
+    assert budgets["src/local_review.py"] > budgets["tests/test_review_panel.py"]
+    assert budgets["tests/test_review_panel.py"] > budgets["README.md"]
+
+
+def test_large_text_evidence_keeps_a_cross_file_structural_index():
+    body = (
+        "header\n"
+        + "x" * 10_000
+        + "\n+def preflight_auth(repo):\n+    return repo\n"
+        + "y" * 10_000
+        + "\nfooter\n"
+    ).encode("utf-8")
+    sampled = review_panel._sample_text_evidence(body, 2_000)
+    assert len(sampled.encode("utf-8")) <= 2_000
+    assert "header" in sampled
+    assert "footer" in sampled
+    assert "structural index sampled" in sampled
+    assert "+def preflight_auth(repo):" in sampled
+
+
 def test_policy_rejects_zero_always_lanes_before_prompt_preparation(tmp_path: Path):
     policy = json.loads(POLICY.read_text(encoding="utf-8"))
     for lane in policy["lanes"]:
@@ -620,17 +675,84 @@ def test_static_evidence_materializes_diff_and_nearby_head_blobs(
         check=True,
     )
     monkeypatch.chdir(tmp_path)
+    changed_index = review_panel._changed_paths(
+        ".review-target", base_sha=base, head_sha=head
+    )
     evidence = review_panel._repository_evidence(
         ".review-target",
         base_sha=base,
         head_sha=head,
         budget=100_000,
+        changed_index=changed_index,
     )
     assert "Pull-request diff" in evidence
     assert "+VALUE = 2" in evidence
     assert "BEGIN HEAD BLOB src/changed.py" in evidence
     assert "BEGIN HEAD BLOB src/neighbor.py" in evidence
     assert "Head tree path index" in evidence
+
+
+def test_optional_identifier_search_timeout_becomes_explicit_coverage_gap(
+    monkeypatch,
+):
+    def fake_git(_review_directory, *args, **_kwargs):
+        if args[0] == "grep":
+            raise TimeoutError("fixture timeout")
+        if args[0] == "ls-tree":
+            stdout = b"src/local_review.py\0"
+        elif args[0] == "diff":
+            stdout = b"+important_identifier\n"
+        elif args[:2] == ("cat-file", "-s"):
+            stdout = b"20\n"
+        elif args[:2] == ("cat-file", "blob"):
+            stdout = b"important_identifier\n"
+        else:
+            raise AssertionError(args)
+        return review_panel.BoundedProcessResult(
+            ["git"], 0, stdout, b"", False, False
+        )
+
+    monkeypatch.setattr(review_panel, "_bare_git", fake_git)
+    evidence = review_panel._repository_evidence(
+        "review-target",
+        base_sha=BASE_SHA,
+        head_sha=HEAD_SHA,
+        budget=80_000,
+        changed_index=review_panel.GitPathClassification(
+            ["src/local_review.py"], 0
+        ),
+    )
+    assert "identifier search unavailable" in evidence
+    assert "coverage gap" in evidence
+
+
+def test_report_counts_only_applicable_lanes_and_preserves_line_range():
+    receipts = [
+        completed_receipt("claude", "correctness-concurrency"),
+        completed_receipt("claude", "security-abuse"),
+        completed_receipt("codex", "regression-tests"),
+        completed_receipt("codex", "architecture-portability"),
+        completed_receipt("codex", "simplicity-consolidation"),
+        review_panel.placeholder_receipt(
+            provider="codex",
+            lane="artifact-output",
+            base_sha=BASE_SHA,
+            head_sha=HEAD_SHA,
+            status="not_run",
+            reason="not applicable",
+        ),
+    ]
+    receipts[0]["findings"] = [finding("range preserved")]
+    report = review_panel.render_report(
+        receipts=receipts,
+        groups=review_panel.correlate_findings(receipts),
+        base_sha=BASE_SHA,
+        head_sha=HEAD_SHA,
+        blockers=[],
+        action_required=[],
+    )
+    assert "**Completed lanes:** 5/5" in report
+    assert "src/example.py:20-22" in report
 
 
 def test_bounded_subprocess_stops_before_buffering_untrusted_output():
@@ -827,7 +949,7 @@ def test_normalize_returns_a_placeholder_when_provider_fails(tmp_path: Path):
     )
 
 
-def test_aggregate_requires_human_review_for_a_dropped_reviewer_finding(
+def test_aggregate_reports_dropped_reviewer_finding_as_coverage_gap(
     tmp_path: Path,
 ):
     receipts = tmp_path / "receipts"
@@ -857,10 +979,10 @@ def test_aggregate_requires_human_review_for_a_dropped_reviewer_finding(
     ) == 0
     summary = json.loads(summary_path.read_text(encoding="utf-8"))
     assert summary["require_all"] is True
-    assert summary["should_fail"] is True
+    assert summary["should_fail"] is False
     assert any(
         "malformed reviewer finding(s)" in item
-        for item in summary["action_required"]
+        for item in summary["trusted_coverage_gaps"]
     )
 
 
@@ -1128,7 +1250,7 @@ def test_model_controlled_report_fields_render_as_inert_plain_text_golden():
     )
     assert framing_and_finding_golden in report
     assert f"### P1 — {golden}" in report
-    assert "<code>src/`code`&#64;reviewers.md:20</code>" in report
+    assert "<code>src/`code`&#64;reviewers.md:20-22</code>" in report
     assert report.count(review_panel.REPORT_MARKER) == 1
     assert report.count("<!--") == 1
     assert "@reviewers" not in report
@@ -1195,7 +1317,7 @@ def test_missing_artifact_lane_requires_human_resolution(tmp_path: Path):
     assert value["should_fail"] is True
 
 
-def test_missing_machine_required_runtime_evidence_requires_human_resolution(
+def test_missing_machine_required_runtime_evidence_is_visible_nonblocking_gap(
     tmp_path: Path,
 ):
     receipts = tmp_path / "receipts"
@@ -1221,12 +1343,12 @@ def test_missing_machine_required_runtime_evidence_requires_human_resolution(
     assert review_panel.main(common) == 0
     value = json.loads(summary.read_text(encoding="utf-8"))
     assert value["runtime_evidence_required"] == ["seed-report"]
-    assert value["should_fail"] is True
+    assert value["should_fail"] is False
     requirement = (
-        "Required runtime artifact verification 'seed-report' has no trusted "
-        "evidence; human verification is required."
+        "Required runtime artifact verification 'seed-report' was not executed "
+        "by the static local panel."
     )
-    assert requirement in value["action_required"]
+    assert requirement in value["trusted_coverage_gaps"]
     assert review_panel._model_text(requirement) in report.read_text(encoding="utf-8")
 
 

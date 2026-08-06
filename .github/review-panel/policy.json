@@ -46,6 +46,8 @@
     "bin/**",
     "commands/**",
     ".agents/skills/**",
+    "templates/codex/**",
+    "templates/review-target-contract.md",
     "claude_md_snippet.md",
     "cursor_rule_snippet.mdc",
     "src/quickstart.py",

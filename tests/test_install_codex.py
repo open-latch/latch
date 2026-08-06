@@ -535,10 +535,9 @@ def test_render_review_skill_shell_quotes_adversarial_latch_path():
         _assert(not ic.install_engine.unresolved_command_placeholders(body), body)
         _assert("LATCH_REVIEW_POSIX_LITERAL" not in body, body)
         _assert("LATCH_REVIEW_POWERSHELL_LITERAL" not in body, body)
-        _assert("latch-review-source-template-guard:start" in body, body)
         _assert(
-            "Continue below only when both installer tokens have already been rendered"
-            in body,
+            "outside the filesystem sandbox from the first attempt"
+            in " ".join(body.split()),
             body,
         )
         normalized_home = str(latch_home).replace("\\", "/")
