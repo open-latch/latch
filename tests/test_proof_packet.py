@@ -758,6 +758,25 @@ def test_windows_workflow_propagates_proof_command_failures():
     print("PASS windows_workflow_propagates_proof_command_failures")
 
 
+def test_release_readiness_workflow_is_check_only():
+    """The manual release-gate smoke must never publish (PR #86 review).
+
+    release.yml enforces packet currency but also publishes on a tag, so the
+    gate is otherwise only exercised by cutting a real release. This separate
+    workflow runs the same gate on demand; the point of keeping it separate is
+    that it carries no publish step, so guard exactly that.
+    """
+    workflow = (
+        ROOT / ".github" / "workflows" / "release-readiness.yml"
+    ).read_text(encoding="utf-8")
+    _assert("workflow_dispatch:" in workflow, workflow)
+    _assert("pull_request" not in workflow, workflow)
+    _assert("push:" not in workflow, workflow)
+    _assert("gh release create" not in workflow, workflow)
+    _assert("LATCH_PROOF_RELEASE_CHECK" in workflow, workflow)
+    print("PASS release_readiness_workflow_is_check_only")
+
+
 if __name__ == "__main__":
     test_live_receipt_is_observed_and_complete()
     test_live_receipt_rejects_non_proof_states()
@@ -784,4 +803,5 @@ if __name__ == "__main__":
     test_wrapper_uses_configured_python()
     test_powershell_wrapper_forwards_interpreter_and_args()
     test_windows_workflow_propagates_proof_command_failures()
+    test_release_readiness_workflow_is_check_only()
     print("\nAll proof packet tests pass.")
