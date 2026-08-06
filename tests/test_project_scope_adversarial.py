@@ -247,6 +247,72 @@ def test_shared_target_cannot_nest_below_private_target(
         project_config.authorize_scope(shared_root)
 
 
+@pytest.mark.parametrize("target_kind", ["private", "shared", "compatibility"])
+@pytest.mark.parametrize("root_relation", ["equal", "ancestor", "descendant"])
+def test_project_root_cannot_overlap_a_later_reserved_kb_target(
+    scope_env: Path,
+    tmp_path: Path,
+    target_kind: str,
+    root_relation: str,
+) -> None:
+    """Reverse-order setup must be as strict as target authorization.
+
+    Portable intent is deliberately created first. The target is reserved
+    afterward, proving final local authorization rechecks the full registry
+    instead of trusting the earlier marker-only decision.
+    """
+    container = _directory(tmp_path / "reserved-container")
+    reserved = _directory(container / "reserved-kb")
+    if root_relation == "equal":
+        candidate_root = reserved
+    elif root_relation == "ancestor":
+        candidate_root = container
+    else:
+        candidate_root = _directory(reserved / "nested-project")
+
+    project_config.create_scope(
+        candidate_root,
+        policy=project_config.POLICY_PRIVATE,
+    )
+
+    if target_kind == "private":
+        owner_root = _directory(tmp_path / "private-owner")
+        _private_scope(owner_root, reserved)
+    elif target_kind == "shared":
+        _pin_shared(scope_env, reserved)
+        owner_root = _directory(tmp_path / "shared-owner")
+        _shared_scope(owner_root)
+    else:
+        _pin_shared(scope_env, reserved)
+        project_config.write_machine_policy(
+            project_config.MACHINE_POLICY_COMPATIBILITY
+        )
+        project_config.initialize_compatibility_binding()
+
+    candidate_kb = _directory(tmp_path / "candidate-kb")
+    with pytest.raises(project_config.ProjectConfigError, match="reserved KB target"):
+        project_config.authorize_scope(candidate_root, kb_dir=candidate_kb)
+
+    resolved = project_config.resolve(candidate_root)
+    assert resolved.state == project_config.MODE_LOCKED
+    assert resolved.kb_dir is None
+
+
+def test_scope_intent_inside_reserved_kb_is_rejected_before_marker_write(
+    scope_env: Path,
+    tmp_path: Path,
+) -> None:
+    reserved = _pin_shared(scope_env, tmp_path / "shared-kb")
+    owner = _directory(tmp_path / "shared-owner")
+    _shared_scope(owner)
+    nested = _directory(reserved / "nested-project")
+
+    with pytest.raises(project_config.ProjectConfigError, match="reserved KB target"):
+        project_config.create_scope(nested, policy=project_config.POLICY_PRIVATE)
+
+    assert not (nested / project_config.PORTABLE_DIR_NAME).exists()
+
+
 def test_off_boundary_removal_cannot_race_parent_repin(
     scope_env: Path,
     tmp_path: Path,
@@ -451,6 +517,7 @@ def test_linked_checkout_git_metadata_does_not_create_an_implicit_boundary(
     project_config.write_machine_policy(
         project_config.MACHINE_POLICY_COMPATIBILITY
     )
+    project_config.initialize_compatibility_binding()
 
     assert project_config.git_root(linked) == linked
     resolved = project_config.resolve(linked)

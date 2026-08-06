@@ -214,6 +214,7 @@ def test_compatibility_requires_a_persisted_migration_policy(
     project_config.write_machine_policy(
         project_config.MACHINE_POLICY_COMPATIBILITY
     )
+    project_config.initialize_compatibility_binding()
     target = project_config.resolve(project)
     assert target.state == project_config.MODE_LATCHED
     assert target.source == "compatibility"
@@ -281,6 +282,28 @@ def test_downstream_unlatch_is_off_boundary_and_never_a_vault(
     resumed = project_config.remove_off_boundary(child)
     assert resumed.state == project_config.MODE_LATCHED
     assert resumed.scope_id == shared.scope_id
+
+
+def test_downstream_relatch_permanently_stales_pre_off_task(
+    scope_env: Path, tmp_path: Path,
+) -> None:
+    _pin_shared(scope_env, tmp_path)
+    outer = _directory(tmp_path / "shared-root")
+    child = _directory(outer / "client-work")
+    _shared_scope(outer)
+    before = project_config.resolve(child)
+    project_config.record_session_binding(child, "pre-off-task")
+
+    project_config.create_off_boundary(child)
+    after = project_config.remove_off_boundary(child)
+
+    # The product returns to the exact inherited scope and KB, but the local
+    # The continuity epoch prevents pre-cycle work from reviving.
+    assert after.target_revision == before.target_revision
+    assert after.revision != before.revision
+    assert after.kb_dir == before.kb_dir
+    assert project_config.current_session_revision(child, "pre-off-task") is None
+    assert project_config.record_session_binding(child, "fresh-task") == after.revision
 
 
 def test_off_boundary_refuses_resume_after_parent_target_changes(

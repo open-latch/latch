@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 import paths
+import lockfile
 
 
 HOT_RETENTION_DAYS = 30
@@ -120,7 +121,7 @@ def emit_event(
     project_path: str | os.PathLike | None = None,
     session_id: str | None = None,
     log_date: date | None = None,
-) -> None:
+) -> bool:
     """Append one JSONL row to the daily file for ``event_type``.
 
     Common header (ts, project, session_id, event_type) is prepended. Any
@@ -137,8 +138,7 @@ def emit_event(
             file_date = _today_utc_date()
         else:
             file_date = log_date.strftime("%Y-%m-%d")
-        path = _project_log_dir(project_path) / f"{event_type}-{file_date}.log"
-        path.parent.mkdir(parents=True, exist_ok=True)
+        filename = f"{event_type}-{file_date}.log"
         header = {
             "ts": _now_iso(),
             "project": _project_basename(project_path),
@@ -146,10 +146,14 @@ def emit_event(
             "event_type": event_type,
         }
         merged = {**row, **header}
-        with path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(merged, default=str) + "\n")
+        lockfile.append_project_log(
+            project_path,
+            filename,
+            json.dumps(merged, default=str) + "\n",
+        )
+        return True
     except Exception:
-        pass
+        return False
 
 
 def maintain_log_retention(

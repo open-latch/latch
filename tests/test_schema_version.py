@@ -17,6 +17,11 @@ import vault_backup  # noqa: E402
 import vault_identity  # noqa: E402
 
 
+def _make_pre_identity_legacy(connection: sqlite3.Connection) -> None:
+    """Model a real pre-vault-identity Latch DB, not an interrupted new one."""
+    connection.execute("DROP TABLE IF EXISTS vault_identity")
+
+
 def test_fresh_db_is_stamped_without_backup(tmp_path):
     backup_root = paths.validated_test_root() / "backups" / "legacy-production"
     before = set(backup_root.rglob("*.db")) if backup_root.exists() else set()
@@ -37,6 +42,7 @@ def test_legacy_db_backs_up_once_before_stamp(tmp_path):
     path.parent.mkdir(parents=True, exist_ok=True)
     legacy = sqlite3.connect(path)
     legacy.executescript((ROOT / "src" / "schema.sql").read_text(encoding="utf-8"))
+    _make_pre_identity_legacy(legacy)
     legacy.execute(
         "INSERT INTO nodes(kind,title,body,status) VALUES('decision','keep me','durable','canonical')"
     )
@@ -65,6 +71,7 @@ def test_current_unidentified_db_is_backed_up_before_production_adoption(tmp_pat
     legacy = sqlite3.connect(path)
     try:
         legacy.executescript((ROOT / "src" / "schema.sql").read_text(encoding="utf-8"))
+        _make_pre_identity_legacy(legacy)
         legacy.execute(
             "INSERT INTO nodes(kind,title,body,status) "
             "VALUES('decision','pre-adoption','must survive','canonical')"
@@ -92,6 +99,7 @@ def test_schema_three_is_fenced_before_first_identity_commit(
     tmp_path, monkeypatch, starting_schema
 ):
     scope = tmp_path / starting_schema
+    scope.mkdir()
     path = paths.db_path(str(scope))
     backup_root = paths.validated_test_root() / "backups" / "legacy-production"
     before = set(backup_root.rglob("*.db")) if backup_root.exists() else set()
@@ -101,6 +109,7 @@ def test_schema_three_is_fenced_before_first_identity_commit(
         legacy.executescript(
             (ROOT / "src" / "schema.sql").read_text(encoding="utf-8")
         )
+        _make_pre_identity_legacy(legacy)
         legacy.execute(
             "INSERT INTO nodes(kind,title,body,status) "
             "VALUES('decision','pre-v3','must survive','canonical')"
@@ -144,8 +153,15 @@ def test_newer_schema_refuses_before_migration_or_backup(tmp_path):
     path = paths.db_path(str(tmp_path))
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path)
-    conn.execute("CREATE TABLE latch_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
-    conn.execute("INSERT INTO latch_meta VALUES('kb_schema_version', '999')")
+    conn.executescript((ROOT / "src" / "schema.sql").read_text(encoding="utf-8"))
+    _make_pre_identity_legacy(conn)
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS latch_meta("
+        "key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+    )
+    conn.execute(
+        "INSERT OR REPLACE INTO latch_meta VALUES('kb_schema_version', '999')"
+    )
     conn.commit()
     conn.close()
     before = path.read_bytes()
@@ -204,6 +220,7 @@ def test_connect_readonly_fails_closed_on_missing_or_mismatched_registry(
     tmp_path, monkeypatch
 ):
     scope = tmp_path / "readonly-identity"
+    scope.mkdir()
     path = paths.db_path(str(scope))
     conn = db.connect(str(scope))
     try:
@@ -237,6 +254,7 @@ def test_connect_readonly_does_not_create_or_migrate(tmp_path):
     missing.parent.mkdir(parents=True, exist_ok=True)
     legacy = sqlite3.connect(missing)
     legacy.executescript((ROOT / "src" / "schema.sql").read_text(encoding="utf-8"))
+    _make_pre_identity_legacy(legacy)
     legacy.commit()
     legacy.close()
     with pytest.raises(schema_version.SchemaMigrationRequiredError):

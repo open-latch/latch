@@ -6,21 +6,38 @@ makes concurrent reads/writes safe for our usage pattern (MCP server + hooks).
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import os
 import sqlite3
+import stat
+import sys
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 import log_utils
+import lockfile
+import paths
+import project_config
 import schema_version
 import vault_identity
-from paths import SCHEMA_PATH, db_path, ensure_project_dir
+from paths import (  # compatibility names retained for older callers/tests
+    SCHEMA_PATH,
+    db_path,
+    ensure_project_dir,
+)
 
 
 VEC_DIM = 384  # all-MiniLM-L6-v2
+
+# `_ensure_schema` includes additive migrations that intentionally do not bump
+# the SQLite schema version.  Record the Latch release that completed the whole
+# setup chain so ordinary opens can stay read-fast while each upgrade still
+# performs its one serialized migration pass.
+_CONNECTION_SETUP_KEY = "last_connection_setup_by_latch_version"
+_CONNECTION_SCHEMA_COOKIE_KEY = "connection_setup_schema_cookie"
 
 # Closed, privacy-safe outcomes for the seed import ledgers.  Store the code,
 # never raw exception text (which can contain transcript excerpts or secrets).
@@ -145,7 +162,986 @@ _ACTOR = _resolve_actor()
 class _Connection(sqlite3.Connection):
     """sqlite3.Connection subclass — the C base class forbids arbitrary
     attributes, so we need a subclass to stash the vec-loaded flag."""
-    pass
+
+    def close(self) -> None:
+        lease = getattr(self, "_latch_connection_lease", None)
+        if lease is not None:
+            self._latch_connection_lease = None
+        try:
+            super().close()
+        finally:
+            if lease is not None:
+                lease.__exit__(None, None, None)
+
+    def __exit__(self, exc_type, exc_value, traceback) -> bool:
+        try:
+            return bool(super().__exit__(exc_type, exc_value, traceback))
+        finally:
+            self.close()
+
+
+class UnlatchedModeError(RuntimeError):
+    """Raised before any SQLite open while the target project is unlatched."""
+
+
+class ProjectTargetChangedError(RuntimeError):
+    """Raised when a project selects another KB during connection setup."""
+
+
+def _connection_directory(
+    cwd: str | None,
+    *,
+    expected: Path,
+    target: project_config.ResolvedScope,
+    revalidate_target: bool = False,
+) -> Path:
+    if paths.unlatch_scope(cwd, resolved=target) is not None:
+        raise UnlatchedModeError(
+            "Latch is unlatched for this project; refusing to open a KB"
+        )
+    selected = project_config.validated_bound_kb_dir(target)
+    if selected is None:
+        raise ProjectTargetChangedError("project has no safe KB target")
+    directory = Path(selected)
+    if revalidate_target:
+        current = project_config.resolve(cwd or os.getcwd())
+        current_directory = project_config.validated_bound_kb_dir(current)
+        if (
+            current.state != project_config.MODE_LATCHED
+            or current.revision != target.revision
+            or current_directory is None
+            or os.path.normcase(str(current_directory))
+            != os.path.normcase(str(directory))
+        ):
+            raise ProjectTargetChangedError(
+                "project KB changed during connection setup"
+            )
+    if paths.unlatch_scope(cwd, resolved=target) is not None:
+        raise UnlatchedModeError(
+            "Latch became unlatched during connection setup; refusing to open a KB"
+        )
+    identities = {
+        os.path.normcase(str(Path(value)))
+        for value in (expected, directory)
+    }
+    if len(identities) != 1:
+        raise ProjectTargetChangedError(
+            "project KB changed during connection setup: "
+            f"expected {expected}, prepared {directory}"
+        )
+    return expected
+
+
+def _validate_recovery_authority(
+    project: str,
+    target: project_config.ResolvedScope,
+    *,
+    expected_binding_revision: str | None,
+    expected_kb_dir: str | os.PathLike[str] | None,
+) -> None:
+    if (
+        expected_binding_revision is not None
+        and target.revision != expected_binding_revision
+    ):
+        raise ProjectTargetChangedError(
+            "this agent connection belongs to an older project KB binding; "
+            "start a fresh agent task before using Latch"
+        )
+    if expected_kb_dir is not None and (
+        target.remembered_kb_dir is None
+        or os.path.normcase(str(Path(expected_kb_dir)))
+        != os.path.normcase(str(target.remembered_kb_dir))
+    ):
+        raise ProjectTargetChangedError(
+            "this agent connection belongs to a different project KB; "
+            "start a fresh agent task before using Latch"
+        )
+    if expected_binding_revision is not None:
+        return
+    session_id = project_config.current_agent_session_id()
+    if session_id is not None:
+        if project_config.current_session_revision(
+            project,
+            session_id,
+            resolved_target=target,
+            allow_identity_recovery=True,
+        ) is None:
+            raise ProjectTargetChangedError(
+                "this agent task belongs to an older project KB binding; "
+                "start a fresh task before using Latch"
+            )
+    elif project_config.is_agent_context():
+        raise ProjectTargetChangedError(
+            "Latch cannot verify this agent task's project binding; "
+            "start a fresh task before using Latch"
+        )
+
+
+def _recover_interrupted_identity(
+    project: str,
+    target: project_config.ResolvedScope,
+) -> project_config.ResolvedScope:
+    try:
+        with lockfile.identity_recovery_lock(project, target) as directory:
+            path = _validated_sqlite_path(directory)
+            if (
+                target.reason_code
+                == project_config.LOCK_VAULT_IDENTITY_INITIALIZING
+            ):
+                receipt = _read_initialization_receipt(target, directory)
+                if receipt is None:
+                    raise ProjectTargetChangedError(
+                        "interrupted vault initialization has no exact recovery receipt"
+                    )
+                if receipt["phase"] == _INITIALIZATION_PHASE_PREPARED:
+                    new_vault = _finalize_prepared_new_vault_receipt(
+                        target,
+                        directory,
+                    )
+                else:
+                    loaded = _load_initialization_receipt(target, directory)
+                    assert loaded is not None
+                    new_vault = loaded
+            else:
+                # Pending finalization must also prove the exact database inode
+                # before sqlite3 is allowed to open a writable handle.
+                if _load_initialization_receipt(target, directory) is None:
+                    raise ProjectTargetChangedError(
+                        "interrupted vault finalization has no exact recovery receipt"
+                    )
+            conn = sqlite3.connect(
+                path.as_uri() + "?mode=rw",
+                uri=True,
+                factory=_Connection,
+            )
+            try:
+                current = project_config.validated_kb_path(directory)
+                if (
+                    target.target_fingerprint is None
+                    or not hmac.compare_digest(
+                        project_config._directory_fingerprint(current),
+                        target.target_fingerprint,
+                    )
+                ):
+                    raise ProjectTargetChangedError(
+                        "project KB changed during identity recovery"
+                    )
+                conn.row_factory = sqlite3.Row
+                conn.execute("PRAGMA foreign_keys = ON")
+                exact_origin = _load_initialization_receipt(target, directory)
+                if exact_origin is None:
+                    raise ProjectTargetChangedError(
+                        "interrupted vault recovery lost its exact database receipt"
+                    )
+                if (
+                    target.reason_code
+                    == project_config.LOCK_VAULT_IDENTITY_INITIALIZING
+                ):
+                    if exact_origin != new_vault:
+                        raise ProjectTargetChangedError(
+                            "interrupted vault recovery changed database origin"
+                        )
+                    identity = _initialize_connection_database(
+                        conn,
+                        Path(path),
+                        original_had_nodes=not new_vault,
+                    )
+                else:
+                    identity = vault_identity.validate_existing_identity(
+                        conn,
+                        directory,
+                    )
+                _finalize_initial_target(
+                    target,
+                    identity,
+                    project=project,
+                    directory=directory,
+                )
+                _clear_initialization_receipt(target, directory)
+            finally:
+                conn.close()
+    except lockfile.ProjectTargetChangedError:
+        # The original initializer may have completed while recovery queued.
+        # Only accept that race when a fresh resolve proves the exact revision.
+        fresh = project_config.resolve(project)
+        if (
+            fresh.state == project_config.MODE_LATCHED
+            and fresh.revision == target.revision
+            and fresh.kb_dir is not None
+            and target.remembered_kb_dir is not None
+            and os.path.normcase(str(fresh.kb_dir))
+            == os.path.normcase(str(target.remembered_kb_dir))
+            and fresh.target_fingerprint == target.target_fingerprint
+        ):
+            return fresh
+        raise
+    fresh = project_config.resolve(project)
+    if (
+        fresh.state != project_config.MODE_LATCHED
+        or fresh.revision != target.revision
+        or fresh.kb_dir is None
+        or target.remembered_kb_dir is None
+        or os.path.normcase(str(fresh.kb_dir))
+        != os.path.normcase(str(target.remembered_kb_dir))
+    ):
+        raise ProjectTargetChangedError(
+            "project scope did not recover its exact vault identity"
+        )
+    return fresh
+
+
+def _resolve_connection_target(
+    project: str,
+    *,
+    expected_binding_revision: str | None,
+    expected_kb_dir: str | os.PathLike[str] | None,
+    allow_identity_recovery: bool,
+) -> project_config.ResolvedScope:
+    """Wait for or narrowly recover interrupted first-vault initialization."""
+    target = project_config.resolve(project)
+    if (
+        target.state == project_config.MODE_LOCKED
+        and target.reason_code
+        in {
+            project_config.LOCK_VAULT_IDENTITY_INITIALIZING,
+            project_config.LOCK_VAULT_IDENTITY_PENDING,
+        }
+        and target.remembered_kb_dir is not None
+    ):
+        lockfile.wait_for_compaction(
+            project,
+            kb_dir=str(target.remembered_kb_dir),
+        )
+        target = project_config.resolve(project)
+        if (
+            allow_identity_recovery
+            and
+            target.state == project_config.MODE_LOCKED
+            and target.reason_code
+            in {
+                project_config.LOCK_VAULT_IDENTITY_INITIALIZING,
+                project_config.LOCK_VAULT_IDENTITY_PENDING,
+            }
+        ):
+            _validate_recovery_authority(
+                project,
+                target,
+                expected_binding_revision=expected_binding_revision,
+                expected_kb_dir=expected_kb_dir,
+            )
+            target = _recover_interrupted_identity(project, target)
+    return target
+
+
+def _automatic_session_revision(
+    cwd: str | None,
+    target: project_config.ResolvedScope,
+) -> str | None:
+    """Fence direct agent-launched DB calls to their SessionStart binding."""
+    if target.state != project_config.MODE_LATCHED:
+        return None
+    session_id = project_config.current_agent_session_id()
+    if session_id is not None:
+        revision = project_config.current_session_revision(
+            cwd or os.getcwd(),
+            session_id,
+            resolved_target=target,
+        )
+        if revision is None:
+            raise ProjectTargetChangedError(
+                "this agent task belongs to an older project KB binding; "
+                "start a fresh task before using Latch"
+            )
+        return revision
+    if project_config.is_agent_context():
+        raise ProjectTargetChangedError(
+            "Latch cannot verify this agent task's project binding; "
+            "start a fresh task before using Latch"
+        )
+    return None
+
+
+def _acquire_connection_lease(
+    cwd: str | None,
+    *,
+    expected_binding_revision: str | None = None,
+    expected_kb_dir: str | os.PathLike[str] | None = None,
+    allow_identity_recovery: bool = False,
+):
+    project = str(cwd or os.getcwd())
+    target = _resolve_connection_target(
+        project,
+        expected_binding_revision=expected_binding_revision,
+        expected_kb_dir=expected_kb_dir,
+        allow_identity_recovery=allow_identity_recovery,
+    )
+    if expected_binding_revision is None:
+        expected_binding_revision = _automatic_session_revision(cwd, target)
+    lease = None
+    entered = False
+    try:
+        lease = lockfile.project_access_lock(
+            project, resolved_target=target
+        )
+        locked_directory = lease.__enter__()
+        entered = True
+        assert locked_directory is not None
+        if (
+            expected_binding_revision is not None
+            and target.revision != expected_binding_revision
+        ):
+            raise ProjectTargetChangedError(
+                "this agent connection belongs to an older project KB binding; "
+                "start a fresh agent task before using Latch"
+            )
+        if expected_kb_dir is not None and os.path.normcase(
+            str(Path(expected_kb_dir))
+        ) != os.path.normcase(str(locked_directory)):
+            raise ProjectTargetChangedError(
+                "this agent connection belongs to a different project KB; "
+                "start a fresh agent task before using Latch"
+            )
+        return lease, Path(locked_directory), target
+    except lockfile.ProjectTargetChangedError as exc:
+        if entered and lease is not None:
+            lease.__exit__(*sys.exc_info())
+        if exc.reason == "unlatched":
+            raise UnlatchedModeError(
+                "Latch is unlatched for this project; refusing to open a KB"
+            ) from exc
+        raise ProjectTargetChangedError(str(exc)) from exc
+    except Exception:
+        if entered and lease is not None:
+            lease.__exit__(*sys.exc_info())
+        raise
+
+
+def _validated_sqlite_path(directory: Path) -> Path:
+    """Reject final SQLite files that could redirect I/O outside the KB."""
+    database = directory / "kb.db"
+    for suffix in ("", "-wal", "-shm", "-journal"):
+        entry = directory / f"kb.db{suffix}"
+        try:
+            metadata = entry.lstat()
+        except FileNotFoundError:
+            continue
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            raise project_config.ProjectConfigError(
+                f"unsafe SQLite file in project KB: {entry}"
+            )
+    return database
+
+
+def _initialization_receipt_path(
+    target: project_config.ResolvedScope,
+    directory: Path,
+) -> Path:
+    identity = "\0".join(
+        (
+            target.target_revision,
+            os.path.normcase(str(directory)),
+        )
+    )
+    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+    return (
+        project_config.control_root()
+        / project_config.RUNTIME_DIR_NAME
+        / "initializations"
+        / f"{digest}.json"
+    )
+
+
+def _database_file_fingerprint(path: Path) -> str:
+    try:
+        metadata = path.lstat()
+    except OSError as exc:
+        raise project_config.ProjectConfigError(
+            f"vault database is missing during identity setup: {path}: {exc}"
+        ) from exc
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+        raise project_config.ProjectConfigError(
+            f"unsafe SQLite database during identity setup: {path}"
+        )
+    return _database_metadata_fingerprint(path, metadata)
+
+
+def _database_metadata_fingerprint(path: Path, metadata: os.stat_result) -> str:
+    body = "\0".join(
+        (
+            os.path.normcase(str(path)),
+            str(metadata.st_dev),
+            str(metadata.st_ino),
+        )
+    )
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+
+_INITIALIZATION_PHASE_PREPARED = "prepared"
+_INITIALIZATION_PHASE_EXACT = "exact"
+
+
+def _initialization_receipt_payload(
+    target: project_config.ResolvedScope,
+    directory: Path,
+    *,
+    phase: str,
+    new_vault: bool,
+    db_fingerprint: str | None,
+) -> dict[str, object]:
+    return {
+        "format": project_config.FORMAT_VERSION,
+        "target_revision": target.target_revision,
+        "kb_dir": str(directory),
+        "kb_fingerprint": target.target_fingerprint,
+        "db_fingerprint": db_fingerprint,
+        "new_vault": new_vault,
+        "phase": phase,
+    }
+
+
+def _read_initialization_receipt(
+    target: project_config.ResolvedScope,
+    directory: Path,
+) -> dict[str, object] | None:
+    path = _initialization_receipt_path(target, directory)
+    if not (path.exists() or path.is_symlink()):
+        return None
+    payload = project_config._read_regular_json(
+        path,
+        label="vault initialization receipt",
+    )
+    expected_fields = {
+        "format",
+        "target_revision",
+        "kb_dir",
+        "kb_fingerprint",
+        "db_fingerprint",
+        "new_vault",
+        "phase",
+    }
+    phase = payload.get("phase")
+    new_vault = payload.get("new_vault")
+    db_fingerprint = payload.get("db_fingerprint")
+    common_valid = (
+        set(payload) == expected_fields
+        and payload.get("format") == project_config.FORMAT_VERSION
+        and payload.get("target_revision") == target.target_revision
+        and payload.get("kb_dir") == str(directory)
+        and payload.get("kb_fingerprint") == target.target_fingerprint
+        and isinstance(new_vault, bool)
+    )
+    prepared_valid = (
+        phase == _INITIALIZATION_PHASE_PREPARED
+        and new_vault is True
+        and db_fingerprint is None
+    )
+    exact_valid = (
+        phase == _INITIALIZATION_PHASE_EXACT
+        and isinstance(db_fingerprint, str)
+        and len(db_fingerprint) == 64
+        and all(char in "0123456789abcdef" for char in db_fingerprint)
+    )
+    if not common_valid or not (prepared_valid or exact_valid):
+        raise project_config.ProjectConfigError(
+            f"vault initialization receipt does not match the exact target: {path}"
+        )
+    return payload
+
+
+def _new_vault_sidecars(directory: Path) -> list[Path]:
+    return [
+        directory / f"kb.db{suffix}"
+        for suffix in ("-wal", "-shm", "-journal")
+        if (directory / f"kb.db{suffix}").exists()
+        or (directory / f"kb.db{suffix}").is_symlink()
+    ]
+
+
+def _create_new_database_file(path: Path) -> str:
+    """Create the selected database inode without asking SQLite to adopt it."""
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    try:
+        descriptor = os.open(path, flags, 0o600)
+    except FileExistsError as exc:
+        raise project_config.ProjectConfigError(
+            "selected KB database appeared during initialization; refusing to adopt it"
+        ) from exc
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            raise project_config.ProjectConfigError(
+                f"unsafe SQLite database during identity setup: {path}"
+            )
+        fingerprint = _database_metadata_fingerprint(path, metadata)
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    project_config._fsync_directory(path.parent)
+    return fingerprint
+
+
+def _finalize_prepared_new_vault_receipt(
+    target: project_config.ResolvedScope,
+    directory: Path,
+) -> bool:
+    path = directory / "kb.db"
+    sidecars = _new_vault_sidecars(directory)
+    if sidecars:
+        raise project_config.ProjectConfigError(
+            "selected empty KB directory contains SQLite sidecars; refusing "
+            f"new-vault initialization: {sidecars[0]}"
+        )
+    if path.exists() or path.is_symlink():
+        raise project_config.ProjectConfigError(
+            "vault initialization stopped before recording the exact database "
+            "origin; refusing to adopt the existing kb.db"
+        )
+    created_fingerprint = _create_new_database_file(path)
+    project_config.atomic_json(
+        _initialization_receipt_path(target, directory),
+        _initialization_receipt_payload(
+            target,
+            directory,
+            phase=_INITIALIZATION_PHASE_EXACT,
+            new_vault=True,
+            db_fingerprint=created_fingerprint,
+        ),
+    )
+    # Detect a pathname replacement after O_EXCL creation before SQLite can
+    # open and mutate anything.  The fingerprint came from fstat on our owned
+    # descriptor, never from a potentially replaced pathname.
+    loaded = _load_initialization_receipt(target, directory)
+    assert loaded is True
+    return True
+
+
+def _recognize_legacy_latch_database(
+    target: project_config.ResolvedScope,
+    directory: Path,
+) -> None:
+    """Recognize an unidentified legacy Latch DB without a writable open."""
+    path = directory / "kb.db"
+    connection = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
+    try:
+        connection.execute("PRAGMA query_only = ON")
+        _verify_opened_connection_target(connection, path, target)
+        required_columns = {
+            "nodes": {"id", "kind", "title", "body", "status"},
+            "edges": {"id", "src", "dst", "relation"},
+            "sessions": {"id", "project_path", "started_at"},
+        }
+        recognizable = all(
+            expected.issubset(
+                {
+                    str(row[1])
+                    for row in connection.execute(
+                        f"PRAGMA table_info({table})"
+                    ).fetchall()
+                }
+            )
+            for table, expected in required_columns.items()
+        )
+        if not recognizable:
+            raise project_config.ProjectConfigError(
+                "selected pre-existing SQLite database is not a recognizable "
+                "legacy Latch KB; refusing to adopt it"
+            )
+        schema_version.ensure_supported(connection)
+    finally:
+        connection.close()
+
+
+def _prepare_initialization_origin(
+    target: project_config.ResolvedScope,
+    directory: Path,
+) -> bool:
+    """Prove fresh creation or recognize legacy Latch before writable open."""
+    receipt = _read_initialization_receipt(target, directory)
+    if receipt is not None:
+        if receipt["phase"] == _INITIALIZATION_PHASE_PREPARED:
+            return _finalize_prepared_new_vault_receipt(target, directory)
+        observed = _database_file_fingerprint(directory / "kb.db")
+        if not hmac.compare_digest(str(receipt["db_fingerprint"]), observed):
+            raise project_config.ProjectConfigError(
+                "vault initialization receipt does not match the exact target: "
+                f"{_initialization_receipt_path(target, directory)}"
+            )
+        return bool(receipt["new_vault"])
+
+    if target.target_fingerprint is None:
+        raise project_config.ProjectConfigError(
+            "new vault target has no exact directory fingerprint"
+        )
+    path = directory / "kb.db"
+    if not (path.exists() or path.is_symlink()):
+        sidecars = _new_vault_sidecars(directory)
+        if sidecars:
+            raise project_config.ProjectConfigError(
+                "selected empty KB directory contains SQLite sidecars; refusing "
+                f"new-vault initialization: {sidecars[0]}"
+            )
+        # This durable receipt is the proof that kb.db was absent before this
+        # initialization attempt.  It deliberately carries no inode authority.
+        # Only the exact receipt written after O_EXCL creation grants that.
+        project_config.atomic_json(
+            _initialization_receipt_path(target, directory),
+            _initialization_receipt_payload(
+                target,
+                directory,
+                phase=_INITIALIZATION_PHASE_PREPARED,
+                new_vault=True,
+                db_fingerprint=None,
+            ),
+        )
+        return _finalize_prepared_new_vault_receipt(target, directory)
+
+    _recognize_legacy_latch_database(target, directory)
+    return _record_initialization_origin(
+        target,
+        directory,
+        new_vault=False,
+    )
+
+
+def _opened_vault_identity(
+    conn: sqlite3.Connection,
+    directory: Path,
+) -> vault_identity.VaultIdentity | None:
+    table = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='vault_identity'"
+    ).fetchone()
+    if table is None:
+        return None
+    return vault_identity.validate_existing_identity(conn, directory)
+
+
+def _serialized_database_fingerprint(conn: sqlite3.Connection) -> str:
+    try:
+        payload = conn.serialize()
+    except (AttributeError, sqlite3.OperationalError) as exc:
+        page_count = int(conn.execute("PRAGMA page_count").fetchone()[0])
+        if page_count == 0:
+            payload = b""
+        else:
+            raise ProjectTargetChangedError(
+                "cannot verify the opened unidentified vault against its path"
+            ) from exc
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _verify_opened_connection_target(
+    conn: sqlite3.Connection,
+    path: Path,
+    target: project_config.ResolvedScope,
+) -> vault_identity.VaultIdentity | None:
+    """Bind SQLite's opened handle to the authorized path before any write."""
+    opened_identity = _opened_vault_identity(conn, path.parent)
+    current_identity = vault_identity.read_identity(path)
+    if target.vault_uuid is not None:
+        if (
+            opened_identity is None
+            or current_identity is None
+            or not hmac.compare_digest(
+                opened_identity.vault_uuid,
+                target.vault_uuid,
+            )
+            or not hmac.compare_digest(
+                current_identity.vault_uuid,
+                target.vault_uuid,
+            )
+        ):
+            raise ProjectTargetChangedError(
+                "opened SQLite vault does not match the bound immutable identity"
+            )
+        return opened_identity
+    if opened_identity is not None or current_identity is not None:
+        if (
+            opened_identity is None
+            or current_identity is None
+            or not hmac.compare_digest(
+                opened_identity.vault_uuid,
+                current_identity.vault_uuid,
+            )
+        ):
+            raise ProjectTargetChangedError(
+                "opened vault identity does not match its authorized path"
+            )
+        # Another serialized first opener may have completed the one allowed
+        # UUID-strengthening transition after this caller took its stable
+        # revision snapshot. Accept only that exact finalized identity.
+        fresh = project_config.resolve(target.project_root)
+        if (
+            fresh.state != project_config.MODE_LATCHED
+            or fresh.target_revision != target.target_revision
+            or fresh.vault_uuid is None
+            or not hmac.compare_digest(
+                fresh.vault_uuid,
+                opened_identity.vault_uuid,
+            )
+        ):
+            raise ProjectTargetChangedError(
+                "vault identity appeared before its binding could be finalized"
+            )
+        return opened_identity
+    current = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)
+    try:
+        current.execute("PRAGMA query_only = ON")
+        if not hmac.compare_digest(
+            _serialized_database_fingerprint(conn),
+            _serialized_database_fingerprint(current),
+        ):
+            raise ProjectTargetChangedError(
+                "opened unidentified SQLite vault does not match its authorized path"
+            )
+    finally:
+        current.close()
+    return None
+
+
+def _load_initialization_receipt(
+    target: project_config.ResolvedScope,
+    directory: Path,
+) -> bool | None:
+    payload = _read_initialization_receipt(target, directory)
+    if payload is None:
+        return None
+    path = _initialization_receipt_path(target, directory)
+    if payload["phase"] != _INITIALIZATION_PHASE_EXACT:
+        raise project_config.ProjectConfigError(
+            "vault initialization receipt has no exact database origin: "
+            f"{path}"
+        )
+    observed = _database_file_fingerprint(directory / "kb.db")
+    if not hmac.compare_digest(str(payload["db_fingerprint"]), observed):
+        raise project_config.ProjectConfigError(
+            f"vault initialization receipt does not match the exact target: {path}"
+        )
+    return bool(payload["new_vault"])
+
+
+def _record_initialization_origin(
+    target: project_config.ResolvedScope,
+    directory: Path,
+    *,
+    new_vault: bool,
+) -> bool:
+    existing = _load_initialization_receipt(target, directory)
+    if existing is not None:
+        if existing != new_vault:
+            raise project_config.ProjectConfigError(
+                "vault initialization receipt origin conflicts with the selected database"
+            )
+        return existing
+    if target.target_fingerprint is None:
+        raise project_config.ProjectConfigError(
+            "new vault target has no exact directory fingerprint"
+        )
+    if new_vault:
+        raise project_config.ProjectConfigError(
+            "new vault origin must be prepared before database creation"
+        )
+    project_config.atomic_json(
+        _initialization_receipt_path(target, directory),
+        _initialization_receipt_payload(
+            target,
+            directory,
+            phase=_INITIALIZATION_PHASE_EXACT,
+            new_vault=False,
+            db_fingerprint=_database_file_fingerprint(directory / "kb.db"),
+        ),
+    )
+    return new_vault
+
+
+def _clear_initialization_receipt(
+    target: project_config.ResolvedScope,
+    directory: Path,
+) -> None:
+    path = _initialization_receipt_path(target, directory)
+    if path.exists() or path.is_symlink():
+        _load_initialization_receipt(target, directory)
+        project_config.durable_unlink(path)
+
+
+def _initialize_connection_database(
+    conn: _Connection,
+    path: Path,
+    *,
+    original_had_nodes: bool,
+) -> vault_identity.VaultIdentity:
+    """Run the idempotent schema/identity chain with preserved origin."""
+    installed_schema = schema_version.ensure_supported(conn)
+    existing_identity = vault_identity.read_identity(path)
+    if original_had_nodes and installed_schema < schema_version.KB_SCHEMA_VERSION:
+        schema_version.backup_connection(
+            conn,
+            path,
+            from_version=installed_schema,
+            to_version=schema_version.KB_SCHEMA_VERSION,
+        )
+    elif original_had_nodes and existing_identity is None:
+        import vault_backup
+
+        vault_backup.create_pre_migration_snapshot(
+            conn,
+            path,
+            from_version=installed_schema,
+            to_version=installed_schema,
+            reason="identity-adoption",
+        )
+
+    migration_due = installed_schema < schema_version.KB_SCHEMA_VERSION
+    if existing_identity is not None:
+        if migration_due:
+            schema_version.stamp_current(conn, record_migration=True)
+        identity = vault_identity.ensure_identity(
+            conn,
+            path.parent,
+            new_vault=False,
+        )
+        _load_vec(conn)
+        _ensure_schema(conn)
+    else:
+        _load_vec(conn)
+        _ensure_schema(conn)
+        schema_version.stamp_current(
+            conn,
+            record_migration=(not original_had_nodes or migration_due),
+        )
+        identity = vault_identity.ensure_identity(
+            conn,
+            path.parent,
+            new_vault=not original_had_nodes,
+        )
+    schema_version.stamp_current(
+        conn,
+        record_migration=(not original_had_nodes or migration_due),
+    )
+    schema_cookie = str(conn.execute("PRAGMA schema_version").fetchone()[0])
+    conn.executemany(
+        "INSERT INTO latch_meta(key, value) VALUES (?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value "
+        "WHERE latch_meta.value != excluded.value",
+        (
+            (_CONNECTION_SETUP_KEY, schema_version.LATCH_VERSION),
+            (_CONNECTION_SCHEMA_COOKIE_KEY, schema_cookie),
+        ),
+    )
+    conn.commit()
+    return identity
+
+
+def _connection_setup_is_current(
+    conn: _Connection,
+    target: project_config.ResolvedScope,
+    directory: Path,
+) -> bool:
+    """Read-only proof that this connection needs no serialized setup."""
+    if schema_version.ensure_supported(conn) != schema_version.KB_SCHEMA_VERSION:
+        return False
+    setup = {
+        str(row[0]): str(row[1])
+        for row in conn.execute(
+            "SELECT key, value FROM latch_meta WHERE key IN (?, ?)",
+            (_CONNECTION_SETUP_KEY, _CONNECTION_SCHEMA_COOKIE_KEY),
+        ).fetchall()
+    }
+    if setup.get(_CONNECTION_SETUP_KEY) != schema_version.LATCH_VERSION:
+        return False
+    schema_cookie = str(conn.execute("PRAGMA schema_version").fetchone()[0])
+    if setup.get(_CONNECTION_SCHEMA_COOKIE_KEY) != schema_cookie:
+        return False
+    receipt = _initialization_receipt_path(target, directory)
+    if receipt.exists() or receipt.is_symlink():
+        return False
+    _load_vec(conn)
+    if vec_loaded(conn):
+        vec_table = conn.execute(
+            "SELECT 1 FROM sqlite_master "
+            "WHERE type='table' AND name='vec_nodes'"
+        ).fetchone()
+        if vec_table is None:
+            return False
+    return True
+
+
+def _open_bound_writable_connection(
+    cwd: str | None,
+    *,
+    locked_directory: Path,
+    target: project_config.ResolvedScope,
+) -> tuple[
+    _Connection,
+    Path,
+    Path,
+    vault_identity.VaultIdentity | None,
+]:
+    """Open and verify one exact leased target without performing setup."""
+    directory = _connection_directory(
+        cwd,
+        expected=locked_directory,
+        target=target,
+    )
+    path = _validated_sqlite_path(directory)
+    conn = sqlite3.connect(
+        path.as_uri() + "?mode=rw",
+        uri=True,
+        factory=_Connection,
+    )
+    try:
+        # sqlite3 accepts only a pathname, not the validated directory handle.
+        # Recheck immediately after open and before issuing setup SQL so an
+        # atomic path swap cannot redirect this connection into another vault.
+        _connection_directory(
+            cwd,
+            expected=locked_directory,
+            target=target,
+            revalidate_target=True,
+        )
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
+        identity = _verify_opened_connection_target(conn, path, target)
+        return conn, directory, path, identity
+    except Exception:
+        conn.close()
+        raise
+
+
+def _finalize_initial_target(
+    target: project_config.ResolvedScope,
+    identity: vault_identity.VaultIdentity,
+    *,
+    project: str,
+    directory: Path,
+) -> project_config.ResolvedScope:
+    if target.source == project_config.SOURCE_EXPLICIT and target.scope_id is not None:
+        finalized = project_config.finalize_scope_vault_identity(
+            target.project_root,
+            expected_revision=target.target_revision,
+            vault_uuid=identity.vault_uuid,
+            continuity_root=project,
+        )
+    elif target.source == project_config.SOURCE_COMPATIBILITY:
+        finalized = project_config.finalize_compatibility_vault_identity(
+            expected_target_revision=target.target_revision,
+            vault_uuid=identity.vault_uuid,
+            continuity_root=project,
+        )
+    else:
+        raise ProjectTargetChangedError(
+            "project target cannot finalize a new vault identity"
+        )
+    if (
+        finalized.state != project_config.MODE_LATCHED
+        or finalized.revision != target.revision
+        or finalized.kb_dir is None
+        or os.path.normcase(str(finalized.kb_dir))
+        != os.path.normcase(str(directory))
+    ):
+        raise ProjectTargetChangedError(
+            "project scope changed while finalizing its new vault identity"
+        )
+    return finalized
 
 
 def _now() -> str:
@@ -163,79 +1159,185 @@ def _parse_ts(s: str | None) -> datetime | None:
     return None
 
 
-def connect(cwd: str | None = None) -> sqlite3.Connection:
-    ensure_project_dir(cwd)
-    path = db_path(cwd)
-    conn = sqlite3.connect(str(path), factory=_Connection)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
+def connect(
+    cwd: str | None = None,
+    *,
+    expected_binding_revision: str | None = None,
+    expected_kb_dir: str | os.PathLike[str] | None = None,
+) -> sqlite3.Connection:
+    lease, locked_directory, initial_target = _acquire_connection_lease(
+        cwd,
+        expected_binding_revision=expected_binding_revision,
+        expected_kb_dir=expected_kb_dir,
+        allow_identity_recovery=True,
+    )
+    conn: _Connection | None = None
+    lease_attached = False
     try:
-        had_nodes = conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='nodes'"
-        ).fetchone() is not None
-        installed_schema = schema_version.ensure_supported(conn)
-        existing_identity = (
-            vault_identity.read_identity(Path(path)) if had_nodes else None
-        )
-        if had_nodes and installed_schema < schema_version.KB_SCHEMA_VERSION:
-            schema_version.backup_connection(
+        if initial_target.vault_uuid is not None:
+            conn, directory, _path, opened_identity = (
+                _open_bound_writable_connection(
+                    cwd,
+                    locked_directory=locked_directory,
+                    target=initial_target,
+                )
+            )
+            if _connection_setup_is_current(
+                conn,
+                initial_target,
+                directory,
+            ):
+                if opened_identity is None or not hmac.compare_digest(
+                    opened_identity.vault_uuid,
+                    initial_target.vault_uuid,
+                ):
+                    raise ProjectTargetChangedError(
+                        "opened SQLite vault does not match the bound immutable identity"
+                    )
+                conn._kb_vault_identity = opened_identity
+                conn._latch_connection_lease = lease
+                lease_attached = True
+                return conn
+            conn.close()
+            conn = None
+
+        # Connection setup may create or migrate schema and finalize a fresh
+        # vault identity. Serialize that short write window with the same
+        # sentinel used by every other KB mutation. The outer access lease
+        # keeps the selected scope stable while a queued initializer waits.
+        with lockfile.writer_lock(
+            str(cwd or os.getcwd()),
+            kb_dir=str(locked_directory),
+            resolved_target=initial_target,
+        ):
+            initialization_origin: bool | None = None
+            if initial_target.vault_uuid is None:
+                directory = _connection_directory(
+                    cwd,
+                    expected=locked_directory,
+                    target=initial_target,
+                )
+                initialization_origin = _prepare_initialization_origin(
+                    initial_target,
+                    directory,
+                )
+            # Scope setup never delegates file creation to SQLite. The exact
+            # receipt/O_EXCL path above is the sole authority to create a first
+            # kb.db. Identified migration paths likewise reopen only after
+            # taking the writer sentinel.
+            conn, directory, path, _opened_identity = (
+                _open_bound_writable_connection(
+                    cwd,
+                    locked_directory=locked_directory,
+                    target=initial_target,
+                )
+            )
+            if initial_target.vault_uuid is None:
+                exact_origin = _load_initialization_receipt(
+                    initial_target,
+                    directory,
+                )
+                if exact_origin != initialization_origin:
+                    raise ProjectTargetChangedError(
+                        "selected vault initialization origin changed during open"
+                    )
+            had_nodes = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='nodes'"
+            ).fetchone() is not None
+            original_had_nodes = had_nodes
+            if initial_target.vault_uuid is None:
+                assert initialization_origin is not None
+                if initialization_origin and had_nodes:
+                    raise project_config.ProjectConfigError(
+                        "new vault changed before initialization; refusing to adopt it"
+                    )
+                if not initialization_origin and not had_nodes:
+                    raise project_config.ProjectConfigError(
+                        "selected pre-existing SQLite database is no longer a "
+                        "recognizable legacy Latch KB; refusing to adopt it"
+                    )
+                original_had_nodes = not initialization_origin
+            conn._kb_vault_identity = _initialize_connection_database(
                 conn,
                 Path(path),
-                from_version=installed_schema,
-                to_version=schema_version.KB_SCHEMA_VERSION,
+                original_had_nodes=original_had_nodes,
             )
-        elif had_nodes and existing_identity is None:
-            # Identity adoption is itself a mutation. Freeze an external,
-            # verified production baseline first even when no schema migration
-            # is due.
-            import vault_backup
-
-            vault_backup.create_pre_migration_snapshot(
-                conn,
-                Path(path),
-                from_version=installed_schema,
-                to_version=installed_schema,
-                reason="identity-adoption",
-            )
-
-        migration_due = installed_schema < schema_version.KB_SCHEMA_VERSION
-        if existing_identity is not None:
-            # Reserve the current compatibility boundary before any current-
-            # only trigger/DDL repair. Old writers then refuse even if this
-            # process stops partway through an idempotent migration.
-            if migration_due:
-                schema_version.stamp_current(conn, record_migration=True)
-            conn._kb_vault_identity = vault_identity.ensure_identity(
-                conn, Path(path).parent, new_vault=False
-            )
-            # Existing identity and registry are validated before ordinary
-            # schema repair or optional native extension setup.
-            _load_vec(conn)
-            _ensure_schema(conn)
-        else:
-            # New or legacy-unidentified vaults have no identity to validate.
-            # Complete the idempotent schema chain, durably fence this writer
-            # version, and only then commit the first v3 identity row.
-            _load_vec(conn)
-            _ensure_schema(conn)
-            schema_version.stamp_current(
-                conn,
-                record_migration=(not had_nodes or migration_due),
-            )
-            conn._kb_vault_identity = vault_identity.ensure_identity(
-                conn, Path(path).parent, new_vault=not had_nodes
-            )
-        schema_version.stamp_current(
-            conn,
-            record_migration=(not had_nodes or migration_due),
-        )
+            identity = conn._kb_vault_identity
+            if initial_target.vault_uuid is None:
+                _finalize_initial_target(
+                    initial_target,
+                    identity,
+                    project=str(cwd or os.getcwd()),
+                    directory=locked_directory,
+                )
+            _clear_initialization_receipt(initial_target, locked_directory)
+        conn._latch_connection_lease = lease
+        lease_attached = True
         return conn
     except Exception:
-        conn.close()
+        if conn is not None:
+            conn.close()
+        if not lease_attached:
+            lease.__exit__(*sys.exc_info())
         raise
 
 
-def connect_readonly(cwd: str | None = None) -> sqlite3.Connection:
+def open_existing_readonly(
+    cwd: str | None = None,
+    *,
+    expected_binding_revision: str | None = None,
+    expected_kb_dir: str | os.PathLike[str] | None = None,
+) -> sqlite3.Connection:
+    """Open an existing SQLite KB read-only without schema or identity setup."""
+    lease, locked_directory, _initial_target = _acquire_connection_lease(
+        cwd,
+        expected_binding_revision=expected_binding_revision,
+        expected_kb_dir=expected_kb_dir,
+    )
+    conn: _Connection | None = None
+    lease_attached = False
+    try:
+        directory = _connection_directory(
+            cwd,
+            expected=locked_directory,
+            target=_initial_target,
+        )
+        path = _validated_sqlite_path(directory)
+        conn = sqlite3.connect(
+            path.as_uri() + "?mode=ro", uri=True, factory=_Connection
+        )
+        conn._latch_connection_lease = lease
+        conn._latch_db_path = path
+        lease_attached = True
+        _connection_directory(
+            cwd,
+            expected=locked_directory,
+            target=_initial_target,
+            revalidate_target=True,
+        )
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA query_only = ON")
+        conn.execute("PRAGMA foreign_keys = ON")
+        _verify_opened_connection_target(
+            conn,
+            Path(path),
+            _initial_target,
+        )
+        return conn
+    except Exception:
+        if conn is not None:
+            conn.close()
+        if not lease_attached:
+            lease.__exit__(*sys.exc_info())
+        raise
+
+
+def connect_readonly(
+    cwd: str | None = None,
+    *,
+    expected_binding_revision: str | None = None,
+    expected_kb_dir: str | os.PathLike[str] | None = None,
+) -> sqlite3.Connection:
     """Open an existing, current-schema KB without any setup writes.
 
     Diagnostics and other read-only surfaces must remain usable when a pinned
@@ -243,13 +1345,12 @@ def connect_readonly(cwd: str | None = None) -> sqlite3.Connection:
     This connector never creates a directory or database, migrates a schema,
     stamps metadata, or commits.
     """
-    path = Path(db_path(cwd)).expanduser().resolve()
-    uri = path.as_uri() + "?mode=ro"
-    conn = sqlite3.connect(uri, uri=True, factory=_Connection)
-    conn.row_factory = sqlite3.Row
+    conn = open_existing_readonly(
+        cwd,
+        expected_binding_revision=expected_binding_revision,
+        expected_kb_dir=expected_kb_dir,
+    )
     try:
-        conn.execute("PRAGMA query_only = ON")
-        conn.execute("PRAGMA foreign_keys = ON")
         installed_schema = schema_version.ensure_supported(conn)
         if installed_schema < schema_version.KB_SCHEMA_VERSION:
             raise schema_version.SchemaMigrationRequiredError(
@@ -257,7 +1358,7 @@ def connect_readonly(cwd: str | None = None) -> sqlite3.Connection:
                 f"{schema_version.KB_SCHEMA_VERSION} before read-only access"
             )
         conn._kb_vault_identity = vault_identity.validate_existing_identity(
-            conn, path.parent
+            conn, Path(conn._latch_db_path).parent
         )
         _load_vec(conn)
         return conn

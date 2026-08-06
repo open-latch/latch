@@ -9,6 +9,7 @@ import os
 import shutil
 import sys
 import tempfile
+import uuid
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -17,6 +18,7 @@ sys.path.insert(0, str(_SRC))
 
 import log_utils  # noqa: E402
 import paths      # noqa: E402
+import project_config  # noqa: E402
 
 
 def _assert(cond, msg):
@@ -25,8 +27,14 @@ def _assert(cond, msg):
 
 
 def _fresh_project():
-    tmp = tempfile.mkdtemp(prefix="kb_logutils_test_")
-    return tmp
+    tmp = Path(tempfile.mkdtemp(prefix="kb_logutils_test_")).resolve()
+    test_root = paths.validated_test_root()
+    assert test_root is not None
+    vault = test_root / "vaults" / f"log-utils-{uuid.uuid4()}"
+    vault.mkdir(parents=True)
+    project_config.create_scope(tmp, policy=project_config.POLICY_PRIVATE)
+    project_config.authorize_scope(tmp, kb_dir=vault)
+    return str(tmp)
 
 
 def _cleanup(tmp):
@@ -175,20 +183,20 @@ def test_emit_event_swallows_open_failure():
     exception — log failure cannot break the verdict path."""
     tmp = _fresh_project()
     try:
-        # Replace Path.open globally to always raise, then emit.
-        original_open = Path.open
+        original_append = log_utils.lockfile.append_project_log
 
-        def _raise(self, *a, **kw):
+        def _raise(*_args, **_kwargs):
             raise IOError("simulated disk failure")
 
-        Path.open = _raise
+        log_utils.lockfile.append_project_log = _raise
         try:
             # Must NOT raise.
-            log_utils.emit_event(
+            written = log_utils.emit_event(
                 "heal", {"x": 1}, project_path=tmp, session_id=None,
             )
         finally:
-            Path.open = original_open
+            log_utils.lockfile.append_project_log = original_append
+        _assert(written is False, "failed append must return a truthful receipt")
         print("PASS emit_event_swallows_open_failure")
     finally:
         _cleanup(tmp)
@@ -210,17 +218,17 @@ def test_emit_event_session_id_null_is_serialized():
         _cleanup(tmp)
 
 
-def test_emit_event_creates_project_dir_lazily():
-    """If the project dir doesn't exist yet, emit_event creates it."""
+def test_emit_event_creates_log_file_lazily():
+    """An authorized vault exists first; emit_event creates only its log."""
     tmp = _fresh_project()
     try:
         proj_dir = paths.project_dir(tmp)
-        # Ensure the dir is missing at the start.
-        _assert(not proj_dir.exists(), f"fresh test vault unexpectedly exists: {proj_dir}")
+        path = log_utils.today_log_path("heal", tmp)
+        _assert(not path.exists(), f"fresh test log unexpectedly exists: {path}")
         log_utils.emit_event("heal", {"x": 1}, project_path=tmp, session_id=None)
         _assert(proj_dir.is_dir(), f"project_dir not created: {proj_dir}")
-        _assert(log_utils.today_log_path("heal", tmp).exists(), "log not created")
-        print("PASS emit_event_creates_project_dir_lazily")
+        _assert(path.exists(), "log not created")
+        print("PASS emit_event_creates_log_file_lazily")
     finally:
         _cleanup(tmp)
 
@@ -314,7 +322,7 @@ def test_retention_skips_non_matching_files():
         proj_dir.mkdir(parents=True, exist_ok=True)
         legacy = proj_dir / "retrieve.log"
         legacy.write_text('{"legacy": true}\n', encoding="utf-8")
-        other = proj_dir / "kb.db"
+        other = proj_dir / "unrelated.bin"
         other.write_text("not a log", encoding="utf-8")
         out = log_utils.maintain_log_retention(tmp)
         _assert(out["gzipped"] == 0 and out["deleted"] == 0, out)
@@ -325,16 +333,16 @@ def test_retention_skips_non_matching_files():
         _cleanup(tmp)
 
 
-def test_retention_handles_missing_project_dir():
-    """Calling on a project that has no log dir is a no-op, not an error."""
+def test_retention_handles_vault_without_logs():
+    """Calling on an authorized vault with no logs is a no-op."""
     tmp = _fresh_project()
     try:
-        # Don't create the project dir.
         proj_dir = paths.project_dir(tmp)
-        _assert(not proj_dir.exists(), f"fresh test vault unexpectedly exists: {proj_dir}")
+        _assert(proj_dir.is_dir(), f"authorized vault is missing: {proj_dir}")
+        _assert(not list(proj_dir.glob("*.log*")), "fresh vault unexpectedly has logs")
         out = log_utils.maintain_log_retention(tmp)
         _assert(out == {"gzipped": 0, "deleted": 0, "skipped": 0}, out)
-        print("PASS retention_handles_missing_project_dir")
+        print("PASS retention_handles_vault_without_logs")
     finally:
         _cleanup(tmp)
 

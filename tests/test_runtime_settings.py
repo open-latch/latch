@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -14,6 +15,8 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
 import paths  # noqa: E402
+import lockfile  # noqa: E402
+import project_config  # noqa: E402
 
 
 def _fake_executable(directory: Path, name: str = "codex") -> Path:
@@ -193,35 +196,84 @@ def test_vault_daemon_ttl_is_scoped_and_invalid_policy_fails_soft(
         paths.configured_maintenance_runner(settings)
 
 
-def test_refresh_pinned_dir_moves_runtime_policy_to_new_vault(
+def test_pin_refresh_requires_explicit_compatibility_reauthorization(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    pin = tmp_path / "kb_location.json"
-    vault = tmp_path / "store"
-    vault.mkdir()
+    test_root = paths.validated_test_root()
+    assert test_root is not None
+    pin = Path(os.environ["LATCH_HOME"]) / "kb_location.json"
+    vault = test_root / "vaults" / f"runtime-repin-{tmp_path.name}"
+    vault.mkdir(parents=True)
     executable = _fake_executable(tmp_path)
     monkeypatch.setattr(paths, "KB_LOCATION_FILE", pin)
-    monkeypatch.setattr(paths, "PROJECTS_ROOT", tmp_path / "projects")
     monkeypatch.setattr(paths, "_PINNED_DIR", None)
-    # This exercises production pin refresh semantics.  The authenticated
-    # pytest capability deliberately overrides production pin files, so remove
-    # it for this test after redirecting every relevant path into ``tmp_path``.
-    monkeypatch.delenv(paths.TEST_ROOT_ENV)
-    monkeypatch.delenv(paths.TEST_CAPABILITY_ENV)
+    project = tmp_path / "project"
+    project.mkdir()
 
-    # Simulate quickstart first observing a legacy/unpinned snapshot, then
-    # creating the fresh-install pin in the same process.
-    assert paths.project_dir(tmp_path / "project") != vault
+    # Refresh sees the installer pin, but the data plane stays fail-closed until
+    # the machine-local compatibility binding explicitly authorizes that exact
+    # replacement vault.
+    assert paths.project_dir(project) != vault
     pin.write_text(json.dumps({"kb_dir": str(vault)}) + "\n", encoding="utf-8")
     assert paths.refresh_pinned_dir() == vault
+    locked = project_config.resolve(project)
+    assert locked.state == project_config.MODE_LOCKED
+    assert locked.reason_code == project_config.LOCK_GLOBAL_PIN_CHANGED
+    with pytest.raises(lockfile.ProjectTargetChangedError, match="locked"):
+        paths.write_maintenance_runner(
+            backend="codex",
+            executable=str(executable),
+            home=str(tmp_path),
+            search_path=str(tmp_path),
+            project_path=project,
+        )
+
+    project_config.reauthorize_compatibility_binding()
 
     written = paths.write_maintenance_runner(
         backend="codex",
         executable=str(executable),
         home=str(tmp_path),
         search_path=str(tmp_path),
-        project_path=tmp_path / "project",
+        project_path=project,
     )
     assert written == vault / paths.VAULT_RUNTIME_SETTINGS_FILENAME
     assert written.is_file()
+
+
+def test_runtime_settings_write_holds_project_target_through_replace(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    executable = _fake_executable(tmp_path)
+    transition_entered = threading.Event()
+    waiter: threading.Thread | None = None
+
+    def write_while_transition_waits(updates, runtime_settings_file, **_kwargs):
+        nonlocal waiter
+
+        def transition() -> None:
+            with lockfile.project_access_lock(str(project), exclusive=True):
+                transition_entered.set()
+
+        waiter = threading.Thread(target=transition)
+        waiter.start()
+        assert not transition_entered.wait(timeout=0.2)
+        return runtime_settings_file
+
+    monkeypatch.setattr(paths, "_write_vault_runtime_settings", write_while_transition_waits)
+    written = paths.write_maintenance_runner(
+        backend="codex",
+        executable=str(executable),
+        home=str(tmp_path),
+        search_path=str(tmp_path),
+        project_path=project,
+    )
+    assert written.name == paths.VAULT_RUNTIME_SETTINGS_FILENAME
+    assert transition_entered.wait(timeout=2)
+    assert waiter is not None
+    waiter.join(timeout=2)
+    assert not waiter.is_alive()

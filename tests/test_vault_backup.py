@@ -5,6 +5,7 @@ import json
 import os
 import sqlite3
 import sys
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -14,7 +15,9 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
 import db  # noqa: E402
+import lockfile  # noqa: E402
 import paths  # noqa: E402
+import project_config  # noqa: E402
 import vault_backup  # noqa: E402
 import vault_identity  # noqa: E402
 
@@ -98,6 +101,83 @@ def test_prune_deletes_only_expired_verified_pair_and_keeps_newest(tmp_path):
     assert not Path(old_daily["database"]).exists()
     assert not Path(old_frequent["database"]).exists()
     assert Path(newest["database"]).exists()
+
+
+def test_prune_holds_exact_project_lease_through_destructive_unlinks(
+    tmp_path, monkeypatch
+):
+    project = tmp_path / "project"
+    (project / ".git").mkdir(parents=True)
+    test_root = paths.validated_test_root()
+    kb_a = test_root / "vaults" / f"prune-a-{tmp_path.name}"
+    kb_b = test_root / "vaults" / f"prune-b-{tmp_path.name}"
+    for kb_dir in (kb_a, kb_b):
+        kb_dir.mkdir(parents=True)
+    (kb_b / "canary.txt").write_text("other KB\n", encoding="utf-8")
+    project_config.create_scope(
+        project, policy=project_config.POLICY_PRIVATE
+    )
+    project_config.authorize_scope(project, kb_dir=kb_a)
+    _seed(project)
+    start = datetime(2026, 5, 1, 0, 0, tzinfo=UTC)
+    expired = vault_backup.create_snapshot(str(project), reason="expired", now=start)
+    newest = vault_backup.create_snapshot(
+        str(project), reason="newest", now=start + timedelta(days=1)
+    )
+
+    prune_paused = threading.Event()
+    release_prune = threading.Event()
+    transition_done = threading.Event()
+    errors: list[BaseException] = []
+    original_writable = vault_backup._make_opened_file_writable
+
+    def pause_before_final_verification(path: Path) -> bool:
+        if not prune_paused.is_set():
+            prune_paused.set()
+            assert release_prune.wait(timeout=5)
+        return original_writable(path)
+
+    monkeypatch.setattr(
+        vault_backup, "_make_opened_file_writable", pause_before_final_verification
+    )
+
+    def prune() -> None:
+        try:
+            vault_backup.prune_expired(
+                str(project), now=start + timedelta(days=40)
+            )
+        except BaseException as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+
+    def repin() -> None:
+        try:
+            project_config.repin_private_scope(project, kb_b)
+        except BaseException as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+        finally:
+            transition_done.set()
+
+    pruning = threading.Thread(target=prune)
+    pruning.start()
+    assert prune_paused.wait(timeout=2)
+    transition = threading.Thread(target=repin)
+    transition.start()
+
+    assert not transition_done.wait(timeout=0.2)
+    assert project_config.discover(project).kb_dir == kb_a
+    assert Path(expired["database"]).is_file()
+
+    release_prune.set()
+    pruning.join(timeout=3)
+    transition.join(timeout=3)
+
+    assert not pruning.is_alive()
+    assert transition_done.is_set()
+    assert not errors
+    assert not Path(expired["database"]).exists()
+    assert Path(newest["database"]).is_file()
+    assert (kb_b / "canary.txt").read_text(encoding="utf-8") == "other KB\n"
+    assert project_config.discover(project).kb_dir == kb_b
 
 
 def test_corrupt_snapshot_is_never_pruned(tmp_path):
@@ -271,11 +351,16 @@ def test_test_runtime_ignores_durability_root_spoof(tmp_path, monkeypatch):
 
 
 def test_production_classified_legacy_copy_still_backs_up_inside_test_root(tmp_path):
-    vault = paths.project_dir(str(tmp_path))
+    test_root = paths.validated_test_root()
+    assert test_root is not None
+    vault = test_root / "vaults" / f"legacy-backup-{tmp_path.name}"
     vault.mkdir(parents=True)
     legacy = sqlite3.connect(vault / "kb.db")
     try:
         legacy.executescript((ROOT / "src" / "schema.sql").read_text(encoding="utf-8"))
+        # Model an actual pre-identity Latch vault.  The current schema already
+        # declares vault_identity, but a legacy database had no such table.
+        legacy.execute("DROP TABLE vault_identity")
         legacy.execute(
             "INSERT INTO nodes(kind,title,body,status) "
             "VALUES('decision','legacy production copy','safe','canonical')"
@@ -283,6 +368,11 @@ def test_production_classified_legacy_copy_still_backs_up_inside_test_root(tmp_p
         legacy.commit()
     finally:
         legacy.close()
+    project_config.create_scope(
+        tmp_path,
+        policy=project_config.POLICY_PRIVATE,
+    )
+    project_config.authorize_scope(tmp_path, kb_dir=vault)
     conn = db.connect(str(tmp_path))
     try:
         assert conn._kb_vault_identity.classification == vault_identity.CLASS_PRODUCTION
@@ -295,11 +385,16 @@ def test_production_classified_legacy_copy_still_backs_up_inside_test_root(tmp_p
 
 
 def test_real_restore_recreates_missing_production_registry(tmp_path, monkeypatch):
-    vault = paths.project_dir(str(tmp_path / "source"))
+    source = tmp_path / "source"
+    source.mkdir()
+    test_root = paths.validated_test_root()
+    assert test_root is not None
+    vault = test_root / "vaults" / f"restore-source-{tmp_path.name}"
     vault.mkdir(parents=True)
     legacy = sqlite3.connect(vault / "kb.db")
     try:
         legacy.executescript((ROOT / "src" / "schema.sql").read_text(encoding="utf-8"))
+        legacy.execute("DROP TABLE vault_identity")
         legacy.execute(
             "INSERT INTO nodes(kind,title,body,status) "
             "VALUES('decision','recoverable','survives restore','canonical')"
@@ -307,13 +402,18 @@ def test_real_restore_recreates_missing_production_registry(tmp_path, monkeypatc
         legacy.commit()
     finally:
         legacy.close()
-    conn = db.connect(str(tmp_path / "source"))
+    project_config.create_scope(
+        source,
+        policy=project_config.POLICY_PRIVATE,
+    )
+    project_config.authorize_scope(source, kb_dir=vault)
+    conn = db.connect(str(source))
     try:
         identity = conn._kb_vault_identity
     finally:
         conn.close()
     assert identity.classification == vault_identity.CLASS_PRODUCTION
-    snapshot = vault_backup.create_snapshot(str(tmp_path / "source"), reason="recovery")
+    snapshot = vault_backup.create_snapshot(str(source), reason="recovery")
 
     registry = (
         paths.validated_test_root()
@@ -331,8 +431,8 @@ def test_real_restore_recreates_missing_production_registry(tmp_path, monkeypatc
     assert restored["ok"] is True
     assert restored["nodes"] == 1
     assert Path(restored["registry"]).is_file()
-    monkeypatch.setenv("LATCH_KB_DIR", str(target))
-    reopened = db.connect("ignored-after-restore")
+    project_config.repin_private_scope(source, target)
+    reopened = db.connect(str(source))
     try:
         assert reopened._kb_vault_identity == identity
         assert reopened.execute("SELECT COUNT(*) FROM nodes").fetchone()[0] == 1

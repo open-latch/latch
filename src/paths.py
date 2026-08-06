@@ -7,23 +7,16 @@ override; ``CLAUDE_KB_HOME`` remains a legacy alias for existing installs. This
 is useful when the source tree is on a read-only mount and you need projects/logs
 to live elsewhere.
 
-**The KB directory is pinned, not derived from the working directory** (KB
-decision id=1556). Historically the project DB was selected per-cwd via
-``PROJECTS_ROOT / sanitize_cwd(cwd) / kb.db``; that "which DB, inferred from
-where I'm standing" model was the single root cause of the entire wrong-DB bug
-family (id=302/307/335/1461/1523/1555 — including a session compacted into a
-*foreign project's* KB). ``project_dir`` now returns ONE fixed KB directory
-chosen at install time, resolved by ``_resolve_pinned_dir()``:
+**The KB directory is selected by an explicit scope, not inferred from the
+working directory.** ``project_config.resolve`` finds the nearest authorized
+SCM-independent root and returns its exact vault target.  LOCKED and UNLATCHED
+states have no KB path and cannot fall through to an environment or install
+pin.  A persisted compatibility policy may still resolve an existing user's
+global pin when no explicit project boundary exists.
 
-  1. ``LATCH_KB_DIR`` / ``CLAUDE_KB_DIR`` env var (explicit override), else
-  2. ``<KB_ROOT>/kb_location.json`` written at install time, else
-  3. legacy per-cwd selection (only when neither is configured, so an
-     unconfigured clone keeps working exactly as before — no silent regression).
-
-The working directory is retained ONLY as the *scope* signal for artifact
-tagging (``artifacts.canonicalize_repo`` has its own canonicalizer); it never
-again selects the on-disk DB. Multiple KBs are possible only by explicit opt-in
-(a named vault), never inferred from cwd.
+``_resolve_pinned_dir`` remains the compatibility pin reader used by installer
+and refresh flows.  It is not a second runtime routing algorithm: data-plane
+callers enter through ``project_dir`` and therefore through the resolved scope.
 """
 from __future__ import annotations
 
@@ -39,6 +32,7 @@ import warnings
 from pathlib import Path
 
 import mcp_runtime
+import project_config
 
 
 def _default_kb_root() -> Path:
@@ -56,8 +50,9 @@ UNLATCHED_STATE_FILE = KB_ROOT / "UNLATCH_STATE.json"
 UNLATCHED_MESSAGE = (
     "Latch is currently UNLATCHED.\n"
     "Latch guidance, gate/search/compact/maintenance, and automatic writes are off "
-    "for this latch install.\n"
-    "Run /unlatch to re-latch. If LATCH_UNLATCHED is set, unset it too."
+    "for this scope.\n"
+    "Run /latch status to see whether this is project-local or caused by a "
+    "legacy/global override before assuming other projects are unchanged."
 )
 
 # Install-time pin file: a small JSON {"kb_dir": "<absolute path>"} written by
@@ -427,16 +422,24 @@ def write_maintenance_runner(
         home,
         search_path,
     )
-    return _write_vault_runtime_settings(
-        {
-            "maintenance_backend": normalized,
-            "maintenance_executable": resolved_executable,
-            "maintenance_home": resolved_home,
-            "maintenance_path": resolved_search_path,
-        },
-        runtime_settings_file,
-        project_path=project_path,
-    )
+    updates = {
+        "maintenance_backend": normalized,
+        "maintenance_executable": resolved_executable,
+        "maintenance_home": resolved_home,
+        "maintenance_path": resolved_search_path,
+    }
+    if runtime_settings_file is not None:
+        return _write_vault_runtime_settings(updates, runtime_settings_file)
+
+    # Imported lazily because lockfile itself uses this path module.
+    import lockfile
+
+    project = str(project_path or os.getcwd())
+    with lockfile.project_access_lock(project) as locked_kb:
+        return _write_vault_runtime_settings(
+            updates,
+            locked_kb / VAULT_RUNTIME_SETTINGS_FILENAME,
+        )
 
 
 def _resolve_pinned_dir() -> Path | None:
@@ -476,27 +479,52 @@ def refresh_pinned_dir() -> Path | None:
     return _resolve_pinned_dir()
 
 
-def is_unlatched_mode() -> bool:
-    """User-facing vanilla-agent escape hatch.
+def _binding_for(
+    project_path: str | os.PathLike | None = None,
+) -> project_config.ResolvedScope:
+    raw = project_path or os.getcwd()
+    return project_config.resolve(Path(raw).expanduser())
 
-    Unlatched mode is implemented as a thin layer over the full kill switch:
-    automatic latch influence is off, while the UNLATCHED sentinel gives hooks and
-    status commands enough metadata to show an explicit receipt instead of going
-    silently dark.
-    """
+
+def unlatch_scope(
+    project_path: str | os.PathLike | None = None,
+    *,
+    resolved: project_config.ResolvedScope | None = None,
+) -> str | None:
+    """Return ``project``, ``global``, or ``connection`` when Latch is off."""
+    # Upgrade compatibility: old installs may still carry an install-wide
+    # sentinel.  It remains authoritative until the user explicitly re-latches.
     if UNLATCHED_FILE.exists():
-        return True
+        return "global"
     connection = mcp_runtime.current_connection()
-    if connection is not None:
-        return connection.unlatched
-    return bool(os.environ.get("LATCH_UNLATCHED"))
+    # A brokered MCP connection snapshots the proxy's trustworthy project
+    # state. Ignore daemon-process environment poison in that case.
+    if connection is None and os.environ.get("LATCH_UNLATCHED"):
+        return "global"
+    scope = project_path
+    if scope is None and connection is not None:
+        scope = connection.project_cwd
+    binding = resolved if resolved is not None else _binding_for(scope)
+    if binding is not None and binding.mode == project_config.MODE_UNLATCHED:
+        return "project"
+    # Disk state may turn an existing connection off immediately.  The
+    # connection snapshot remains an additive safety latch, so turning a
+    # project back on still requires the documented agent restart.
+    if connection is not None and connection.unlatched:
+        return "connection"
+    return None
 
 
-def is_disabled() -> bool:
+def is_unlatched_mode(project_path: str | os.PathLike | None = None) -> bool:
+    """Whether Latch is off for this project or by a legacy global override."""
+    return unlatch_scope(project_path) is not None
+
+
+def is_disabled(project_path: str | os.PathLike | None = None) -> bool:
     """Kill-switch: hooks and compactor no-op if DISABLE/UNLATCHED exists or
     the LATCH_DISABLE / CLAUDE_KB_DISABLE env var is set. Recoverable in one
-    command: `bash bin/latch_enable.sh` or `/unlatch`."""
-    if is_unlatched_mode():
+    command: `bash bin/latch_enable.sh` globally or `/latch` for one project."""
+    if is_unlatched_mode(project_path):
         return True
     if DISABLE_FILE.exists():
         return True
@@ -508,13 +536,13 @@ def is_disabled() -> bool:
     )
 
 
-def is_write_disabled() -> bool:
+def is_write_disabled(project_path: str | os.PathLike | None = None) -> bool:
     """Narrower kill-switch covering write-side hooks (Stop, SessionEnd) only.
 
     Read-side hooks (SessionStart, UserPromptSubmit) stay live. Used to enable
     silent startup repair and per-prompt context injection without re-enabling
     the Stop->compactor path that fan-out'd in 2026-04-23. Implies is_disabled()."""
-    if is_disabled():
+    if is_disabled(project_path):
         return True
     if DISABLE_WRITE_FILE.exists():
         return True
@@ -608,33 +636,52 @@ def sanitize_cwd(cwd: str | os.PathLike) -> str:
 def project_dir(cwd: str | os.PathLike | None = None) -> Path:
     """The KB directory (holds kb.db, budget.json, the compactor lock, logs).
 
-    When a pin is configured (id=1556) the ``cwd`` argument is IGNORED and the
-    one fixed KB directory is returned — this is what makes the wrong-DB bug
-    class structurally impossible. ``cwd`` is honored only in legacy
-    (unconfigured) mode, where it selects a per-project dir as before."""
+    ``project_config.resolve`` is the sole authority for selecting a vault.
+    In particular, an explicit LOCKED or UNLATCHED boundary must fail before
+    consulting an environment pin, the install pin, or legacy cwd routing.
+    Compatibility is represented by a LATCHED resolved scope too, but only
+    when the resolver found no explicit boundary and the persisted machine
+    policy permits the existing global pin.
+    """
+    scope = cwd or os.getcwd()
+    target = project_config.resolve(scope)
+    if target.state == project_config.MODE_UNLATCHED:
+        raise project_config.ProjectConfigError(
+            f"Latch is UNLATCHED for {target.project_root}; no KB access is allowed"
+        )
+    if target.state != project_config.MODE_LATCHED or target.kb_dir is None:
+        detail = target.reason or "no safe KB target"
+        state_label = (
+            target.state.upper()
+            if target.state != project_config.MODE_LATCHED
+            else "LOCKED"
+        )
+        raise project_config.ProjectConfigError(
+            f"Latch is {state_label} for {target.project_root}: {detail}"
+        )
+
+    selected = project_config.validated_bound_kb_dir(target)
+    if selected is None:
+        # A LATCHED target without a directory would violate the resolver
+        # contract.  Keep this fail-closed even if a future state is added.
+        raise project_config.ProjectConfigError(
+            f"Latch resolved no KB target for {target.project_root}"
+        )
+
     test_root = validated_test_root()
     if test_root is not None:
-        raw_pin = os.environ.get("LATCH_KB_DIR") or os.environ.get("CLAUDE_KB_DIR")
-        if raw_pin:
-            candidate = Path(raw_pin).expanduser().resolve()
-            allowed = (test_root / "vaults").resolve()
-            if candidate != allowed and _is_relative_to(candidate, allowed):
-                return candidate
+        allowed = (test_root / "vaults").resolve()
+        if selected == allowed or not _is_relative_to(selected, allowed):
             raise UnsafeTestExecutionError(
-                "test subprocess KB pin is outside its authenticated disposable root"
+                "resolved test KB is outside its authenticated disposable root"
             )
-        scope = cwd or os.getcwd()
-        return test_root / "vaults" / sanitize_cwd(scope)
+        return selected
     if _direct_test_script():
         raise UnsafeTestExecutionError(
             "direct test execution is not allowed without an authenticated "
             "disposable Latch test root; run `python -m pytest ...`"
         )
-    pinned = _resolve_pinned_dir()
-    if pinned is not None:
-        return pinned
-    cwd = cwd or os.getcwd()
-    return PROJECTS_ROOT / sanitize_cwd(cwd)
+    return selected
 
 
 def db_path(cwd: str | os.PathLike | None = None) -> Path:

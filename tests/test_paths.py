@@ -92,23 +92,14 @@ def test_sanitize_cwd_mingw_does_not_double_prefix():
     print("PASS sanitize_cwd_mingw_does_not_double_prefix")
 
 
-def test_sanitize_cwd_idempotent_on_project_dir():
-    """connect(project_dir(cwd)) must resolve to the same KB as connect(cwd).
-
-    Regression: passing an already-sanitized project_dir back into
-    sanitize_cwd used to double-sanitize (e.g. produce a nested form like
-    `c--installdir-projects-c--Users-me-someproject`), silently creating a
-    ghost empty DB.
-    """
+def test_project_dir_is_idempotent_on_resolved_compatibility_vault():
+    """Resolving an already-selected global vault cannot create a ghost KB."""
     cwd = "C:/Users/me/some_project"
-    once = paths.sanitize_cwd(cwd)
-    pdir = paths.project_dir(cwd)
-    twice = paths.sanitize_cwd(pdir)
-    _assert(once == twice,
-            f"sanitize should be idempotent on project_dir output: once={once!r} twice={twice!r}")
-    _assert(twice == "c--Users-me-some_project",
-            f"unexpected sanitized form: {twice!r}")
-    print(f"PASS sanitize_cwd_idempotent_on_project_dir ({once})")
+    first = paths.project_dir(cwd)
+    second = paths.project_dir(first)
+    _assert(first == second,
+            f"project_dir should preserve its resolved vault: first={first!r} second={second!r}")
+    print(f"PASS project_dir_is_idempotent_on_resolved_compatibility_vault ({first})")
 
 
 def test_is_write_disabled_via_env_var():
@@ -245,7 +236,7 @@ def test_latch_kb_dir_precedes_legacy_env_pin():
             os.environ["CLAUDE_KB_DIR"] = saved_legacy
 
 
-def test_connection_state_outranks_daemon_process_environment():
+def test_connection_state_outranks_daemon_process_environment(tmp_path):
     names = (
         "LATCH_IN_COMPACT",
         "CLAUDE_KB_IN_COMPACT",
@@ -259,9 +250,11 @@ def test_connection_state_outranks_daemon_process_environment():
     try:
         for name in names:
             os.environ[name] = "1"
+        project = tmp_path / "project"
+        project.mkdir()
         safe = mcp_runtime.ConnectionContext(
             connection_id="safe",
-            project_cwd="/tmp/project",
+            project_cwd=str(project),
             session_id=None,
             session_source="test",
             proxy_pid=123,
