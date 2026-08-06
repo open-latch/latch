@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+LATCH_REVIEW_HOME="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+if [ -x "${LATCH_REVIEW_HOME}/.venv/bin/python" ]; then
+  LATCH_REVIEW_PYTHON="${LATCH_REVIEW_HOME}/.venv/bin/python"
+elif command -v python3 >/dev/null 2>&1; then
+  LATCH_REVIEW_PYTHON="$(command -v python3)"
+elif command -v python >/dev/null 2>&1; then
+  LATCH_REVIEW_PYTHON="$(command -v python)"
+else
+  echo "latch-review: Python 3.11 or newer was not found." >&2
+  exit 2
+fi
+
+if ! "$LATCH_REVIEW_PYTHON" -c \
+  'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)' \
+  >/dev/null 2>&1; then
+  echo "latch-review: selected interpreter is not Python 3.11 or newer: $LATCH_REVIEW_PYTHON" >&2
+  exit 2
+fi
+
+exec "$LATCH_REVIEW_PYTHON" "${LATCH_REVIEW_HOME}/src/local_review.py" "$@"

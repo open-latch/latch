@@ -66,6 +66,7 @@ import argparse
 import json
 import os
 import platform
+import re
 import shlex
 import shutil
 import subprocess
@@ -103,8 +104,25 @@ SNIPPET_PATH = KB_HOME / "settings_snippet.json"
 # Slash-command install (step 4): commands/*.md -> Claude Code's commands dir,
 # with the <KB_HOME> placeholder resolved to this clone's path.
 COMMANDS_SRC = KB_HOME / "commands"
+REVIEW_TARGET_CONTRACT_PATH = (
+    Path(__file__).resolve().parent.parent / "templates" / "review-target-contract.md"
+)
 COMMANDS_DEST = Path(os.environ.get("CLAUDE_COMMANDS_DIR") or (Path.home() / ".claude" / "commands"))
 COMMAND_PLACEHOLDER = "<KB_HOME>"
+KB_HOME_POSIX_LITERAL_PLACEHOLDER = "<KB_HOME_POSIX_LITERAL>"
+LATCH_REVIEW_POSIX_LITERAL_PLACEHOLDER = "<LATCH_REVIEW_POSIX_LITERAL>"
+LATCH_REVIEW_POWERSHELL_LITERAL_PLACEHOLDER = "<LATCH_REVIEW_POWERSHELL_LITERAL>"
+LATCH_REVIEW_TARGET_CONTRACT_PLACEHOLDER = "<LATCH_REVIEW_TARGET_CONTRACT>"
+COMMAND_PLACEHOLDERS = (
+    COMMAND_PLACEHOLDER,
+    KB_HOME_POSIX_LITERAL_PLACEHOLDER,
+    LATCH_REVIEW_POSIX_LITERAL_PLACEHOLDER,
+    LATCH_REVIEW_POWERSHELL_LITERAL_PLACEHOLDER,
+    LATCH_REVIEW_TARGET_CONTRACT_PLACEHOLDER,
+)
+COMMAND_PLACEHOLDER_RE = re.compile(
+    "|".join(re.escape(value) for value in sorted(COMMAND_PLACEHOLDERS, key=len, reverse=True))
+)
 LEGACY_COMMAND_ALIASES = {
     "kb-budget-approve.md": "latch-budget-approve.md",
     "kb-compact.md": "latch-compact.md",
@@ -131,6 +149,8 @@ LATCH_COMMAND_MARKERS = (
     "/bin/run_latch_compact_now.sh",
     "/bin/run_kb_focus.sh",
     "/bin/latch_direction.sh",
+    "/bin/latch-review",
+    "/bin/latch-review.ps1",
     "/src/budget.py",
     "/src/maintenance.py",
     "kb_profile_active",
@@ -666,6 +686,55 @@ def _resolved_kb_home() -> str:
     return str(KB_HOME).replace("\\", "/")
 
 
+def _powershell_literal(value: str) -> str:
+    """Return a PowerShell single-quoted literal with no interpolation."""
+    return "'" + value.replace("'", "''") + "'"
+
+
+def render_command_template(body: str, *, kb_home: str | Path | None = None) -> str:
+    """Resolve install-path placeholders without turning paths into shell code.
+
+    ``<KB_HOME>`` retains its historical raw substitution for existing command
+    templates.  The review command uses shell-specific placeholders because it
+    embeds the checkout path in executable snippets: POSIX values are rendered
+    with :func:`shlex.quote`, while PowerShell receives a non-interpolating
+    single-quoted literal.
+    """
+    normalized_home = str(KB_HOME if kb_home is None else kb_home).replace("\\", "/")
+    reserved = [value for value in COMMAND_PLACEHOLDERS if value in normalized_home]
+    if reserved:
+        raise ValueError(
+            "the Latch installation path contains a reserved command-template "
+            f"token: {reserved[0]}"
+        )
+    review_posix = f"{normalized_home}/bin/latch-review"
+    review_powershell = f"{normalized_home}/bin/latch-review.ps1"
+    target_contract = ""
+    if LATCH_REVIEW_TARGET_CONTRACT_PLACEHOLDER in body:
+        if not REVIEW_TARGET_CONTRACT_PATH.is_file():
+            raise FileNotFoundError(REVIEW_TARGET_CONTRACT_PATH)
+        target_contract = REVIEW_TARGET_CONTRACT_PATH.read_text(
+            encoding="utf-8"
+        ).strip()
+    replacements = {
+        COMMAND_PLACEHOLDER: normalized_home,
+        KB_HOME_POSIX_LITERAL_PLACEHOLDER: shlex.quote(normalized_home),
+        LATCH_REVIEW_POSIX_LITERAL_PLACEHOLDER: shlex.quote(review_posix),
+        LATCH_REVIEW_POWERSHELL_LITERAL_PLACEHOLDER: _powershell_literal(
+            review_powershell
+        ),
+        LATCH_REVIEW_TARGET_CONTRACT_PLACEHOLDER: target_contract,
+    }
+    return COMMAND_PLACEHOLDER_RE.sub(
+        lambda match: replacements[match.group(0)],
+        body,
+    )
+
+
+def unresolved_command_placeholders(body: str) -> tuple[str, ...]:
+    return tuple(placeholder for placeholder in COMMAND_PLACEHOLDERS if placeholder in body)
+
+
 def _read_text(path: Path) -> str:
     try:
         return path.read_text(encoding="utf-8")
@@ -673,10 +742,10 @@ def _read_text(path: Path) -> str:
         return ""
 
 
-def _is_latch_command_body(body: str) -> bool:
+def is_latch_command_body(body: str) -> bool:
     normalized = body.replace("\\", "/")
     return (
-        COMMAND_PLACEHOLDER in body
+        bool(unresolved_command_placeholders(body))
         or _resolved_kb_home() in normalized
         or any(marker in normalized for marker in LATCH_COMMAND_MARKERS)
     )
@@ -687,7 +756,7 @@ def _write_command(src: Path, dest: Path) -> None:
 
 
 def _command_content(src: Path) -> str:
-    return src.read_text(encoding="utf-8").replace(COMMAND_PLACEHOLDER, _resolved_kb_home())
+    return render_command_template(src.read_text(encoding="utf-8"))
 
 
 def _legacy_alias_content(legacy_name: str, primary: Path) -> str:
@@ -714,9 +783,10 @@ def install_commands(dry_run: bool) -> tuple[str, list[str]]:
     Claude Code only discovers commands under ``~/.claude/commands/`` (or a
     project ``.claude/commands/``) — it does NOT scan this repo's ``commands/``
     folder. So the source must be copied there, with the ``<KB_HOME>``
-    placeholder resolved to this clone's path. Mirrors
-    ``bin/install_commands.{sh,ps1}`` (kept for commands-only re-installs) so the
-    one engine install also wires the commands — without this step ``/latch-compact``
+    placeholder resolved to this clone's path. The standalone
+    ``bin/install_commands.{sh,ps1}`` launchers delegate here for commands-only
+    re-installs, so this function is the single policy owner. The full engine
+    install also wires the commands — without this step ``/latch-compact``
     et al. error ``Unknown skill`` even though the engine + MCP are fully wired
     (the gap that bit the 2026-06-07 Mac install, id=1468 #1). Overwrite-always,
     matching the shell installers. Honors ``CLAUDE_COMMANDS_DIR`` via
@@ -745,7 +815,7 @@ def install_commands(dry_run: bool) -> tuple[str, list[str]]:
         if not legacy.exists() or not primary.exists():
             continue
         body = _read_text(legacy)
-        if not _is_latch_command_body(body):
+        if not is_latch_command_body(body):
             changes.append(f"skipped legacy alias {legacy_name} (looks user-owned)")
             continue
         if dry_run:
@@ -758,7 +828,7 @@ def install_commands(dry_run: bool) -> tuple[str, list[str]]:
         if not stale.exists():
             continue
         body = _read_text(stale)
-        if not _is_latch_command_body(body):
+        if not is_latch_command_body(body):
             changes.append(f"skipped stale legacy command {stale_name} (looks user-owned)")
             continue
         if dry_run:
@@ -782,22 +852,27 @@ def commands_status() -> tuple[bool, str]:
         head = ", ".join(missing[:3]) + ("..." if len(missing) > 3 else "")
         return False, (f"slash commands: {len(missing)}/{len(expected)} not installed in "
                        f"{COMMANDS_DEST} (e.g. {head})")
-    unresolved = [n for n in expected
-                  if COMMAND_PLACEHOLDER in (COMMANDS_DEST / n).read_text(encoding="utf-8")]
+    unresolved = [
+        n
+        for n in expected
+        if unresolved_command_placeholders(
+            (COMMANDS_DEST / n).read_text(encoding="utf-8")
+        )
+    ]
     unresolved.extend(
         n for n in LEGACY_COMMAND_ALIASES
         if (COMMANDS_DEST / n).is_file()
-        and _is_latch_command_body(_read_text(COMMANDS_DEST / n))
-        and COMMAND_PLACEHOLDER in _read_text(COMMANDS_DEST / n)
+        and is_latch_command_body(_read_text(COMMANDS_DEST / n))
+        and unresolved_command_placeholders(_read_text(COMMANDS_DEST / n))
     )
     if unresolved:
         head = ", ".join(unresolved[:3]) + ("..." if len(unresolved) > 3 else "")
-        return False, (f"slash commands: {len(unresolved)} still contain a literal "
-                       f"{COMMAND_PLACEHOLDER} placeholder (e.g. {head})")
+        return False, (f"slash commands: {len(unresolved)} still contain an install-path "
+                       f"placeholder (e.g. {head})")
     stale = [
         n for n in STALE_LEGACY_COMMANDS
         if (COMMANDS_DEST / n).is_file()
-        and _is_latch_command_body(_read_text(COMMANDS_DEST / n))
+        and is_latch_command_body(_read_text(COMMANDS_DEST / n))
     ]
     if stale:
         head = ", ".join(stale[:3]) + ("..." if len(stale) > 3 else "")
@@ -898,7 +973,30 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--no-seed-prompt", action="store_true",
                     help="leave the initial KB pending and print its review command")
     ap.add_argument("--suppress-seed-output", action="store_true", help=argparse.SUPPRESS)
+    ap.add_argument(
+        "--commands-only",
+        action="store_true",
+        help="install only the Claude slash commands using the shared policy",
+    )
     args = ap.parse_args(argv)
+
+    if args.commands_only:
+        level, changes = install_commands(args.dry_run)
+        for change in changes:
+            print(change)
+        if level != "OK":
+            return 1
+        if args.dry_run:
+            print(
+                f"Done — {len(changes)} planned command change(s) in "
+                f"{COMMANDS_DEST}"
+            )
+        else:
+            print(
+                f"Done — updated slash commands in {COMMANDS_DEST} "
+                f"({_command_change_summary(changes)})"
+            )
+        return 0
 
     python_path = resolve_python(args.python)
     server_py = str((KB_HOME / "src" / "mcp_server.py")).replace("\\", "/")

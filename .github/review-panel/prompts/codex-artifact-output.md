@@ -1,14 +1,12 @@
 # Lane: user-facing artifact and output review
 
-Review the inline `Artifact packet` evidence section alongside the code diff.
-It contains the packet README and manifest, changed user-facing files, a
-focused patch, and the output or failure receipts from applicable deterministic
-simulation recipes. Judge what a user would actually read or experience:
-confusing UX, hidden overclaims, stale copy, broken formatting, missing
-receipts, misleading errors, and mismatches between behavior and product
-promises.
+Review the supplied immutable diff, changed and nearby blobs, and path index
+with a strict user-facing-output lens. Judge what a user would actually read or
+experience: confusing UX, hidden overclaims, stale copy, broken formatting,
+misleading errors, and mismatches between behavior and product promises.
 
 This lane is intentionally separate from project-decision review. Do not infer
 that an artifact is good merely because the code follows an internal
-architecture. If no recipe could simulate an affected surface, record that
-specific limitation in coverage_gaps.
+architecture. The local trust boundary never executes project code, builds, or
+simulation recipes. Record any conclusion that requires rendered or runtime
+output as a specific coverage gap instead of fabricating that evidence.

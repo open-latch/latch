@@ -282,6 +282,39 @@ Compaction is user-initiated because it spends a model call and writes a durable
 
 Or, you can simply ask latch in natural language, and the agent will offer the matching command.
 
+For an adversarial code review, ask Claude Code or Codex to “send PR 73 to the
+Latch review panel,” use Claude Code's `/latch-review`, or point `LATCH_HOME`
+at the app path printed by the installer and run from the repository you want
+reviewed:
+
+```bash
+bash "$LATCH_HOME/bin/latch-review" --pr 73
+bash "$LATCH_HOME/bin/latch-review" --range main...HEAD
+bash "$LATCH_HOME/bin/latch-review" --commit HEAD
+```
+
+On Windows PowerShell, use
+`& "$env:LATCH_HOME\bin\latch-review.ps1" --pr 73`. If you want the short
+terminal spelling, define a shell alias or function named `latch-review` for
+that installed wrapper. The installed Claude command and Codex skill embed the
+app path and do not require a persistent `LATCH_HOME` variable.
+
+The panel runs two Claude and three Codex specialist lanes in parallel, adding
+the artifact/output lane when user-facing files change. It uses the CLIs'
+subscription logins, refuses API-key/alternate-token auth and endpoint
+overrides, and saves
+its consolidated report inside the target repository's local Git metadata,
+where it cannot be committed. Nothing is posted to GitHub unless you add
+`--post-pr`. The GitHub CLI is used only for `--pr`, automatic PR detection,
+and posting; an explicit `--range` or `--commit` review without posting needs
+only Git. If multiple provider CLIs are installed, set an absolute
+`CLAUDE_BIN` or `CODEX_BIN`; the runner pins that executable for the whole run
+and rejects a Codex binary whose offline bundled catalog lacks the configured
+model or effort. The CLIs cannot inspect
+account-level usage-credit or auto-top-up settings, so disable those separately
+if you want a hard stop at the included allowance. See
+[the local review-panel reference](./.github/review-panel/README.md).
+
 ## Using latch in more than one repo
 
 You install latch once. The runtime and your KB are shared, and for **Claude Code** and **Codex** the

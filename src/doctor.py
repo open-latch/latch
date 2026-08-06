@@ -325,7 +325,7 @@ def check_commands_installed() -> tuple[str, str, str]:
     """Are latch's slash commands copied into Claude Code's commands dir?
 
     install_engine (and the standalone install_commands.{sh,ps1}) copy
-    commands/*.md into ~/.claude/commands/ with the <KB_HOME> placeholder
+    commands/*.md into ~/.claude/commands/ with install-path placeholders
     resolved. If that step was skipped, /latch-compact et al. error 'Unknown skill'
     even though the engine + MCP are wired — the gap that bit the 2026-06-07 Mac
     install (id=1468 #1).
@@ -333,7 +333,8 @@ def check_commands_installed() -> tuple[str, str, str]:
     WARN (not FAIL), like the MCP-wiring check: this is WIRING, not ENVIRONMENT,
     and the doctor may legitimately run before the commands are installed. The
     WARN surfaces the gap loudly without failing a pre-wiring env verify. Checks
-    presence + that <KB_HOME> was resolved (a literal placeholder = broken copy).
+    presence + that every install-path placeholder was resolved (a literal
+    placeholder = broken copy).
     Runtime health of what the commands invoke is covered by the env checks above
     + the fixed bin wrappers (id=1467) — this is not a presence-only false PASS.
     Honors CLAUDE_COMMANDS_DIR.
@@ -356,75 +357,38 @@ def check_commands_installed() -> tuple[str, str, str]:
         return name, WARN, (f"{len(missing)}/{len(expected)} not in {dest} (e.g. {head}) - "
                             "/latch-compact will error 'Unknown skill'. "
                             f"{context}. Fix: bash bin/install_engine.sh")
+    install_path_placeholders = install_engine.COMMAND_PLACEHOLDERS
     unresolved = []
     for n in expected:
         try:
-            if "<KB_HOME>" in (dest / n).read_text(encoding="utf-8"):
+            if any(
+                marker in (dest / n).read_text(encoding="utf-8")
+                for marker in install_path_placeholders
+            ):
                 unresolved.append(n)
         except OSError:
             pass
-    legacy_aliases = {
-        "kb-budget-approve.md": "latch-budget-approve.md",
-        "kb-compact.md": "latch-compact.md",
-        "kb-decay.md": "latch-decay.md",
-        "kb-gate.md": "latch-gate.md",
-        "kb-gate-report.md": "latch-gate-report.md",
-        "kb-heal.md": "latch-heal.md",
-        "kb-tree.md": "latch-tree.md",
-    }
-    stale_legacy = (
-        "latch-baseline.md",
-        "kb-focus.md",
-        "kb-project-direction.md",
-        "mission-control.md",
-        "trust-and-go.md",
-    )
-    markers = (
-        "/bin/run_kb_gate.sh",
-        "/bin/run_latch_gate.sh",
-        "/bin/latch_baseline.sh",
-        "/bin/unlatch.sh",
-        "/bin/latch_gate_report.sh",
-        "/bin/run_compact_now.sh",
-        "/bin/run_latch_compact_now.sh",
-        "/bin/run_kb_focus.sh",
-        "/bin/latch_direction.sh",
-        "/src/budget.py",
-        "/src/maintenance.py",
-        "kb_profile_active",
-        "kb_profile_bind",
-        "mission-control verification profile",
-        "trust-and-go verification profile",
-    )
-
-    def is_latch_command_body(body: str) -> bool:
-        normalized = body.replace("\\", "/")
-        kb_home = str(SRC_DIR.parent).replace("\\", "/")
-        return (
-            "<KB_HOME>" in body
-            or kb_home in normalized
-            or any(marker in normalized for marker in markers)
-        )
-
-    for n in legacy_aliases:
+    for n in install_engine.LEGACY_COMMAND_ALIASES:
         path = dest / n
         if not path.is_file():
             continue
         body = path.read_text(encoding="utf-8")
-        if is_latch_command_body(body) and "<KB_HOME>" in body:
+        if install_engine.is_latch_command_body(body) and any(
+            marker in body for marker in install_path_placeholders
+        ):
             unresolved.append(n)
     if unresolved:
         head = ", ".join(unresolved[:3]) + ("..." if len(unresolved) > 3 else "")
-        return name, WARN, (f"{len(unresolved)} command(s) still contain a literal <KB_HOME> "
+        return name, WARN, (f"{len(unresolved)} command(s) still contain an install-path "
                             f"placeholder (e.g. {head}) - {context}. "
                             "Re-run bash bin/install_engine.sh")
     stale = []
-    for n in stale_legacy:
+    for n in install_engine.STALE_LEGACY_COMMANDS:
         path = dest / n
         if not path.is_file():
             continue
         body = path.read_text(encoding="utf-8")
-        if is_latch_command_body(body):
+        if install_engine.is_latch_command_body(body):
             stale.append(n)
     if stale:
         head = ", ".join(stale[:3]) + ("..." if len(stale) > 3 else "")

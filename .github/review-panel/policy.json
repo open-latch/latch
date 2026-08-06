@@ -44,6 +44,10 @@
     "install.sh",
     "install.ps1",
     "bin/**",
+    "commands/**",
+    ".agents/skills/**",
+    "templates/codex/**",
+    "templates/review-target-contract.md",
     "claude_md_snippet.md",
     "cursor_rule_snippet.mdc",
     "src/quickstart.py",
@@ -55,7 +59,7 @@
     "src/uninstall*.py",
     "tests/seed_report_review_fixtures.py"
   ],
-  "artifact_recipes": [
+  "runtime_evidence_requirements": [
     {
       "id": "seed-report",
       "paths": [
@@ -63,14 +67,6 @@
         "src/seed_report_evals.py",
         "tests/seed_report_review_fixtures.py",
         "tests/test_seed*.py"
-      ],
-      "command": [
-        "python",
-        "tests/seed_report_review_fixtures.py",
-        "--out-dir",
-        "{output_dir}/seed-report",
-        "--llm",
-        "no"
       ]
     },
     {
@@ -82,12 +78,6 @@
         "src/claude_md_sync.py",
         "src/cursor_rules_sync.py",
         "src/managed_doc_sync.py"
-      ],
-      "command": [
-        "python",
-        ".github/scripts/agent_contract_footprint.py",
-        "--base",
-        "{base_sha}"
       ]
     }
   ]

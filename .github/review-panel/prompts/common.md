@@ -21,8 +21,9 @@ Your job is to try to falsify the change, not summarize or praise it. Report
 only actionable problems introduced by this change. Every finding must name the
 affected repository-relative path and exact line range, explain the impact,
 cite concrete code or artifact evidence, and give a credible remediation.
-Inspect surrounding code and search the repository before claiming that logic,
-an abstraction, or an extension point does not already exist.
+Inspect the supplied surrounding blobs, identifier matches, and path index
+before claiming that logic, an abstraction, or an extension point does not
+already exist.
 
 Priority meanings:
 

@@ -1,0 +1,23 @@
+{
+  "source": {
+    "kind": "local_review_canary",
+    "pr_number": 75,
+    "base_sha": "3405be2b72ed4b79bf0c1457bc52c6529aec002f",
+    "head_sha": "32afe95284c94857b659b2bfbd2e3b96be69e882",
+    "captured_at": "2026-08-05T03:07:08Z"
+  },
+  "claude": {
+    "cli_version": "2.1.220",
+    "compatible_schema_uri": "http://json-schema.org/draft-07/schema#",
+    "rejected_schema_uri": "https://json-schema.org/draft/2020-12/schema",
+    "stderr": "Error: --json-schema is not a valid JSON Schema: no schema with key or ref \"https://json-schema.org/draft/2020-12/schema\""
+  },
+  "codex": {
+    "cli_version": "0.146.0-alpha.9.2",
+    "model": "gpt-5.6-sol",
+    "error_code": "invalid_json_schema",
+    "rejected_pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$)).+$",
+    "unsupported_pattern_tokens": ["(?=", "(?!", "(?<=", "(?<!"],
+    "stderr": "Invalid JSON schema: regex lookaround is not supported. Found at $.properties.findings.items.properties.code_location.properties.path.pattern."
+  }
+}
