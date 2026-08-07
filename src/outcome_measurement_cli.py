@@ -137,6 +137,20 @@ def load_envelope(path: str | os.PathLike[str]) -> dict[str, Any]:
     }
 
 
+OUTCOME_LINEAGE_FILENAME = "outcome-lineage.json"
+
+
+def default_lineage_path(project: str | os.PathLike[str]) -> Path:
+    """The checkpoint's sanctioned vault-local home (ruling 4562).
+
+    The checkpoint persists raw source coordinates, so its default location
+    is inside the project's vault directory — written 0o600 and gitignored —
+    never an operator-invented path that travels.
+    """
+
+    return paths.project_dir(os.fspath(project)) / OUTCOME_LINEAGE_FILENAME
+
+
 def _same_path(left: Path, right: Path) -> bool:
     if left.expanduser().resolve() == right.expanduser().resolve():
         return True
@@ -170,7 +184,10 @@ def _inside_root(path: Path, root: Path) -> bool:
     if resolved_path == resolved_root:
         return True
     if resolved_root.exists() and not resolved_root.is_dir():
-        return False
+        # A file-valued root contains exactly itself, and identity — not
+        # spelling — decides: a case-variant or hardlinked output would be
+        # committed over the very evidence this run just measured.
+        return _same_path(resolved_path, resolved_root)
     try:
         resolved_path.relative_to(resolved_root)
         return True
@@ -210,10 +227,26 @@ def _validate_output_paths(
         "project database wal": Path(str(database) + "-wal"),
         "project database shm": Path(str(database) + "-shm"),
     })
+    sanctioned_lineage = default_lineage_path(project)
     for output_name, output in outputs.items():
         for input_name, input_path in inputs.items():
             if _same_path(output, input_path):
                 raise ValueError(f"{output_name} path aliases {input_name}")
+        if output_name == "report" and _same_path(output, sanctioned_lineage):
+            # The checkpoint is lineage authority: a report aimed at it would
+            # destroy the admission history it exists to carry.
+            raise ValueError("report path aliases the vault lineage checkpoint")
+        if output_name == "lineage" and (
+            output.expanduser().resolve()
+            == sanctioned_lineage.expanduser().resolve()
+        ):
+            # The sanctioned vault-local home (ruling 4562). The vault is
+            # itself the measured S1 root, and this one inert name is never
+            # discoverable as evidence, so exactly this spelling is exempt
+            # from the refusal below. Identity (samefile) is deliberately not
+            # used: a hardlink of the checkpoint under any other name —
+            # including an evidence-shaped one — stays refused.
+            continue
         for roots in source_roots.values():
             if any(_inside_root(output, Path(root)) for root in roots):
                 raise ValueError(f"{output_name} path is inside a measured root")
@@ -309,8 +342,17 @@ def main(argv: list[str] | None = None) -> int:
         description="Run one explicit, offline canonical outcome audit.",
     )
     parser.add_argument("--project", required=True)
-    for name in ("envelope", "lineage", "report"):
+    for name in ("envelope", "report"):
         parser.add_argument(f"--{name}", required=True, type=Path)
+    parser.add_argument(
+        "--lineage",
+        type=Path,
+        default=None,
+        help=(
+            "lineage checkpoint path; defaults to the private vault-local "
+            f"{OUTCOME_LINEAGE_FILENAME} inside the project directory"
+        ),
+    )
     parser.add_argument(
         "--contract",
         type=Path,
@@ -328,6 +370,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.contract is None:
         args.contract = runner.packaged_contract_path()
+    if args.lineage is None:
+        args.lineage = default_lineage_path(args.project)
     try:
         loaded = load_envelope(args.envelope)
         fixture_paths = loaded.pop("fixture_paths")

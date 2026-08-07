@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 import outcome_measurement as om
+import outcome_measurement_runner as runner
 
 
 UTC = timezone.utc
@@ -1898,13 +1899,25 @@ def test_unfinalized_prior_preserves_lineage_without_freezing_outcome():
     ]
 
 
-def _lineage_probe_state(*, mutate: bool, finalize_prior: bool):
+def _lineage_probe_state(
+    *,
+    mutate: bool,
+    finalize_prior: bool,
+    evolve_resolver: bool = False,
+    relabel_protocol: bool = False,
+):
     """29 genuine in-window pairs plus one nonce whose evidence can move.
 
     ``mutate`` moves the 30th nonce's current evidence to CAP+5min while its
     prior receipt was admitted at T0+100min.  ``finalize_prior`` decides whether
     that prior is finalized or provisional, so the two lineage classes can be
-    driven through the identical mutation.
+    driven through the identical mutation.  ``evolve_resolver`` re-derives the
+    resolver-owned activity counts on the 30th nonce's current re-read while
+    its evidence identity stays byte-identical — an honest rerun whose KB
+    events sit differently relative to a legitimately different window.
+    ``relabel_protocol`` keeps the honest pair in place and ADDS the mutated
+    copies relabelled to an older protocol generation — a tamper hoping a
+    per-generation comparison gives it a private group.
     """
 
     config = _config(fresh=True)
@@ -1946,6 +1959,26 @@ def _lineage_probe_state(*, mutate: bool, finalize_prior: bool):
         ]
     else:
         current_moved = prior_pair
+    if evolve_resolver:
+        current_moved = [
+            replace(
+                row,
+                progress_inserts=row.progress_inserts + 1,
+                inserts=row.inserts + 1,
+                linked_cited_insert=not row.linked_cited_insert,
+                cited_edge_activity=not row.cited_edge_activity,
+                touches=row.touches + 3,
+            )
+            for row in current_moved
+        ]
+    if relabel_protocol:
+        current_moved = [
+            *prior_pair,
+            *(
+                replace(row, measurement_protocol_version="outcome-v2.5.0")
+                for row in current_moved
+            ),
+        ]
     state = _state(
         [*genuine, *current_moved],
         config=config,
@@ -2015,6 +2048,180 @@ def test_unmutated_provisional_rerun_stays_green_with_no_markers():
     assert result.o2 == "pass"
     assert result.o2_reasons == ()
     assert result.v1_green is True
+
+
+def test_resolver_only_evolution_is_not_candidate_tampering():
+    """Latch 4562 item 2 acceptance: the 4528 blocker-2 A/B stays green.
+
+    Byte-identical evidence whose re-read legitimately re-derives the seven
+    resolver-owned fields (the same KB event sitting differently relative to
+    two legitimately different windows, Codex 4547) is an honest rerun in both
+    lineage classes, never candidate tampering.
+    """
+
+    for finalize_prior in (False, True):
+        state, result = _lineage_probe_state(
+            mutate=False, finalize_prior=finalize_prior, evolve_resolver=True
+        )
+        assert state.loss_markers == (), finalize_prior
+        assert result.eligible_n == result.d_min == 30
+        assert result.o2 == "pass"
+        assert result.o2_reasons == ()
+        assert result.v1_green is True
+
+
+def test_instrument_availability_flip_is_censorship_not_tampering():
+    """An availability re-derivation censors honestly; it is not a conflict.
+
+    ``observable`` and ``evidence_available`` are resolver-owned: a rerun
+    during an instrument outage flips them with no evidence moving. The guard
+    must not read that as candidate tampering (4562 item 2) — the flip
+    surfaces as disposition, never as ``admitted_candidate_conflict``.
+    """
+
+    prior = replace(_state(_pair("outage", 1)).receipts[0], finalized=False)
+    current = _pair("outage", 1, observable=False, evidence_available=False)
+    state = _state(current, prior=(prior,))
+    assert not [
+        marker
+        for marker in state.loss_markers
+        if marker.reason
+        in ("admitted_candidate_conflict", "finalized_candidate_conflict")
+    ]
+
+
+def test_provisional_protocol_bump_is_succession_not_conflict():
+    """Codex 4547 / Latch 4562 item 2: generations never conflict-compare.
+
+    A legitimate protocol bump re-observes an admitted nonce under the next
+    generation. Comparing candidates across generations manufactured an
+    ``admitted_candidate_conflict`` out of ``protocol_mismatch``; succession
+    is decision 4432's intended shape, not tampering.
+    """
+
+    next_protocol = "outcome-v2.6.1"
+    prior = replace(_state(_pair("bumped", 1)).receipts[0], finalized=False)
+    config = _config(protocol=next_protocol)
+    current = _pair("bumped", 1, protocol=next_protocol)
+    state = _state(current, config=config, prior=(prior,))
+    assert [marker.reason for marker in state.loss_markers] == []
+    inherited = next(row for row in state.receipts if row.nonce == "bumped")
+    assert inherited.admitted is True
+
+
+def test_protocol_relabel_cannot_hide_moved_evidence():
+    """A tamper that also relabels the protocol field must still conflict.
+
+    Partitioning the guard comparison by ``measurement_protocol_version``
+    would hand a rewritten row a private comparison group: one relabelled
+    field hides evidence moved outside [T0, cap) — the 4546 false-green
+    class. Generation succession is honored by neutralizing the field in the
+    comparison, never by exempting relabelled rows from it.
+    """
+
+    for finalize_prior in (False, True):
+        state, result = _lineage_probe_state(
+            mutate=True, finalize_prior=finalize_prior, relabel_protocol=True
+        )
+        conflicts = [
+            marker
+            for marker in state.loss_markers
+            if marker.reason
+            in ("admitted_candidate_conflict", "finalized_candidate_conflict")
+        ]
+        assert [marker.nonce for marker in conflicts] == ["moved"], finalize_prior
+        assert "timestamp_mismatch" in (conflicts[0].detail or ""), finalize_prior
+        assert result.v1_green is False, finalize_prior
+
+
+def test_total_loss_checkpoint_reappearance_cannot_reach_green(
+    tmp_path: Path,
+) -> None:
+    """Fact 4546 / Latch 4562 item 3: the one confirmed reachable false green.
+
+    Provisional admission -> total S1/S2 loss (synthesis moves the surviving
+    coordinates into ``boundary_evidence``) -> authenticated checkpoint round
+    trip -> reappearance at CAP+5min. The guard must read
+    ``observations + boundary_evidence`` exactly like ``prior_sources``
+    already does; scanning only ``observations`` compares the reappeared
+    evidence against an empty tuple and lets it ride the prior admission into
+    ``v1_green`` with zero markers.
+    """
+
+    config = _config(fresh=True)
+
+    def _snaps(rows):
+        return [
+            om.SnapshotReceipt(
+                source=row.source,
+                file=row.file,
+                first_sha256="a" * 64,
+                second_sha256="a" * 64,
+                snapshot_taken=row.ts + timedelta(seconds=om.FRESHNESS_SECONDS),
+            )
+            for row in rows
+        ]
+
+    genuine = []
+    for index in range(29):
+        nonce = f"genuine-{index}"
+        genuine.extend(
+            replace(row, file=f"{row.file}.{nonce}") for row in _pair(nonce, index)
+        )
+    genuine_snapshots = _snaps(genuine)
+    lost_pair = [replace(row, file=f"{row.file}.lost") for row in _pair("lost", 100)]
+
+    admitted = _state(
+        [*genuine, *lost_pair],
+        config=config,
+        snapshots=genuine_snapshots,
+    )
+    prior_lost = next(row for row in admitted.receipts if row.nonce == "lost")
+    assert prior_lost.admitted is True
+    assert prior_lost.finalized is False
+
+    lossy = _state(
+        genuine,
+        config=config,
+        prior=admitted.receipts,
+        snapshots=genuine_snapshots,
+    )
+    resynthesized = next(row for row in lossy.receipts if row.nonce == "lost")
+    assert resynthesized.observations == ()
+    assert resynthesized.boundary_evidence, (
+        "total loss must preserve the prior coordinates as boundary evidence"
+    )
+
+    checkpoint = tmp_path / "lineage.json"
+    mac_key = b"\x66" * 32
+    runner.write_lineage_checkpoint(
+        checkpoint, lossy, coordinate_sha256="b" * 64, mac_key=mac_key
+    )
+    restored = runner.load_lineage_checkpoint(
+        checkpoint, coordinate_sha256="b" * 64, mac_key=mac_key
+    )
+
+    reappeared = [
+        replace(row, file=f"{row.file}.lost", ts=CAP + timedelta(minutes=5))
+        for row in _pair("lost", 100)
+    ]
+    state = _state(
+        [*genuine, *reappeared],
+        config=config,
+        prior=restored,
+        snapshots=[*genuine_snapshots, *_snaps(reappeared)],
+    )
+    result = om.compute_oracles(state)
+    conflicts = [
+        marker
+        for marker in state.loss_markers
+        if marker.reason == "admitted_candidate_conflict"
+    ]
+    assert [marker.nonce for marker in conflicts] == ["lost"]
+    assert "timestamp_mismatch" in (conflicts[0].detail or "")
+    assert result.o2 == "indeterminate"
+    assert "loss_markers_present" in result.o2_reasons
+    assert result.v1_green is False
 
 
 def test_unfinalized_prior_partial_source_loss_is_explicit_and_monotone():

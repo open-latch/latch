@@ -692,6 +692,41 @@ def _conflict_reasons(observations: Sequence[Observation]) -> tuple[str, ...]:
     return tuple(sorted(reasons))
 
 
+def _admission_conflict_reasons(
+    observations: tuple[Observation, ...],
+) -> tuple[str, ...]:
+    """Cross-run admission-guard conflicts on evidence-only identity.
+
+    Prior lineage rows carry the previous run's resolver outputs while current
+    rows re-derive them, so the seven resolver-owned fields are neutralized
+    before comparison: the guard joins on ``_observation_evidence_join_key``
+    identity, and a rerun whose KB events sit differently relative to a
+    legitimately different window is honest evolution, not tampering.
+    ``measurement_protocol_version`` is neutralized for the same reason — a
+    protocol bump is decision 4432's succession and never conflicts on its
+    own (ruling 4562 item 2) — rather than partitioned on, because a
+    partition would hand any relabelled row a private comparison group and
+    reopen the 4546 false-green class item 3 closes. Tampering that hides
+    behind a relabel still moves an evidence field this comparison keeps.
+    """
+
+    neutralized = tuple(
+        replace(
+            row,
+            measurement_protocol_version=None,
+            observable=True,
+            evidence_available=True,
+            progress_inserts=0,
+            inserts=0,
+            linked_cited_insert=False,
+            cited_edge_activity=False,
+            touches=0,
+        )
+        for row in observations
+    )
+    return _conflict_reasons(neutralized)
+
+
 def _loss_reasons(
     observations: Sequence[Observation], config: MeasurementConfig
 ) -> tuple[str, ...]:
@@ -1338,18 +1373,21 @@ def fold_observations(
         # Admission inheritance carries the same tamper detection as the
         # finalized path below. Preserving lineage must never let evidence that
         # changed content or moved outside [T0, cap) ride a prior admission into
-        # a clean run: an honest re-read is content-identical and collapses, so
+        # a clean run: an honest re-read is evidence-identical and collapses, so
         # this fires only when the evidence backing the admission actually moved.
+        # Prior coordinates live in ``boundary_evidence`` once synthesis has
+        # rebuilt a total loss, so the guard reads both tuples exactly like
+        # ``prior_sources`` above (fact 4546 / ruling 4562 item 3).
         provisional_candidates = tuple(
             observation
             for row in provisional_rows
-            for observation in row.observations
+            for observation in row.observations + row.boundary_evidence
         ) + tuple(
             observation
             for generation_rows in grouped[nonce].values()
             for observation in generation_rows
         )
-        candidate_conflicts = _conflict_reasons(provisional_candidates)
+        candidate_conflicts = _admission_conflict_reasons(provisional_candidates)
         if candidate_conflicts and not _is_proven_foreign(
             provisional_candidates, config,
         ):
@@ -1388,11 +1426,14 @@ def fold_observations(
             for generation_rows in grouped.get(nonce, {}).values()
             for row in generation_rows
         ]
-        candidate_conflicts = _conflict_reasons(
-            tuple(receipt.observations) + tuple(current_candidates)
+        finalized_candidates = (
+            tuple(receipt.observations)
+            + tuple(receipt.boundary_evidence)
+            + tuple(current_candidates)
         )
+        candidate_conflicts = _admission_conflict_reasons(finalized_candidates)
         if candidate_conflicts and not _is_proven_foreign(
-            tuple(receipt.observations) + tuple(current_candidates), config,
+            finalized_candidates, config,
         ):
             marker_rows.append(
                 LossMarker(

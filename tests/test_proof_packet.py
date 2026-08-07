@@ -162,6 +162,11 @@ def test_runtime_manifest_covers_authoritative_bundle():
         "vendor/vocab.txt",
         "bin/latch_proof_packet.sh",
         "bin/latch_proof_packet.ps1",
+        # The audit CLI's packaged default contract is runtime-critical: a
+        # proof that omits it can claim current/public-safe without binding
+        # the shipped contract bytes (Latch 4562 item 4).
+        "bin/run_latch_outcome_audit.sh",
+        "artifacts/outcome-measurement/contract-v2.6.md",
     }
     _assert(required <= paths, sorted(required - paths))
     _assert(not any("__pycache__" in path or path.endswith(".pyc") for path in paths),

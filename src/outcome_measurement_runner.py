@@ -39,9 +39,6 @@ PACKAGED_CONTRACT_RELPATH = "artifacts/outcome-measurement/contract-v2.6.md"
 LINEAGE_CHECKPOINT_MAC_DOMAIN = (
     b"latch/outcome-measurement/lineage-checkpoint-mac\x00"
 )
-CHECKPOINT_PATH_TOKEN_DOMAIN = (
-    b"latch/outcome-measurement/checkpoint-path-token\x00"
-)
 
 
 def lineage_checkpoint_mac_key(
@@ -379,35 +376,32 @@ def _iso(value: datetime | None) -> str | None:
     return value.isoformat().replace("+00:00", "Z")
 
 
-def _opaque_checkpoint_file(source: str, file: str, mac_key: bytes) -> str:
-    """Return a stable opaque stand-in for a recoverable source path.
+def _observation_checkpoint_row(
+    row: outcome_measurement.Observation,
+) -> dict[str, object]:
+    """Serialize one observation with its exact source coordinates.
 
-    ``run_pinned_audit`` promises that recoverable project paths never enter a
-    receipt, but the checkpoint persisted raw absolute vault and transcript
-    paths.  The token is deterministic under this project's own key, so a path
-    always maps to the same value and nothing downstream sees a moving target.
+    The checkpoint is a vault-local private artifact — a 0o600 file under
+    0o700 parents, defaulting to a path inside the vault directory and
+    gitignored — so raw ``file`` paths and cleartext ``session_id`` are
+    acceptable and must round-trip exactly: the evidence resolver joins prior
+    rows against snapshot maps keyed by real absolute paths, and an opaque
+    stand-in made every finalized rerun fail closed (Latch 4528 blocker 1;
+    reverted under ruling 4562).
 
-    Only the path is suppressed.  ``session_id`` and ``project_proof`` stay in
-    cleartext on purpose: ``_conflict_reasons`` compares them across runs
-    against freshly parsed observations, so a token here would disagree with the
-    real value there and manufacture ``session_mismatch`` /
-    ``project_proof_mismatch`` on every subsequent run.
+    ``key_id`` inside ``project_proof`` also stays cleartext.  It is
+    ``HMAC(epoch_key, PROJECT_KEY_ID_DOMAIN)`` — an identifier published by
+    design in every gate result envelope.  Tokenizing it would not manufacture
+    ``project_proof_mismatch``; it would suppress it, because
+    ``_conflict_reasons`` only reports two fingerprints under one generation
+    when every row agrees on a single non-empty ``key_id``, and it would break
+    ``compare_project_proofs``, which reads distinct key ids as an epoch
+    mismatch.
     """
 
-    digest = hmac.new(
-        mac_key,
-        CHECKPOINT_PATH_TOKEN_DOMAIN + file.encode("utf-8"),
-        hashlib.sha256,
-    ).hexdigest()
-    return f"{source}-file-{digest[:32]}"
-
-
-def _observation_checkpoint_row(
-    row: outcome_measurement.Observation, mac_key: bytes
-) -> dict[str, object]:
     return {
         "source": row.source,
-        "file": _opaque_checkpoint_file(row.source, row.file, mac_key),
+        "file": row.file,
         "byte_offset": row.byte_offset,
         "nonce": row.nonce,
         "ts": _iso(row.ts),
@@ -446,13 +440,13 @@ def _observation_checkpoint_row(
 
 
 def _receipt_checkpoint_row(
-    row: outcome_measurement.InvocationReceipt, mac_key: bytes
+    row: outcome_measurement.InvocationReceipt,
 ) -> dict[str, object]:
     return {
         "nonce": row.nonce,
         "measurement_protocol_version": row.measurement_protocol_version,
         "observations": [
-            _observation_checkpoint_row(item, mac_key) for item in row.observations
+            _observation_checkpoint_row(item) for item in row.observations
         ],
         "disposition": row.disposition,
         "admitted": row.admitted,
@@ -469,7 +463,7 @@ def _receipt_checkpoint_row(
         "window_end": _iso(row.window_end),
         "prefix_member": row.prefix_member,
         "boundary_evidence": [
-            _observation_checkpoint_row(item, mac_key)
+            _observation_checkpoint_row(item)
             for item in row.boundary_evidence
         ],
     }
@@ -557,7 +551,7 @@ def write_lineage_checkpoint(
             raise ValueError("audit state contains conflicting receipt authority")
         by_identity[receipt.identity] = receipt
     rows = [
-        _receipt_checkpoint_row(row, mac_key)
+        _receipt_checkpoint_row(row)
         for row in sorted(
             by_identity.values(),
             key=lambda item: (

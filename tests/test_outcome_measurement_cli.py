@@ -100,28 +100,7 @@ def _write_json(path: Path, payload: object) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
 
 
-def _without_source_paths(receipts):
-    """Compare receipts ignoring the checkpoint's opaque path coordinate.
-
-    The checkpoint deliberately stores a stable token in place of the recoverable
-    absolute source path, so exact equality on ``file`` no longer holds.
-    """
-
-    return tuple(
-        replace(
-            row,
-            observations=tuple(
-                replace(item, file="") for item in row.observations
-            ),
-            boundary_evidence=tuple(
-                replace(item, file="") for item in row.boundary_evidence
-            ),
-        )
-        for row in receipts
-    )
-
-
-def test_lineage_checkpoint_round_trips_structural_authority_privately(
+def test_lineage_checkpoint_round_trips_structural_authority_exactly(
     tmp_path: Path,
 ) -> None:
     config = om.MeasurementConfig(
@@ -232,10 +211,11 @@ def test_lineage_checkpoint_round_trips_structural_authority_privately(
     loaded = runner.load_lineage_checkpoint(
         checkpoint, coordinate_sha256=coordinate, mac_key=mac_key
     )
-    assert _without_source_paths(loaded) == _without_source_paths(
-        (provisional, finalized)
-    )
-    assert "/private/structural-coordinate/gate.log" not in encoded
+    assert loaded == (provisional, finalized)
+    # The checkpoint is a vault-local private artifact (ruling 4562), so the
+    # exact source coordinate persists: the evidence resolver joins prior rows
+    # against snapshot maps keyed by real absolute paths (Latch 4528).
+    assert "/private/structural-coordinate/gate.log" in encoded
     with pytest.raises(ValueError, match="schema or coordinate"):
         runner.load_lineage_checkpoint(
             checkpoint, coordinate_sha256="c" * 64, mac_key=mac_key
@@ -539,12 +519,18 @@ def _corpus_baseline(
     *,
     contract_hash: str,
     implementation_commit: str,
+    event_age: timedelta = timedelta(minutes=10),
+    file_valued_s1: bool = False,
 ) -> dict[str, Path]:
     """Build one corpus-derived current-protocol audit envelope.
 
     Uses the real ``gate._log_invocation`` writer for S1 and a structural
     mutation of the pinned real Codex rollout for S2 (Latch 4114: external-format
     code is exercised only against corpus-derived fixtures).
+
+    ``event_age`` places the evidence relative to the wall clock: the default
+    keeps it inside ``FRESHNESS_SECONDS`` so receipts stay provisional, while
+    an age past that bound lets run-time snapshots finalize them.
     """
 
     project = tmp_path / "project"
@@ -560,7 +546,7 @@ def _corpus_baseline(
         conn.close()
 
     now = datetime.now(UTC)
-    event_ts = now - timedelta(minutes=10)
+    event_ts = now - event_age
     t0 = event_ts - timedelta(hours=1)
     cap = t0 + timedelta(days=21)
     host_root = tmp_path / "host"
@@ -594,11 +580,11 @@ def _corpus_baseline(
         measurement=measurement,
     )
     gate_root = paths.project_dir(str(project))
-    assert (
-        gate_root / f"gate-{event_ts.date().isoformat()}.log"
-    ).is_file(), "the real gate writer must produce S1"
+    gate_path = gate_root / f"gate-{event_ts.date().isoformat()}.log"
+    assert gate_path.is_file(), "the real gate writer must produce S1"
     (host_root / "rollout-corpus-current.jsonl").write_bytes(host_bytes)
-    roots = {"S1": [str(gate_root)], "S2": [str(host_root)]}
+    s1_root = gate_path if file_valued_s1 else gate_root
+    roots = {"S1": [str(s1_root)], "S2": [str(host_root)]}
 
     fixture_bytes = _fixture_bytes()
     fixture_hashes = {
@@ -670,7 +656,7 @@ def _corpus_baseline(
             ],
         },
     )
-    return {"project": project, "envelope": envelope}
+    return {"project": project, "envelope": envelope, "gate_path": gate_path}
 
 
 def _clean_git_checkout(tmp_path: Path) -> tuple[Path, str]:
@@ -686,6 +672,7 @@ def _clean_git_checkout(tmp_path: Path) -> tuple[Path, str]:
     ignore = shutil.ignore_patterns("__pycache__", "*.pyc")
     shutil.copytree(REPO_ROOT / "src", root / "src", ignore=ignore)
     shutil.copytree(REPO_ROOT / "artifacts", root / "artifacts", ignore=ignore)
+    shutil.copytree(REPO_ROOT / "bin", root / "bin", ignore=ignore)
     for name in ("VERSION", "KB_SCHEMA_VERSION", "WIRING_VERSION"):
         shutil.copy2(REPO_ROOT / name, root / name)
     (root / ".gitignore").write_text("__pycache__/\n*.pyc\n", encoding="utf-8")
@@ -793,6 +780,148 @@ def test_canonical_report_is_reachable_without_patching_pinned_constants(
     assert payload["contract"]["sha256"] == om.CONTRACT_SHA256
 
 
+def test_omitting_contract_uses_packaged_default_end_to_end(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Latch 4562 item 4: the packaged contract default is production-real.
+
+    A run that omits ``--contract`` must resolve the shipped
+    ``artifacts/outcome-measurement/contract-v2.6.md``, hash it to the pinned
+    capture, and commit a non-invalidated canonical report.
+    """
+
+    deployed, head = _clean_git_checkout(tmp_path)
+    built = _corpus_baseline(
+        tmp_path,
+        monkeypatch,
+        contract_hash=om.CONTRACT_SHA256,
+        implementation_commit=head,
+    )
+    report = tmp_path / "report.json"
+    completed = subprocess.run(
+        [
+            "bash",
+            str(deployed / "bin" / "run_latch_outcome_audit.sh"),
+            "--project", str(built["project"]),
+            "--envelope", str(built["envelope"]),
+            "--lineage", str(tmp_path / "lineage.json"),
+            "--report", str(report),
+            "--initialize-empty-lineage",
+        ],
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "LATCH_HOME": str(deployed),
+            "LATCH_PYTHON": sys.executable,
+        },
+    )
+    assert completed.returncode == 0, (
+        f"stdout={completed.stdout!r} stderr={completed.stderr!r}"
+    )
+    payload = json.loads(report.read_text())
+    assert payload["oracles"]["invalidated"] is False
+    assert payload["contract"]["sha256"] == om.CONTRACT_SHA256
+
+
+def test_three_consecutive_real_entrypoint_runs_with_finalized_prior_stay_clean(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """A finalized prior over byte-identical evidence must replay clean.
+
+    Latch 4562 item 1 acceptance (4528 blocker 1): three consecutive runs of
+    the real ``bin/run_latch_outcome_audit.sh`` entrypoint over byte-identical
+    evidence with a FINALIZED prior all produce a clean canonical report.
+    ``_snapshot_qualifies`` finalizes anything older than ``FRESHNESS_SECONDS``,
+    so a production rerun is essentially always in this class.
+    """
+
+    deployed, head = _clean_git_checkout(tmp_path)
+    contract = deployed / runner.PACKAGED_CONTRACT_RELPATH
+    contract_hash = hashlib.sha256(contract.read_bytes()).hexdigest()
+    assert contract_hash == om.CONTRACT_SHA256
+
+    built = _corpus_baseline(
+        tmp_path,
+        monkeypatch,
+        contract_hash=contract_hash,
+        implementation_commit=head,
+        event_age=timedelta(seconds=om.FRESHNESS_SECONDS * 4),
+    )
+    project = built["project"]
+    lineage = tmp_path / "lineage.json"
+    report = tmp_path / "report.json"
+
+    gate_root = paths.project_dir(str(project))
+    evidence_files = sorted(
+        [*gate_root.glob("gate-*.log"), *(tmp_path / "host").glob("*.jsonl")]
+    )
+    assert len(evidence_files) == 2, "corpus baseline must yield S1+S2 evidence"
+
+    def evidence_digest() -> list[str]:
+        return [
+            hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in evidence_files
+        ]
+
+    frozen_evidence = evidence_digest()
+    env = {
+        **os.environ,
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "LATCH_HOME": str(deployed),
+        "LATCH_PYTHON": sys.executable,
+    }
+    base_argv = [
+        "bash",
+        str(deployed / "bin" / "run_latch_outcome_audit.sh"),
+        "--project", str(project),
+        "--envelope", str(built["envelope"]),
+        "--contract", str(contract),
+        "--lineage", str(lineage),
+        "--report", str(report),
+    ]
+
+    loaded_envelope = cli.load_envelope(built["envelope"])
+    coordinate = runner.lineage_checkpoint_coordinate(
+        loaded_envelope["config"], loaded_envelope["manifest"]
+    )
+    mac_key = runner.lineage_checkpoint_mac_key(str(project), key_epoch=EPOCH)
+
+    for attempt in range(3):
+        argv = list(base_argv)
+        if attempt == 0:
+            argv.append("--initialize-empty-lineage")
+        completed = subprocess.run(argv, capture_output=True, text=True, env=env)
+        assert completed.returncode == 0, (
+            f"run {attempt + 1}: stdout={completed.stdout!r} "
+            f"stderr={completed.stderr!r}"
+        )
+        payload = json.loads(report.read_text())
+        assert payload["oracles"]["invalidated"] is False, f"run {attempt + 1}"
+        assert payload["loss_markers"] == [], (
+            f"run {attempt + 1} must be clean, saw {payload['loss_markers']!r}"
+        )
+        assert payload["oracles"]["o2"] == "pass", (
+            f"run {attempt + 1}: {payload['oracles']!r}"
+        )
+        prior = runner.load_lineage_checkpoint(
+            lineage,
+            coordinate_sha256=coordinate,
+            mac_key=mac_key,
+            contract_sha256=contract_hash,
+        )
+        assert prior and prior[0].finalized is True, (
+            f"run {attempt + 1} must persist the finalized class this "
+            "regression exists for"
+        )
+        assert evidence_digest() == frozen_evidence, (
+            f"run {attempt + 1} mutated the measured evidence"
+        )
+
+
 def _mac_state(tmp_path: Path):
     """One admitted receipt whose checkpoint authority is worth forging."""
 
@@ -883,7 +1012,7 @@ def test_lineage_checkpoint_is_authenticated_against_on_disk_forgery(
     loaded = runner.load_lineage_checkpoint(
         checkpoint, coordinate_sha256=coordinate, mac_key=mac_key
     )
-    assert _without_source_paths(loaded) == _without_source_paths(state.receipts)
+    assert loaded == tuple(state.receipts)
     assert loaded[0].outcome == "AMBIGUOUS"
 
     honest = json.loads(checkpoint.read_text())
@@ -928,11 +1057,9 @@ def test_lineage_checkpoint_is_authenticated_against_on_disk_forgery(
         )
 
     # the honest checkpoint still loads under the right key
-    assert _without_source_paths(
-        runner.load_lineage_checkpoint(
-            checkpoint, coordinate_sha256=coordinate, mac_key=mac_key
-        )
-    ) == _without_source_paths(state.receipts)
+    assert runner.load_lineage_checkpoint(
+        checkpoint, coordinate_sha256=coordinate, mac_key=mac_key
+    ) == tuple(state.receipts)
 
 
 def test_root_containment_rejects_case_variant_spelling(tmp_path: Path) -> None:
@@ -958,6 +1085,177 @@ def test_root_containment_rejects_case_variant_spelling(tmp_path: Path) -> None:
 
     outside = tmp_path / "elsewhere" / "report.json"
     assert cli._inside_root(outside, root) is False
+
+
+def test_file_valued_source_root_contains_its_aliases(tmp_path: Path) -> None:
+    """Latch 4562 item 5: a file-valued root contains exactly itself.
+
+    ``_inside_root`` short-circuited False for any regular-file root before
+    identity was ever consulted, so an aliased spelling of a measured gate log
+    passed output validation and the audit destroyed the evidence it had just
+    measured (Latch 4528 defect i). Hardlinks give the identity check
+    deterministic coverage on case-sensitive filesystems too.
+    """
+
+    root = tmp_path / "gate-2026-08-03.log"
+    root.write_bytes(b"s1 evidence\n")
+    assert cli._inside_root(root, root) is True
+
+    alias = tmp_path / "report-alias.json"
+    os.link(root, alias)
+    assert cli._inside_root(alias, root) is True
+
+    sibling = tmp_path / "report.json"
+    sibling.write_bytes(b"{}")
+    assert cli._inside_root(sibling, root) is False
+    assert cli._inside_root(tmp_path / "unwritten.json", root) is False
+
+    variant = tmp_path / "GATE-2026-08-03.LOG"
+    if variant.is_file():
+        # The filesystem case-folds: the variant names the same entry.
+        assert cli._inside_root(variant, root) is True
+    else:
+        assert cli._inside_root(variant, root) is False
+
+
+def test_report_aliasing_a_file_valued_source_root_is_refused(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """Latch 4562 item 5 acceptance: the audit must not destroy its evidence.
+
+    File-valued source roots are first-class in discovery. A report path that
+    aliases the measured gate log (hardlink everywhere; case-variant where the
+    filesystem folds) previously passed validation, and ``os.replace``
+    committed the report over the S1 evidence with exit 0 (Latch 4528: the
+    real run overwrote the S1 gate log).
+    """
+
+    contract = runner.packaged_contract_path()
+    built = _corpus_baseline(
+        tmp_path,
+        monkeypatch,
+        contract_hash=om.CONTRACT_SHA256,
+        implementation_commit=COMMIT,
+        file_valued_s1=True,
+    )
+    monkeypatch.setattr(runner, "_deployed_implementation_commit", lambda: COMMIT)
+    gate_path = built["gate_path"]
+    evidence = gate_path.read_bytes()
+
+    aliases = [tmp_path / "report-hardlink.json"]
+    os.link(gate_path, aliases[0])
+    variant = gate_path.with_name(gate_path.name.upper())
+    if variant.is_file():
+        aliases.append(variant)
+
+    for alias in aliases:
+        argv = [
+            "--project", str(built["project"]),
+            "--envelope", str(built["envelope"]),
+            "--contract", str(contract),
+            "--lineage", str(tmp_path / "lineage.json"),
+            "--report", str(alias),
+            "--initialize-empty-lineage",
+        ]
+        assert cli.main(argv) == 2, alias
+        failure = json.loads(capsys.readouterr().err)
+        assert "inside a measured root" in failure["error"], alias
+        assert gate_path.read_bytes() == evidence, alias
+
+
+def test_omitted_lineage_defaults_to_a_private_vault_local_checkpoint(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """Ruling 4562: the checkpoint's default home is inside the vault.
+
+    The checkpoint carries raw source coordinates, so its sanctioned location
+    is a 0o600 file in the project's vault directory — already private and
+    gitignored — rather than an operator-invented path. The vault is also the
+    measured S1 root, so exactly this default (an inert name discovery can
+    never read as evidence) is exempt from the inside-a-measured-root refusal.
+    """
+
+    contract = runner.packaged_contract_path()
+    built = _corpus_baseline(
+        tmp_path,
+        monkeypatch,
+        contract_hash=om.CONTRACT_SHA256,
+        implementation_commit=COMMIT,
+    )
+    monkeypatch.setattr(runner, "_deployed_implementation_commit", lambda: COMMIT)
+    report = tmp_path / "report.json"
+    argv = [
+        "--project", str(built["project"]),
+        "--envelope", str(built["envelope"]),
+        "--contract", str(contract),
+        "--report", str(report),
+        "--initialize-empty-lineage",
+    ]
+    assert cli.main(argv) == 0
+    receipt = json.loads(capsys.readouterr().out)
+    assert receipt["lineage_updated"] is True
+    default_lineage = cli.default_lineage_path(str(built["project"]))
+    assert default_lineage.parent == paths.project_dir(str(built["project"]))
+    assert default_lineage.is_file()
+    assert default_lineage.stat().st_mode & 0o777 == 0o600
+
+    # Any other vault-internal spelling keeps the blanket refusal.
+    inside = paths.project_dir(str(built["project"])) / "elsewhere.json"
+    assert cli.main(argv[:-1] + ["--lineage", str(inside)]) == 2
+    failure = json.loads(capsys.readouterr().err)
+    assert "inside a measured root" in failure["error"]
+
+    # The exemption is keyed on the sanctioned spelling, not file identity:
+    # a hardlink of the checkpoint under an evidence-shaped name would let
+    # the audit commit checkpoint JSON into its own S1 corpus.
+    evidence_shaped = default_lineage.parent / "gate-2099-01-01.log"
+    os.link(default_lineage, evidence_shaped)
+    assert cli.main(argv[:-1] + ["--lineage", str(evidence_shaped)]) == 2
+    failure = json.loads(capsys.readouterr().err)
+    assert "inside a measured root" in failure["error"]
+
+
+def test_report_cannot_destroy_the_vault_lineage_checkpoint(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """The default checkpoint is protected authority, not a writable sink.
+
+    With a file-valued S1 root the vault directory is not itself a measured
+    root, so containment alone never protected the checkpoint: a report aimed
+    at the well-known default would destroy the admission history and leave
+    every later default-lineage run failing closed.
+    """
+
+    contract = runner.packaged_contract_path()
+    built = _corpus_baseline(
+        tmp_path,
+        monkeypatch,
+        contract_hash=om.CONTRACT_SHA256,
+        implementation_commit=COMMIT,
+        file_valued_s1=True,
+    )
+    monkeypatch.setattr(runner, "_deployed_implementation_commit", lambda: COMMIT)
+    base = [
+        "--project", str(built["project"]),
+        "--envelope", str(built["envelope"]),
+        "--contract", str(contract),
+    ]
+    assert cli.main(base + [
+        "--report", str(tmp_path / "report.json"),
+        "--initialize-empty-lineage",
+    ]) == 0
+    capsys.readouterr()
+    default_lineage = cli.default_lineage_path(str(built["project"]))
+    checkpoint_bytes = default_lineage.read_bytes()
+
+    assert cli.main(base + [
+        "--report", str(default_lineage),
+        "--lineage", str(tmp_path / "other-lineage.json"),
+        "--initialize-empty-lineage",
+    ]) == 2
+    failure = json.loads(capsys.readouterr().err)
+    assert "aliases the vault lineage checkpoint" in failure["error"]
+    assert default_lineage.read_bytes() == checkpoint_bytes
 
 
 def test_same_path_does_not_fail_open_on_undecidable_errors(
@@ -1091,10 +1389,17 @@ def test_sqlite_errors_are_reported_as_a_failed_audit(
     assert "database is locked" in failure["error"]
 
 
-def test_checkpoint_does_not_persist_recoverable_source_paths(
+def test_checkpoint_persists_exact_coordinates_and_rewrites_stably(
     tmp_path: Path,
 ) -> None:
-    """``run_pinned_audit`` promises recoverable paths never enter a receipt."""
+    """The vault-local checkpoint stores the real coordinate, stable on rewrite.
+
+    Ruling 4562 reverted path tokenization: the checkpoint never leaves the
+    vault, and the evidence resolver joins prior rows against snapshot maps
+    keyed by real absolute paths (Latch 4528 blocker 1). A load -> write cycle
+    must be byte-stable — the tokenized design re-derived tokens from
+    already-tokenized values on every rewrite.
+    """
 
     state = _mac_state(tmp_path)
     checkpoint = tmp_path / "lineage.json"
@@ -1102,20 +1407,21 @@ def test_checkpoint_does_not_persist_recoverable_source_paths(
     runner.write_lineage_checkpoint(
         checkpoint, state, coordinate_sha256="b" * 64, mac_key=mac_key
     )
-    encoded = checkpoint.read_text()
-    assert "/private/structural-coordinate/gate.log" not in encoded
+    encoded = checkpoint.read_bytes()
     loaded = runner.load_lineage_checkpoint(
         checkpoint, coordinate_sha256="b" * 64, mac_key=mac_key
     )
-    # The token is stable, so nothing downstream sees a moving coordinate.
-    assert loaded[0].observations[0].file.startswith(f"{om.SOURCE_GATE}-file-")
+    assert loaded[0].observations[0].file == (
+        "/private/structural-coordinate/gate.log"
+    )
+    rewritten = tmp_path / "lineage-rewritten.json"
     runner.write_lineage_checkpoint(
-        checkpoint, state, coordinate_sha256="b" * 64, mac_key=mac_key
+        rewritten,
+        replace(state, receipts=loaded),
+        coordinate_sha256="b" * 64,
+        mac_key=mac_key,
     )
-    again = runner.load_lineage_checkpoint(
-        checkpoint, coordinate_sha256="b" * 64, mac_key=mac_key
-    )
-    assert again[0].observations[0].file == loaded[0].observations[0].file
+    assert rewritten.read_bytes() == encoded
 
 
 def test_private_checkpoint_parents_are_created_at_0o700(tmp_path: Path) -> None:
