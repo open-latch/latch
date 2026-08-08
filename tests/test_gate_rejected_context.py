@@ -70,6 +70,15 @@ def _prompt_for(conn, query):
     return gate.build_classifier_prompt(assembly)
 
 
+def _call_context(prompt: str) -> str:
+    """The per-call slice of the prompt: everything after the static
+    instruction + few-shot block. Item 2's byte-identity acceptance is about
+    THIS section — the static block also mentions rejected[rp=...] (it
+    teaches the citation field, item 3) but is version-constant and identical
+    across calls."""
+    return prompt.split("--- ACTUAL REQUEST ---", 1)[1]
+
+
 def _strip_rejection_lines(prompt: str) -> str:
     kept = [
         line
@@ -157,10 +166,10 @@ def test_context_is_additive_only_without_row():
             "Redis Streams adopted for the job queue.", status="canonical",
         )
         gate.search.hybrid_search = _force_seed(conn, nid)
-        before = _prompt_for(conn, "re-try the in-process queue")
+        before = _call_context(_prompt_for(conn, "re-try the in-process queue"))
         _assert(
             "rejected[rp=" not in before,
-            "no-row prompt must carry no rejection marker",
+            "no-row call context must carry no rejection marker",
         )
 
         db.insert_rejected_path(
@@ -168,12 +177,15 @@ def test_context_is_additive_only_without_row():
             option="in-process queue",
             reason="loses state across worker restarts",
         )
-        with_row = _prompt_for(conn, "re-try the in-process queue")
+        with_row = _call_context(
+            _prompt_for(conn, "re-try the in-process queue")
+        )
         _assert("rejected[rp=" in with_row, "row present but not rendered")
         _assert(
             _strip_rejection_lines(with_row) == before,
-            "with-row prompt is not byte-identical to no-row prompt after "
-            "stripping the rejection lines — the change is not additive-only",
+            "with-row call context is not byte-identical to no-row call "
+            "context after stripping the rejection lines — the change is "
+            "not additive-only",
         )
         print("PASS context_is_additive_only_without_row")
     finally:
@@ -196,7 +208,7 @@ def test_per_node_cap_with_omitted_note():
                 reason=f"ruled out for reason {i}",
             )
         gate.search.hybrid_search = _force_seed(conn, nid)
-        prompt = _prompt_for(conn, "revisit the runtime surface")
+        prompt = _call_context(_prompt_for(conn, "revisit the runtime surface"))
         rendered = [
             l for l in prompt.split("\n") if l.lstrip().startswith("rejected[rp=")
         ]

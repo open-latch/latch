@@ -979,6 +979,15 @@ change the verdict. For each, point at its backing:
                                  confirmed by the user).
 gap_type is required when evidence_type is "none", and null otherwise.
 
+Typed-rejection rule: some nodes carry explicitly rejected options, rendered as
+  rejected[rp=<rp_id>]: <option> — <reason> (ratifier=..., decided=..., scope=...)
+These are ratified do-not-revive facts, stronger than ordinary stale history.
+When one or more rejected[rp=...] lines bear on your verdict — the request
+would revive a rejected option, or a rejection's reason constrains how to
+proceed — list exactly those rp ids in cited_rejected_paths. Use the rp id
+from the rejected[...] line, never a node id. If none bear on the verdict,
+output an empty list; do not cite decoratively.
+
 Output a single JSON object, nothing else:
 
 {
@@ -991,6 +1000,7 @@ Output a single JSON object, nothing else:
   "risk_if_proceed":    "<one sentence>",
   "better_next_action": "<one sentence — concrete, actionable; or empty if PROCEED>",
   "evidence_nodes":     [<node_id>, ...],   # all node ids cited above, deduped
+  "cited_rejected_paths": [<rp_id>, ...],   # rp ids of rejected[rp=...] lines that bear on this verdict; [] if none
   "load_bearing_claims": [                  # claims the recommendation rests on
     {"claim": "<assertion the plan depends on>",
      "evidence_type": "kb_node" | "user_input" | "code_trace" | "none",
@@ -1021,7 +1031,7 @@ seed [id=200, decision, status=canonical] Redis chosen for session cache after 4
     [id=203, hop=1, via=related_to(in), status=canonical] session-key naming convention (tenant:user:scope)
 
 OUTPUT:
-{"recommendation":"PROCEED","summary":"Redis session cache already won the 4-way bake-off (id=200) and the key-naming convention (id=203) generalizes to the admin API. The in-process LRU prototype (id=202) is in the chain only as the abandoned alternative and does not bear on the admin-API extension.","decision_chain":[200,203],"abandoned_paths":[202],"active_constraints":[203],"current_direction":[200],"risk_if_proceed":"Admin-API key cardinality may push connection-pool sizing beyond the current baseline.","better_next_action":"","evidence_nodes":[200,201,202,203],"load_bearing_claims":[{"claim":"Redis is the chosen session cache","evidence_type":"kb_node","evidence_ref":200,"gap_type":null},{"claim":"the tenant:user:scope key convention generalizes to the admin API","evidence_type":"kb_node","evidence_ref":203,"gap_type":null},{"claim":"the admin API needs the same session semantics as the main API","evidence_type":"user_input","evidence_ref":null,"gap_type":null}]}
+{"recommendation":"PROCEED","summary":"Redis session cache already won the 4-way bake-off (id=200) and the key-naming convention (id=203) generalizes to the admin API. The in-process LRU prototype (id=202) is in the chain only as the abandoned alternative and does not bear on the admin-API extension.","decision_chain":[200,203],"abandoned_paths":[202],"active_constraints":[203],"current_direction":[200],"risk_if_proceed":"Admin-API key cardinality may push connection-pool sizing beyond the current baseline.","better_next_action":"","evidence_nodes":[200,201,202,203],"cited_rejected_paths":[],"load_bearing_claims":[{"claim":"Redis is the chosen session cache","evidence_type":"kb_node","evidence_ref":200,"gap_type":null},{"claim":"the tenant:user:scope key convention generalizes to the admin API","evidence_type":"kb_node","evidence_ref":203,"gap_type":null},{"claim":"the admin API needs the same session semantics as the main API","evidence_type":"user_input","evidence_ref":null,"gap_type":null}]}
 
 --- EXAMPLE 2 (MODIFY) ---
 REQUEST: re-run the in-process job-queue prototype with a larger worker pool to fix throughput
@@ -1029,6 +1039,7 @@ REQUEST: re-run the in-process job-queue prototype with a larger worker pool to 
 CHAIN ASSEMBLY:
 seed [id=300, decision, status=stale] in-process job queue prototype
   body: In-process queue tested 2026-04-23; throughput capped at 1/4 of target. Worker model couldn't survive worker-process restarts. Abandoned.
+  rejected[rp=7]: in-process job queue — worker model loses state across restarts; pool size does not address the abandonment reason (ratifier=founder, decided=2026-04-23)
   evidence:
     [id=301, hop=1, via=supersedes(in), status=canonical] Redis Streams pipeline replaces in-process queue
       body: Switched to Redis Streams + consumer groups; durable across restarts, scales horizontally.
@@ -1038,7 +1049,7 @@ seed [id=300, decision, status=stale] in-process job queue prototype
       body: Original abandonment driver — in-process state lost on every rolling deploy.
 
 OUTPUT:
-{"recommendation":"MODIFY","summary":"The in-process queue was abandoned (id=300) because the worker-process model loses state across restarts (id=303), not because of pool size. Redis Streams (id=301) is the live path, and worker-pool tuning already landed there (id=302). Re-running the in-process prototype with a larger pool will not fix the abandonment reason.","decision_chain":[300,301,302],"abandoned_paths":[300],"active_constraints":[303],"current_direction":[301],"risk_if_proceed":"Same restart-storm failure returns; pool-size fix is wasted on the wrong layer.","better_next_action":"Apply any throughput tuning to the Redis Streams pipeline (id=301), which is the live path.","evidence_nodes":[300,301,302,303],"load_bearing_claims":[{"claim":"the in-process queue was abandoned for restart survival, not pool size","evidence_type":"kb_node","evidence_ref":303,"gap_type":null},{"claim":"Redis Streams is the live job-queue path","evidence_type":"kb_node","evidence_ref":301,"gap_type":null},{"claim":"the current Streams worker-pool size is the actual throughput bottleneck today","evidence_type":"none","evidence_ref":null,"gap_type":"current_value_or_code"}]}
+{"recommendation":"MODIFY","summary":"The in-process queue was abandoned (id=300) because the worker-process model loses state across restarts (id=303), not because of pool size. Redis Streams (id=301) is the live path, and worker-pool tuning already landed there (id=302). Re-running the in-process prototype with a larger pool will not fix the abandonment reason.","decision_chain":[300,301,302],"abandoned_paths":[300],"active_constraints":[303],"current_direction":[301],"risk_if_proceed":"Same restart-storm failure returns; pool-size fix is wasted on the wrong layer.","better_next_action":"Apply any throughput tuning to the Redis Streams pipeline (id=301), which is the live path.","evidence_nodes":[300,301,302,303],"cited_rejected_paths":[7],"load_bearing_claims":[{"claim":"the in-process queue was abandoned for restart survival, not pool size","evidence_type":"kb_node","evidence_ref":303,"gap_type":null},{"claim":"Redis Streams is the live job-queue path","evidence_type":"kb_node","evidence_ref":301,"gap_type":null},{"claim":"the current Streams worker-pool size is the actual throughput bottleneck today","evidence_type":"none","evidence_ref":null,"gap_type":"current_value_or_code"}]}
 
 --- EXAMPLE 3 (DO_NOT_PROCEED) ---
 REQUEST: switch the storage layer to a NoSQL document store
@@ -1046,12 +1057,13 @@ REQUEST: switch the storage layer to a NoSQL document store
 CHAIN ASSEMBLY:
 seed [id=431, idea, status=staging] NoSQL document-store migration
   body: Considered moving primary storage to a document DB for schema flexibility. Verdict: wrong tradeoff. Audit-log query patterns require relational joins; schema validation at write-time is a non-negotiable for compliance.
+  rejected[rp=9]: NoSQL document store — audit-log queries require relational joins; write-time schema validation is a compliance non-negotiable (ratifier=founder, decided=2026-03-02)
   evidence:
     [id=400, hop=1, via=related_to(out), status=canonical] Postgres + strict schema migrations chosen as primary store
     [id=401, hop=1, via=related_to(out), status=canonical] audit-log query patterns require relational joins (compliance constraint)
 
 OUTPUT:
-{"recommendation":"DO_NOT_PROCEED","summary":"The NoSQL migration (id=431) is an explicitly-parked idea with verdict 'wrong tradeoff' — audit-log queries require relational joins (id=401) and Postgres with strict schemas is the locked decision (id=400). Implementing the NoSQL switch would unwind the deliberate compliance-driven architectural choice.","decision_chain":[431,400,401],"abandoned_paths":[431],"active_constraints":[400,401],"current_direction":[400],"risk_if_proceed":"Audit-log queries break; compliance constraint violated.","better_next_action":"If the goal is schema flexibility, see the locked Postgres approach (id=400) — JSONB columns there cover the flexibility need without losing relational guarantees.","evidence_nodes":[400,401,431],"load_bearing_claims":[{"claim":"audit-log queries require relational joins","evidence_type":"kb_node","evidence_ref":401,"gap_type":null},{"claim":"Postgres with strict schema is the locked primary store","evidence_type":"kb_node","evidence_ref":400,"gap_type":null},{"claim":"write-time schema validation is a compliance non-negotiable","evidence_type":"kb_node","evidence_ref":401,"gap_type":null}]}
+{"recommendation":"DO_NOT_PROCEED","summary":"The NoSQL migration (id=431) is an explicitly-parked idea with verdict 'wrong tradeoff' — audit-log queries require relational joins (id=401) and Postgres with strict schemas is the locked decision (id=400). Implementing the NoSQL switch would unwind the deliberate compliance-driven architectural choice.","decision_chain":[431,400,401],"abandoned_paths":[431],"active_constraints":[400,401],"current_direction":[400],"risk_if_proceed":"Audit-log queries break; compliance constraint violated.","better_next_action":"If the goal is schema flexibility, see the locked Postgres approach (id=400) — JSONB columns there cover the flexibility need without losing relational guarantees.","evidence_nodes":[400,401,431],"cited_rejected_paths":[9],"load_bearing_claims":[{"claim":"audit-log queries require relational joins","evidence_type":"kb_node","evidence_ref":401,"gap_type":null},{"claim":"Postgres with strict schema is the locked primary store","evidence_type":"kb_node","evidence_ref":400,"gap_type":null},{"claim":"write-time schema validation is a compliance non-negotiable","evidence_type":"kb_node","evidence_ref":401,"gap_type":null}]}
 
 --- END EXAMPLES ---
 """
@@ -1434,6 +1446,12 @@ def _normalize_verdict(obj: dict) -> dict:
         "risk_if_proceed": str(obj.get("risk_if_proceed", "")).strip(),
         "better_next_action": str(obj.get("better_next_action", "")).strip(),
         "evidence_nodes": [int(x) for x in obj.get("evidence_nodes") or [] if _is_intish(x)],
+        # rejected_path row ids, NOT node ids (id=4626 item 3). Same defensive
+        # int coercion as the node-id lists; classify_gate additionally clamps
+        # to the surfaced set so a hallucinated id never reaches gate.log.
+        "cited_rejected_paths": [
+            int(x) for x in obj.get("cited_rejected_paths") or [] if _is_intish(x)
+        ],
         "load_bearing_claims": claims,
         "uncovered_claims": uncovered,
         "error": None,
@@ -1513,6 +1531,7 @@ def _classifier_error(reason: str) -> dict:
         "risk_if_proceed": "",
         "better_next_action": "",
         "evidence_nodes": [],
+        "cited_rejected_paths": [],
         "load_bearing_claims": [],
         "uncovered_claims": [],
         "error": reason,
@@ -1772,12 +1791,18 @@ def classify_gate(
     if not allowed:
         return {**_classifier_error("daily budget cap hit"), "skipped": True}
 
+    surfaced: list[int] = []
     prompt = build_classifier_prompt(
         chain_assembly,
         max_chains=max_chains,
         exposure=outcome_exposure,
+        surfaced_rejected_paths=surfaced,
     )
     prompt_chars = len(prompt)
+    # What the classifier actually saw (post-cap render), for invocation
+    # logging (id=4626 item 3). Attached even on error/timeout so the row's
+    # surfaced set reflects the prompt that was really sent.
+    surfaced_ids = sorted(set(surfaced))
     raw, err, timed_out = _invoke_classifier_backend_once(
         prompt, backend=resolved_backend, timeout_s=timeout_s,
         purpose="classifier",
@@ -1788,13 +1813,27 @@ def classify_gate(
         # silent no-op — a guard that fails invisibly is worst-case.
         return {**_classifier_error(err or f"classifier timed out after {timeout_s}s"),
                 "prompt_chars": prompt_chars, "timed_out": True,
-                "backend": resolved_backend}
+                "backend": resolved_backend,
+                "surfaced_rejected_paths": surfaced_ids}
     if err is not None or raw is None:
         return {**_classifier_error(err or "classifier subprocess failed"),
-                "prompt_chars": prompt_chars, "backend": resolved_backend}
+                "prompt_chars": prompt_chars, "backend": resolved_backend,
+                "surfaced_rejected_paths": surfaced_ids}
     result = parse_classifier_output(raw)
     result["prompt_chars"] = prompt_chars
     result["backend"] = resolved_backend
+    result["surfaced_rejected_paths"] = surfaced_ids
+    # Clamp citations to the surfaced set (dedup, first occurrence wins): a
+    # cited rp id the prompt never contained is a hallucination and must not
+    # count toward the V4 metric (docs/v4_citation_metric.md).
+    allowed = set(surfaced_ids)
+    seen: set[int] = set()
+    cited: list[int] = []
+    for x in result.get("cited_rejected_paths") or []:
+        if x in allowed and x not in seen:
+            seen.add(x)
+            cited.append(x)
+    result["cited_rejected_paths"] = cited
     return result
 
 
@@ -2618,6 +2657,17 @@ def _log_invocation(
             "abandoned_paths": list(verdict.get("abandoned_paths") or []),
             "active_constraints": list(verdict.get("active_constraints") or []),
             "current_direction": list(verdict.get("current_direction") or []),
+            # V4 citation observability (id=4626 item 3): which typed
+            # rejections the classifier actually saw (post-cap) and which it
+            # cited. rejected_path row ids — pure ints, same privacy class as
+            # the node-id lists above; option/reason text stays in the prompt
+            # and never reaches this row (id=3915 / id=3985 / id=1108 §3).
+            "surfaced_rejected_paths": list(
+                verdict.get("surfaced_rejected_paths") or []
+            ),
+            "cited_rejected_paths": list(
+                verdict.get("cited_rejected_paths") or []
+            ),
             "seed_count": len(seeds),
             "seed_ids": [s["id"] for s in seeds],
             # Structural lane-contact substrate for lifecycle detection. Never
