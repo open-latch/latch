@@ -145,6 +145,14 @@ GATE_MAX_TOTAL_EVIDENCE = _env_int("CLAUDE_KB_GATE_MAX_TOTAL_EVIDENCE", 60)
 # Reserved slots so the abandoned-path signal (stale nodes — the whole point of
 # the gate) survives the cap even when active nodes would otherwise crowd it out.
 GATE_STALE_BUDGET = _env_int("CLAUDE_KB_GATE_STALE_BUDGET", 3, minimum=0)
+# Per-node cap on rendered typed rejections (V4 build, id=4626 item 2). A
+# single node can carry many rejected_path rows (the live backfill has one
+# node with 16, id=4165); rendering all of them would flood the prompt the
+# same way unbounded evidence did (id=1415). Overflow is noted inline, never
+# silently dropped.
+GATE_MAX_REJECTED_PER_NODE = _env_int(
+    "CLAUDE_KB_GATE_MAX_REJECTED_PER_NODE", 3, minimum=0
+)
 
 # Max hop depth at which the dense `related_to` relation is traversed (id=1415
 # #3). related_to is ~72% of edges and its 2-hop neighbourhood explodes
@@ -260,6 +268,7 @@ def assemble_gate(
         })
         all_evidence_ids.update(e["id"] for e in evidence)
 
+    _attach_rejected_paths(conn, seeds, chains)
     lane_groups = _lane_groups_for_chains(conn, seeds, chains)
     active_workstream_ids = _workstream_ids_from_seeds(seeds, conn=conn)
     prio = priorities.list_for_context(conn, active_workstream_ids)
@@ -302,6 +311,42 @@ def blast_radius(
         max_hops=max_hops,
         body_excerpt_chars=body_excerpt_chars,
     )
+
+
+def _attach_rejected_paths(
+    conn: sqlite3.Connection,
+    seeds: list[dict],
+    chains: list[dict],
+) -> None:
+    """Attach typed rejected_path rows (V2 table, id=4369) to every seed and
+    evidence node dict that carries them — one batched read-time join, on the
+    gate_report._attach_rejected_path_counts precedent. Nodes without rows
+    are left byte-untouched, which is what keeps the rendered context
+    byte-identical when no rejection exists (id=4626 item 2 acceptance).
+    Degrades to a no-op on sqlite3.Error (vault created by an older engine
+    that never grew the table)."""
+    nodes_by_id: dict[int, list[dict]] = {}
+    for seed in seeds:
+        nodes_by_id.setdefault(int(seed["id"]), []).append(seed)
+    for chain in chains:
+        for ev in chain.get("evidence") or []:
+            nodes_by_id.setdefault(int(ev["id"]), []).append(ev)
+    if not nodes_by_id:
+        return
+    ids = sorted(nodes_by_id)
+    placeholders = ",".join("?" for _ in ids)
+    try:
+        rows = conn.execute(
+            f"SELECT * FROM rejected_path WHERE node_id IN ({placeholders}) "
+            f"ORDER BY node_id, id",
+            ids,
+        ).fetchall()
+    except sqlite3.Error:
+        return
+    for row in rows:
+        rp = dict(row)
+        for node in nodes_by_id[int(rp["node_id"])]:
+            node.setdefault("rejected_paths", []).append(rp)
 
 
 # ---------- seed collection ----------
@@ -1087,6 +1132,50 @@ def _select_chain_evidence(
     return chosen
 
 
+def _render_rejected_paths(
+    node: dict,
+    *,
+    indent: str,
+    surfaced: list[int] | None,
+) -> list[str]:
+    """Render a node's attached typed rejections (id=4626 item 2), bounded by
+    GATE_MAX_REJECTED_PER_NODE with an inline omitted-count note. Appends the
+    rendered (post-cap) rejected_path row ids to `surfaced` when the caller
+    tracks them — that list is what item 3 logs as surfaced_rejected_paths,
+    so it must reflect what the classifier actually saw, never the full
+    attach set."""
+    rows = node.get("rejected_paths") or []
+    if not rows:
+        return []
+    lines: list[str] = []
+    shown = rows[: GATE_MAX_REJECTED_PER_NODE]
+    for rp in shown:
+        try:
+            rp_id = int(rp["id"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        option = _excerpt(str(rp.get("option") or ""), 120)
+        reason = _excerpt(str(rp.get("reason") or ""), 240)
+        meta = []
+        if rp.get("ratifier"):
+            meta.append(f"ratifier={rp['ratifier']}")
+        if rp.get("decided_at"):
+            meta.append(f"decided={rp['decided_at']}")
+        if rp.get("scope_predicate"):
+            meta.append(f"scope={rp['scope_predicate']}")
+        suffix = f" ({', '.join(meta)})" if meta else ""
+        lines.append(f"{indent}rejected[rp={rp_id}]: {option} — {reason}{suffix}")
+        if surfaced is not None:
+            surfaced.append(rp_id)
+    omitted = len(rows) - len(shown)
+    if omitted > 0:
+        lines.append(
+            f"{indent}… +{omitted} rejected option(s) omitted "
+            f"(per-node cap; earliest shown)"
+        )
+    return lines
+
+
 def _render_chain_for_prompt(
     chain_assembly: dict,
     *,
@@ -1095,13 +1184,17 @@ def _render_chain_for_prompt(
     max_total_evidence: int = GATE_MAX_TOTAL_EVIDENCE,
     stale_budget: int = GATE_STALE_BUDGET,
     exposure: list[dict] | None = None,
+    surfaced_rejected_paths: list[int] | None = None,
 ) -> str:
     """Serialize the assemble_gate() output into the human-readable form the
     classifier prompt consumes. Bounded on three axes (KB id=1415): at most
     `max_chains` seeds, at most `max_evidence_per_chain` ranked evidence nodes
     per seed, and at most `max_total_evidence` evidence nodes across the whole
     prompt. Omitted (lower-signal) nodes are noted inline so the classifier
-    knows the chain was truncated rather than exhausted."""
+    knows the chain was truncated rather than exhausted. Nodes carrying typed
+    rejected_path rows (attached by _attach_rejected_paths) additionally
+    render bounded `rejected[rp=<id>]:` lines; `surfaced_rejected_paths`
+    collects the rendered row ids for invocation logging (id=4626)."""
     lines: list[str] = []
     seeds = chain_assembly.get("seeds") or []
     chains = chain_assembly.get("chains") or []
@@ -1173,6 +1266,9 @@ def _render_chain_for_prompt(
             body = seed.get("body_excerpt", "")
             if body:
                 lines.append(f"  body: {body}")
+            lines.extend(_render_rejected_paths(
+                seed, indent="  ", surfaced=surfaced_rejected_paths,
+            ))
             chain = chains_by_seed.get(sid)
             full_ev = (chain or {}).get("evidence") or []
             if full_ev:
@@ -1218,6 +1314,10 @@ def _render_chain_for_prompt(
                         eb = ev.get("body_excerpt", "")
                         if eb:
                             lines.append(f"      body: {eb}")
+                        lines.extend(_render_rejected_paths(
+                            ev, indent="      ",
+                            surfaced=surfaced_rejected_paths,
+                        ))
                 omitted = len(full_ev) - len(shown)
                 if omitted > 0:
                     lines.append(
@@ -1249,6 +1349,7 @@ def build_classifier_prompt(
     *,
     max_chains: int = 5,
     exposure: list[dict] | None = None,
+    surfaced_rejected_paths: list[int] | None = None,
 ) -> str:
     """Compose the full prompt: system + few-shot + actual chain + request."""
     request = chain_assembly.get("query", "").strip() or "(empty request)"
@@ -1260,6 +1361,7 @@ def build_classifier_prompt(
         chain_assembly,
         max_chains=max_chains,
         exposure=exposure,
+        surfaced_rejected_paths=surfaced_rejected_paths,
     )
     prio_block = priorities.render_for_gate(chain_assembly.get("priorities") or [])
     prio_section = (
