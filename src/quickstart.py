@@ -32,6 +32,13 @@ KB_HOME = Path(
 AGENT_CHOICES = ("claude", "codex", "cursor", "both", "all")
 SCOPE_CHOICES = (project_config.POLICY_SHARED, project_config.POLICY_PRIVATE)
 
+ONE_WAY_DISCLOSURE = (
+    "One-way change: enabling project scopes affects this whole machine. Every\n"
+    "location outside an explicitly latched Shared or Private scope becomes\n"
+    "LOCKED for Latch, and the machine cannot return to Global Shared mode.\n"
+    "No KB content is copied, merged, imported, or deleted."
+)
+
 
 @dataclass(frozen=True)
 class Step:
@@ -60,6 +67,7 @@ def resolve_scope_choice(
     requested: str | None,
     *,
     dry_run: bool,
+    activation_confirmed: bool = False,
     is_tty: bool | None = None,
     input_fn: Callable[[str], str] = input,
 ) -> tuple[str | None, project_config.ResolvedScope]:
@@ -72,6 +80,14 @@ def resolve_scope_choice(
     machine_policy = project_config.read_machine_policy()
     if machine_policy == project_config.MACHINE_POLICY_SHARED:
         if requested is not None:
+            if not activation_confirmed:
+                raise ValueError(
+                    "--scope would enable project scopes for this whole machine, "
+                    "a one-way change that LOCKS every unscoped location; add "
+                    "--enable-project-scopes to confirm it, or omit --scope to "
+                    "keep the global shared KB"
+                )
+            print(ONE_WAY_DISCLOSURE)
             return requested, target
         if dry_run:
             return None, target
@@ -99,8 +115,22 @@ def resolve_scope_choice(
             except (EOFError, KeyboardInterrupt) as exc:
                 raise ValueError("project scope choice cancelled") from exc
             if raw_scope in SCOPE_CHOICES:
-                return raw_scope, target
+                break
             print("Please enter shared or private.")
+        print(ONE_WAY_DISCLOSURE)
+        try:
+            confirmation = input_fn(
+                "Type exactly 'latch' to enable project scopes for this machine "
+                "(anything else cancels): "
+            )
+        except (EOFError, KeyboardInterrupt) as exc:
+            raise ValueError("project scope activation cancelled") from exc
+        if confirmation.strip() != "latch":
+            raise ValueError(
+                "project scope activation not confirmed; Global Shared mode is "
+                "unchanged"
+            )
+        return raw_scope, target
 
     if (
         target.state == project_config.MODE_LATCHED
@@ -605,6 +635,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "private creates a new isolated KB"
         ),
     )
+    ap.add_argument(
+        "--enable-project-scopes",
+        action="store_true",
+        help=(
+            "confirm the one-way machine-wide switch to project scopes; "
+            "required with --scope while the machine is in Global Shared mode"
+        ),
+    )
     ap.add_argument("--lookback-days", type=int, default=90,
                     help="history horizon for initial-KB seeding (default: 90)")
     ap.add_argument("--last-sessions", type=int, default=50,
@@ -648,6 +686,7 @@ def main(argv: list[str] | None = None) -> int:
             project,
             args.scope,
             dry_run=args.dry_run,
+            activation_confirmed=args.enable_project_scopes,
         )
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)

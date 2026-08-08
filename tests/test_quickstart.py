@@ -270,6 +270,7 @@ def test_dry_run_reports_unresolved_maintenance_cli_without_stopping(
         "--project", str(project),
         "--python", sys.executable,
         "--scope", "shared",
+        "--enable-project-scopes",
         "--dry-run",
     ])
 
@@ -576,6 +577,7 @@ def test_quickstart_pins_after_preflight_before_wiring():
             "--project", str(project),
             "--kb-dir", str(root / "isolated kb"),
             "--scope", "shared",
+            "--enable-project-scopes",
             "--skip-doctor",
             "--no-seed",
         ])
@@ -634,6 +636,7 @@ def _run_scope_only_quickstart(
     kb_dir: Path,
     *,
     scope: str | None,
+    activate: bool = True,
 ) -> int:
     monkeypatch.setattr(qs, "agent_preflight_errors", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(
@@ -658,6 +661,8 @@ def _run_scope_only_quickstart(
     ]
     if scope is not None:
         args.extend(["--scope", scope])
+        if activate:
+            args.append("--enable-project-scopes")
     return qs.main(args)
 
 
@@ -812,6 +817,88 @@ def test_global_shared_access_needs_no_project_scope_choice(
     _assert(target.state == qs.project_config.MODE_LATCHED, target)
 
 
+def test_scope_flag_without_activation_confirmation_is_refused(
+    monkeypatch, tmp_path,
+):
+    test_root = qs.paths.validated_test_root()
+    _assert(test_root is not None, "pytest isolation root is required")
+    project = tmp_path / "unconfirmed-scope-project"
+    project.mkdir()
+    home = tmp_path / "unconfirmed-scope-home"
+    home.mkdir()
+    control = test_root / "unconfirmed-scope-control" / tmp_path.name
+    monkeypatch.setenv("LATCH_HOME", str(home))
+    monkeypatch.setenv(qs.project_config.CONTROL_ROOT_ENV, str(control))
+    monkeypatch.delenv("LATCH_KB_DIR", raising=False)
+    monkeypatch.delenv("CLAUDE_KB_DIR", raising=False)
+    monkeypatch.setattr(qs.install_engine, "KB_LOCATION_PATH", home / "kb_location.json")
+    vault = test_root / "vaults" / f"unconfirmed-scope-{tmp_path.name}"
+    rc = _run_scope_only_quickstart(
+        monkeypatch,
+        project,
+        vault,
+        scope="shared",
+        activate=False,
+    )
+
+    _assert(rc == 2, rc)
+    _assert(
+        qs.project_config.read_machine_policy()
+        == qs.project_config.MACHINE_POLICY_SHARED,
+        "unconfirmed --scope still activated project mode",
+    )
+    _assert(not (project / ".latch").exists(), "unconfirmed --scope wrote a boundary")
+    _assert(not control.exists(), "unconfirmed --scope wrote scope control state")
+
+
+def test_interactive_activation_requires_exact_latch_word(
+    compatibility_scope_env, tmp_path,
+):
+    project = tmp_path / "ceremony-refused-project"
+    project.mkdir()
+    responses = iter(["projects", "shared", "yes"])
+    prompts: list[str] = []
+    try:
+        qs.resolve_scope_choice(
+            project,
+            None,
+            dry_run=False,
+            is_tty=True,
+            input_fn=lambda prompt: prompts.append(prompt) or next(responses),
+        )
+    except ValueError as exc:
+        _assert("not confirmed" in str(exc), str(exc))
+    else:
+        raise AssertionError("casual 'yes' was accepted as one-way activation consent")
+    _assert(len(prompts) == 3, prompts)
+    _assert("exactly 'latch'" in prompts[-1], prompts[-1])
+    _assert(
+        qs.project_config.read_machine_policy()
+        == qs.project_config.MACHINE_POLICY_SHARED,
+        "refused ceremony still activated project mode",
+    )
+
+
+def test_interactive_activation_proceeds_after_exact_latch_word(
+    compatibility_scope_env, tmp_path, capsys,
+):
+    project = tmp_path / "ceremony-confirmed-project"
+    project.mkdir()
+    responses = iter(["projects", "private", "latch"])
+
+    choice, _target = qs.resolve_scope_choice(
+        project,
+        None,
+        dry_run=False,
+        is_tty=True,
+        input_fn=lambda _prompt: next(responses),
+    )
+
+    _assert(choice == "private", choice)
+    out = capsys.readouterr().out
+    _assert("One-way change" in out, out)
+
+
 def test_quickstart_without_scope_keeps_global_shared_mode(
     monkeypatch, tmp_path,
 ):
@@ -880,6 +967,7 @@ def test_dry_run_scope_plan_writes_nothing(
         "--project", str(project),
         "--kb-dir", str(global_vault),
         "--scope", "private",
+        "--enable-project-scopes",
         "--dry-run",
         "--no-seed",
     ])
@@ -1095,6 +1183,7 @@ def test_quickstart_pin_conflict_stops_before_wiring():
                 "--agents", "codex",
                 "--project", str(project),
                 "--scope", "shared",
+                "--enable-project-scopes",
                 "--skip-doctor",
                 "--no-seed",
             ])
