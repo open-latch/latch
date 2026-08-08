@@ -171,7 +171,38 @@ def append_project_log(
             handle.write(line)
 
 
-def _advisory_lock(fd: int, *, exclusive: bool) -> None:
+LOCK_TIMEOUT_ENV = "LATCH_LOCK_TIMEOUT_SECONDS"
+DEFAULT_LOCK_TIMEOUT_S = 600.0
+
+
+class LockWaitTimeout(TimeoutError):
+    """Bounded wait for an advisory scope lock expired; nothing was acquired."""
+
+
+def _lock_timeout_s() -> float:
+    raw = os.environ.get(LOCK_TIMEOUT_ENV)
+    if raw is None:
+        return DEFAULT_LOCK_TIMEOUT_S
+    try:
+        value = float(raw)
+    except ValueError:
+        return DEFAULT_LOCK_TIMEOUT_S
+    return value if value > 0 else DEFAULT_LOCK_TIMEOUT_S
+
+
+def _lock_wait_message(path: Path | None, timeout_s: float) -> str:
+    where = f" {path}" if path is not None else ""
+    return (
+        f"timed out after {timeout_s:.0f}s waiting for the scope lock{where}; "
+        "another Latch process (a transition, a long compaction, or an "
+        "unclosed agent connection) may still hold it. Retry, or set "
+        f"{LOCK_TIMEOUT_ENV} to wait longer. No state was changed."
+    )
+
+
+def _advisory_lock(fd: int, *, exclusive: bool, path: Path | None = None) -> None:
+    timeout_s = _lock_timeout_s()
+    deadline = time.monotonic() + timeout_s
     if sys.platform == "win32":
         import msvcrt
 
@@ -186,11 +217,27 @@ def _advisory_lock(fd: int, *, exclusive: bool) -> None:
             except OSError as exc:
                 if not _windows_lock_contention(exc):
                     raise
+                if time.monotonic() >= deadline:
+                    raise LockWaitTimeout(
+                        _lock_wait_message(path, timeout_s)
+                    ) from exc
                 time.sleep(POLL_INTERVAL_S)
     else:
         import fcntl
 
-        fcntl.flock(fd, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+        flags = (fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH) | fcntl.LOCK_NB
+        while True:
+            try:
+                fcntl.flock(fd, flags)
+                break
+            except OSError as exc:
+                if exc.errno not in {errno.EACCES, errno.EAGAIN}:
+                    raise
+                if time.monotonic() >= deadline:
+                    raise LockWaitTimeout(
+                        _lock_wait_message(path, timeout_s)
+                    ) from exc
+            time.sleep(POLL_INTERVAL_S)
 
 
 def _windows_lock_contention(exc: OSError) -> bool:
@@ -338,7 +385,7 @@ def project_access_lock(
     locked = False
     registered = False
     try:
-        _advisory_lock(fd, exclusive=exclusive)
+        _advisory_lock(fd, exclusive=exclusive, path=access_file)
         locked = True
         _validate_advisory_file(access_file, fd)
         after = project_config.resolve(project_path)
@@ -476,7 +523,7 @@ def _cleanup_mutex(lock_file: Path):
     mutex_file = lock_file.with_name(lock_file.name + CLEANUP_LOCK_SUFFIX)
     fd = _open_advisory_file(mutex_file)
     try:
-        _advisory_lock(fd, exclusive=True)
+        _advisory_lock(fd, exclusive=True, path=mutex_file)
         try:
             _validate_advisory_file(mutex_file, fd)
             yield
@@ -496,6 +543,10 @@ def _release_owned_lock(lock_file: Path, token: str) -> None:
                 lock_file.unlink()
             except OSError:
                 pass
+    except LockWaitTimeout:
+        # Swallowing the bounded-wait timeout here would silently leak this
+        # process's live-PID sentinel and wedge every later writer/compactor.
+        raise
     except OSError:
         pass
 

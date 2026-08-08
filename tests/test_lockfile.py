@@ -488,9 +488,9 @@ def test_project_access_detects_path_swap_after_lock(tmp_path, monkeypatch):
     original_lock = lockfile._advisory_lock
     swapped = False
 
-    def swap_after_lock(fd, *, exclusive):
+    def swap_after_lock(fd, *, exclusive, path=None):
         nonlocal swapped
-        original_lock(fd, exclusive=exclusive)
+        original_lock(fd, exclusive=exclusive, path=path)
         if not swapped:
             swapped = True
             lock_path.unlink()

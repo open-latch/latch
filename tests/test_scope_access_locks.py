@@ -278,10 +278,10 @@ def test_queued_access_rejects_binding_changed_before_lock(
     owner_thread = threading.get_ident()
     errors: list[BaseException] = []
 
-    def delayed_lock(fd: int, *, exclusive: bool) -> None:
+    def delayed_lock(fd: int, *, exclusive: bool, path=None) -> None:
         if threading.get_ident() != owner_thread:
             entered_wait.set()
-        original_lock(fd, exclusive=exclusive)
+        original_lock(fd, exclusive=exclusive, path=path)
 
     monkeypatch.setattr(lockfile, "_advisory_lock", delayed_lock)
 

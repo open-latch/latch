@@ -13,6 +13,7 @@ import sqlite3
 import stat
 import sys
 import time
+import weakref
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
@@ -167,6 +168,10 @@ class _Connection(sqlite3.Connection):
         lease = getattr(self, "_latch_connection_lease", None)
         if lease is not None:
             self._latch_connection_lease = None
+        finalizer = getattr(self, "_latch_lease_finalizer", None)
+        if finalizer is not None:
+            self._latch_lease_finalizer = None
+            finalizer.detach()
         try:
             super().close()
         finally:
@@ -178,6 +183,23 @@ class _Connection(sqlite3.Connection):
             return bool(super().__exit__(exc_type, exc_value, traceback))
         finally:
             self.close()
+
+
+def _release_abandoned_lease(lease) -> None:
+    try:
+        lease.__exit__(None, None, None)
+    except Exception:
+        pass
+
+
+def _attach_connection_lease(conn: _Connection, lease) -> None:
+    # A leaked (never-closed) connection must not pin its scope-access lease
+    # until process exit — the lease would block every latch/unlatch transition
+    # on this scope for the lifetime of the leaking process.
+    conn._latch_connection_lease = lease
+    conn._latch_lease_finalizer = weakref.finalize(
+        conn, _release_abandoned_lease, lease
+    )
 
 
 class UnlatchedModeError(RuntimeError):
@@ -1193,7 +1215,7 @@ def connect(
                         "opened SQLite vault does not match the bound immutable identity"
                     )
                 conn._kb_vault_identity = opened_identity
-                conn._latch_connection_lease = lease
+                _attach_connection_lease(conn, lease)
                 lease_attached = True
                 return conn
             conn.close()
@@ -1269,7 +1291,7 @@ def connect(
                     directory=locked_directory,
                 )
             _clear_initialization_receipt(initial_target, locked_directory)
-        conn._latch_connection_lease = lease
+        _attach_connection_lease(conn, lease)
         lease_attached = True
         return conn
     except Exception:
@@ -1304,7 +1326,7 @@ def open_existing_readonly(
         conn = sqlite3.connect(
             path.as_uri() + "?mode=ro", uri=True, factory=_Connection
         )
-        conn._latch_connection_lease = lease
+        _attach_connection_lease(conn, lease)
         conn._latch_db_path = path
         lease_attached = True
         _connection_directory(
