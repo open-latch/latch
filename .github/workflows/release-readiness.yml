@@ -1,0 +1,46 @@
+name: Release readiness (proof packet)
+
+# Manual only. Run this before pushing a vX.Y.Z tag to confirm the committed
+# proof packet is current for the commit you intend to release. It runs the
+# exact packet-currency gate from release.yml but never publishes anything, so
+# the release path is exercisable without cutting a release. A red run means the
+# packet is stale: recapture with `bin/latch_proof_packet.sh --capture-live`
+# and commit the refreshed proof/ before tagging.
+#
+# This is deliberately a separate workflow rather than a workflow_dispatch on
+# release.yml: dispatching release.yml would expose its release-publishing step
+# to manual triggering. This workflow carries no publish step at all.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  proof-packet-currency:
+    name: proof-packet-currency (release gate, check-only)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out full history
+        uses: actions/checkout@v4
+        with:
+          # The currency gate resolves the source commit and its direct-child
+          # artifact commit, so it needs full history.
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements-ci.lock
+
+      - name: Install proof-packet dependency lock
+        run: python -m pip install --require-hashes -r requirements-ci.lock
+
+      - name: Verify the public proof packet is current
+        # Same fail-closed CLI gate as release.yml, minus the publish step.
+        env:
+          HF_HUB_OFFLINE: "1"
+          TRANSFORMERS_OFFLINE: "1"
+        run: bash bin/latch_proof_packet.sh --check

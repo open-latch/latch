@@ -14,11 +14,17 @@ jobs:
     steps:
       - name: Check out tagged source
         uses: actions/checkout@v4
+        with:
+          # Packet-currency enforcement resolves the source commit and its
+          # direct-child artifact commit, so it needs full history.
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements-ci.lock
 
       - name: Verify stable tag and release metadata
         shell: bash
@@ -29,8 +35,21 @@ jobs:
           fi
           python src/versioning.py --check-tag "$GITHUB_REF_NAME"
 
-      - name: Install focused test runner
-        run: python -m pip install pytest
+      - name: Install proof-packet dependency lock
+        run: python -m pip install --require-hashes -r requirements-ci.lock
+
+      - name: Verify the public proof packet is current for this release
+        # Release is the single point where the committed proof/ must be
+        # byte-current with the tagged tree and directly follow its source
+        # commit. This is the fail-closed `--check` CLI, not an env-gated test
+        # subset: it regenerates the packet and errors on any drift, so it cannot
+        # silently no-op. A stale packet blocks the release; recapture with
+        # bin/latch_proof_packet.sh --capture-live before tagging. The wiring is
+        # pinned by test_release_workflow_enforces_packet_currency.
+        env:
+          HF_HUB_OFFLINE: "1"
+          TRANSFORMERS_OFFLINE: "1"
+        run: bash bin/latch_proof_packet.sh --check
 
       - name: Run public release hygiene
         run: bash bin/latch_public_release_check.sh

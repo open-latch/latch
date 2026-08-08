@@ -16,6 +16,15 @@ import proof_packet  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 
+# Packet *currency* — the committed proof/ being byte-current with the tree and
+# a direct child of its source commit — is enforced only at release, via the
+# fail-closed `bin/latch_proof_packet.sh --check` CLI wired into release.yml (and
+# the manual release-readiness workflow). It is deliberately NOT a mode of this
+# test module: a skipped test exits 0, so an env-gated currency check would fail
+# open if the flag were ever dropped. Everyday CI runs every proof guard here
+# unconditionally, including the drift-independent README/packet consistency
+# check; only the genuinely drift-sensitive regeneration lives behind `--check`.
+
 
 def _assert(condition, message):
     if not condition:
@@ -518,7 +527,7 @@ def test_readme_selects_seeded_canonical_evidence():
         "title": "Supporting staging evidence",
         "status": "staging",
     })
-    results = proof_packet.build_public_results(receipt)
+    results = proof_packet.build_public_results(receipt, verify_runtime=False)
     rendered = proof_packet.render_readme(results)
     expected = receipt["fixture"]["seeded_decision_id"]
     _assert(f"Cited canonical decision id={expected}" in rendered, rendered)
@@ -528,7 +537,7 @@ def test_readme_selects_seeded_canonical_evidence():
 
 def test_readme_derives_fixture_count():
     receipt = proof_packet.load_live_receipt()
-    results = proof_packet.build_public_results(receipt)
+    results = proof_packet.build_public_results(receipt, verify_runtime=False)
     results["wedge_v1"]["cases"] = 11
     rendered = proof_packet.render_readme(results)
     _assert("add value on these 11 fixtures" in rendered, rendered)
@@ -544,6 +553,10 @@ def test_root_readme_gate_receipt_matches_proof_packet():
     the live gate recommendation silently leaves ``README.md`` advertising a
     stale verdict or backend.  This asserts both root README claims match the
     generated packet.
+
+    It only compares two committed files, so it is drift-independent and runs on
+    every merge — a PR must not be able to change the public README's advertised
+    verdict without CI noticing.
     """
     import json
     import re
@@ -627,7 +640,9 @@ def test_failed_directory_swap_restores_last_good_packet():
             proof_packet.os, "replace", side_effect=fail_new_directory_swap
         ):
             try:
-                proof_packet.publish_packet(receipt, output_dir=output_dir)
+                proof_packet.publish_packet(
+                    receipt, output_dir=output_dir, verify_runtime=False,
+                )
             except OSError:
                 pass
             else:
@@ -642,7 +657,7 @@ def test_failed_directory_swap_restores_last_good_packet():
 
 def test_generated_packet_matches_derived_eval_results():
     receipt = proof_packet.load_live_receipt()
-    results = proof_packet.build_public_results(receipt)
+    results = proof_packet.build_public_results(receipt, verify_runtime=False)
     _assert(results["wedge_v1"]["ok"] is True, results["wedge_v1"])
     _assert(results["wedge_v1"]["modes"]["latch_evidence"]["passed"] ==
             results["wedge_v1"]["cases"], results["wedge_v1"])
@@ -657,9 +672,38 @@ def test_generated_packet_matches_derived_eval_results():
     print("PASS generated_packet_matches_derived_eval_results")
 
 
-def test_packet_files_are_reproducible():
-    proof_packet.check_generated(proof_packet.load_live_receipt())
-    print("PASS packet_files_are_reproducible")
+def test_derivation_survives_runtime_drift_but_release_still_enforces():
+    """Everyday CI must survive a routine runtime-bundle edit (PR #86 review).
+
+    Packet *currency* is a release gate.  Derivation and rendering run on every
+    merge, so they must not re-bind the receipt to the working tree: a VERSION
+    bump or a ``bin/`` wrapper change would otherwise turn CI red and force a
+    live gate recapture, which is the loop release-gating exists to break.  The
+    release path must keep enforcing it, so this pins both halves.
+    """
+    receipt = proof_packet.load_live_receipt()
+    drifted = mock.Mock(side_effect=proof_packet.ProofPacketError(
+        "proof runtime changed since the live receipt; recapture the live proof",
+    ))
+    with mock.patch.object(proof_packet, "assert_tested_runtime_matches", drifted):
+        results = proof_packet.build_public_results(receipt, verify_runtime=False)
+        _assert(
+            drifted.call_count == 0,
+            "everyday derivation must not re-verify the working tree",
+        )
+        _assert(
+            results["source_commit"] == receipt["source_commit"],
+            results["source_commit"],
+        )
+        try:
+            proof_packet.build_public_results(receipt)
+        except proof_packet.ProofPacketError:
+            pass
+        else:
+            raise AssertionError(
+                "release derivation must still enforce runtime currency",
+            )
+    print("PASS derivation_survives_runtime_drift_but_release_still_enforces")
 
 
 def test_wrapper_uses_configured_python():
@@ -702,11 +746,59 @@ def test_windows_workflow_propagates_proof_command_failures():
     proof_job = workflow.split("  proof-packet-windows:", 1)[1].split(
         "\n  cursor-cumulative-full-suite:", 1,
     )[0]
+    # Everyday CI runs the drift-independent proof tests plus a `--help` smoke
+    # of the PowerShell wrapper; the packet-currency `--check` moved to the
+    # release workflow.  Both commands stay guarded, so neither can fail
+    # silently the way the Windows proof job once did.
     _assert(
         proof_job.count("if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }") == 2,
         proof_job,
     )
+    _assert("latch_proof_packet.ps1 --help" in proof_job, proof_job)
     print("PASS windows_workflow_propagates_proof_command_failures")
+
+
+def test_release_readiness_workflow_is_check_only():
+    """The manual release-gate smoke must never publish (PR #86 review).
+
+    release.yml enforces packet currency but also publishes on a tag, so the
+    gate is otherwise only exercised by cutting a real release. This separate
+    workflow runs the same gate on demand; the point of keeping it separate is
+    that it carries no publish step, so guard exactly that.
+    """
+    workflow = (
+        ROOT / ".github" / "workflows" / "release-readiness.yml"
+    ).read_text(encoding="utf-8")
+    _assert("workflow_dispatch:" in workflow, workflow)
+    _assert("pull_request" not in workflow, workflow)
+    _assert("push:" not in workflow, workflow)
+    _assert("gh release create" not in workflow, workflow)
+    _assert("bin/latch_proof_packet.sh --check" in workflow, workflow)
+    print("PASS release_readiness_workflow_is_check_only")
+
+
+def test_release_workflow_enforces_packet_currency():
+    """The release job must run the fail-closed currency gate (PR #86 review).
+
+    Currency enforcement moved off every-merge CI, so the release workflow is the
+    load-bearing gate. It must invoke the `--check` CLI — which cannot silently
+    no-op the way a skipped, env-gated test can — before it publishes. Guarding
+    the wiring here means deleting or bypassing the gate breaks CI, mirroring
+    test_windows_workflow_propagates_proof_command_failures.
+    """
+    workflow = (
+        ROOT / ".github" / "workflows" / "release.yml"
+    ).read_text(encoding="utf-8")
+    verify_job = workflow.split("  verify-and-publish:", 1)[1]
+    check_index = verify_job.find("bin/latch_proof_packet.sh --check")
+    publish_index = verify_job.find("gh release create")
+    _assert(check_index != -1, "release job must run bin/latch_proof_packet.sh --check")
+    _assert(publish_index != -1, "release job must publish with gh release create")
+    _assert(
+        check_index < publish_index,
+        "the currency gate must run before the publish step",
+    )
+    print("PASS release_workflow_enforces_packet_currency")
 
 
 if __name__ == "__main__":
@@ -730,8 +822,10 @@ if __name__ == "__main__":
     test_failed_publication_preserves_last_good_packet()
     test_failed_directory_swap_restores_last_good_packet()
     test_generated_packet_matches_derived_eval_results()
-    test_packet_files_are_reproducible()
+    test_derivation_survives_runtime_drift_but_release_still_enforces()
     test_wrapper_uses_configured_python()
     test_powershell_wrapper_forwards_interpreter_and_args()
     test_windows_workflow_propagates_proof_command_failures()
+    test_release_readiness_workflow_is_check_only()
+    test_release_workflow_enforces_packet_currency()
     print("\nAll proof packet tests pass.")
