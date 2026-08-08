@@ -44,6 +44,14 @@ the flag refuses to run when a checkpoint already exists.
 The wrapper honors `LATCH_HOME`/`CLAUDE_KB_HOME` for the checkout root and
 `LATCH_PYTHON`/`CLAUDE_KB_PYTHON` for the interpreter.
 
+## Codex pre-canary marker race
+
+codex MCP attach precedes the SessionStart hook write, so codex identity rides
+transcript attribution. Clearing a stale project marker
+(`runtime/codex_sessions/<hash>/codex_session.json`) is a sanctioned
+pre-canary operational step. This is operational guidance only: no code fix to
+marker lifecycle is authorized without a separate founder ruling.
+
 ## Reading the result
 
 - Exit 0: a non-invalidated canonical report was committed; a sorted-keys
