@@ -56,5 +56,30 @@ def test_metric_doc_exists_and_names_exact_fields():
     print("PASS test_metric_doc_exists_and_names_exact_fields")
 
 
+def test_metric_doc_declares_window_rescope_deviation():
+    """Codex review round 1 (2026-08-08) item-1 finding: the doc re-scopes
+    3948's window denominator from "next 200 gate calls" to the first ~200
+    ELIGIBLE rows, but did not list that as a declared deviation. Every
+    deviation from the literal rubric must sit in the declared-deviations
+    section (the 4611 pattern) — pin it there."""
+    text = DOC.read_text(encoding="utf-8")
+    _assert(
+        "## Declared deviations" in text,
+        "metric doc must keep a declared-deviations section",
+    )
+    deviations = text.split("## Declared deviations", 1)[1]
+    _assert(
+        "next 200 gate calls" in deviations,
+        "the window/denominator re-scope must be DECLARED as a deviation, "
+        "naming the literal 3948 window it replaces",
+    )
+    _assert(
+        "eligible rows" in deviations,
+        "the deviation must name the replacement denominator (eligible rows)",
+    )
+    print("PASS test_metric_doc_declares_window_rescope_deviation")
+
+
 if __name__ == "__main__":
     test_metric_doc_exists_and_names_exact_fields()
+    test_metric_doc_declares_window_rescope_deviation()

@@ -59,6 +59,16 @@ first ~200 eligible rows of the live measurement window.**
    NEEDS_HUMAN_JUDGMENT does not count. The ≥5% PASS bar is therefore
    evaluated against a strictly conservative numerator (the denominator is
    the same eligible-row set under either reading).
+4. **The window denominator is re-scoped from 3948's "next 200 gate calls"
+   to the first ~200 eligible rows** (surfaced round 1 of the cross-vendor
+   review, 2026-08-08). Skipped and errored calls produce no verdict to
+   change, and rows written by pre-capability runtimes structurally cannot
+   cite; counting either would make the rate measure runtime mix and outage
+   luck rather than citation behavior. The excluded-row accounting
+   (`capability_missing` / `skipped` / `errored` / `invalid_recommendation` /
+   `unparsable` / `non_gate`) is reported by the counter precisely so this
+   re-scope stays auditable — the founder can recompute the literal
+   all-calls denominator from the same output if they re-pin.
 
 ## What the counter reports (secondary observables, not the metric)
 

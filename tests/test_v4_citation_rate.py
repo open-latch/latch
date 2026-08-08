@@ -235,6 +235,36 @@ def test_pass_threshold_uses_unrounded_rate():
     print("PASS pass_threshold_uses_unrounded_rate")
 
 
+def test_eligibility_requires_skipped_exactly_false():
+    """Codex review round 1 (2026-08-08) item-4 finding: the doc's eligibility
+    conjunction is the strict `skipped == false`, but compute() used
+    truthiness, so rows with skipped missing / null / 0 / "" counted as
+    eligible. Only JSON false qualifies; every other value lands in the
+    skipped bucket. (The real writer always emits a bool, so live counts are
+    unchanged — this pins doc-code parity.)"""
+    def _row(skipped_value, present=True):
+        row = {
+            "event_type": "gate", "error": None, "recommendation": "MODIFY",
+            "surfaced_rejected_paths": [1], "cited_rejected_paths": [1],
+        }
+        if present:
+            row["skipped"] = skipped_value
+        return row
+
+    out = v4.compute([
+        _row(False),            # the only eligible shape
+        _row(None),
+        _row(0),
+        _row(""),
+        _row(True),
+        _row(None, present=False),  # key missing entirely
+    ])
+    _assert(out["eligible"] == 1, f"only skipped==false is eligible: {out}")
+    _assert(out["skipped"] == 5, f"all non-false shapes must bucket as skipped: {out}")
+    _assert(out["changed_verdict"] == 1, out)
+    print("PASS eligibility_requires_skipped_exactly_false")
+
+
 if __name__ == "__main__":
     test_exact_counts_on_corpus_fixture()
     test_conformance_floor_on_real_schema_rows()
@@ -245,3 +275,4 @@ if __name__ == "__main__":
     test_fixture_carries_no_live_secret_shapes()
     test_gz_aged_logs_are_counted()
     test_pass_threshold_uses_unrounded_rate()
+    test_eligibility_requires_skipped_exactly_false()

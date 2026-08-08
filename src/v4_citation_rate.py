@@ -83,7 +83,11 @@ def compute(rows: Iterable[dict | None]) -> dict:
         if "surfaced_rejected_paths" not in row:
             counts["capability_missing"] += 1
             continue
-        if row.get("skipped"):
+        # Strict doc conjunction (docs/v4_citation_metric.md: skipped ==
+        # false): only JSON false is eligible; missing/null/0/"" bucket as
+        # skipped. The real writer always emits a bool, so this is doc-code
+        # parity, not a live-count change (review round 1, 2026-08-08).
+        if row.get("skipped") is not False:
             counts["skipped"] += 1
             continue
         if row.get("error") is not None:
