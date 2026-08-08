@@ -647,7 +647,18 @@ def test_run_gate_result_invariance_and_exact_gate_join(
     finally:
         conn.close()
 
-    assert enabled == disabled
+    # The invariant under test is that the outcome-events flag does not change
+    # gate behavior. `gate_call_id` is a fresh per-call nonce that is now
+    # returned to the caller (so hosts recording tool results capture it and an
+    # offline pass can attribute the call exactly), so it necessarily differs
+    # between any two calls — flag or no flag. Compare everything else, and
+    # assert the nonce's presence separately rather than weakening the check.
+    assert enabled.keys() == disabled.keys()
+    assert {k: v for k, v in enabled.items() if k != "gate_call_id"} == {
+        k: v for k, v in disabled.items() if k != "gate_call_id"
+    }
+    assert enabled["gate_call_id"] != disabled["gate_call_id"]
+    assert len(enabled["gate_call_id"]) == 12
     gate_rows = _rows(local_vault, gate.LOG_STREAM)
     outcome_rows = _rows(local_vault)
     assert len(gate_rows) == 2
@@ -819,7 +830,22 @@ def test_concurrent_process_rows_remain_valid_json(
     assert len({row["gate_call_id"] for row in rows}) == 32
 
 
-@pytest.mark.parametrize("filename", ["gate.py", "capture_streams.py"])
+@pytest.mark.parametrize(
+    "filename",
+    [
+        "gate.py",
+        "capture_streams.py",
+        "outcome_measurement.py",
+        "outcome_measurement_runner.py",
+        "outcome_evidence.py",
+        "artifacts.py",
+        "project_proof.py",
+        "paths.py",
+        "db.py",
+        "vault_identity.py",
+        "log_utils.py",
+    ],
+)
 def test_outcome_runtime_modules_change_the_shared_runtime_key(
     monkeypatch: pytest.MonkeyPatch,
     filename: str,

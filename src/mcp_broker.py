@@ -159,10 +159,20 @@ def _runtime_key() -> str:
         root / "mcp_server.py",
         root / "mcp_runtime.py",
         # Gate/capture behavior executes inside the long-lived owner. Include
-        # both so an update performs the normal blue/green transition instead
-        # of reconnecting new proxies to an owner with stale outcome behavior.
+        # every online dependency so an update performs the normal blue/green
+        # transition instead of reconnecting new proxies to an owner with stale
+        # protocol pins, runtime attestation, or project-proof behavior.
         root / "gate.py",
         root / "capture_streams.py",
+        root / "outcome_measurement.py",
+        root / "outcome_measurement_runner.py",
+        root / "outcome_evidence.py",
+        root / "artifacts.py",
+        root / "project_proof.py",
+        root / "paths.py",
+        root / "db.py",
+        root / "vault_identity.py",
+        root / "log_utils.py",
         paths.KB_ROOT / "vendor" / "config.json",
         paths.KB_ROOT / "vendor" / "tokenizer.json",
         paths.KB_ROOT / "vendor" / "tokenizer_config.json",

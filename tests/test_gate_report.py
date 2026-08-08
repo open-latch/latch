@@ -270,9 +270,34 @@ def test_gate_report_cli_json_output():
         _cleanup(tmp, conn)
 
 
+def test_measurement_block_is_prominently_noncanonical_and_invalidated():
+    lines: list[str] = []
+    gate_report._append_measurement(lines, {
+        "measurement_protocol_version": "outcome-v2.6.0",
+        "invalidated": True,
+        "invalidation_reasons": [
+            "source_roots_missing:S2",
+            "candidate_enumeration_incomplete:S1",
+        ],
+        "o1": True,
+        "o2": "indeterminate",
+        "o3_status": "diagnostic-fail",
+        "o3_subordinated_to_o2": True,
+    })
+    text = "\n".join(lines)
+    _assert("Diagnostic (Noncanonical)" in text, text)
+    _assert("Status: INVALIDATED" in text, text)
+    _assert("no canonical authority" in text, text)
+    _assert("source_roots_missing:S2" in text, text)
+    _assert("candidate_enumeration_incomplete:S1" in text, text)
+    _assert("B18" not in text, text)
+    print("PASS measurement_block_is_prominently_noncanonical_and_invalidated")
+
+
 if __name__ == "__main__":
     test_gate_report_summarizes_structural_logs_and_current_nodes()
     test_gate_report_does_not_infer_triggers_from_structural_logs()
     test_gate_report_ignores_raw_query_debug_fields()
     test_gate_report_cli_json_output()
+    test_measurement_block_is_prominently_noncanonical_and_invalidated()
     print("\nAll gate report tests pass.")

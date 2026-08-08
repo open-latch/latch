@@ -171,6 +171,11 @@ def test_runtime_manifest_covers_authoritative_bundle():
         "vendor/vocab.txt",
         "bin/latch_proof_packet.sh",
         "bin/latch_proof_packet.ps1",
+        # The audit CLI's packaged default contract is runtime-critical: a
+        # proof that omits it can claim current/public-safe without binding
+        # the shipped contract bytes (Latch 4562 item 4).
+        "bin/run_latch_outcome_audit.sh",
+        "artifacts/outcome-measurement/contract-v2.6.md",
     }
     _assert(required <= paths, sorted(required - paths))
     _assert(not any("__pycache__" in path or path.endswith(".pyc") for path in paths),
@@ -540,13 +545,13 @@ def test_readme_derives_fixture_count():
     print("PASS readme_derives_fixture_count")
 
 
-def test_root_readme_gate_verdict_matches_proof_packet():
+def test_root_readme_gate_receipt_matches_proof_packet():
     """Cross-surface guard (PR #37 review, node 2553).
 
     ``proof/`` is regenerated on every recapture, but the root ``README.md``
     proof table is hand-maintained.  Without this check a recapture that changes
     the live gate recommendation silently leaves ``README.md`` advertising a
-    stale verdict.  This asserts the root README's live-gate row matches the
+    stale verdict or backend.  This asserts both root README claims match the
     generated packet.
 
     It only compares two committed files, so it is drift-independent and runs on
@@ -558,6 +563,7 @@ def test_root_readme_gate_verdict_matches_proof_packet():
 
     results = json.loads((ROOT / "proof" / "results.json").read_text(encoding="utf-8"))
     packet_verdict = results["live_demo"]["recommendation"]
+    packet_backend = results["live_demo"]["backend"]
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     match = re.search(r"\|\s*Live pre-edit gate\s*\|\s*`([A-Z_]+)`", readme)
     _assert(match is not None, "root README has no 'Live pre-edit gate' proof row")
@@ -567,7 +573,17 @@ def test_root_readme_gate_verdict_matches_proof_packet():
         f"root README live-gate verdict {readme_verdict!r} != proof packet "
         f"{packet_verdict!r}; update README.md or recapture the packet",
     )
-    print("PASS root_readme_gate_verdict_matches_proof_packet")
+    backend_match = re.search(
+        r"captured with the\s+`([a-z]+)` backend", readme,
+    )
+    _assert(backend_match is not None, "root README has no live-gate backend claim")
+    readme_backend = backend_match.group(1)
+    _assert(
+        readme_backend == packet_backend,
+        f"root README live-gate backend {readme_backend!r} != proof packet "
+        f"{packet_backend!r}; update README.md or recapture the packet",
+    )
+    print("PASS root_readme_gate_receipt_matches_proof_packet")
 
 
 def test_failed_publication_preserves_last_good_packet():
@@ -802,7 +818,7 @@ if __name__ == "__main__":
     test_depth_one_merge_ref_requires_two_history_levels()
     test_readme_selects_seeded_canonical_evidence()
     test_readme_derives_fixture_count()
-    test_root_readme_gate_verdict_matches_proof_packet()
+    test_root_readme_gate_receipt_matches_proof_packet()
     test_failed_publication_preserves_last_good_packet()
     test_failed_directory_swap_restores_last_good_packet()
     test_generated_packet_matches_derived_eval_results()

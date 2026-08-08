@@ -43,6 +43,10 @@ RUNTIME_BUNDLE_FILES = (
     "bin/latch_proof_packet.sh",
     "bin/latch_proof_packet.ps1",
     "bin/latch_seed_report_eval.sh",
+    "bin/run_latch_outcome_audit.sh",
+    # The audit CLI's packaged default: proof currency must bind the shipped
+    # contract bytes, not just the code that reads them (Latch 4562 item 4).
+    "artifacts/outcome-measurement/contract-v2.6.md",
 )
 NO_EDIT_PROOF_FIELDS = (
     "command",
