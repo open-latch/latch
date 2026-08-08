@@ -54,10 +54,11 @@ first ~200 eligible rows of the live measurement window.**
 2. **"NEEDS_HUMAN_JUDGMENT" is excluded from the changed-verdict numerator.**
    It is a routing outcome, not a changed verdict. The counter reports the
    cited-NEEDS_HUMAN_JUDGMENT count separately so the exclusion is visible.
-3. Both narrowings UNDER-count: a PROCEED whose better_next_action was
-   rejection-informed does not count. The ≥5% PASS bar is therefore evaluated
-   against a conservative numerator; a PASS under this reading is a fortiori
-   a PASS under the literal rubric's intent.
+3. Both narrowings UNDER-count the numerator: a PROCEED whose
+   better_next_action was rejection-informed does not count, and a cited
+   NEEDS_HUMAN_JUDGMENT does not count. The ≥5% PASS bar is therefore
+   evaluated against a strictly conservative numerator (the denominator is
+   the same eligible-row set under either reading).
 
 ## What the counter reports (secondary observables, not the metric)
 

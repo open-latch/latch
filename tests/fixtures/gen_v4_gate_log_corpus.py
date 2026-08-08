@@ -90,6 +90,14 @@ def _map_str(kind: str, v):
             _STR_MAP[key] = f"{k:012x}"
         elif kind == "session_id":
             _STR_MAP[key] = f"00000000-0000-4000-8000-{k:012d}"
+        elif kind == "runtime_key":
+            # 20-char shape like the real attestation key, clearly fake.
+            _STR_MAP[key] = f"fx{k:018x}"
+        elif kind == "proof_hex":
+            # 64-char shape like the vault HMAC fingerprint/key_id.
+            _STR_MAP[key] = f"fx{k:062x}"
+        elif kind == "key_epoch":
+            _STR_MAP[key] = f"fx-key-epoch-{k}"
         else:  # gate_call_id
             _STR_MAP[key] = f"fixturecall{k:04d}"
     return _STR_MAP[key]
@@ -108,6 +116,19 @@ def sanitize(entry: dict) -> dict:
             out[k] = _map_str("gate_call_id", v)
         elif k == "project":
             out[k] = "-fixture-project"
+        elif k in ("attestation", "runtime_attestation", "runtime_version"):
+            # V1-runtime attestation material (adversarial-panel finding over
+            # dd5f6f1): never let the live runtime key into the fixture.
+            out[k] = _map_str("runtime_key", v)
+        elif k == "key_epoch":
+            out[k] = _map_str("key_epoch", v)
+        elif k == "project_proof" and isinstance(v, dict):
+            out[k] = {
+                **v,
+                "fingerprint": _map_str("proof_hex", v.get("fingerprint")),
+                "key_id": _map_str("proof_hex", v.get("key_id")),
+                "key_epoch": _map_str("key_epoch", v.get("key_epoch")),
+            }
         elif k == "seeds" and isinstance(v, list):
             out[k] = [
                 {**s, "id": _map_int(s.get("id")),

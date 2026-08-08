@@ -150,6 +150,91 @@ def test_cli_main_runs():
     print("PASS cli_main_runs")
 
 
+# Adversarial-panel hardenings (2026-08-08 panel over dd5f6f1; kept inside
+# item 4's named scope: the fixture is item 4's deliverable and both counter
+# fixes protect the declared metric arithmetic).
+
+_HEX_SECRET_KEYS = ("attestation", "runtime_attestation", "runtime_version")
+
+
+def test_fixture_carries_no_live_secret_shapes():
+    """Sanitizer completeness: rows written by the installed V1 runtime carry
+    attestation/HMAC material. The committed fixture must hold only fixture
+    placeholders (prefix 'fx') in those slots, never live values."""
+    import json as _json
+
+    for line in FIXTURE.read_text(encoding="utf-8").splitlines():
+        row = _json.loads(line)
+        for key in _HEX_SECRET_KEYS:
+            if key in row:
+                _assert(
+                    str(row[key]).startswith("fx"),
+                    f"{key} not a fixture placeholder: {row[key]!r}",
+                )
+        proof = row.get("project_proof")
+        if isinstance(proof, dict):
+            for key in ("fingerprint", "key_id"):
+                _assert(
+                    str(proof.get(key, "fx")).startswith("fx"),
+                    f"project_proof.{key} not a placeholder: {proof.get(key)!r}",
+                )
+            _assert(
+                str(proof.get("key_epoch", "fx")).startswith("fx"),
+                f"project_proof.key_epoch not a placeholder: {proof.get('key_epoch')!r}",
+            )
+        if "key_epoch" in row:
+            _assert(
+                str(row["key_epoch"]).startswith("fx"),
+                f"key_epoch not a placeholder: {row['key_epoch']!r}",
+            )
+    print("PASS fixture_carries_no_live_secret_shapes")
+
+
+def test_gz_aged_logs_are_counted():
+    """log_utils retention gzips daily logs older than 30 days; a ~200-call
+    window can span that, so the counter must read gate-*.log.gz too or the
+    denominator silently shrinks."""
+    import gzip
+
+    tmp = Path(tempfile.mkdtemp(prefix="v4_counter_gz_"))
+    try:
+        raw = FIXTURE.read_bytes()
+        with gzip.open(tmp / "gate-2026-01-01.log.gz", "wb") as fh:
+            fh.write(raw)
+        out = v4.summarize(v4.resolve_paths([str(tmp)]))
+        _assert(out["files"] == 1, f"gz log not discovered: {out['files']}")
+        _assert(out["rows_total"] == EXPECTED["rows_total"], out)
+        _assert(out["eligible"] == EXPECTED["eligible"], out)
+        print("PASS gz_aged_logs_are_counted")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_pass_threshold_uses_unrounded_rate():
+    """docs/v4_citation_metric.md says PASS iff V4 >= 5.0 — on the true rate,
+    not the 2-dp display rounding. 100/2001 = 4.9975% rounds to 5.0 but must
+    NOT pass."""
+    def _row(recommendation, cited):
+        return {
+            "event_type": "gate", "skipped": False, "error": None,
+            "recommendation": recommendation,
+            "surfaced_rejected_paths": [1] if cited else [],
+            "cited_rejected_paths": [1] if cited else [],
+        }
+
+    rows = [_row("MODIFY", True) for _ in range(100)]
+    rows += [_row("PROCEED", False) for _ in range(1901)]
+    out = v4.compute(rows)
+    _assert(out["eligible"] == 2001, out["eligible"])
+    _assert(out["changed_verdict"] == 100, out["changed_verdict"])
+    _assert(out["v4_firing_rate_pct"] == 5.0, out["v4_firing_rate_pct"])
+    _assert(
+        out["pass_at_5pct"] is False,
+        f"4.9975% must not pass the 5.0 bar: {out['pass_at_5pct']}",
+    )
+    print("PASS pass_threshold_uses_unrounded_rate")
+
+
 if __name__ == "__main__":
     test_exact_counts_on_corpus_fixture()
     test_conformance_floor_on_real_schema_rows()
@@ -157,3 +242,6 @@ if __name__ == "__main__":
     test_directory_mode_globs_gate_logs_only()
     test_empty_input_and_degraded_rows()
     test_cli_main_runs()
+    test_fixture_carries_no_live_secret_shapes()
+    test_gz_aged_logs_are_counted()
+    test_pass_threshold_uses_unrounded_rate()

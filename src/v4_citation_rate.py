@@ -28,6 +28,7 @@ the ≥5% bar belongs to the founder at window close; the exit code is always
 from __future__ import annotations
 
 import argparse
+import gzip
 import json
 import sys
 from pathlib import Path
@@ -104,18 +105,25 @@ def compute(rows: Iterable[dict | None]) -> dict:
         elif recommendation == "NEEDS_HUMAN_JUDGMENT":
             counts["cited_needs_human"] += 1
     eligible = counts["eligible"]
-    v4_rate = _pct(counts["changed_verdict"], eligible)
     counts["citing_rate_pct"] = _pct(counts["citing"], eligible)
-    counts["v4_firing_rate_pct"] = v4_rate
+    counts["v4_firing_rate_pct"] = _pct(counts["changed_verdict"], eligible)
     counts["pass_threshold_pct"] = PASS_THRESHOLD_PCT
+    # PASS is judged on the true rate, never the 2-dp display rounding
+    # (docs/v4_citation_metric.md: PASS iff V4 >= 5.0).
     counts["pass_at_5pct"] = (
-        None if v4_rate is None else v4_rate >= PASS_THRESHOLD_PCT
+        None if eligible <= 0
+        else 100.0 * counts["changed_verdict"] / eligible >= PASS_THRESHOLD_PCT
     )
     return counts
 
 
 def iter_rows(path: Path) -> Iterator[dict | None]:
-    for line in path.read_text(encoding="utf-8").splitlines():
+    if path.suffix == ".gz":
+        with gzip.open(path, "rt", encoding="utf-8") as fh:
+            text = fh.read()
+    else:
+        text = path.read_text(encoding="utf-8")
+    for line in text.splitlines():
         line = line.strip()
         if not line:
             continue
@@ -132,7 +140,10 @@ def resolve_paths(args: Iterable[str]) -> list[Path]:
     for arg in args:
         p = Path(arg)
         if p.is_dir():
-            files.extend(sorted(p.glob("gate-*.log")))
+            # Include retention-gzipped daily logs: log_utils gzips files
+            # older than the 30-day hot window, and a ~200-call V4 window can
+            # span that. Missing them would silently shrink the denominator.
+            files.extend(sorted([*p.glob("gate-*.log"), *p.glob("gate-*.log.gz")]))
         else:
             files.append(p)
     return files
