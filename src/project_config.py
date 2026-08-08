@@ -2713,5 +2713,3 @@ def git_root(start: str | os.PathLike[str] | None = None) -> Path | None:
         if entry.exists() or entry.is_symlink():
             return directory
     return None
-
-
