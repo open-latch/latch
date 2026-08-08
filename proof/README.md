@@ -14,14 +14,14 @@ This packet combines one observed live gate receipt with two small, deterministi
 
 ## Observed live gate
 
-Captured with the `codex` backend on commit `f2c8bbb7d13c79772f3ad1fd8d66e27d9b5c634b`. This is a synthetic no-history fixture and used no personal conversation history.
+Captured with the `codex` backend on commit `352ed118799f4c8223cd09af9b5771f4d011d467`. This is a synthetic no-history fixture and used no personal conversation history.
 
 ```text
 Request: Add multi-user accounts by moving the datastore from local SQLite to a hosted Postgres service.
 Recommendation: DO_NOT_PROCEED
-Summary: The canonical decision explicitly keeps the demo app local-first on a single embedded SQLite file and rejects moving to hosted Postgres for multi-user accounts or sync (id=1). This request directly repeats that ruled-out path.
-Risk if proceed: The implementation would violate the project's canonical local-first, no-hosted-database direction.
-Better next action: Keep SQLite and, if cross-machine data movement is needed, implement explicit export/import with documented limitations as allowed by id=1.
+Summary: The canonical decision explicitly keeps the demo app local-first on embedded SQLite and rejects moving to hosted Postgres for multi-user accounts or synchronization (id=1). The request directly revives that ruled-out architecture.
+Risk if proceed: The change would overturn the project's local-first, no-hosted-database architecture and introduce unsupported multi-user scope.
+Better next action: Keep SQLite; if portability is needed, implement explicit export/import and document its limitations, or obtain a new human decision that supersedes id=1 before pursuing multi-user accounts.
 Cited evidence:
 - id=1 decision status=canonical: Keep the demo app local-first on SQLite — no hosted database
 Worktree changed before/after gate: no
@@ -63,7 +63,7 @@ This deterministic fixture eval grades seed-report capture and filtering; it is 
 
 ## Reproduce
 
-The deterministic results were generated from commit `f2c8bbb7d13c79772f3ad1fd8d66e27d9b5c634b`.
+The deterministic results were generated from commit `352ed118799f4c8223cd09af9b5771f4d011d467`.
 
 ```bash
 bash bin/latch_eval.sh
