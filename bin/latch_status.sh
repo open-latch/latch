@@ -43,9 +43,10 @@ elif command -v python >/dev/null 2>&1; then
 else
   status_python=""
 fi
+project_status_rc=0
 if [ -n "$status_python" ]; then
   echo
-  "$status_python" "${KB_HOME}/src/project_mode.py" status --project "$(pwd -W 2>/dev/null || pwd)"
+  "$status_python" "${KB_HOME}/src/project_mode.py" status --project "$(pwd -W 2>/dev/null || pwd)" || project_status_rc=$?
 else
   echo
   echo "  [UNKNOWN] project mode unavailable because Python was not found; no state changed."
@@ -58,3 +59,5 @@ elif [ -n "${CLAUDE_KB_DISABLE_WRITE:-}" ]; then
 elif [ -e "${KB_HOME}/DISABLE_WRITE" ]; then
   echo "  [write-off] ${KB_HOME}/DISABLE_WRITE exists — Stop/SessionEnd/compactor no-op; reads live."
 fi
+
+exit "$project_status_rc"

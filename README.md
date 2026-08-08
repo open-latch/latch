@@ -127,7 +127,7 @@ and repro scripts are in [Safety and control](#safety-and-control).
 
 ## What you get on day one
 
-Install the runtime once, explicitly latch the project, and seed it. From the
+Install the runtime once, confirm the project it protects, and seed it. From the
 next session on:
 
 - **Every decision on file is one you ratified.** Seeding is review-first — `--apply` writes only the
@@ -138,10 +138,11 @@ next session on:
   records whether it actually did.
 - **You get a receipt, not an assurance.** latch shows a short foreground receipt when it shapes an
   answer or a gate fires, and `/latch-gate-report` audits recent gate activity without writing.
-- **Shared across your agents, separate across client scopes.** On a fresh install, an unscoped
-  location is LOCKED until you choose Shared (the existing global KB) or Private (a clean separate
-  KB). Descendants inherit the nearest scope. Upgraded global-KB installs keep their old shared
-  behavior until explicitly migrated; no automatic lookup, copy, or import crosses KBs.
+- **Shared across your agents, separate across client scopes when you opt in.** Every install —
+  fresh or upgraded — keeps one global KB shared by all projects. Consultants can make the one-way
+  `latch --enable-project-scopes` choice; from then on an unscoped location is LOCKED until you
+  choose Shared (the existing global KB) or Private (a clean separate KB), and descendants inherit
+  the nearest scope. No automatic lookup, copy, or import crosses KBs.
 - **Your session start stays quiet.** A healthy session start injects no standing project brief — at
   most five compact pointers, when they're relevant.
 - **Today's judgment carries into tomorrow, when you ask for it.** `/latch-compact` at a stopping
@@ -173,8 +174,9 @@ Windows PowerShell:
 irm https://raw.githubusercontent.com/open-latch/latch/main/install.ps1 | iex
 ```
 
-That's the install. The quickstart wires your agent, asks whether this project
-is Shared or Private, and offers seed only after the project is LATCHED.
+That's the install. The quickstart wires your agent, keeps the default global
+shared KB (per-client project scopes are a separate, explicit one-way opt-in),
+and offers seed only after the project is LATCHED.
 **Restart the agent** afterward so its tools and hooks load.
 
 **Then seed — this is the real first step, not an optional demo.** From here latch captures decisions
@@ -463,8 +465,10 @@ Details in [benchmarks/README.md](./benchmarks/README.md).
 isolated [`uv`](https://docs.astral.sh/uv/) + Python 3.11 runtime — it does not touch your shell
 profile or require a system Python. It asks which agent surfaces to wire, runs
 their doctor checks, and offers a bounded initial-KB review only after the
-selected project is LATCHED. A LOCKED project instead gets the exact Shared and
-Private `latch` commands. Selected transcripts are listed and redacted before
+selected project is LATCHED. On a default install that means the global shared
+KB; only a machine that has opted into project scopes has LOCKED locations, and
+a LOCKED project instead gets the exact Shared and Private `latch` commands.
+Selected transcripts are listed and redacted before
 any model call, and nothing is written until you approve it. Rerunning the
 command repairs and reconciles the existing install
 while keeping its current Latch source revision; it never silently switches to

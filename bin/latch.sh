@@ -30,6 +30,7 @@ Usage: bash bin/latch.sh
        bash bin/latch.sh --confirm latch [--shared | --private]
        bash bin/latch.sh --confirm latch --private [--new-kb | --kb-dir ABSOLUTE_PATH]
        bash bin/latch.sh --confirm latch --enable-project-scopes --shared
+       bash bin/latch.sh --confirm latch --enable-project-scopes --private [--new-kb | --kb-dir ABSOLUTE_PATH]
 
 With no arguments, latch only shows the effective root, state, policy, and KB.
 Confirmed changes affect that filesystem root and its descendants. No KB
