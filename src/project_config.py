@@ -84,11 +84,8 @@ TEST_ROOT_ENV = "LATCH_TEST_ROOT"
 TEST_CAPABILITY_ENV = "LATCH_TEST_CAPABILITY"
 TEST_SENTINEL = ".latch-test-root.json"
 
-# Compatibility names for code being migrated off the draft PR architecture.
-STATE_DIR_NAME = PORTABLE_DIR_NAME
-BINDING_FILE_NAME = PORTABLE_FILE_NAME
+# Compatibility name for code being migrated off the draft PR architecture.
 KB_TARGET_MARKER_FILE_NAME = ".latch-kb-target.json"
-DISABLED_RUNTIME_DIR_NAME = "unlatched-runtime"
 
 AGENT_SESSION_ENV_VARS = (
     "LATCH_SESSION_ID",
@@ -189,10 +186,6 @@ class ResolvedScope:
     @property
     def state_dir(self) -> Path:
         return state_dir(self.project_root)
-
-    @property
-    def disabled_runtime_dir(self) -> Path:
-        return control_root() / RUNTIME_DIR_NAME / self.lock_key
 
 
 # Compatibility alias used by downstream code while it moves to ResolvedScope.
@@ -2479,12 +2472,6 @@ def mark_kb_target(kb_dir: str | os.PathLike[str]) -> None:
     validated_kb_path(kb_dir)
 
 
-def kb_target_is_marked(kb_dir: str | os.PathLike[str]) -> bool:
-    """The retired in-vault marker grants no authority."""
-    validated_kb_path(kb_dir)
-    return False
-
-
 def _lock_file_for_root(root: Path) -> Path:
     directory = control_root() / LOCKS_DIR_NAME
     _ensure_real_directory(directory)
@@ -2728,23 +2715,3 @@ def git_root(start: str | os.PathLike[str] | None = None) -> Path | None:
     return None
 
 
-def _git_dir(root: Path) -> Path:
-    """Compatibility parser for tests/adapters; scope state never lives here."""
-    entry = root / ".git"
-    if entry.is_symlink():
-        raise ProjectConfigError(f"Git metadata entry must not be a symlink: {entry}")
-    if entry.is_dir():
-        directory = entry
-    elif entry.is_file():
-        lines = entry.read_text(encoding="utf-8").splitlines()
-        if len(lines) != 1 or not lines[0].startswith("gitdir: "):
-            raise ProjectConfigError(f"invalid Git metadata pointer: {entry}")
-        directory = Path(lines[0][len("gitdir: ") :].strip()).expanduser()
-        if not directory.is_absolute():
-            directory = root / directory
-    else:
-        raise ProjectConfigError(f"Git metadata entry is missing: {entry}")
-    resolved = directory.resolve(strict=True)
-    if not resolved.is_dir():
-        raise ProjectConfigError(f"Git metadata is not a directory: {resolved}")
-    return resolved
