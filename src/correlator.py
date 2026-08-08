@@ -25,7 +25,7 @@ invariant — no titles, bodies, or raw prompt text in emitted rows.
 This legacy correlator emits diagnostic outcomes only. Canonical v2.6 receipts
 are minted exclusively by ``outcome_measurement.measure/fold_observations``
 after the required snapshot and freshness drain. Diagnostic rows are idempotent
-per ``(gate_call_id, correlator_version)`` so corrected 0.5.0 rows backfill over
+per ``(gate_call_id, correlator_version)`` so corrected 0.6.0 rows backfill over
 bad 0.4.0 output without masquerading as finalized protocol receipts.
 """
 from __future__ import annotations
@@ -45,7 +45,7 @@ import outcome_measurement  # noqa: E402
 import project_proof      # noqa: E402
 
 
-CORRELATOR_VERSION_DEFAULT = "0.5.0"  # diagnostic boundary/classification repair
+CORRELATOR_VERSION_DEFAULT = "0.6.0"  # scoped candidate-completeness receipts
 MEASUREMENT_PROTOCOL_VERSION_DEFAULT = outcome_measurement.MEASUREMENT_PROTOCOL_VERSION
 PROJECT_KEY_EPOCH_DEFAULT = "outcome-v2.6-key-1"
 WINDOW_SECONDS_DEFAULT = 1800  # 30 minutes
@@ -906,6 +906,16 @@ def correlate(
     Returns counts dict: ``rows_emitted``, ``rows_skipped_no_session_id``,
     ``rows_skipped_dedup``, ``rows_skipped_skipped_verdict``.
     """
+    if (
+        isinstance(window_seconds, bool)
+        or not isinstance(window_seconds, int)
+        or window_seconds < 0
+    ):
+        raise ValueError("window_seconds must be a nonnegative integer")
+    try:
+        timedelta(seconds=window_seconds)
+    except OverflowError as exc:
+        raise ValueError("window_seconds is too large") from exc
     counts = {
         "rows_emitted": 0,
         "rows_skipped_no_session_id": 0,
@@ -1020,6 +1030,7 @@ def correlate(
                 row,
                 _attribution(),
                 target_project_proof=target_project_proof,
+                window_seconds=window_seconds,
             )
 
         # Resolve identity for EVERY row before building the next-gate map.
@@ -1077,6 +1088,12 @@ def correlate(
             if hit.get("conflict") and not hit.get("session_id"):
                 counts["rows_attribution_conflict"] += 1
                 continue
+            scoped_receipt = hit.get("candidate_completeness")
+            scoped_stream_complete = (
+                scoped_receipt.get("complete") is True
+                if isinstance(scoped_receipt, dict)
+                else _candidate_index_complete(_attribution())
+            )
             resolved[idx] = {
                 "session_id": hit["session_id"],
                 "session_source": hit["source"],
@@ -1087,7 +1104,8 @@ def correlate(
                 "source_order": hit.get("source_order"),
                 "conflict": hit.get("conflict") is True,
                 "conflict_reasons": tuple(hit.get("conflict_reasons") or ()),
-                "s2_stream_complete": True,
+                "candidate_completeness": scoped_receipt,
+                "s2_stream_complete": scoped_stream_complete,
             }
 
         # Exact-session evidence only.  Unknown-session rows are neither
@@ -1131,10 +1149,8 @@ def correlate(
                 current_index,
                 target_project_proof=target_project_proof,
             )
-            candidate_index_complete = _candidate_index_complete(current_index)
         else:
             transcript_calls = {}
-            candidate_index_complete = None
 
         # Exact-session S2 loss markers participate in boundary censoring too.
         for session_id, stream in host_stream_cache.items():
@@ -1203,7 +1219,12 @@ def correlate(
                 s2_complete = stream.get("complete") is True
             else:
                 s2_calls = transcript_calls
-                s2_complete = candidate_index_complete is True
+                scoped_receipt = hit.get("candidate_completeness")
+                s2_complete = (
+                    scoped_receipt.get("complete") is True
+                    if isinstance(scoped_receipt, dict)
+                    else _candidate_index_complete(_attribution())
+                )
             next_s2_ts = _next_transcript_gate_ts(
                 s2_calls,
                 session_id=session_id,
@@ -1292,6 +1313,9 @@ def correlate(
                     "diagnostic_loss_reasons": list(loss_reasons),
                     "project_check": hit.get("project_check"),
                     "candidate_index_complete": s2_complete,
+                    "candidate_completeness_receipt": hit.get(
+                        "candidate_completeness"
+                    ),
                     "verdict": R.get("recommendation"),
                     "outcome_category": outcome,
                     "followup_count_inserts": followup_inserts,
