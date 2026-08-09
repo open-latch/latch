@@ -1,0 +1,28 @@
+{
+  "fixtures": {
+    "codex-rollout-2026-08-07-canary-a.sanitized.jsonl": {
+      "sha256": "939914d9a1452a2f1138c862ea6e430275b16f3e5cc969a294ae3c1c98df545c",
+      "source_category": "Codex live canary rollout transcript",
+      "source_date": "2026-08-07",
+      "source_records": [1, 16, 17, 20, 21],
+      "sanitizations": [
+        "request and result prose",
+        "cwd and project proof identity",
+        "session/call/runtime ids",
+        "evidence ids and nested content"
+      ]
+    },
+    "codex-rollout-2026-08-07-canary-b.sanitized.jsonl": {
+      "sha256": "e41e545acb64f7403f5cb45f57bba4e2b1acc668235ab70ebd109a346f2f8690",
+      "source_category": "Codex live canary rollout transcript",
+      "source_date": "2026-08-07",
+      "source_records": [1, 14, 15, 18, 19],
+      "sanitizations": [
+        "request and result prose",
+        "cwd and project proof identity",
+        "session/call/runtime ids",
+        "evidence ids and nested content"
+      ]
+    }
+  }
+}

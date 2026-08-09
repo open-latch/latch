@@ -18,6 +18,7 @@ SRC = Path(__file__).resolve().parents[1] / "src"
 sys.path.insert(0, str(SRC))
 
 import correlator  # noqa: E402
+import correlator_cli  # noqa: E402
 import db  # noqa: E402
 import outcome_measurement  # noqa: E402
 import paths  # noqa: E402
@@ -236,6 +237,89 @@ def test_same_project_unknown_at_391s_does_not_truncate_or_censor_recovered(
     assert rows[0]["window_seconds"] == 1800
     assert rows[0]["window_boundary_uncertain"] is False
     assert rows[0]["outcome_category"] != "CENSORED"
+
+
+def test_recovered_attribution_forwards_and_persists_scoped_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gate = _gate_row(
+        tmp_path,
+        ts="2026-07-30T12:00:00.000Z",
+        call_id="aaaaaaaaaaaa",
+        query_hash="hash-a",
+    )
+    _write_rows(tmp_path, [gate])
+    _install_index(
+        monkeypatch,
+        by_session={"session-a": [gate]},
+    )
+    scoped_receipt = correlator.codex_attribution._with_receipt_hash({
+        "version": "codex-rollout-full-v3",
+        "complete": True,
+        "measurement_window": {
+            "start": "2026-07-30T12:00:00.000Z",
+            "end_inclusive": "2026-07-30T12:15:00.000Z",
+            "window_seconds": 900,
+        },
+        "waived_defects": [{
+            "defect_id": "D000001",
+            "kind": "missing_tool_results",
+            "reason": "proven_disjoint_interval",
+        }],
+    })
+    observed_windows: list[int | None] = []
+
+    def scoped_attribute(row, _index, **kwargs):
+        observed_windows.append(kwargs.get("window_seconds"))
+        return {
+            **_hit("session-a"),
+            "candidate_completeness": scoped_receipt,
+        }
+
+    monkeypatch.setattr(
+        correlator.codex_attribution,
+        "attribute",
+        scoped_attribute,
+    )
+
+    correlator.correlate(str(tmp_path), DAY, DAY, window_seconds=900)
+    rows = _outcomes(tmp_path)
+    assert observed_windows == [900]
+    assert len(rows) == 1
+    assert rows[0]["candidate_index_complete"] is True
+    assert rows[0]["candidate_completeness_receipt"] == scoped_receipt
+    assert correlator.codex_attribution._receipt_hash_matches(
+        rows[0]["candidate_completeness_receipt"]
+    )
+
+
+@pytest.mark.parametrize("invalid_window", [-1, True, 1.5, 10**100])
+def test_correlator_rejects_invalid_window_before_identity_branching(
+    tmp_path: Path,
+    invalid_window,
+) -> None:
+    with pytest.raises(ValueError, match="window_seconds"):
+        correlator.correlate(
+            str(tmp_path),
+            DAY,
+            DAY,
+            window_seconds=invalid_window,
+        )
+
+
+@pytest.mark.parametrize("invalid_window", ["-1", str(10**100)])
+def test_correlator_cli_rejects_invalid_window_as_argv_error(
+    tmp_path: Path,
+    invalid_window: str,
+) -> None:
+    assert correlator_cli.main([
+        "kb-correlate",
+        "--project", str(tmp_path),
+        "--start", DAY_TEXT,
+        "--end", DAY_TEXT,
+        "--window", invalid_window,
+    ]) == 2
 
 
 def test_skipped_recovered_call_is_non_emitting_exact_session_boundary(

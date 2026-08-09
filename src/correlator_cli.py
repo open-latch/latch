@@ -18,7 +18,7 @@ import argparse
 import json
 import os
 import sys
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -28,6 +28,17 @@ import correlator
 
 def _parse_date(s: str) -> date:
     return date.fromisoformat(s)
+
+
+def _parse_window(s: str) -> int:
+    value = int(s)
+    if value < 0:
+        raise argparse.ArgumentTypeError("window must be nonnegative")
+    try:
+        timedelta(seconds=value)
+    except OverflowError as exc:
+        raise argparse.ArgumentTypeError("window is too large") from exc
+    return value
 
 
 def main(argv: list[str]) -> int:
@@ -41,7 +52,7 @@ def main(argv: list[str]) -> int:
                    help="inclusive start date YYYY-MM-DD")
     p.add_argument("--end", required=True, type=_parse_date,
                    help="inclusive end date YYYY-MM-DD")
-    p.add_argument("--window", type=int,
+    p.add_argument("--window", type=_parse_window,
                    default=correlator.WINDOW_SECONDS_DEFAULT,
                    help="attribution window in seconds (default: 1800)")
     p.add_argument("--version", "--correlator-version", dest="correlator_version",
