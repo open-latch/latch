@@ -235,6 +235,14 @@ GATE_MAX_TOTAL_EVIDENCE = _env_int("CLAUDE_KB_GATE_MAX_TOTAL_EVIDENCE", 60)
 # Reserved slots so the abandoned-path signal (stale nodes — the whole point of
 # the gate) survives the cap even when active nodes would otherwise crowd it out.
 GATE_STALE_BUDGET = _env_int("CLAUDE_KB_GATE_STALE_BUDGET", 3, minimum=0)
+# Per-node cap on rendered typed rejections (V4 build, id=4626 item 2). A
+# single node can carry many rejected_path rows (the live backfill has one
+# node with 16, id=4165); rendering all of them would flood the prompt the
+# same way unbounded evidence did (id=1415). Overflow is noted inline, never
+# silently dropped.
+GATE_MAX_REJECTED_PER_NODE = _env_int(
+    "CLAUDE_KB_GATE_MAX_REJECTED_PER_NODE", 3, minimum=0
+)
 
 # Max hop depth at which the dense `related_to` relation is traversed (id=1415
 # #3). related_to is ~72% of edges and its 2-hop neighbourhood explodes
@@ -350,6 +358,7 @@ def assemble_gate(
         })
         all_evidence_ids.update(e["id"] for e in evidence)
 
+    _attach_rejected_paths(conn, seeds, chains)
     lane_groups = _lane_groups_for_chains(conn, seeds, chains)
     active_workstream_ids = _workstream_ids_from_seeds(seeds, conn=conn)
     prio = priorities.list_for_context(conn, active_workstream_ids)
@@ -392,6 +401,42 @@ def blast_radius(
         max_hops=max_hops,
         body_excerpt_chars=body_excerpt_chars,
     )
+
+
+def _attach_rejected_paths(
+    conn: sqlite3.Connection,
+    seeds: list[dict],
+    chains: list[dict],
+) -> None:
+    """Attach typed rejected_path rows (V2 table, id=4369) to every seed and
+    evidence node dict that carries them — one batched read-time join, on the
+    gate_report._attach_rejected_path_counts precedent. Nodes without rows
+    are left byte-untouched, which is what keeps the rendered context
+    byte-identical when no rejection exists (id=4626 item 2 acceptance).
+    Degrades to a no-op on sqlite3.Error (vault created by an older engine
+    that never grew the table)."""
+    nodes_by_id: dict[int, list[dict]] = {}
+    for seed in seeds:
+        nodes_by_id.setdefault(int(seed["id"]), []).append(seed)
+    for chain in chains:
+        for ev in chain.get("evidence") or []:
+            nodes_by_id.setdefault(int(ev["id"]), []).append(ev)
+    if not nodes_by_id:
+        return
+    ids = sorted(nodes_by_id)
+    placeholders = ",".join("?" for _ in ids)
+    try:
+        rows = conn.execute(
+            f"SELECT * FROM rejected_path WHERE node_id IN ({placeholders}) "
+            f"ORDER BY node_id, id",
+            ids,
+        ).fetchall()
+    except sqlite3.Error:
+        return
+    for row in rows:
+        rp = dict(row)
+        for node in nodes_by_id[int(rp["node_id"])]:
+            node.setdefault("rejected_paths", []).append(rp)
 
 
 # ---------- seed collection ----------
@@ -1024,6 +1069,15 @@ change the verdict. For each, point at its backing:
                                  confirmed by the user).
 gap_type is required when evidence_type is "none", and null otherwise.
 
+Typed-rejection rule: some nodes carry explicitly rejected options, rendered as
+  rejected[rp=<rp_id>]: <option> — <reason> (ratifier=..., decided=..., scope=...)
+These are ratified do-not-revive facts, stronger than ordinary stale history.
+When one or more rejected[rp=...] lines bear on your verdict — the request
+would revive a rejected option, or a rejection's reason constrains how to
+proceed — list exactly those rp ids in cited_rejected_paths. Use the rp id
+from the rejected[...] line, never a node id. If none bear on the verdict,
+output an empty list; do not cite decoratively.
+
 Output a single JSON object, nothing else:
 
 {
@@ -1036,6 +1090,7 @@ Output a single JSON object, nothing else:
   "risk_if_proceed":    "<one sentence>",
   "better_next_action": "<one sentence — concrete, actionable; or empty if PROCEED>",
   "evidence_nodes":     [<node_id>, ...],   # all node ids cited above, deduped
+  "cited_rejected_paths": [<rp_id>, ...],   # rp ids of rejected[rp=...] lines that bear on this verdict; [] if none
   "load_bearing_claims": [                  # claims the recommendation rests on
     {"claim": "<assertion the plan depends on>",
      "evidence_type": "kb_node" | "user_input" | "code_trace" | "none",
@@ -1066,7 +1121,7 @@ seed [id=200, decision, status=canonical] Redis chosen for session cache after 4
     [id=203, hop=1, via=related_to(in), status=canonical] session-key naming convention (tenant:user:scope)
 
 OUTPUT:
-{"recommendation":"PROCEED","summary":"Redis session cache already won the 4-way bake-off (id=200) and the key-naming convention (id=203) generalizes to the admin API. The in-process LRU prototype (id=202) is in the chain only as the abandoned alternative and does not bear on the admin-API extension.","decision_chain":[200,203],"abandoned_paths":[202],"active_constraints":[203],"current_direction":[200],"risk_if_proceed":"Admin-API key cardinality may push connection-pool sizing beyond the current baseline.","better_next_action":"","evidence_nodes":[200,201,202,203],"load_bearing_claims":[{"claim":"Redis is the chosen session cache","evidence_type":"kb_node","evidence_ref":200,"gap_type":null},{"claim":"the tenant:user:scope key convention generalizes to the admin API","evidence_type":"kb_node","evidence_ref":203,"gap_type":null},{"claim":"the admin API needs the same session semantics as the main API","evidence_type":"user_input","evidence_ref":null,"gap_type":null}]}
+{"recommendation":"PROCEED","summary":"Redis session cache already won the 4-way bake-off (id=200) and the key-naming convention (id=203) generalizes to the admin API. The in-process LRU prototype (id=202) is in the chain only as the abandoned alternative and does not bear on the admin-API extension.","decision_chain":[200,203],"abandoned_paths":[202],"active_constraints":[203],"current_direction":[200],"risk_if_proceed":"Admin-API key cardinality may push connection-pool sizing beyond the current baseline.","better_next_action":"","evidence_nodes":[200,201,202,203],"cited_rejected_paths":[],"load_bearing_claims":[{"claim":"Redis is the chosen session cache","evidence_type":"kb_node","evidence_ref":200,"gap_type":null},{"claim":"the tenant:user:scope key convention generalizes to the admin API","evidence_type":"kb_node","evidence_ref":203,"gap_type":null},{"claim":"the admin API needs the same session semantics as the main API","evidence_type":"user_input","evidence_ref":null,"gap_type":null}]}
 
 --- EXAMPLE 2 (MODIFY) ---
 REQUEST: re-run the in-process job-queue prototype with a larger worker pool to fix throughput
@@ -1074,6 +1129,7 @@ REQUEST: re-run the in-process job-queue prototype with a larger worker pool to 
 CHAIN ASSEMBLY:
 seed [id=300, decision, status=stale] in-process job queue prototype
   body: In-process queue tested 2026-04-23; throughput capped at 1/4 of target. Worker model couldn't survive worker-process restarts. Abandoned.
+  rejected[rp=7]: in-process job queue — worker model loses state across restarts; pool size does not address the abandonment reason (ratifier=founder, decided=2026-04-23)
   evidence:
     [id=301, hop=1, via=supersedes(in), status=canonical] Redis Streams pipeline replaces in-process queue
       body: Switched to Redis Streams + consumer groups; durable across restarts, scales horizontally.
@@ -1083,7 +1139,7 @@ seed [id=300, decision, status=stale] in-process job queue prototype
       body: Original abandonment driver — in-process state lost on every rolling deploy.
 
 OUTPUT:
-{"recommendation":"MODIFY","summary":"The in-process queue was abandoned (id=300) because the worker-process model loses state across restarts (id=303), not because of pool size. Redis Streams (id=301) is the live path, and worker-pool tuning already landed there (id=302). Re-running the in-process prototype with a larger pool will not fix the abandonment reason.","decision_chain":[300,301,302],"abandoned_paths":[300],"active_constraints":[303],"current_direction":[301],"risk_if_proceed":"Same restart-storm failure returns; pool-size fix is wasted on the wrong layer.","better_next_action":"Apply any throughput tuning to the Redis Streams pipeline (id=301), which is the live path.","evidence_nodes":[300,301,302,303],"load_bearing_claims":[{"claim":"the in-process queue was abandoned for restart survival, not pool size","evidence_type":"kb_node","evidence_ref":303,"gap_type":null},{"claim":"Redis Streams is the live job-queue path","evidence_type":"kb_node","evidence_ref":301,"gap_type":null},{"claim":"the current Streams worker-pool size is the actual throughput bottleneck today","evidence_type":"none","evidence_ref":null,"gap_type":"current_value_or_code"}]}
+{"recommendation":"MODIFY","summary":"The in-process queue was abandoned (id=300) because the worker-process model loses state across restarts (id=303), not because of pool size. Redis Streams (id=301) is the live path, and worker-pool tuning already landed there (id=302). Re-running the in-process prototype with a larger pool will not fix the abandonment reason.","decision_chain":[300,301,302],"abandoned_paths":[300],"active_constraints":[303],"current_direction":[301],"risk_if_proceed":"Same restart-storm failure returns; pool-size fix is wasted on the wrong layer.","better_next_action":"Apply any throughput tuning to the Redis Streams pipeline (id=301), which is the live path.","evidence_nodes":[300,301,302,303],"cited_rejected_paths":[7],"load_bearing_claims":[{"claim":"the in-process queue was abandoned for restart survival, not pool size","evidence_type":"kb_node","evidence_ref":303,"gap_type":null},{"claim":"Redis Streams is the live job-queue path","evidence_type":"kb_node","evidence_ref":301,"gap_type":null},{"claim":"the current Streams worker-pool size is the actual throughput bottleneck today","evidence_type":"none","evidence_ref":null,"gap_type":"current_value_or_code"}]}
 
 --- EXAMPLE 3 (DO_NOT_PROCEED) ---
 REQUEST: switch the storage layer to a NoSQL document store
@@ -1091,12 +1147,13 @@ REQUEST: switch the storage layer to a NoSQL document store
 CHAIN ASSEMBLY:
 seed [id=431, idea, status=staging] NoSQL document-store migration
   body: Considered moving primary storage to a document DB for schema flexibility. Verdict: wrong tradeoff. Audit-log query patterns require relational joins; schema validation at write-time is a non-negotiable for compliance.
+  rejected[rp=9]: NoSQL document store — audit-log queries require relational joins; write-time schema validation is a compliance non-negotiable (ratifier=founder, decided=2026-03-02)
   evidence:
     [id=400, hop=1, via=related_to(out), status=canonical] Postgres + strict schema migrations chosen as primary store
     [id=401, hop=1, via=related_to(out), status=canonical] audit-log query patterns require relational joins (compliance constraint)
 
 OUTPUT:
-{"recommendation":"DO_NOT_PROCEED","summary":"The NoSQL migration (id=431) is an explicitly-parked idea with verdict 'wrong tradeoff' — audit-log queries require relational joins (id=401) and Postgres with strict schemas is the locked decision (id=400). Implementing the NoSQL switch would unwind the deliberate compliance-driven architectural choice.","decision_chain":[431,400,401],"abandoned_paths":[431],"active_constraints":[400,401],"current_direction":[400],"risk_if_proceed":"Audit-log queries break; compliance constraint violated.","better_next_action":"If the goal is schema flexibility, see the locked Postgres approach (id=400) — JSONB columns there cover the flexibility need without losing relational guarantees.","evidence_nodes":[400,401,431],"load_bearing_claims":[{"claim":"audit-log queries require relational joins","evidence_type":"kb_node","evidence_ref":401,"gap_type":null},{"claim":"Postgres with strict schema is the locked primary store","evidence_type":"kb_node","evidence_ref":400,"gap_type":null},{"claim":"write-time schema validation is a compliance non-negotiable","evidence_type":"kb_node","evidence_ref":401,"gap_type":null}]}
+{"recommendation":"DO_NOT_PROCEED","summary":"The NoSQL migration (id=431) is an explicitly-parked idea with verdict 'wrong tradeoff' — audit-log queries require relational joins (id=401) and Postgres with strict schemas is the locked decision (id=400). Implementing the NoSQL switch would unwind the deliberate compliance-driven architectural choice.","decision_chain":[431,400,401],"abandoned_paths":[431],"active_constraints":[400,401],"current_direction":[400],"risk_if_proceed":"Audit-log queries break; compliance constraint violated.","better_next_action":"If the goal is schema flexibility, see the locked Postgres approach (id=400) — JSONB columns there cover the flexibility need without losing relational guarantees.","evidence_nodes":[400,401,431],"cited_rejected_paths":[9],"load_bearing_claims":[{"claim":"audit-log queries require relational joins","evidence_type":"kb_node","evidence_ref":401,"gap_type":null},{"claim":"Postgres with strict schema is the locked primary store","evidence_type":"kb_node","evidence_ref":400,"gap_type":null},{"claim":"write-time schema validation is a compliance non-negotiable","evidence_type":"kb_node","evidence_ref":401,"gap_type":null}]}
 
 --- END EXAMPLES ---
 """
@@ -1177,6 +1234,50 @@ def _select_chain_evidence(
     return chosen
 
 
+def _render_rejected_paths(
+    node: dict,
+    *,
+    indent: str,
+    surfaced: list[int] | None,
+) -> list[str]:
+    """Render a node's attached typed rejections (id=4626 item 2), bounded by
+    GATE_MAX_REJECTED_PER_NODE with an inline omitted-count note. Appends the
+    rendered (post-cap) rejected_path row ids to `surfaced` when the caller
+    tracks them — that list is what item 3 logs as surfaced_rejected_paths,
+    so it must reflect what the classifier actually saw, never the full
+    attach set."""
+    rows = node.get("rejected_paths") or []
+    if not rows:
+        return []
+    lines: list[str] = []
+    shown = rows[: GATE_MAX_REJECTED_PER_NODE]
+    for rp in shown:
+        try:
+            rp_id = int(rp["id"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        option = _excerpt(str(rp.get("option") or ""), 120)
+        reason = _excerpt(str(rp.get("reason") or ""), 240)
+        meta = []
+        if rp.get("ratifier"):
+            meta.append(f"ratifier={rp['ratifier']}")
+        if rp.get("decided_at"):
+            meta.append(f"decided={rp['decided_at']}")
+        if rp.get("scope_predicate"):
+            meta.append(f"scope={rp['scope_predicate']}")
+        suffix = f" ({', '.join(meta)})" if meta else ""
+        lines.append(f"{indent}rejected[rp={rp_id}]: {option} — {reason}{suffix}")
+        if surfaced is not None:
+            surfaced.append(rp_id)
+    omitted = len(rows) - len(shown)
+    if omitted > 0:
+        lines.append(
+            f"{indent}… +{omitted} rejected option(s) omitted "
+            f"(per-node cap; earliest shown)"
+        )
+    return lines
+
+
 def _render_chain_for_prompt(
     chain_assembly: dict,
     *,
@@ -1185,13 +1286,17 @@ def _render_chain_for_prompt(
     max_total_evidence: int = GATE_MAX_TOTAL_EVIDENCE,
     stale_budget: int = GATE_STALE_BUDGET,
     exposure: list[dict] | None = None,
+    surfaced_rejected_paths: list[int] | None = None,
 ) -> str:
     """Serialize the assemble_gate() output into the human-readable form the
     classifier prompt consumes. Bounded on three axes (KB id=1415): at most
     `max_chains` seeds, at most `max_evidence_per_chain` ranked evidence nodes
     per seed, and at most `max_total_evidence` evidence nodes across the whole
     prompt. Omitted (lower-signal) nodes are noted inline so the classifier
-    knows the chain was truncated rather than exhausted."""
+    knows the chain was truncated rather than exhausted. Nodes carrying typed
+    rejected_path rows (attached by _attach_rejected_paths) additionally
+    render bounded `rejected[rp=<id>]:` lines; `surfaced_rejected_paths`
+    collects the rendered row ids for invocation logging (id=4626)."""
     lines: list[str] = []
     seeds = chain_assembly.get("seeds") or []
     chains = chain_assembly.get("chains") or []
@@ -1263,6 +1368,9 @@ def _render_chain_for_prompt(
             body = seed.get("body_excerpt", "")
             if body:
                 lines.append(f"  body: {body}")
+            lines.extend(_render_rejected_paths(
+                seed, indent="  ", surfaced=surfaced_rejected_paths,
+            ))
             chain = chains_by_seed.get(sid)
             full_ev = (chain or {}).get("evidence") or []
             if full_ev:
@@ -1308,6 +1416,10 @@ def _render_chain_for_prompt(
                         eb = ev.get("body_excerpt", "")
                         if eb:
                             lines.append(f"      body: {eb}")
+                        lines.extend(_render_rejected_paths(
+                            ev, indent="      ",
+                            surfaced=surfaced_rejected_paths,
+                        ))
                 omitted = len(full_ev) - len(shown)
                 if omitted > 0:
                     lines.append(
@@ -1339,6 +1451,7 @@ def build_classifier_prompt(
     *,
     max_chains: int = 5,
     exposure: list[dict] | None = None,
+    surfaced_rejected_paths: list[int] | None = None,
 ) -> str:
     """Compose the full prompt: system + few-shot + actual chain + request."""
     request = chain_assembly.get("query", "").strip() or "(empty request)"
@@ -1350,6 +1463,7 @@ def build_classifier_prompt(
         chain_assembly,
         max_chains=max_chains,
         exposure=exposure,
+        surfaced_rejected_paths=surfaced_rejected_paths,
     )
     prio_block = priorities.render_for_gate(chain_assembly.get("priorities") or [])
     prio_section = (
@@ -1422,6 +1536,12 @@ def _normalize_verdict(obj: dict) -> dict:
         "risk_if_proceed": str(obj.get("risk_if_proceed", "")).strip(),
         "better_next_action": str(obj.get("better_next_action", "")).strip(),
         "evidence_nodes": [int(x) for x in obj.get("evidence_nodes") or [] if _is_intish(x)],
+        # rejected_path row ids, NOT node ids (id=4626 item 3). Same defensive
+        # int coercion as the node-id lists; classify_gate additionally clamps
+        # to the surfaced set so a hallucinated id never reaches gate.log.
+        "cited_rejected_paths": [
+            int(x) for x in obj.get("cited_rejected_paths") or [] if _is_intish(x)
+        ],
         "load_bearing_claims": claims,
         "uncovered_claims": uncovered,
         "error": None,
@@ -1501,6 +1621,7 @@ def _classifier_error(reason: str) -> dict:
         "risk_if_proceed": "",
         "better_next_action": "",
         "evidence_nodes": [],
+        "cited_rejected_paths": [],
         "load_bearing_claims": [],
         "uncovered_claims": [],
         "error": reason,
@@ -1760,12 +1881,18 @@ def classify_gate(
     if not allowed:
         return {**_classifier_error("daily budget cap hit"), "skipped": True}
 
+    surfaced: list[int] = []
     prompt = build_classifier_prompt(
         chain_assembly,
         max_chains=max_chains,
         exposure=outcome_exposure,
+        surfaced_rejected_paths=surfaced,
     )
     prompt_chars = len(prompt)
+    # What the classifier actually saw (post-cap render), for invocation
+    # logging (id=4626 item 3). Attached even on error/timeout so the row's
+    # surfaced set reflects the prompt that was really sent.
+    surfaced_ids = sorted(set(surfaced))
     raw, err, timed_out = _invoke_classifier_backend_once(
         prompt, backend=resolved_backend, timeout_s=timeout_s,
         purpose="classifier",
@@ -1776,13 +1903,27 @@ def classify_gate(
         # silent no-op — a guard that fails invisibly is worst-case.
         return {**_classifier_error(err or f"classifier timed out after {timeout_s}s"),
                 "prompt_chars": prompt_chars, "timed_out": True,
-                "backend": resolved_backend}
+                "backend": resolved_backend,
+                "surfaced_rejected_paths": surfaced_ids}
     if err is not None or raw is None:
         return {**_classifier_error(err or "classifier subprocess failed"),
-                "prompt_chars": prompt_chars, "backend": resolved_backend}
+                "prompt_chars": prompt_chars, "backend": resolved_backend,
+                "surfaced_rejected_paths": surfaced_ids}
     result = parse_classifier_output(raw)
     result["prompt_chars"] = prompt_chars
     result["backend"] = resolved_backend
+    result["surfaced_rejected_paths"] = surfaced_ids
+    # Clamp citations to the surfaced set (dedup, first occurrence wins): a
+    # cited rp id the prompt never contained is a hallucination and must not
+    # count toward the V4 metric (docs/v4_citation_metric.md).
+    allowed = set(surfaced_ids)
+    seen: set[int] = set()
+    cited: list[int] = []
+    for x in result.get("cited_rejected_paths") or []:
+        if x in allowed and x not in seen:
+            seen.add(x)
+            cited.append(x)
+    result["cited_rejected_paths"] = cited
     return result
 
 
@@ -2626,6 +2767,17 @@ def _log_invocation(
             "abandoned_paths": _plain_int_list(verdict.get("abandoned_paths")),
             "active_constraints": _plain_int_list(verdict.get("active_constraints")),
             "current_direction": _plain_int_list(verdict.get("current_direction")),
+            # V4 citation observability (id=4626 item 3): which typed
+            # rejections the classifier actually saw (post-cap) and which it
+            # cited. rejected_path row ids — pure ints, same privacy class as
+            # the node-id lists above; option/reason text stays in the prompt
+            # and never reaches this row (id=3915 / id=3985 / id=1108 §3).
+            "surfaced_rejected_paths": _plain_int_list(
+                verdict.get("surfaced_rejected_paths")
+            ),
+            "cited_rejected_paths": _plain_int_list(
+                verdict.get("cited_rejected_paths")
+            ),
             "seed_count": len(seeds),
             "seed_ids": _plain_int_list(s.get("id") for s in seeds),
             # Structural lane-contact substrate for lifecycle detection. Never

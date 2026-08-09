@@ -23,6 +23,7 @@ DOCS_MARKDOWN_ALLOW = {
     "docs/first_run_mission.md",
     "docs/mcp_resource_architecture.md",
     "docs/v2_rejection_rubric.md",
+    "docs/v4_citation_metric.md",
 }
 
 GUARD_IMPLEMENTATION_FILES = {
