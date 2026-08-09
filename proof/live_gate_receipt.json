@@ -1,8 +1,8 @@
 {
   "backend": "codex",
-  "better_next_action": "Keep SQLite and, if data portability is needed, implement an explicit export/import workflow with documented limitations as allowed by id=1.",
+  "better_next_action": "Keep SQLite and, if data must move between machines, implement an explicit export/import workflow and document its limitations as allowed by id=1.",
   "capture_command": "bash bin/latch_proof_packet.sh --capture-live --backend codex",
-  "captured_at_utc": "2026-08-09T01:05:29Z",
+  "captured_at_utc": "2026-08-09T01:14:02Z",
   "demo_kind": "synthetic_no_history_fixture",
   "evidence_nodes": [
     {
@@ -30,10 +30,10 @@
   "observed": true,
   "recommendation": "DO_NOT_PROCEED",
   "request": "Add multi-user accounts by moving the datastore from local SQLite to a hosted Postgres service.",
-  "risk_if_proceed": "The implementation would violate the established local-first, no-hosted-database architecture.",
+  "risk_if_proceed": "The app would lose its deliberately chosen local-first, no-hosted-database architecture.",
   "schema_version": 2,
-  "source_commit": "93918a7ca4d5db52c8d339fe30c358d4a4344596",
-  "summary": "The canonical decision explicitly keeps the demo app local-first on an embedded SQLite file and rejects moving to hosted Postgres for multi-user accounts or sync (id=1). The request directly repeats that ruled-out path.",
+  "source_commit": "fd8a0a5dda027a241ee2a1388e852290fbfd03ca",
+  "summary": "The request directly contradicts the canonical decision to keep the demo app local-first on embedded SQLite with no hosted database (id=1). That decision specifically rejects moving to managed Postgres to add multi-user accounts or sync, so this proposal revives the ruled-out architecture.",
   "tested_runtime_git_blobs": {
     ".gitattributes": "dfdb8b771ce07609491fa2e83698969fd917a135",
     "KB_SCHEMA_VERSION": "00750edc07d6415dcc07ae0351e9397b0222b7ba",
@@ -80,7 +80,7 @@
     "src/embeddings.py": "a03647e44c0abe4c2a6fe5ee8f82dd80d1e68c4d",
     "src/evals.py": "b5c70452b2a29204bff328700a5720888bdc36dc",
     "src/feeders.py": "dec71cb552580cd28789f1c1b4f733c00cc9b270",
-    "src/gate.py": "4fa00e533f5f298d53502e523bb8e8aa9c2967d0",
+    "src/gate.py": "d28e8ecf05a31893f40ec9e2008152acafe25af5",
     "src/gate_report.py": "86d6fac2e5d9c2fef0dd5e61570b4ddd532fd27e",
     "src/heal.py": "c9b428fd20bcc5930c90290ccb6c891f0ba26478",
     "src/hooks/_common.py": "81a05bd16e89881978bf69834618531d21edca00",
@@ -143,6 +143,7 @@
     "src/uninstall_engine.py": "d69a5c092cb73fc22ce1cf35f6207c248d11aad0",
     "src/unlatch.py": "33bebac6ac89b4d2188dec4dadfae4564dca2af8",
     "src/update_latch.py": "37f7775011cb5aaf83583ad99ebe5f928ce9c35a",
+    "src/v4_citation_rate.py": "a213981e83a86d37926ddf9b0938f09ffb99dc7c",
     "src/vault_backup.py": "449443a6fa5155c393ca76b1fba4fc09156c15c8",
     "src/vault_identity.py": "dd8f4b99b271af06f7149167199463f3f408f55a",
     "src/verify.py": "71c594dd6e309d4562dd5485cd365be2f922ee73",
