@@ -24,7 +24,8 @@ Two strata, both derived from the real writer, never hand-typed:
    4114-compliant derivation. Sanitized with the same remap.
 
 Run from the repo root on a machine with the live corpus:
-    python3 tests/fixtures/gen_v4_gate_log_corpus.py
+    LATCH_LIVE_GATE_LOG_DIR=<vault dir with gate-*.log> \
+        python3 tests/fixtures/gen_v4_gate_log_corpus.py
 Regeneration is content-deterministic except ts/elapsed_ms/budget_count on
 the capability stratum (wall-clock values from the real writer; the counter
 ignores all three). The committed fixture is the review artifact.
@@ -52,7 +53,9 @@ import log_utils   # noqa: E402
 
 gate.ADVERSARY_ENABLED = False
 
-LIVE_DIR = Path("/Users/nicomey/repos/latch-vault")
+# Vault directory holding the live gate-*.log corpus. Machine-specific, so it
+# comes from the environment (public-release hygiene: no personal paths).
+LIVE_DIR = Path(os.environ.get("LATCH_LIVE_GATE_LOG_DIR", ""))
 OUT = Path(__file__).resolve().parent / "v4_gate_log_corpus.jsonl"
 LEGACY_COUNT = 12
 
@@ -154,9 +157,9 @@ def sanitize(entry: dict) -> dict:
 # ------------------------------------------------------------ legacy stratum
 
 def legacy_rows() -> list[dict]:
-    if not LIVE_DIR.is_dir():
-        print(f"WARNING: live corpus dir missing ({LIVE_DIR}); "
-              f"legacy stratum skipped", file=sys.stderr)
+    if not os.environ.get("LATCH_LIVE_GATE_LOG_DIR") or not LIVE_DIR.is_dir():
+        print("WARNING: LATCH_LIVE_GATE_LOG_DIR unset or not a directory; "
+              "legacy stratum skipped", file=sys.stderr)
         return []
     rows = []
     for path in sorted(glob.glob(str(LIVE_DIR / "gate-*.log"))):

@@ -1,6 +1,6 @@
 # V4 citation metric — operationalized definition
 
-Roadmap item V4 (KB id=3948, Phase V) verbatim:
+Phase V item V4 (decision 3948) verbatim:
 
 > V4 firing rate over next 200 gate calls: % citing ≥1 typed rejection that
 > changed the verdict (pre-registered rubric: recommendation or
