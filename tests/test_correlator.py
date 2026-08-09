@@ -57,6 +57,24 @@ def _write_gate_row(
     skipped: bool = False,
 ) -> dict:
     """Append a synthetic gate.log row to the daily file."""
+    if session_id:
+        transcript = Path(tmp) / f"{session_id}.jsonl"
+        if not transcript.exists():
+            transcript.write_text(
+                json.dumps({
+                    "timestamp": f"{date_str}T00:00:00.000Z",
+                    "type": "session_meta",
+                    "payload": {"id": session_id, "cwd": tmp},
+                }) + "\n",
+                encoding="utf-8",
+            )
+        session_conn = db.connect(tmp)
+        try:
+            db.upsert_session(
+                session_conn, session_id, tmp, transcript_path=str(transcript),
+            )
+        finally:
+            session_conn.close()
     proj_dir = paths.project_dir(tmp)
     proj_dir.mkdir(parents=True, exist_ok=True)
     ts = f"{date_str}T{hour:02d}:{minute:02d}:00.000Z"

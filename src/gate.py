@@ -72,10 +72,13 @@ import cursor_backend
 import db
 import log_utils
 import lifecycle_signals
+import mcp_broker
 import mcp_runtime
+import outcome_measurement
 import paths
 import priorities
 import profiles
+import project_proof
 import search
 
 
@@ -103,6 +106,93 @@ _HIGH_SIGNAL_RELATIONS: frozenset[str] = frozenset(
 DEFAULT_SEED_TOP_K = 5
 DEFAULT_MAX_HOPS = 2
 DEFAULT_BODY_EXCERPT = 400
+
+# Outcome-measurement generation pins.  The protocol and proof format live in
+# their shared implementation modules; the key epoch is deliberately a
+# separate runtime pin so key rotation can be classified as loss rather than
+# as a foreign project (contract v2.6 / B9).
+MEASUREMENT_PROTOCOL_VERSION = outcome_measurement.MEASUREMENT_PROTOCOL_VERSION
+PROJECT_PROOF_KEY_EPOCH = "outcome-v2.6-key-1"
+MEASUREMENT_METADATA_FIELDS = (
+    "measurement_protocol_version",
+    "host_adapter",
+    "attestation",
+    "runtime_attestation",
+    "runtime_version",
+    "project_proof_version",
+    "key_epoch",
+    "project_proof",
+)
+
+
+def measurement_metadata(
+    conn: sqlite3.Connection | None,
+    project_path: str | os.PathLike | None,
+    *,
+    host_adapter: str | None = None,
+) -> dict:
+    """Build the structural v2.6 attestation shared by S1 and S2.
+
+    The canonical project path, immutable vault identity, and derived HMAC key
+    exist only while this function runs.  The returned proof is opaque and
+    versioned; when the vault identity is unavailable or invalid we preserve
+    an explicit ``None`` instead of falling back to lossy ``sanitize_cwd``
+    equality or leaking identity material into an error field.
+    """
+    proof = None
+    identity = getattr(conn, "_kb_vault_identity", None) if conn is not None else None
+    explicit_project = (
+        project_path is not None and bool(str(project_path).strip())
+    )
+    if identity is not None and explicit_project:
+        try:
+            context = project_proof.ProjectProofContext.from_vault_identity(
+                identity,
+                key_epoch=PROJECT_PROOF_KEY_EPOCH,
+            )
+            proof = context.prove(project_path)
+        except (OSError, TypeError, ValueError):
+            # Missing/invalid proof is a named measurement loss.  The gate
+            # itself must remain available and must not serialize exception
+            # text that could contain a path or vault detail.
+            proof = None
+    return {
+        "measurement_protocol_version": MEASUREMENT_PROTOCOL_VERSION,
+        # Host provenance is supplied only by the MCP connection layer. It is
+        # deliberately separate from the classifier backend, which can differ
+        # from the calling host and is not a session namespace.
+        "host_adapter": (
+            host_adapter
+            if host_adapter in {"claude", "codex", "cursor"}
+            else None
+        ),
+        # ``attestation`` is the frozen observation field.  Keep the explicit
+        # alias too so host adapters can identify its provenance without
+        # guessing which version/hash field is authoritative.
+        "attestation": mcp_broker.RUNTIME_KEY,
+        "runtime_attestation": mcp_broker.RUNTIME_KEY,
+        "runtime_version": mcp_broker.RUNTIME_KEY,
+        "project_proof_version": project_proof.PROJECT_PROOF_VERSION,
+        "key_epoch": PROJECT_PROOF_KEY_EPOCH,
+        "project_proof": proof,
+    }
+
+
+def _new_gate_call_id() -> str:
+    """Return the host/source join nonce, including the best-effort fallback."""
+    try:
+        return capture_streams.new_gate_call_id()
+    except Exception:
+        return _query_hash(f"{time.time_ns()}:{os.getpid()}")
+
+
+def _plain_int_list(values: Iterable[object] | None) -> list[int]:
+    """Normalize structural verdict fields to JSON ``list[int]`` values."""
+    return [
+        int(value)
+        for value in (values or [])
+        if isinstance(value, int) and not isinstance(value, bool)
+    ]
 
 
 def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
@@ -2281,6 +2371,7 @@ def run_gate(
     *,
     project_path: str | None,
     session_id: str | None = None,
+    host_adapter: str | None = None,
     use_llm: bool = True,
     seed_top_k: int = DEFAULT_SEED_TOP_K,
     max_hops: int = DEFAULT_MAX_HOPS,
@@ -2304,10 +2395,16 @@ def run_gate(
     stays as the raw compact cited-node list; the agent can `latch_get(<id>)`
     for full bodies.
     """
+    gate_call_id = _new_gate_call_id()
+    measurement = measurement_metadata(
+        conn, project_path, host_adapter=host_adapter
+    )
     if paths.is_unlatched_mode():
         verdict = unlatched_verdict()
         return {
             "request": request,
+            "gate_call_id": gate_call_id,
+            **measurement,
             "verdict": verdict,
             "findings": format_gate_findings(verdict, []),
             "chains": {
@@ -2319,10 +2416,6 @@ def run_gate(
             },
             "evidence": [],
         }
-    try:
-        gate_call_id = capture_streams.new_gate_call_id()
-    except Exception:
-        gate_call_id = _query_hash(f"{time.time_ns()}:{os.getpid()}")
     try:
         outcome_enabled = capture_streams.outcome_events_enabled(project_path)
     except Exception:
@@ -2372,6 +2465,7 @@ def run_gate(
         evidence=evidence,
         elapsed_ms=elapsed_ms,
         gate_call_id=gate_call_id,
+        measurement=measurement,
     )
 
     # Adversarial verdict layer (scope KB id=1343). PROCEED-only, default-off.
@@ -2411,6 +2505,12 @@ def run_gate(
 
     return {
         "request": request,
+        # Returned so a host that records tool results (Codex rollouts do)
+        # captures the nonce, which lets an offline pass attribute the call to a
+        # real thread by exact identity instead of a request-text hash. Purely
+        # structural: an opaque per-call id, no KB content.
+        "gate_call_id": gate_call_id,
+        **measurement,
         "verdict": verdict,
         "findings": format_gate_findings(verdict, evidence),
         "chains": chain_assembly,
@@ -2627,6 +2727,7 @@ def _log_invocation(
     evidence: list[dict],
     elapsed_ms: float,
     gate_call_id: str | None = None,
+    measurement: dict | None = None,
 ) -> None:
     """Append one JSONL line per run_gate() call to the daily gate log
     (KB id=1091 conventions). Best-effort: any error is swallowed so
@@ -2639,37 +2740,46 @@ def _log_invocation(
     """
     try:
         seeds = chain_assembly.get("seeds") or []
+        if measurement is None:
+            # Direct/internal callers without a DB connection still emit the
+            # complete schema.  ``project_proof=None`` is an explicit loss,
+            # never a lossy path-derived fallback.
+            measurement = measurement_metadata(None, project_path)
         entry = {
             "gate_call_id": gate_call_id,
+            **{
+                field: measurement.get(field)
+                for field in MEASUREMENT_METADATA_FIELDS
+            },
             "query_hash": _query_hash(request),
             "query_chars": len(request),
             "recommendation": verdict.get("recommendation"),
             "skipped": bool(verdict.get("skipped", False)),
             "error": verdict.get("error"),
-            "evidence_ids": sorted(e["id"] for e in evidence),
-            "decision_chain": list(verdict.get("decision_chain") or []),
+            "evidence_ids": sorted(_plain_int_list(e.get("id") for e in evidence)),
+            "decision_chain": _plain_int_list(verdict.get("decision_chain")),
             # Remaining verdict id-lists. Same privacy class as decision_chain
             # above: pure node-id ints, never titles or verdict prose, so the
             # structural-only invariant (id=1108 §3 / id=3915) still holds.
             # abandoned_paths is the only one that cannot be recomputed from
             # anything else, and it is what makes a cited rejection auditable
             # after the fact.
-            "abandoned_paths": list(verdict.get("abandoned_paths") or []),
-            "active_constraints": list(verdict.get("active_constraints") or []),
-            "current_direction": list(verdict.get("current_direction") or []),
+            "abandoned_paths": _plain_int_list(verdict.get("abandoned_paths")),
+            "active_constraints": _plain_int_list(verdict.get("active_constraints")),
+            "current_direction": _plain_int_list(verdict.get("current_direction")),
             # V4 citation observability (id=4626 item 3): which typed
             # rejections the classifier actually saw (post-cap) and which it
             # cited. rejected_path row ids — pure ints, same privacy class as
             # the node-id lists above; option/reason text stays in the prompt
             # and never reaches this row (id=3915 / id=3985 / id=1108 §3).
-            "surfaced_rejected_paths": list(
-                verdict.get("surfaced_rejected_paths") or []
+            "surfaced_rejected_paths": _plain_int_list(
+                verdict.get("surfaced_rejected_paths")
             ),
-            "cited_rejected_paths": list(
-                verdict.get("cited_rejected_paths") or []
+            "cited_rejected_paths": _plain_int_list(
+                verdict.get("cited_rejected_paths")
             ),
             "seed_count": len(seeds),
-            "seed_ids": [s["id"] for s in seeds],
+            "seed_ids": _plain_int_list(s.get("id") for s in seeds),
             # Structural lane-contact substrate for lifecycle detection. Never
             # copy seed/evidence titles, excerpts, or request content here.
             "seeds": _structural_seed_metadata(seeds),

@@ -134,12 +134,19 @@ jobs:
         run: python -m pip install --require-hashes -r requirements-ci.lock
 
       - name: Test proof packet through PowerShell
+        # Drift-independent proof guards only. The packet-currency `--check`
+        # (committed proof/ must be byte-current with the tree) runs at release,
+        # not on every merge; see .github/workflows/release.yml. `--help` keeps
+        # the PowerShell wrapper itself executed here — interpreter discovery,
+        # argument forwarding, exit-code propagation — because it is the only
+        # place bin/latch_proof_packet.ps1 actually runs, and a static text
+        # assertion cannot catch a wrapper that no longer launches.
         shell: pwsh
         working-directory: ${{ runner.temp }}/latch-proof-crlf
         run: |
           python -m pytest -q tests/test_proof_packet.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & .\bin\latch_proof_packet.ps1 --check
+          & .\bin\latch_proof_packet.ps1 --help
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   cursor-cumulative-full-suite:

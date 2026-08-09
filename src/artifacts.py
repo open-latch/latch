@@ -34,12 +34,16 @@ they are unused until then.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sqlite3
+from collections import defaultdict
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 import paths
 
@@ -331,7 +335,232 @@ def _parse_transcript_ts(value) -> datetime | None:
 
 
 _CODEX_EDIT_TOOLS = frozenset({"apply_patch"})
+_CODEX_OUTER_EXEC_TOOLS = frozenset({"exec", "functions.exec"})
 _CODEX_PATCH_MARKERS = ("*** Add File:", "*** Update File:", "*** Delete File:")
+
+
+@dataclass(frozen=True)
+class _JsToken:
+    kind: str
+    text: str
+    value: str | None = None
+
+
+def _decode_js_string(raw: str) -> str | None:
+    """Decode one static JS string literal; reject template interpolation."""
+    if len(raw) < 2 or raw[0] not in {"'", '"', "`"} or raw[-1] != raw[0]:
+        return None
+    if raw[0] == '"':
+        try:
+            value = json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+        return value if isinstance(value, str) else None
+    body = raw[1:-1]
+    if raw[0] == "`" and "${" in body:
+        return None
+    out: list[str] = []
+    index = 0
+    escapes = {
+        "n": "\n", "r": "\r", "t": "\t", "b": "\b", "f": "\f",
+        "v": "\v", "0": "\0", "\\": "\\", "'": "'", '"': '"',
+        "`": "`",
+    }
+    while index < len(body):
+        char = body[index]
+        if char != "\\":
+            out.append(char)
+            index += 1
+            continue
+        index += 1
+        if index >= len(body):
+            return None
+        escaped = body[index]
+        if escaped in escapes:
+            out.append(escapes[escaped])
+            index += 1
+            continue
+        if escaped in {"\n", "\r"}:
+            index += 1
+            if escaped == "\r" and index < len(body) and body[index] == "\n":
+                index += 1
+            continue
+        if escaped == "x" and index + 2 < len(body):
+            digits = body[index + 1:index + 3]
+            try:
+                out.append(chr(int(digits, 16)))
+            except ValueError:
+                return None
+            index += 3
+            continue
+        if escaped == "u" and index + 4 < len(body):
+            digits = body[index + 1:index + 5]
+            try:
+                out.append(chr(int(digits, 16)))
+            except ValueError:
+                return None
+            index += 5
+            continue
+        return None
+    return "".join(out)
+
+
+def _js_tokens(script: str) -> tuple[_JsToken, ...]:
+    """Tokenize only the JS surface needed for structural tool-call parsing."""
+    tokens: list[_JsToken] = []
+    index = 0
+    while index < len(script):
+        char = script[index]
+        if char.isspace():
+            index += 1
+            continue
+        if script.startswith("//", index):
+            end = script.find("\n", index + 2)
+            index = len(script) if end < 0 else end + 1
+            continue
+        if script.startswith("/*", index):
+            end = script.find("*/", index + 2)
+            if end < 0:
+                tokens.append(_JsToken("error", script[index:]))
+                break
+            index = end + 2
+            continue
+        if char in {"'", '"', "`"}:
+            quote = char
+            start = index
+            index += 1
+            template_depth = 0
+            while index < len(script):
+                current = script[index]
+                if current == "\\":
+                    index += 2
+                    continue
+                if quote == "`" and script.startswith("${", index):
+                    template_depth += 1
+                    index += 2
+                    continue
+                if quote == "`" and current == "}" and template_depth:
+                    template_depth -= 1
+                    index += 1
+                    continue
+                if current == quote and template_depth == 0:
+                    index += 1
+                    raw = script[start:index]
+                    tokens.append(_JsToken(
+                        "string", raw, _decode_js_string(raw),
+                    ))
+                    break
+                index += 1
+            else:
+                tokens.append(_JsToken("error", script[start:]))
+            continue
+        if char.isalpha() or char in {"_", "$"}:
+            start = index
+            index += 1
+            while index < len(script) and (
+                script[index].isalnum() or script[index] in {"_", "$"}
+            ):
+                index += 1
+            tokens.append(_JsToken("identifier", script[start:index]))
+            continue
+        tokens.append(_JsToken("punctuation", char))
+        index += 1
+    return tuple(tokens)
+
+
+def _structural_apply_patch_arguments(script: str) -> tuple[str | None, ...]:
+    """Return every real ``tools.apply_patch`` argument in execution order.
+
+    A ``None`` entry means the invocation is real but its exact argument cannot
+    be proven static. Callers defer that failure until after receipt-window and
+    outer-call success checks.
+    """
+    tokens = _js_tokens(script)
+    bindings: dict[str, str | None] = {}
+    arguments: list[str | None] = []
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if (
+            token.kind == "identifier"
+            and token.text in {"const", "let", "var"}
+            and index + 3 < len(tokens)
+            and tokens[index + 1].kind == "identifier"
+            and tokens[index + 2].text == "="
+        ):
+            name = tokens[index + 1].text
+            value_token = tokens[index + 3]
+            terminator = tokens[index + 4] if index + 4 < len(tokens) else None
+            bindings[name] = (
+                value_token.value
+                if (
+                    value_token.kind == "string"
+                    and (terminator is None or terminator.text == ";")
+                )
+                else None
+            )
+            index += 4
+            continue
+        if (
+            token.kind == "identifier"
+            and index + 1 < len(tokens)
+            and tokens[index + 1].text == "="
+        ):
+            # Reassignment makes a prior simple binding ambiguous. Declarations
+            # are consumed above, so only later mutation reaches this branch.
+            bindings[token.text] = None
+        if not (
+            token.kind == "identifier"
+            and token.text == "tools"
+            and index + 3 < len(tokens)
+            and tokens[index + 1].text == "."
+            and tokens[index + 2].kind == "identifier"
+            and tokens[index + 2].text == "apply_patch"
+            and tokens[index + 3].text == "("
+        ):
+            index += 1
+            continue
+
+        close = index + 4
+        depth = 1
+        while close < len(tokens) and depth:
+            if tokens[close].text == "(":
+                depth += 1
+            elif tokens[close].text == ")":
+                depth -= 1
+            if depth:
+                close += 1
+        if depth or close != index + 5:
+            arguments.append(None)
+            index += 4
+            continue
+        argument = tokens[index + 4]
+        if argument.kind == "string":
+            arguments.append(argument.value)
+        elif argument.kind == "identifier":
+            arguments.append(bindings.get(argument.text))
+        else:
+            arguments.append(None)
+        index = close + 1
+    return tuple(arguments)
+
+
+def _outer_exec_script(payload: Mapping[str, Any]) -> str | None:
+    if payload.get("type") != "custom_tool_call":
+        return None
+    if payload.get("name") not in _CODEX_OUTER_EXEC_TOOLS:
+        return None
+    script: Any = payload.get("input")
+    if script is None:
+        script = payload.get("arguments")
+    if isinstance(script, Mapping):
+        script = script.get("input") or script.get("code")
+    return script if isinstance(script, str) else None
+
+
+def _outer_exec_has_apply_patch(payload: Mapping[str, Any]) -> bool:
+    script = _outer_exec_script(payload)
+    return bool(script and _structural_apply_patch_arguments(script))
 
 
 def _codex_patch_paths(patch_text: str) -> list[str]:
@@ -394,6 +623,753 @@ def _failed_call_ids(objs: list[dict]) -> set[str]:
                 if isinstance(call_id, str) and call_id:
                     failed.add(call_id)
     return failed
+
+
+class ArtifactEvidenceError(ValueError):
+    """A stable transcript snapshot cannot prove artifact evidence."""
+
+
+def _strict_transcript_objects(data: bytes) -> list[dict[str, Any]]:
+    if not isinstance(data, bytes):
+        raise ArtifactEvidenceError("artifact evidence requires snapshotted bytes")
+    try:
+        decoded = data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ArtifactEvidenceError("artifact evidence is not valid UTF-8") from exc
+    objects: list[dict[str, Any]] = []
+    for line_number, line in enumerate(decoded.splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise ArtifactEvidenceError(
+                f"malformed transcript JSON at line {line_number}"
+            ) from exc
+        if not isinstance(value, dict):
+            raise ArtifactEvidenceError(
+                f"transcript row {line_number} is not an object"
+            )
+        objects.append(value)
+    return objects
+
+
+def _nested_result_failed(value: Any) -> bool:
+    """Conservatively recognize structured tool-result failure markers."""
+    if isinstance(value, str):
+        try:
+            decoded = json.loads(value)
+        except json.JSONDecodeError:
+            return False
+        return _nested_result_failed(decoded)
+    if isinstance(value, list):
+        return any(_nested_result_failed(item) for item in value)
+    if not isinstance(value, dict):
+        return False
+    if (
+        value.get("is_error") is True
+        or value.get("isError") is True
+        or value.get("success") is False
+    ):
+        return True
+    exit_code = value.get("exit_code")
+    if isinstance(exit_code, int) and not isinstance(exit_code, bool) and exit_code != 0:
+        return True
+    status = value.get("status")
+    if isinstance(status, str) and status.strip().lower() in {
+        "error", "failed", "failure", "cancelled", "canceled",
+    }:
+        return True
+    return any(
+        _nested_result_failed(value.get(key))
+        for key in ("content", "output", "result")
+        if key in value
+    )
+
+
+ArtifactIdentity = tuple[str, str, str]
+ArtifactIdentityResolver = Callable[
+    [str, str, str | None, Mapping[str, Any] | None],
+    ArtifactIdentity | None,
+]
+
+
+@dataclass(frozen=True)
+class _IndexedArtifactCall:
+    identity: ArtifactIdentity
+    timestamp: datetime | None
+    file_token: str
+    line_index: int
+    item_index: int
+    call_id: Any
+    adapter: str
+    payload: Mapping[str, Any]
+
+
+@dataclass(frozen=True)
+class _IndexedArtifactResult:
+    identity: ArtifactIdentity
+    timestamp: datetime | None
+    file_token: str
+    line_index: int
+    item_index: int
+    call_id: str
+    adapter: str
+    family: str
+    failed: bool
+    fingerprint_sha256: str
+
+
+def _artifact_result_family(
+    adapter: str,
+    payload: Mapping[str, Any],
+) -> str:
+    """Return the call/result envelope family used for occurrence joins."""
+
+    if adapter == "claude":
+        return "claude-tool"
+    payload_type = str(payload.get("type") or "")
+    if payload_type.startswith("function_call"):
+        return "codex-function"
+    if payload_type.startswith("custom_tool_call"):
+        return "codex-custom"
+    return f"codex-{payload_type or 'unknown'}"
+
+
+def _artifact_result_fingerprint(
+    adapter: str,
+    timestamp: datetime | None,
+    payload: Mapping[str, Any],
+) -> str:
+    """Hash result identity without retaining its potentially large output."""
+
+    encoded = json.dumps(
+        {
+            "adapter": adapter,
+            "timestamp": timestamp.isoformat() if timestamp else None,
+            "payload": payload,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+@dataclass(frozen=True)
+class ArtifactEvidenceIndex:
+    """One immutable parse of the stable S2 segment union.
+
+    Raw paths and transcript contents remain in memory only. The public lookup
+    key contains an adapter, an opaque project-proof fingerprint, and a session
+    id, so a same-session record from another host or project cannot join the
+    target session's edit calls/results.
+    """
+
+    calls_by_identity: Mapping[ArtifactIdentity, tuple[_IndexedArtifactCall, ...]]
+    call_candidates: Mapping[
+        tuple[ArtifactIdentity, str], tuple[_IndexedArtifactCall, ...]
+    ]
+    results: Mapping[
+        tuple[ArtifactIdentity, str], tuple[_IndexedArtifactResult, ...]
+    ]
+    identities_by_file: Mapping[str, frozenset[ArtifactIdentity]]
+    file_errors: frozenset[str]
+    identity_errors: frozenset[ArtifactIdentity]
+
+
+def build_artifact_evidence_index(
+    segments: Sequence[tuple[str, bytes]],
+    *,
+    resolve_identity: ArtifactIdentityResolver,
+    invalid_files: Iterable[str] = (),
+    conflicting_files: Iterable[str] = (),
+) -> ArtifactEvidenceIndex:
+    """Parse stable transcript segments once into exact identity buckets.
+
+    ``resolve_identity`` is the trust boundary: it returns a key only when the
+    row's project proof matches the configured target. Foreign and unknown rows
+    are therefore neither counted nor allowed to poison a target identity.
+    Malformed bytes remain attached to their file and every accepted identity
+    observed in that file, preserving fail-closed behavior for exact evidence.
+    """
+
+    calls: dict[ArtifactIdentity, list[_IndexedArtifactCall]] = defaultdict(list)
+    call_candidates: dict[
+        tuple[ArtifactIdentity, str], list[_IndexedArtifactCall]
+    ] = defaultdict(list)
+    results: dict[
+        tuple[ArtifactIdentity, str], list[_IndexedArtifactResult]
+    ] = defaultdict(list)
+    identities_by_file: dict[str, set[ArtifactIdentity]] = defaultdict(set)
+    file_errors = {str(file) for file in invalid_files if str(file)}
+    conflict_files = {str(file) for file in conflicting_files if str(file)}
+
+    for file_token, data in segments:
+        if not isinstance(file_token, str) or not file_token:
+            continue
+        if not isinstance(data, bytes):
+            file_errors.add(file_token)
+            continue
+        try:
+            decoded = data.decode("utf-8")
+        except UnicodeDecodeError:
+            file_errors.add(file_token)
+            continue
+
+        codex_session: str | None = None
+        codex_cwd: str | None = None
+        for line_index, line in enumerate(decoded.splitlines(), start=1):
+            if not line.strip():
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                file_errors.add(file_token)
+                continue
+            if not isinstance(obj, dict):
+                file_errors.add(file_token)
+                continue
+
+            payload = obj.get("payload")
+            payload = payload if isinstance(payload, dict) else {}
+            record_type = str(obj.get("type") or "")
+            payload_type = str(payload.get("type") or "")
+            if record_type == "session_meta" or payload_type == "session_meta":
+                meta = payload if payload else obj
+                codex_session = str(
+                    meta.get("id") or meta.get("session_id") or ""
+                ) or None
+                codex_cwd = str(meta.get("cwd") or "") or None
+                if codex_session:
+                    identity = resolve_identity(
+                        "codex", codex_session, codex_cwd, None
+                    )
+                    if identity is not None:
+                        identities_by_file[file_token].add(identity)
+                continue
+
+            identity: ArtifactIdentity | None = None
+            adapter: str | None = None
+            if obj.get("event_type") == "gate_host_record":
+                adapter = str(obj.get("adapter") or "host")
+                direct_session = str(obj.get("session_id") or "") or None
+                explicit_proof = obj.get("project_proof")
+                proof = explicit_proof if isinstance(explicit_proof, Mapping) else None
+                if direct_session:
+                    identity = resolve_identity(
+                        adapter,
+                        direct_session,
+                        str(obj.get("cwd") or "") or None,
+                        proof,
+                    )
+            else:
+                claude_session = str(obj.get("sessionId") or "") or None
+                if claude_session:
+                    adapter = "claude"
+                    identity = resolve_identity(
+                        adapter,
+                        claude_session,
+                        str(obj.get("cwd") or "") or None,
+                        None,
+                    )
+                elif codex_session:
+                    adapter = "codex"
+                    identity = resolve_identity(
+                        adapter, codex_session, codex_cwd, None
+                    )
+            if identity is None or adapter is None:
+                # Session/project/adapter filtering happens before any edit
+                # identity or result requirement. Unknown and foreign records
+                # cannot censor an exact target receipt.
+                continue
+            identities_by_file[file_token].add(identity)
+
+            message = obj.get("message")
+            message = message if isinstance(message, dict) else obj
+            content = message.get("content") if isinstance(message, dict) else None
+            if isinstance(content, list):
+                for item_index, item in enumerate(content):
+                    if not isinstance(item, dict):
+                        continue
+                    if item.get("type") == "tool_result":
+                        call_id = item.get("tool_use_id")
+                        if isinstance(call_id, str) and call_id:
+                            timestamp = _parse_transcript_ts(
+                                obj.get("timestamp")
+                            )
+                            result_key = (identity, call_id)
+                            results[result_key].append(
+                                _IndexedArtifactResult(
+                                    identity=identity,
+                                    timestamp=timestamp,
+                                    file_token=file_token,
+                                    line_index=line_index,
+                                    item_index=item_index,
+                                    call_id=call_id,
+                                    adapter="claude",
+                                    family=_artifact_result_family(
+                                        "claude", item
+                                    ),
+                                    failed=(
+                                        bool(item.get("is_error"))
+                                        or _nested_result_failed(item.get("content"))
+                                    ),
+                                    fingerprint_sha256=(
+                                        _artifact_result_fingerprint(
+                                            "claude", timestamp, item
+                                        )
+                                    ),
+                                )
+                            )
+                        continue
+                    if item.get("type") == "tool_use":
+                        call_id = item.get("id")
+                        candidate = _IndexedArtifactCall(
+                            identity=identity,
+                            timestamp=_parse_transcript_ts(obj.get("timestamp")),
+                            file_token=file_token,
+                            line_index=line_index,
+                            item_index=item_index,
+                            call_id=call_id,
+                            adapter="claude",
+                            payload=item,
+                        )
+                        if isinstance(call_id, str) and call_id:
+                            call_candidates[(identity, call_id)].append(candidate)
+                        if item.get("name") in _EDIT_TOOLS:
+                            calls[identity].append(candidate)
+
+            if payload_type in {
+                "function_call_output", "custom_tool_call_output",
+            }:
+                call_id = payload.get("call_id")
+                if isinstance(call_id, str) and call_id:
+                    timestamp = _parse_transcript_ts(obj.get("timestamp"))
+                    result_key = (identity, call_id)
+                    results[result_key].append(
+                        _IndexedArtifactResult(
+                            identity=identity,
+                            timestamp=timestamp,
+                            file_token=file_token,
+                            line_index=line_index,
+                            item_index=0,
+                            call_id=call_id,
+                            adapter="codex",
+                            family=_artifact_result_family("codex", payload),
+                            failed=_nested_result_failed(payload.get("output")),
+                            fingerprint_sha256=_artifact_result_fingerprint(
+                                "codex", timestamp, payload
+                            ),
+                        )
+                    )
+            else:
+                is_edit = (
+                    payload.get("name") in _CODEX_EDIT_TOOLS
+                    or _outer_exec_has_apply_patch(payload)
+                )
+                if payload_type in {"function_call", "custom_tool_call"} or is_edit:
+                    call_id = payload.get("call_id")
+                    if call_id in (None, ""):
+                        call_id = payload.get("id")
+                    candidate = _IndexedArtifactCall(
+                        identity=identity,
+                        timestamp=_parse_transcript_ts(obj.get("timestamp")),
+                        file_token=file_token,
+                        line_index=line_index,
+                        item_index=0,
+                        call_id=call_id,
+                        adapter="codex",
+                        payload=payload,
+                    )
+                    if isinstance(call_id, str) and call_id:
+                        call_candidates[(identity, call_id)].append(candidate)
+                    if is_edit:
+                        calls[identity].append(candidate)
+
+    file_errors.update(conflict_files)
+    identity_errors: set[ArtifactIdentity] = set()
+    for file_token in file_errors:
+        identity_errors.update(identities_by_file.get(file_token, ()))
+    return ArtifactEvidenceIndex(
+        calls_by_identity={
+            identity: tuple(rows) for identity, rows in calls.items()
+        },
+        call_candidates={
+            key: tuple(rows) for key, rows in call_candidates.items()
+        },
+        results={key: tuple(values) for key, values in results.items()},
+        identities_by_file={
+            file: frozenset(identities)
+            for file, identities in identities_by_file.items()
+        },
+        file_errors=frozenset(file_errors),
+        identity_errors=frozenset(identity_errors),
+    )
+
+
+def observe_indexed_session_artifacts(
+    index: ArtifactEvidenceIndex,
+    identity: ArtifactIdentity,
+    project_cwd: str | None,
+    t0: datetime,
+    t_end: datetime,
+) -> list[dict]:
+    """Resolve distinct successful in-window edits from one parsed index."""
+
+    if not isinstance(t0, datetime) or not isinstance(t_end, datetime):
+        raise ArtifactEvidenceError("artifact evidence requires a receipt window")
+    if t0.tzinfo is None or t_end.tzinfo is None or t_end < t0:
+        raise ArtifactEvidenceError("artifact evidence window is invalid")
+    if identity in index.identity_errors:
+        raise ArtifactEvidenceError("exact-session transcript bytes are malformed")
+    t0 = t0.astimezone(timezone.utc)
+    t_end = t_end.astimezone(timezone.utc)
+    seen: set[tuple[str, str]] = set()
+
+    def record(file_path: Any) -> None:
+        if not isinstance(file_path, str) or not file_path.strip():
+            raise ArtifactEvidenceError("edit call is missing its file path")
+        repo, rel = _split_repo_path(file_path, project_cwd)
+        if not repo:
+            raise ArtifactEvidenceError("edit path has no resolvable project scope")
+        seen.add((repo, rel))
+
+    in_window_calls: dict[str, tuple[str, _IndexedArtifactCall]] = {}
+    unkeyed_calls: list[_IndexedArtifactCall] = []
+
+    def call_fingerprint(call: _IndexedArtifactCall) -> str:
+        return json.dumps(
+            {
+                "adapter": call.adapter,
+                "timestamp": (
+                    call.timestamp.isoformat() if call.timestamp else None
+                ),
+                "payload": call.payload,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
+    def event_order(
+        timestamp: datetime,
+        file_token: str,
+        line_index: int,
+        item_index: int,
+    ) -> tuple[datetime, str, int, int]:
+        # v2.6 fixes the stable S2 union order at
+        # (timestamp, segment path, line index); item index is the deterministic
+        # extension for multiple tool records carried by one transcript row.
+        return (timestamp, file_token, line_index, item_index)
+
+    def result_statuses_for_call(
+        call: _IndexedArtifactCall,
+    ) -> tuple[bool, ...]:
+        """Results belonging to this ordered same-id call occurrence only."""
+        call_id = call.call_id
+        if not isinstance(call_id, str) or not call_id:
+            return ()
+        key = (identity, call_id)
+        selected_family = _artifact_result_family(call.adapter, call.payload)
+        candidates = tuple(
+            candidate
+            for candidate in index.call_candidates.get(key, ())
+            if _artifact_result_family(candidate.adapter, candidate.payload)
+            == selected_family
+        )
+        result_candidates = tuple(
+            candidate
+            for candidate in index.results.get(key, ())
+            if candidate.family == selected_family
+        )
+        if any(candidate.timestamp is None for candidate in result_candidates):
+            raise ArtifactEvidenceError(
+                "edit call result has no valid timestamp"
+            )
+
+        # Exact duplicates across resumed segments coalesce. Keeping the
+        # smallest contract-order coordinate makes the result independent of
+        # the input segment enumeration order.
+        unique_calls: dict[
+            str, tuple[tuple[datetime, str, int, int], _IndexedArtifactCall]
+        ] = {}
+        for candidate in candidates:
+            if candidate.timestamp is None:
+                continue
+            fingerprint = call_fingerprint(candidate)
+            order = event_order(
+                candidate.timestamp,
+                candidate.file_token,
+                candidate.line_index,
+                candidate.item_index,
+            )
+            existing = unique_calls.get(fingerprint)
+            if existing is None or order < existing[0]:
+                unique_calls[fingerprint] = (order, candidate)
+
+        unique_results: dict[
+            str, tuple[tuple[datetime, str, int, int], _IndexedArtifactResult]
+        ] = {}
+        for candidate in result_candidates:
+            assert candidate.timestamp is not None
+            fingerprint = candidate.fingerprint_sha256
+            order = event_order(
+                candidate.timestamp,
+                candidate.file_token,
+                candidate.line_index,
+                candidate.item_index,
+            )
+            existing = unique_results.get(fingerprint)
+            if existing is None or order < existing[0]:
+                unique_results[fingerprint] = (order, candidate)
+
+        events: list[
+            tuple[
+                tuple[datetime, str, int, int],
+                int,
+                str,
+                _IndexedArtifactCall | _IndexedArtifactResult,
+            ]
+        ] = []
+        for fingerprint, (order, candidate) in unique_calls.items():
+            events.append((order, 0, fingerprint, candidate))
+        for fingerprint, (order, candidate) in unique_results.items():
+            events.append((order, 1, fingerprint, candidate))
+
+        current_call: str | None = None
+        pending_calls: list[str] = []
+        ambiguous_calls: set[str] = set()
+        occurrence_results: dict[
+            str, list[tuple[str, _IndexedArtifactResult]]
+        ] = defaultdict(list)
+        for _order, event_kind, fingerprint, event in sorted(events):
+            if event_kind == 0:
+                assert isinstance(event, _IndexedArtifactCall)
+                current_call = fingerprint
+                status = event.payload.get("status")
+                call_needs_result = (
+                    event.adapter == "claude"
+                    or _outer_exec_script(event.payload) is not None
+                    or not (isinstance(status, str) and status.strip())
+                )
+                if call_needs_result:
+                    if pending_calls:
+                        # A reused id cannot identify which unresolved call a
+                        # later result completes. Keep that ambiguity debt until
+                        # enough distinct results drain every pending call.
+                        ambiguous_calls.update(pending_calls)
+                        ambiguous_calls.add(fingerprint)
+                    pending_calls.append(fingerprint)
+                elif pending_calls:
+                    # The call-local terminal status remains authoritative,
+                    # but any later same-id output could still belong to the
+                    # unresolved historical call and must not override it.
+                    ambiguous_calls.update(pending_calls)
+                    ambiguous_calls.add(fingerprint)
+            elif current_call is not None:
+                assert isinstance(event, _IndexedArtifactResult)
+                occurrence_results[current_call].append((fingerprint, event))
+                if current_call in pending_calls:
+                    # In an ambiguous group the specific match is unknowable,
+                    # but each distinct result can discharge at most one call.
+                    pending_calls.pop(0)
+
+        selected_fingerprint = call_fingerprint(call)
+        selected = occurrence_results.get(selected_fingerprint, ())
+        if selected_fingerprint in ambiguous_calls:
+            if call.adapter == "claude" or _outer_exec_script(call.payload) is not None:
+                raise ArtifactEvidenceError(
+                    "edit call result occurrence is ambiguous"
+                )
+            status = call.payload.get("status")
+            if isinstance(status, str) and status.strip():
+                # A direct Codex edit with a call-local status does not need an
+                # ambiguously associated output as success authority.
+                return ()
+            raise ArtifactEvidenceError(
+                "edit call result occurrence is ambiguous"
+            )
+        if len({fingerprint for fingerprint, _result in selected}) > 1:
+            raise ArtifactEvidenceError(
+                "edit call has conflicting result payloads"
+            )
+        return tuple(result.failed for _fingerprint, result in selected)
+
+    for call in index.calls_by_identity.get(identity, ()):
+        ts = call.timestamp
+        if ts is None:
+            raise ArtifactEvidenceError("edit call has no valid timestamp")
+        # Window admission precedes call-id, result, and payload validation.
+        # A broken historical/future edit is not evidence for this receipt and
+        # therefore cannot censor its otherwise observable window.
+        if not (t0 <= ts <= t_end):
+            continue
+        call_id = call.call_id
+        if not isinstance(call_id, str) or not call_id:
+            unkeyed_calls.append(call)
+            continue
+        fingerprint = call_fingerprint(call)
+        existing = in_window_calls.get(call_id)
+        if existing is not None and existing[0] != fingerprint:
+            raise ArtifactEvidenceError(
+                "edit call has conflicting duplicate payloads"
+            )
+        in_window_calls.setdefault(call_id, (fingerprint, call))
+
+    for call in [
+        *unkeyed_calls,
+        *(entry[1] for entry in in_window_calls.values()),
+    ]:
+        call_id = call.call_id
+        if not isinstance(call_id, str) or not call_id:
+            raise ArtifactEvidenceError("edit call has no tool identity")
+        candidates = index.call_candidates.get((identity, call_id), ())
+        if any(candidate.timestamp is None for candidate in candidates):
+            raise ArtifactEvidenceError(
+                "edit call identity has an unplaceable tool-call candidate"
+            )
+        candidate_fingerprints = {
+            call_fingerprint(candidate)
+            for candidate in candidates
+            if candidate.timestamp is not None
+            and t0 <= candidate.timestamp <= t_end
+        }
+        if len(candidate_fingerprints) > 1:
+            raise ArtifactEvidenceError(
+                "edit call identity is shared by conflicting tool calls"
+            )
+        statuses = result_statuses_for_call(call)
+
+        if call.adapter == "claude":
+            if not statuses:
+                raise ArtifactEvidenceError("edit call has no tool result")
+            if len(set(statuses)) != 1:
+                raise ArtifactEvidenceError("edit call has conflicting tool results")
+            if statuses[0]:
+                continue
+            inp = call.payload.get("input")
+            if not isinstance(inp, dict):
+                raise ArtifactEvidenceError("edit call input is malformed")
+            record(inp.get("file_path") or inp.get("notebook_path"))
+            continue
+
+        script = _outer_exec_script(call.payload)
+        if script is not None:
+            # The outer exec is only a transport. Its own result, joined by the
+            # outer call id, is the success/failure authority for every nested
+            # apply_patch invocation.
+            if not statuses:
+                raise ArtifactEvidenceError("outer exec has no tool result")
+            if len(set(statuses)) != 1:
+                raise ArtifactEvidenceError("outer exec has conflicting results")
+            if statuses[0]:
+                continue
+        else:
+            status = call.payload.get("status")
+            explicit_success = (
+                isinstance(status, str)
+                and status.strip().lower() in {
+                    "completed", "success", "succeeded",
+                }
+            )
+            if isinstance(status, str) and status.strip() and not explicit_success:
+                continue
+            if statuses and len(set(statuses)) != 1:
+                raise ArtifactEvidenceError("edit call has conflicting tool results")
+            if not explicit_success and not statuses:
+                raise ArtifactEvidenceError("edit call has no success evidence")
+            if statuses and statuses[0]:
+                continue
+        if script is not None:
+            patch_texts = _structural_apply_patch_arguments(script)
+            if not patch_texts or any(text is None for text in patch_texts):
+                raise ArtifactEvidenceError(
+                    "outer exec apply_patch argument is not exactly resolvable"
+                )
+        else:
+            raw = call.payload.get("input")
+            if not isinstance(raw, str):
+                raw = call.payload.get("arguments")
+            if not isinstance(raw, str) or not raw:
+                raise ArtifactEvidenceError("apply_patch input is malformed")
+            patch_text = raw
+            if not raw.lstrip().startswith("***"):
+                try:
+                    decoded = json.loads(raw)
+                except json.JSONDecodeError as exc:
+                    raise ArtifactEvidenceError(
+                        "apply_patch arguments are malformed"
+                    ) from exc
+                if not isinstance(decoded, dict):
+                    raise ArtifactEvidenceError(
+                        "apply_patch arguments are malformed"
+                    )
+                patch_text = str(
+                    decoded.get("input") or decoded.get("patch") or ""
+                )
+            patch_texts = (patch_text,)
+        for patch_text in patch_texts:
+            if patch_text is None:
+                raise ArtifactEvidenceError("apply_patch argument is unavailable")
+            paths_in_patch = _codex_patch_paths(patch_text)
+            if not paths_in_patch:
+                raise ArtifactEvidenceError(
+                    "apply_patch contains no parseable file path"
+                )
+            for file_path in paths_in_patch:
+                record(file_path)
+
+    return [
+        {"repo": repo, "path": path}
+        for repo, path in sorted(seen)
+    ]
+
+
+def observe_session_artifacts_in_window_bytes(
+    data: bytes,
+    project_cwd: str | None,
+    t0: datetime,
+    t_end: datetime,
+    *,
+    session_id: str | None = None,
+) -> list[dict]:
+    """Strict artifact evidence from one already-snapshotted S2 byte stream.
+
+    Unlike the legacy path wrapper below, this production measurement helper
+    never rereads a path and never turns malformed/unavailable evidence into a
+    clean zero. It returns distinct successful edit coordinates whose tool-use
+    timestamp is inside the exact canonical receipt window.
+    """
+    def resolve_identity(
+        adapter: str,
+        candidate_session: str,
+        _cwd: str | None,
+        _proof: Mapping[str, Any] | None,
+    ) -> ArtifactIdentity | None:
+        if session_id is not None and candidate_session != session_id:
+            return None
+        return (adapter, "unscoped", candidate_session)
+
+    index = build_artifact_evidence_index(
+        (("<snapshot>", data),),
+        resolve_identity=resolve_identity,
+    )
+    if index.file_errors:
+        raise ArtifactEvidenceError("artifact snapshot is malformed")
+    identities = {
+        identity
+        for file_identities in index.identities_by_file.values()
+        for identity in file_identities
+        if session_id is None or identity[2] == session_id
+    }
+    seen: dict[tuple[str, str], dict] = {}
+    for identity in sorted(identities):
+        for item in observe_indexed_session_artifacts(
+            index, identity, project_cwd, t0, t_end,
+        ):
+            seen[(item["repo"], item["path"])] = item
+    return [seen[key] for key in sorted(seen)]
 
 
 def observe_session_artifacts_in_window(
