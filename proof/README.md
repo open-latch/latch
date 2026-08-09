@@ -14,14 +14,14 @@ This packet combines one observed live gate receipt with two small, deterministi
 
 ## Observed live gate
 
-Captured with the `codex` backend on commit `fd8a0a5dda027a241ee2a1388e852290fbfd03ca`. This is a synthetic no-history fixture and used no personal conversation history.
+Captured with the `codex` backend on commit `0066fb368c1f9627e8513f5441bb41ce64f62df3`. This is a synthetic no-history fixture and used no personal conversation history.
 
 ```text
 Request: Add multi-user accounts by moving the datastore from local SQLite to a hosted Postgres service.
 Recommendation: DO_NOT_PROCEED
-Summary: The request directly contradicts the canonical decision to keep the demo app local-first on embedded SQLite with no hosted database (id=1). That decision specifically rejects moving to managed Postgres to add multi-user accounts or sync, so this proposal revives the ruled-out architecture.
-Risk if proceed: The app would lose its deliberately chosen local-first, no-hosted-database architecture.
-Better next action: Keep SQLite and, if data must move between machines, implement an explicit export/import workflow and document its limitations as allowed by id=1.
+Summary: The request directly contradicts the canonical decision to keep the demo app local-first on embedded SQLite with no hosted database (id=1). Hosted Postgres for multi-user accounts is the specific rejected direction described by that decision; export/import on SQLite is the approved path for moving data between machines.
+Risk if proceed: The app would abandon its established local-first, single-file architecture and revive the explicitly rejected hosted-database path.
+Better next action: Keep SQLite and, if cross-machine data movement is required, implement an explicit export/import workflow with documented limitations.
 Cited evidence:
 - id=1 decision status=canonical: Keep the demo app local-first on SQLite — no hosted database
 Worktree changed before/after gate: no
@@ -63,7 +63,7 @@ This deterministic fixture eval grades seed-report capture and filtering; it is 
 
 ## Reproduce
 
-The deterministic results were generated from commit `fd8a0a5dda027a241ee2a1388e852290fbfd03ca`.
+The deterministic results were generated from commit `0066fb368c1f9627e8513f5441bb41ce64f62df3`.
 
 ```bash
 bash bin/latch_eval.sh

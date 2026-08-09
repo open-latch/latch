@@ -1,8 +1,8 @@
 {
   "live_demo": {
     "backend": "codex",
-    "better_next_action": "Keep SQLite and, if data must move between machines, implement an explicit export/import workflow and document its limitations as allowed by id=1.",
-    "captured_at_utc": "2026-08-09T01:14:02Z",
+    "better_next_action": "Keep SQLite and, if cross-machine data movement is required, implement an explicit export/import workflow with documented limitations.",
+    "captured_at_utc": "2026-08-09T21:46:41Z",
     "demo_kind": "synthetic_no_history_fixture",
     "evidence_nodes": [
       {
@@ -30,9 +30,9 @@
     "observed": true,
     "recommendation": "DO_NOT_PROCEED",
     "request": "Add multi-user accounts by moving the datastore from local SQLite to a hosted Postgres service.",
-    "risk_if_proceed": "The app would lose its deliberately chosen local-first, no-hosted-database architecture.",
-    "source_commit": "fd8a0a5dda027a241ee2a1388e852290fbfd03ca",
-    "summary": "The request directly contradicts the canonical decision to keep the demo app local-first on embedded SQLite with no hosted database (id=1). That decision specifically rejects moving to managed Postgres to add multi-user accounts or sync, so this proposal revives the ruled-out architecture."
+    "risk_if_proceed": "The app would abandon its established local-first, single-file architecture and revive the explicitly rejected hosted-database path.",
+    "source_commit": "0066fb368c1f9627e8513f5441bb41ce64f62df3",
+    "summary": "The request directly contradicts the canonical decision to keep the demo app local-first on embedded SQLite with no hosted database (id=1). Hosted Postgres for multi-user accounts is the specific rejected direction described by that decision; export/import on SQLite is the approved path for moving data between machines."
   },
   "reproduction": {
     "check_packet": "bash bin/latch_proof_packet.sh --check",
@@ -64,7 +64,7 @@
       "filtered": 4
     }
   },
-  "source_commit": "fd8a0a5dda027a241ee2a1388e852290fbfd03ca",
+  "source_commit": "0066fb368c1f9627e8513f5441bb41ce64f62df3",
   "tested_runtime_manifest_sha256": "af9ce873d9d1dea25699d924ac4bf5960ce9be6e6607aaa799d4ea1dfc551f61",
   "thesis": "Latch preserves project judgment and can surface a rejected path before an agent changes files.",
   "wedge_v1": {
