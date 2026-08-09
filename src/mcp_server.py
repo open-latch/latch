@@ -211,6 +211,40 @@ def _project_session_id() -> str | None:
         PROJECT_SESSION_ID = sid
     return sid
 
+
+def _project_host_adapter() -> str | None:
+    """Return only a host identity proven by session provenance.
+
+    Classifier/backend settings are intentionally excluded: a Claude host may
+    run a Codex classifier and vice versa. Neutral overrides remain unknown.
+    """
+
+    context = mcp_runtime.current_connection()
+    if context is not None:
+        if not context.session_id:
+            return None
+        if context.session_source == "env:CLAUDE_CODE_SESSION_ID":
+            return "claude"
+        if context.session_source in {
+            "env:CODEX_THREAD_ID",
+            "codex_session_start_marker",
+        }:
+            return "codex"
+        return None
+
+    session_id = _project_session_id()
+    if not session_id:
+        return None
+    # The neutral override has priority in _resolve_project_session_id and
+    # carries no trustworthy host namespace.
+    if (os.environ.get("LATCH_SESSION_ID") or "").strip():
+        return None
+    if (os.environ.get("CLAUDE_CODE_SESSION_ID") or "").strip() == session_id:
+        return "claude"
+    if (os.environ.get("CODEX_THREAD_ID") or "").strip() == session_id:
+        return "codex"
+    return None
+
 # ---------- MCP payload size guardrails ----------
 #
 # See docs/claude_kb/mcp_payload_guards.md. Tools that return node-shaped rows
@@ -358,6 +392,44 @@ def _stamp_list_activity(rows: list[dict], activity: dict) -> list[dict]:
 
 def _conn():
     return db.connect(_project_cwd())
+
+
+def _gate_measurement_fields(source: dict) -> dict:
+    """Copy the complete structural measurement envelope without content."""
+    return {
+        field: source.get(field)
+        for field in gate.MEASUREMENT_METADATA_FIELDS
+    }
+
+
+def _unlatched_gate_measurement_metadata() -> dict:
+    """Build skipped-call metadata without mutating an unlatched vault.
+
+    A pre-existing current vault may supply its immutable identity read-only.
+    If it cannot, the returned envelope keeps ``project_proof=None`` so the
+    offline fold records an explicit loss rather than reviving sanitized-path
+    equality or exposing an error/path in the host result.
+    """
+    conn = None
+    try:
+        conn = db.connect_readonly(_project_cwd())
+        return gate.measurement_metadata(
+            conn,
+            _project_cwd(),
+            host_adapter=_project_host_adapter(),
+        )
+    except Exception:
+        return gate.measurement_metadata(
+            None,
+            _project_cwd(),
+            host_adapter=_project_host_adapter(),
+        )
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 
 def _resolve_membership_for_mcp(
@@ -1598,6 +1670,12 @@ def kb_gate(request: str, max_chains: int = 5, verbose: bool = False) -> dict:
     Returns (compact form, default — fits well under MCP tool-result cap):
       {
         "request": <str>,
+        "gate_call_id": <opaque nonce>,
+        "measurement_protocol_version": "outcome-v2.6.0",
+        "attestation": <shared runtime key>,
+        "runtime_version": <shared runtime key>,
+        "project_proof": {"version", "key_epoch", "key_id", "fingerprint"} | null,
+        "key_epoch": "outcome-v2.6-key-1",
         "gate_status": <str>,                 # "OK", else "SKIPPED/DEGRADED — ..." when verdict is None — surface it; never read None as PROCEED (id=1415)
         "verdict": {                          # see parse_classifier_output
           "recommendation": "PROCEED" | "MODIFY" | "DO_NOT_PROCEED" | "NEEDS_HUMAN_JUDGMENT" | None,
@@ -1657,6 +1735,8 @@ def kb_gate(request: str, max_chains: int = 5, verbose: bool = False) -> dict:
         gate_status = _gate_status(verdict)
         return {
             "request": request,
+            "gate_call_id": gate._new_gate_call_id(),
+            **_unlatched_gate_measurement_metadata(),
             "gate_status": gate_status,
             "verdict": verdict,
             "findings": gate.format_gate_findings(
@@ -1673,6 +1753,7 @@ def kb_gate(request: str, max_chains: int = 5, verbose: bool = False) -> dict:
         full = gate.run_gate(
             conn, request, project_path=_project_cwd(), max_chains=max_chains,
             session_id=_project_session_id(),
+            host_adapter=_project_host_adapter(),
         )
     if verbose:
         return full
@@ -1682,6 +1763,11 @@ def kb_gate(request: str, max_chains: int = 5, verbose: bool = False) -> dict:
     gate_status = _gate_status(verdict)
     return {
         "request": full.get("request", request),
+        # Carried into the compact payload too: hosts that record tool results
+        # (Codex rollouts) then hold the nonce, which is what lets an offline
+        # pass attribute a session-less gate row to a real thread exactly.
+        "gate_call_id": full.get("gate_call_id"),
+        **_gate_measurement_fields(full),
         "gate_status": gate_status,
         "verdict": verdict,
         "findings": gate.format_gate_findings(

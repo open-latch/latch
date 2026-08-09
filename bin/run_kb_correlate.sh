@@ -2,7 +2,7 @@
 # Wrapper for the offline gate.log -> gate_outcome.log correlator (id=1098).
 # Usage:
 #   bash run_kb_correlate.sh --start YYYY-MM-DD --end YYYY-MM-DD \
-#                            [--window 1800] [--version 0.1.0] \
+#                            [--window 1800] [--version <semver>] \
 #                            [--project <path>]
 #
 # Defaults --project to the current working directory.

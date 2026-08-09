@@ -20,6 +20,10 @@ latch_settings.json
 **/compactor.lock
 **/budget.json
 **/failed_compact/
+# outcome-audit lineage checkpoint: a vault-local private artifact carrying
+# raw source coordinates (ruling 4562) — never committed, nor its writer lock.
+**/outcome-lineage.json
+**/outcome-lineage.json.lock
 
 # DB files and dumps (data layer — never committed under any path)
 *.db
