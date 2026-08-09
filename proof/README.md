@@ -14,14 +14,14 @@ This packet combines one observed live gate receipt with two small, deterministi
 
 ## Observed live gate
 
-Captured with the `codex` backend on commit `0066fb368c1f9627e8513f5441bb41ce64f62df3`. This is a synthetic no-history fixture and used no personal conversation history.
+Captured with the `codex` backend on commit `0d996328cdde9657b29d19a0707e319dc4243e3c`. This is a synthetic no-history fixture and used no personal conversation history.
 
 ```text
 Request: Add multi-user accounts by moving the datastore from local SQLite to a hosted Postgres service.
 Recommendation: DO_NOT_PROCEED
-Summary: The request directly contradicts the canonical decision to keep the demo app local-first on embedded SQLite with no hosted database (id=1). Hosted Postgres for multi-user accounts is the specific rejected direction described by that decision; export/import on SQLite is the approved path for moving data between machines.
-Risk if proceed: The app would abandon its established local-first, single-file architecture and revive the explicitly rejected hosted-database path.
-Better next action: Keep SQLite and, if cross-machine data movement is required, implement an explicit export/import workflow with documented limitations.
+Summary: The request directly contradicts the canonical decision to keep the demo app local-first on SQLite with no hosted database (id=1). Hosted Postgres for multi-user accounts is the specifically rejected direction; the allowed alternative is explicit export/import while retaining local SQLite.
+Risk if proceed: The app would abandon its established local-first, single-file architecture and revive a datastore direction already ruled out.
+Better next action: Keep SQLite and implement an explicit export/import workflow with documented limits; if true multi-user accounts are now mandatory, obtain a new human decision that supersedes id=1 before changing the datastore.
 Cited evidence:
 - id=1 decision status=canonical: Keep the demo app local-first on SQLite — no hosted database
 Worktree changed before/after gate: no
@@ -63,7 +63,7 @@ This deterministic fixture eval grades seed-report capture and filtering; it is 
 
 ## Reproduce
 
-The deterministic results were generated from commit `0066fb368c1f9627e8513f5441bb41ce64f62df3`.
+The deterministic results were generated from commit `0d996328cdde9657b29d19a0707e319dc4243e3c`.
 
 ```bash
 bash bin/latch_eval.sh

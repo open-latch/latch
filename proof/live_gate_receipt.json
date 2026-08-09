@@ -1,8 +1,8 @@
 {
   "backend": "codex",
-  "better_next_action": "Keep SQLite and, if cross-machine data movement is required, implement an explicit export/import workflow with documented limitations.",
+  "better_next_action": "Keep SQLite and implement an explicit export/import workflow with documented limits; if true multi-user accounts are now mandatory, obtain a new human decision that supersedes id=1 before changing the datastore.",
   "capture_command": "bash bin/latch_proof_packet.sh --capture-live --backend codex",
-  "captured_at_utc": "2026-08-09T21:46:41Z",
+  "captured_at_utc": "2026-08-09T21:52:54Z",
   "demo_kind": "synthetic_no_history_fixture",
   "evidence_nodes": [
     {
@@ -30,10 +30,10 @@
   "observed": true,
   "recommendation": "DO_NOT_PROCEED",
   "request": "Add multi-user accounts by moving the datastore from local SQLite to a hosted Postgres service.",
-  "risk_if_proceed": "The app would abandon its established local-first, single-file architecture and revive the explicitly rejected hosted-database path.",
+  "risk_if_proceed": "The app would abandon its established local-first, single-file architecture and revive a datastore direction already ruled out.",
   "schema_version": 2,
-  "source_commit": "0066fb368c1f9627e8513f5441bb41ce64f62df3",
-  "summary": "The request directly contradicts the canonical decision to keep the demo app local-first on embedded SQLite with no hosted database (id=1). Hosted Postgres for multi-user accounts is the specific rejected direction described by that decision; export/import on SQLite is the approved path for moving data between machines.",
+  "source_commit": "0d996328cdde9657b29d19a0707e319dc4243e3c",
+  "summary": "The request directly contradicts the canonical decision to keep the demo app local-first on SQLite with no hosted database (id=1). Hosted Postgres for multi-user accounts is the specifically rejected direction; the allowed alternative is explicit export/import while retaining local SQLite.",
   "tested_runtime_git_blobs": {
     ".gitattributes": "dfdb8b771ce07609491fa2e83698969fd917a135",
     "KB_SCHEMA_VERSION": "00750edc07d6415dcc07ae0351e9397b0222b7ba",
@@ -129,7 +129,7 @@
     "src/project_direction.py": "bbfb9a4b727bd218efb95a2f939448ce72442429",
     "src/project_proof.py": "4d187808403fc6e92b12ccfeddee3a12c0aa4a17",
     "src/proof_packet.py": "4004ae5097398ce2443a3b7b80d3f40641a44e18",
-    "src/public_release_check.py": "73fd422129d7156cfa3bbe7ff4fd04fd4544e4ca",
+    "src/public_release_check.py": "85f06c2d45cf82ff5ad65a4739852141485b6f4f",
     "src/quickstart.py": "4903b2f4dd8df8a6ab8d8ecbb5158ee746527d98",
     "src/rolling.py": "88a637d7dc9f763e793d53840703dc0382b11307",
     "src/schema.sql": "771ff88ba3004389932d818c44b3bd5824e82acf",
