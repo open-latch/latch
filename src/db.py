@@ -658,6 +658,39 @@ def _migrate_seed_import_ledgers(conn: sqlite3.Connection) -> None:
         "ON seed_import(claim_key, state)"
     )
     conn.commit()
+    _migrate_rejected_path(conn)
+
+
+def _migrate_rejected_path(conn: sqlite3.Connection) -> None:
+    """Add the typed rejected-option table (roadmap V2, id=3948).
+
+    Additive side state, so it follows the ``_migrate_seed_import_ledgers``
+    precedent and needs **no KB_SCHEMA_VERSION bump**: legacy databases need no
+    row backfill, an older engine simply never reads the table, and reconnecting
+    is a no-op. Bumping here would stamp the vault past the installed engine and
+    trip ``SchemaTooNewError`` (id=2694) for a purely additive change.
+    """
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS rejected_path (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            node_id         INTEGER NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+            option          TEXT    NOT NULL,
+            reason          TEXT    NOT NULL,
+            ratifier        TEXT,
+            decided_at      TEXT,
+            scope_predicate TEXT,
+            source          TEXT    NOT NULL DEFAULT 'declared'
+                                    CHECK (source IN ('declared', 'backfill')),
+            created_at      TEXT    NOT NULL DEFAULT (datetime('now')),
+            UNIQUE(node_id, option)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_rejected_path_node ON rejected_path(node_id);
+        CREATE INDEX IF NOT EXISTS idx_rejected_path_source ON rejected_path(source);
+        """
+    )
+    conn.commit()
     _migrate_lifecycle_substrate(conn)
 
 
@@ -2051,6 +2084,101 @@ def compact_row(row: dict, *, body_chars: int = COMPACT_BODY_CHARS,
 def get_node(conn: sqlite3.Connection, node_id: int) -> dict | None:
     row = conn.execute("SELECT * FROM nodes WHERE id = ?", (node_id,)).fetchone()
     return dict(row) if row else None
+
+
+def insert_rejected_path_nc(
+    conn: sqlite3.Connection,
+    node_id: int,
+    *,
+    option: str,
+    reason: str,
+    ratifier: str | None = None,
+    decided_at: str | None = None,
+    scope_predicate: str | None = None,
+    source: str = "declared",
+) -> int | None:
+    """Record one rejected option against the node that documents it (id=3948 V2).
+
+    `option` and `reason` are both required and must be non-blank: an
+    unexplained rejection cannot support a revival check, and a row with an
+    empty reason would read as authoritative while carrying nothing a future
+    agent could act on. Returns the new row id, or None when the
+    UNIQUE(node_id, option) pair already exists — re-recording is a no-op, not
+    an error, so backfill is safely re-runnable.
+    """
+    if not option or not option.strip():
+        raise ValueError("rejected_path.option must be non-empty")
+    if not reason or not reason.strip():
+        raise ValueError("rejected_path.reason must be non-empty")
+    if source not in ("declared", "backfill"):
+        raise ValueError(f"rejected_path.source must be declared|backfill, got {source!r}")
+    cur = conn.execute(
+        """
+        INSERT OR IGNORE INTO rejected_path
+            (node_id, option, reason, ratifier, decided_at, scope_predicate, source)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            node_id,
+            option.strip(),
+            reason.strip(),
+            ratifier,
+            decided_at,
+            scope_predicate,
+            source,
+        ),
+    )
+    return cur.lastrowid if cur.rowcount else None
+
+
+def insert_rejected_path(conn: sqlite3.Connection, node_id: int, **kwargs) -> int | None:
+    row_id = insert_rejected_path_nc(conn, node_id, **kwargs)
+    conn.commit()
+    return row_id
+
+
+def rejected_paths_for_node(conn: sqlite3.Connection, node_id: int) -> list[dict]:
+    rows = conn.execute(
+        "SELECT * FROM rejected_path WHERE node_id = ? ORDER BY id", (node_id,)
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def list_rejected_paths(
+    conn: sqlite3.Connection,
+    *,
+    source: str | None = None,
+    include_stale_nodes: bool = True,
+) -> list[dict]:
+    """All declared rejections, newest node first.
+
+    `include_stale_nodes` defaults True: a rejection recorded on a node that was
+    later superseded was still a genuine rejection when it was made, and the
+    V2 count (docs/v2_rejection_rubric.md) is taken over all statuses.
+    """
+    where, params = ["1=1"], []
+    if source is not None:
+        where.append("r.source = ?")
+        params.append(source)
+    if not include_stale_nodes:
+        where.append("n.status != 'stale'")
+    rows = conn.execute(
+        f"""
+        SELECT r.*, n.title AS node_title, n.kind AS node_kind, n.status AS node_status
+        FROM rejected_path r
+        JOIN nodes n ON n.id = r.node_id
+        WHERE {' AND '.join(where)}
+        ORDER BY r.node_id DESC, r.id
+        """,
+        params,
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def count_rejected_paths(conn: sqlite3.Connection) -> int:
+    return int(
+        conn.execute("SELECT COUNT(*) FROM rejected_path").fetchone()[0]
+    )
 
 
 def neighbors(conn: sqlite3.Connection, node_id: int) -> list[dict]:
