@@ -105,6 +105,7 @@ import embeddings  # noqa: E402
 import gate_report  # noqa: E402
 import heal  # noqa: E402
 import lifecycle_receipts  # noqa: E402
+import maintenance_receipts  # noqa: E402
 import lockfile  # noqa: E402
 import mcp_broker  # noqa: E402
 import mcp_runtime  # noqa: E402
@@ -571,9 +572,12 @@ def _attach_pending_lifecycle_notice(result: Any) -> Any:
     carrier = _kb_activity_carrier(result)
     if carrier is None:
         return result
+    project_path = _project_cwd()
     try:
-        with db.connect_readonly(_project_cwd()) as conn:
-            pending = lifecycle_receipts.pending_surface_items(conn, limit=1)
+        pending = maintenance_receipts.pending_blockers(project_path, limit=1)
+        if not pending:
+            with db.connect_readonly(project_path) as conn:
+                pending = lifecycle_receipts.pending_surface_items(conn, limit=1)
     except Exception:
         return result
     if not pending:
@@ -592,6 +596,7 @@ def _attach_pending_lifecycle_notice(result: Any) -> Any:
             else item[key]
         )
         for key in (
+            "id",
             "surface_kind",
             "text",
             "op",
@@ -603,9 +608,14 @@ def _attach_pending_lifecycle_notice(result: Any) -> Any:
         if item.get(key) is not None
     }
     prepared_activity = dict(original_activity)
+    notice_label = (
+        "Latch maintenance blocker"
+        if notice["surface_kind"] == "maintenance_blocker"
+        else f"Lifecycle {notice['surface_kind']}"
+    )
     prepared_activity["summary"] = (
         f"{str(original_activity.get('summary') or '').rstrip()} "
-        f"Lifecycle {notice['surface_kind']}: {notice['text']}"
+        f"{notice_label}: {notice['text']}"
     ).strip()
     prepared_activity["lifecycle_notice"] = notice
     carrier["kb_activity"] = prepared_activity
@@ -617,14 +627,19 @@ def _attach_pending_lifecycle_notice(result: Any) -> Any:
         if len(encoded) > SAFETY_NET_BYTES:
             carrier["kb_activity"] = original_activity
             return result
-        project_path = _project_cwd()
         with lockfile.writer_lock(project_path, timeout_s=0.0):
-            with _conn() as conn:
-                claim = lifecycle_receipts.claim_pending_surface_item(
-                    conn,
-                    item,
-                    session_id=_project_session_id(),
+            if item.get("surface_kind") == "maintenance_blocker":
+                claim = maintenance_receipts.claim_blocker(
+                    project_path,
+                    str(item.get("id") or ""),
                 )
+            else:
+                with _conn() as conn:
+                    claim = lifecycle_receipts.claim_pending_surface_item(
+                        conn,
+                        item,
+                        session_id=_project_session_id(),
+                    )
         if isinstance(claim, dict) and claim.get("created") is True:
             return result
     except Exception:

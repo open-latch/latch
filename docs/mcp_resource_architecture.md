@@ -211,6 +211,25 @@ connection's credentials, backend choice, config roots, or model selectors.
 Missing or stale autonomous configuration fails maintenance closed without
 taking down MCP. Legacy stdio retains its contextless startup check.
 
+Tree replacement is transactional. Clustering and summary generation happen
+without changing live parent links; completed summaries may be staged locally
+across a bounded retry, and the hierarchy is replaced in one SQLite
+transaction only after every required summary is ready. Authentication,
+missing-executable, and invalid-configuration failures circuit-break that
+backend for the run. A failed or degraded rebuild does not advance the weekly
+success stamp, so maintenance remains pending. The next foreground Latch read
+surfaces a durable blocker with the preserved-hierarchy impact and a concrete
+remediation.
+
+Cross-provider autonomous fallback is off by default, even when several CLIs
+are installed. The guided quickstart option
+`--maintenance-fallback-order claude,codex,cursor` is an explicit approval of
+that exact order; any subset or different order may be supplied. The vault
+persists each approved backend's absolute runner details. Runtime maintenance
+may advance only through that list and only after a terminal pre-invocation
+failure—it never discovers or switches to another provider opportunistically.
+Omitting the option preserves the single configured backend behavior.
+
 Codex SessionStart markers are now keyed by canonical workspace beneath the
 pinned vault. This fixes the prior failure where a single pinned marker could
 attribute repo A's MCP work to repo B's newest task. Direct `LATCH_SESSION_ID`,

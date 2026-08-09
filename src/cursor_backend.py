@@ -32,6 +32,7 @@ def invoke_prompt(
     purpose: str,
     agent_bin: str | None = None,
     model: str | None = None,
+    subprocess_env: dict[str, str] | None = None,
 ) -> tuple[str | None, str | None, bool]:
     """Return ``(final_text, error, timed_out)`` from Cursor headless mode."""
     model = (
@@ -39,7 +40,11 @@ def invoke_prompt(
         or mcp_runtime.connection_env_value("LATCH_CURSOR_MODEL")
         or mcp_runtime.connection_env_value("CURSOR_MODEL")
     )
-    env = mcp_runtime.connection_subprocess_environment("cursor")
+    env = (
+        dict(subprocess_env)
+        if subprocess_env is not None
+        else mcp_runtime.connection_subprocess_environment("cursor")
+    )
     env["CLAUDE_KB_IN_COMPACT"] = "1"
     try:
         resolved = agent_bin or mcp_runtime.connection_binary(

@@ -196,6 +196,44 @@ def seed_backend_for_agents(
     raise ValueError("at least one agent surface is required")
 
 
+def maintenance_backends_for_agents(
+    agents: Sequence[str],
+    *,
+    cursor_model_backend: str | None = None,
+) -> tuple[str, ...]:
+    """Return installed model backends without assigning fallback authority."""
+    available: list[str] = []
+    for backend in (
+        "claude" if "claude" in agents else None,
+        "codex" if "codex" in agents else None,
+        (cursor_model_backend or "cursor") if "cursor" in agents else None,
+    ):
+        if backend and backend not in available:
+            available.append(backend)
+    return tuple(available)
+
+
+def parse_maintenance_fallback_order(
+    raw: str | None,
+    *,
+    available: Sequence[str],
+) -> list[str] | None:
+    if raw is None:
+        return None
+    order = [item.strip().lower() for item in raw.split(",") if item.strip()]
+    if not order:
+        raise ValueError("--maintenance-fallback-order must not be empty")
+    if len(order) != len(set(order)):
+        raise ValueError("--maintenance-fallback-order contains duplicates")
+    unavailable = [backend for backend in order if backend not in available]
+    if unavailable:
+        raise ValueError(
+            "--maintenance-fallback-order names unselected backends: "
+            + ", ".join(unavailable)
+        )
+    return order
+
+
 def pin_kb_for_quickstart(
     kb_dir: str | None,
     *,
@@ -499,6 +537,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument("--cursor-with-hooks", action="store_true",
                     help="install and verify opt-in Cursor session/gate/activity hooks")
     ap.add_argument(
+        "--maintenance-fallback-order",
+        metavar="BACKENDS",
+        help=(
+            "explicitly approve an ordered autonomous fallback policy, e.g. "
+            "claude,codex,cursor; omitted means no cross-provider fallback"
+        ),
+    )
+    ap.add_argument(
         "--cursor-history",
         action="store_true",
         help=(
@@ -582,8 +628,21 @@ def main(argv: list[str] | None = None) -> int:
         agents,
         cursor_model_backend=args.cursor_model_backend,
     )
+    available_maintenance = maintenance_backends_for_agents(
+        agents,
+        cursor_model_backend=args.cursor_model_backend,
+    )
     try:
-        maintenance_executable = paths.resolve_maintenance_executable(backend)
+        fallback_order = parse_maintenance_fallback_order(
+            args.maintenance_fallback_order,
+            available=available_maintenance,
+        )
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    maintenance_backend = fallback_order[0] if fallback_order else backend
+    try:
+        maintenance_executable = paths.resolve_maintenance_executable(maintenance_backend)
     except ValueError as e:
         if not args.dry_run:
             print(f"error: {e}", file=sys.stderr)
@@ -601,6 +660,20 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         maintenance_path = f"<unresolved: {e}>"
     maintenance_home = str(Path.home().resolve())
+    fallback_runners: dict[str, dict[str, str]] = {}
+    if fallback_order:
+        try:
+            for candidate in fallback_order:
+                executable = paths.resolve_maintenance_executable(candidate)
+                fallback_runners[candidate] = {
+                    "executable": executable,
+                    "home": maintenance_home,
+                    "path": paths.resolve_maintenance_path(executable),
+                }
+        except ValueError as e:
+            if not args.dry_run:
+                print(f"error: {e}", file=sys.stderr)
+                return 2
     install_steps = build_install_steps(
         agents=agents,
         python_path=python_path,
@@ -637,7 +710,11 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  agents       : {', '.join(agents)}")
     print(f"  seed source  : {source}")
     print(f"  seed backend : {backend}")
-    print(f"  maintenance  : {backend} ({maintenance_executable})")
+    print(f"  maintenance  : {maintenance_backend} ({maintenance_executable})")
+    print(
+        "  fallback     : "
+        + ("approved " + " > ".join(fallback_order) if fallback_order else "disabled")
+    )
     print(f"  lookback days: {args.lookback_days}")
     if "cursor" in agents:
         print(f"  Cursor backend: {args.cursor_model_backend or 'cursor (native default)'}")
@@ -661,12 +738,18 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         runtime_settings_path = paths.write_maintenance_runner(
-            backend=backend,
+            backend=maintenance_backend,
             executable=maintenance_executable,
             home=maintenance_home,
             search_path=maintenance_path,
             project_path=project,
         )
+        if fallback_order:
+            runtime_settings_path = paths.write_approved_maintenance_fallback_policy(
+                order=fallback_order,
+                runners=fallback_runners,
+                project_path=project,
+            )
     except (OSError, ValueError) as e:
         print(f"error: could not save Latch runtime settings: {e}", file=sys.stderr)
         print("No agent configuration changes were written.", file=sys.stderr)
