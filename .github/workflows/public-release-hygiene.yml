@@ -71,15 +71,24 @@ jobs:
         run: python -m pip install pytest uv==0.11.28
 
       - name: Test PowerShell and Git Bash fresh installs and reruns
+        # The 5.1 case is not redundant with the pwsh cases above it. Every
+        # other PowerShell test resolves `pwsh` first, so they only exercise
+        # PowerShell 7 native-argument passing; Windows PowerShell 5.1 is the
+        # shell README.md tells users to paste into, and it drops unescaped
+        # embedded double quotes when building a native command line.
+        # The explicit exit propagation is required: a Windows job here has
+        # previously reported green while pytest failed.
         shell: pwsh
-        run: >-
-          python -m pytest -q
-          tests/test_bootstrap_install.py::test_powershell_bootstrap_fresh_then_idempotent_on_windows
-          tests/test_bootstrap_install.py::test_powershell_iex_failure_preserves_session_and_environment
-          tests/test_bootstrap_install.py::test_git_bash_bootstrap_fresh_then_idempotent_on_windows
-          tests/test_install_engine.py::test_absolute_kb_dir_normalizes_git_bash_path_on_windows
-          tests/test_quickstart.py::test_seed_backend_follows_selected_agent_surface
-          tests/test_quickstart.py::test_quickstart_persists_transient_env_pin_for_later_processes
+        run: |
+          python -m pytest -q `
+            tests/test_bootstrap_install.py::test_powershell_bootstrap_fresh_then_idempotent_on_windows `
+            tests/test_bootstrap_install.py::test_powershell_iex_failure_preserves_session_and_environment `
+            tests/test_bootstrap_install.py::test_windows_powershell_51_bootstrap_probes_real_argument_passing `
+            tests/test_bootstrap_install.py::test_git_bash_bootstrap_fresh_then_idempotent_on_windows `
+            tests/test_install_engine.py::test_absolute_kb_dir_normalizes_git_bash_path_on_windows `
+            tests/test_quickstart.py::test_seed_backend_follows_selected_agent_surface `
+            tests/test_quickstart.py::test_quickstart_persists_transient_env_pin_for_later_processes
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   one-command-bootstrap-macos:
     name: one-command-bootstrap (macos-latest Bash 3.2)

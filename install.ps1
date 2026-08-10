@@ -155,11 +155,18 @@ function Get-RuntimePython([string]$App) {
 }
 
 function Test-SqliteVecCapability([string]$App, [string]$Python) {
+  # Single quotes are load-bearing. Windows PowerShell 5.1 has no
+  # $PSNativeCommandArgumentPassing: it rebuilds a command line and does NOT
+  # escape double quotes inside an argument, so CommandLineToArgvW deletes
+  # them. A double-quoted "VEC_OK" here reaches python.exe as a bare VEC_OK
+  # and dies with NameError, which the caller then misreports as a missing
+  # sqlite-vec capability. Keep this probe free of double quotes; the contract
+  # test test_bootstrap_script_contracts_and_syntax enforces it.
   $probe = @'
 import sys
 sys.path.insert(0, sys.argv[1])
 from doctor import OK, _VEC_PROBE, _run_probe
-level, _ = _run_probe(_VEC_PROBE, "VEC_OK", 30, arch_hint=True)
+level, _ = _run_probe(_VEC_PROBE, 'VEC_OK', 30, arch_hint=True)
 if level != OK:
     raise SystemExit(1)
 '@

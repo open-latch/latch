@@ -643,6 +643,15 @@ def test_bootstrap_script_contracts_and_syntax():
     assert "UV_UNMANAGED_INSTALL" in powershell
     assert "LOCALAPPDATA" in shell
     assert "LOCALAPPDATA" in powershell
+    # Windows PowerShell 5.1 predates $PSNativeCommandArgumentPassing: it
+    # rebuilds a command line for native calls and leaves embedded double
+    # quotes unescaped, so CommandLineToArgvW strips them back out. A probe
+    # carrying "VEC_OK" arrives at python.exe as a bare VEC_OK and exits with
+    # NameError, which Prepare-Runtime then reports as a failed sqlite-vec
+    # capability. Keep the PowerShell here-string free of double quotes.
+    ps_probe = powershell.split("$probe = @'", 1)[1].split("'@", 1)[0]
+    assert "_run_probe" in ps_probe
+    assert '"' not in ps_probe, f"double quote in PowerShell probe breaks PS 5.1: {ps_probe!r}"
     workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
     assert "one-command-bootstrap-windows:" in workflow
     assert "runs-on: windows-latest" in workflow
@@ -657,6 +666,10 @@ def test_bootstrap_script_contracts_and_syntax():
     assert (
         "tests/test_bootstrap_install.py::"
         "test_powershell_iex_failure_preserves_session_and_environment"
+    ) in workflow
+    assert (
+        "tests/test_bootstrap_install.py::"
+        "test_windows_powershell_51_bootstrap_probes_real_argument_passing"
     ) in workflow
     assert "one-command-bootstrap-macos:" in workflow
     assert "one-command-bootstrap (macos-latest Bash 3.2)" in workflow
@@ -903,6 +916,100 @@ exit /b 43
     assert "SESSION_CONTINUED" in result.stdout
     assert "LATCH_HOME_AFTER=before-home" in result.stdout
     assert "LATCH_PYTHON_AFTER=before-python" in result.stdout
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows PowerShell 5.1 acceptance path")
+def test_windows_powershell_51_bootstrap_probes_real_argument_passing(tmp_path: Path):
+    """Run install.ps1 under the shell README.md actually tells users to use.
+
+    The other PowerShell tests resolve `pwsh` first, and every runner has it,
+    so they only ever exercise PowerShell 7's Standard native-argument
+    passing. Windows PowerShell 5.1 rebuilds a command line instead and drops
+    unescaped embedded double quotes, which silently corrupted the sqlite-vec
+    probe's Python source for every stock-Windows install. This is the only
+    test that runs the installer on 5.1.
+    """
+    shell = shutil.which("powershell")
+    assert shell, "Windows runner has no Windows PowerShell (powershell.exe)"
+
+    origin = make_origin(tmp_path)
+    project = tmp_path / "project"
+    project.mkdir()
+    app = tmp_path / "managed root" / "Latch app"
+    fake_uv = tmp_path / "fake-uv.cmd"
+    fake_uv.write_text(
+        """@echo off
+echo %*>>"%FAKE_UV_LOG%"
+if "%1"=="venv" (
+  "%FAKE_SYSTEM_PYTHON%" -m venv "%~4"
+  exit /b %ERRORLEVEL%
+)
+if "%1"=="pip" exit /b 0
+exit /b 43
+""",
+        encoding="utf-8",
+    )
+    env = installer_env(tmp_path, origin, fake_uv)
+    env["FAKE_SYSTEM_PYTHON"] = sys.executable
+    env["LOCALAPPDATA"] = str(tmp_path / "local-app-data")
+
+    def ps_quote(value: str | Path) -> str:
+        return "'" + str(value).replace("'", "''") + "'"
+
+    def invoke_windows_powershell(command: str):
+        return run(
+            shell,
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            command,
+            cwd=project,
+            env=env,
+        )
+
+    # Guard the coverage claim itself: if powershell.exe ever stops being 5.1,
+    # this test silently reverts to duplicating the pwsh path (see id=1775 —
+    # a Windows job that reported green while its real check was not running).
+    version = invoke_windows_powershell(
+        "Write-Host ('PSMAJOR=' + $PSVersionTable.PSVersion.Major)"
+    )
+    assert "PSMAJOR=5" in version.stdout, (
+        f"expected Windows PowerShell 5.x, got: {version.stdout + version.stderr}"
+    )
+
+    install = (
+        f"try {{ & {ps_quote(INSTALL_PS1)} -InstallDir {ps_quote(app)} "
+        f"-Project {ps_quote(project)} "
+        "-QuickstartArgs @('--agents','codex','--no-seed') } "
+        "catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }"
+    )
+
+    first = invoke_windows_powershell(install)
+    output = first.stdout + first.stderr
+    # A probe whose quoting was eaten by 5.1 reaches python.exe as a bare
+    # VEC_OK and exits NameError, so the install fails here with the generic
+    # runtime wrapper and no interpreter is ever actually tested.
+    assert "NameError" not in output, output
+    assert first.returncode == 0, output
+    assert "Latch activation complete" in first.stdout
+    calls = read_json_lines(Path(env["FAKE_QUICKSTART_LOG"]))
+    assert calls[0]["argv"] == [
+        "--project", str(project), "--agents", "codex", "--no-seed",
+    ]
+
+    # The probe must also deliver a real capability verdict on 5.1, not just
+    # survive parsing: a genuine FAIL has to stop the install before any
+    # configuration write and surface the remediation text.
+    blocked_config = tmp_path / "blocked-config.json"
+    env["FAKE_CONFIG_FILE"] = str(blocked_config)
+    env["FAKE_VEC_PROBE_FAIL"] = "1"
+    blocked = invoke_windows_powershell(install)
+    blocked_output = blocked.stdout + blocked.stderr
+    assert blocked.returncode != 0
+    assert "sqlite-vec capability preflight failed" in blocked_output
+    assert not blocked_config.exists()
+    assert len(read_json_lines(Path(env["FAKE_QUICKSTART_LOG"]))) == 1
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows Git Bash acceptance path")
