@@ -172,7 +172,13 @@ def agent_preflight_errors(
     if codex_required:
         codex_candidate = which("codex")
         if codex_candidate is None:
-            message = "Codex CLI (`codex`) is not on PATH"
+            if "codex" in selected:
+                message = "Codex CLI (`codex`) is not on PATH"
+            else:
+                message = (
+                    "Codex CLI (`codex`) selected as the Cursor model backend "
+                    "is not on PATH"
+                )
             if platform_name == "nt":
                 message += f". {_codex_standalone_cli_guidance(platform_name)}"
             errors.append(message)

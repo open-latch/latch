@@ -342,6 +342,10 @@ def test_cursor_compatibility_backend_is_preflighted():
         run=lambda *_args, **_kwargs: subprocess.CompletedProcess([], 0),
     )
     _assert(any("Codex CLI" in error for error in errors), errors)
+    _assert(
+        any("Cursor model backend" in error for error in errors),
+        f"missing Codex should name why Cursor needs it: {errors}",
+    )
     available["codex"] = "/bin/codex"
     _assert(qs.agent_preflight_errors(
                 ("cursor",),
