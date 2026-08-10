@@ -44,11 +44,15 @@ EXPECTED = {
     "invalid_recommendation": 0,
     "eligible": 7,
     "citing": 5,
-    "changed_verdict": 3,
+    # Founder-ratified 2026-08-09: cited NEEDS_HUMAN_JUDGMENT counts as a
+    # changed verdict (return to 3948's literal "recommendation differs"
+    # rubric). cited_needs_human remains reported so numerator composition
+    # stays visible at read time.
+    "changed_verdict": 4,
     "cited_proceed": 1,
     "cited_needs_human": 1,
     "citing_rate_pct": 71.43,
-    "v4_firing_rate_pct": 42.86,
+    "v4_firing_rate_pct": 57.14,
     "pass_threshold_pct": 5.0,
     "pass_at_5pct": True,
 }
@@ -92,9 +96,9 @@ def test_labels_match_gate_contract():
         f"label drift: {v4.CLASSIFIER_LABELS} vs {gate.CLASSIFIER_LABELS}",
     )
     _assert(
-        v4.V4_CHANGED_LABELS == ("MODIFY", "DO_NOT_PROCEED"),
-        f"changed-verdict labels must match docs/v4_citation_metric.md: "
-        f"{v4.V4_CHANGED_LABELS}",
+        v4.V4_CHANGED_LABELS == ("MODIFY", "DO_NOT_PROCEED", "NEEDS_HUMAN_JUDGMENT"),
+        f"changed-verdict labels must match docs/v4_citation_metric.md "
+        f"(founder-ratified NHJ inclusion, 2026-08-09): {v4.V4_CHANGED_LABELS}",
     )
     print("PASS labels_match_gate_contract")
 

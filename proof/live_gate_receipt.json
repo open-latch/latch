@@ -1,8 +1,8 @@
 {
   "backend": "codex",
-  "better_next_action": "Keep SQLite and implement an explicit export/import workflow with documented limits; if true multi-user accounts are now mandatory, obtain a new human decision that supersedes id=1 before changing the datastore.",
+  "better_next_action": "Keep SQLite and, if cross-machine data movement is required, implement an explicit export/import workflow with documented limitations.",
   "capture_command": "bash bin/latch_proof_packet.sh --capture-live --backend codex",
-  "captured_at_utc": "2026-08-09T21:52:54Z",
+  "captured_at_utc": "2026-08-10T01:46:04Z",
   "demo_kind": "synthetic_no_history_fixture",
   "evidence_nodes": [
     {
@@ -30,10 +30,10 @@
   "observed": true,
   "recommendation": "DO_NOT_PROCEED",
   "request": "Add multi-user accounts by moving the datastore from local SQLite to a hosted Postgres service.",
-  "risk_if_proceed": "The app would abandon its established local-first, single-file architecture and revive a datastore direction already ruled out.",
+  "risk_if_proceed": "The app would cease to be a local-first, no-hosted-database demo and would directly unwind the canonical datastore decision.",
   "schema_version": 2,
-  "source_commit": "0d996328cdde9657b29d19a0707e319dc4243e3c",
-  "summary": "The request directly contradicts the canonical decision to keep the demo app local-first on SQLite with no hosted database (id=1). Hosted Postgres for multi-user accounts is the specifically rejected direction; the allowed alternative is explicit export/import while retaining local SQLite.",
+  "source_commit": "67bb93b508eae3849040e236e856c2b13e1563ff",
+  "summary": "The canonical datastore decision (id=1) explicitly keeps the demo app local-first on embedded SQLite and rejects moving to hosted Postgres for multi-user accounts or sync. The request directly contradicts that decision; the allowed direction is SQLite with explicit export/import for cross-machine data movement.",
   "tested_runtime_git_blobs": {
     ".gitattributes": "dfdb8b771ce07609491fa2e83698969fd917a135",
     "KB_SCHEMA_VERSION": "00750edc07d6415dcc07ae0351e9397b0222b7ba",
@@ -143,7 +143,7 @@
     "src/uninstall_engine.py": "d69a5c092cb73fc22ce1cf35f6207c248d11aad0",
     "src/unlatch.py": "33bebac6ac89b4d2188dec4dadfae4564dca2af8",
     "src/update_latch.py": "37f7775011cb5aaf83583ad99ebe5f928ce9c35a",
-    "src/v4_citation_rate.py": "a213981e83a86d37926ddf9b0938f09ffb99dc7c",
+    "src/v4_citation_rate.py": "1baf6245dceed9d5c0bb23252a5c0607a0be4c55",
     "src/vault_backup.py": "449443a6fa5155c393ca76b1fba4fc09156c15c8",
     "src/vault_identity.py": "dd8f4b99b271af06f7149167199463f3f408f55a",
     "src/verify.py": "71c594dd6e309d4562dd5485cd365be2f922ee73",

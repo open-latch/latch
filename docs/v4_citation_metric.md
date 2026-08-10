@@ -17,11 +17,12 @@ call.
 ## The metric in one measurable sentence
 
 **V4 = 100 × |{eligible gate.log rows where `cited_rejected_paths` is
-non-empty AND `recommendation` ∈ {"MODIFY", "DO_NOT_PROCEED"}}| ÷ |eligible
-rows|, where a row is eligible iff `skipped` == false AND `error` == null AND
-`recommendation` is one of the four classifier labels AND the key
-`surfaced_rejected_paths` is present in the row; PASS iff V4 ≥ 5.0 over the
-first ~200 eligible rows of the live measurement window.**
+non-empty AND `recommendation` ∈ {"MODIFY", "DO_NOT_PROCEED",
+"NEEDS_HUMAN_JUDGMENT"}}| ÷ |eligible rows|, where a row is eligible iff
+`skipped` == false AND `error` == null AND `recommendation` is one of the
+four classifier labels AND the key `surfaced_rejected_paths` is present in
+the row; PASS iff V4 ≥ 5.0 over the first ~200 eligible rows of the live
+measurement window.**
 
 ## Exact field definitions
 
@@ -32,7 +33,8 @@ first ~200 eligible rows of the live measurement window.**
   that call's prompt (`surfaced_rejected_paths`), so a hallucinated id can
   never count.
 - **"changed the verdict"** := on that same row, `recommendation` ∈
-  {"MODIFY", "DO_NOT_PROCEED"}.
+  {"MODIFY", "DO_NOT_PROCEED", "NEEDS_HUMAN_JUDGMENT"} — i.e., any
+  non-PROCEED label while citing.
 - **eligible row** := `skipped` == false, `error` == null, `recommendation` ∈
   {"PROCEED", "MODIFY", "DO_NOT_PROCEED", "NEEDS_HUMAN_JUDGMENT"}, and
   `surfaced_rejected_paths` present (the key marks a runtime with citation
@@ -51,14 +53,18 @@ first ~200 eligible rows of the live measurement window.**
    `recommendation` enum: a non-PROCEED label while citing a typed rejection
    is a verdict that differs from the default go-ahead with the rejection on
    the table.
-2. **"NEEDS_HUMAN_JUDGMENT" is excluded from the changed-verdict numerator.**
-   It is a routing outcome, not a changed verdict. The counter reports the
-   cited-NEEDS_HUMAN_JUDGMENT count separately so the exclusion is visible.
-3. Both narrowings UNDER-count the numerator: a PROCEED whose
-   better_next_action was rejection-informed does not count, and a cited
-   NEEDS_HUMAN_JUDGMENT does not count. The ≥5% PASS bar is therefore
-   evaluated against a strictly conservative numerator (the denominator is
-   the same eligible-row set under either reading).
+2. **"NEEDS_HUMAN_JUDGMENT" counts toward the changed-verdict numerator —
+   RATIFIED 2026-08-09.** The pre-registration draft excluded it as a
+   routing outcome; the founder ratified its inclusion before any organic
+   window data accumulated, returning to 3948's literal "recommendation
+   differs" rubric: a cited rejection that routes the collision to the human
+   is the ratification loop firing, not a non-event. The counter still
+   reports `cited_needs_human` separately so the numerator's composition
+   (steering vs human-routing) stays visible at read time.
+3. The remaining narrowing UNDER-counts the numerator: a PROCEED whose
+   better_next_action was rejection-informed does not count. The ≥5% PASS
+   bar is therefore still evaluated against a conservative numerator (the
+   denominator is the same eligible-row set under either reading).
 4. **The window denominator is re-scoped from 3948's "next 200 gate calls"
    to the first ~200 eligible rows** (surfaced round 1 of the cross-vendor
    review, 2026-08-08). Skipped and errored calls produce no verdict to
@@ -74,7 +80,9 @@ first ~200 eligible rows of the live measurement window.**
 
 - `citing_rate`: share of eligible rows with any non-empty
   `cited_rejected_paths`, including PROCEED rows.
-- `cited_needs_human`: cited rows labeled "NEEDS_HUMAN_JUDGMENT".
+- `cited_needs_human`: cited rows labeled "NEEDS_HUMAN_JUDGMENT" — since the
+  2026-08-09 ratification these are IN the numerator; this count exposes its
+  composition.
 - `capability_missing`, `skipped`, `errored`, `unparsable`: excluded-row
   accounting, so the denominator is auditable.
 
