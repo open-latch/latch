@@ -35,9 +35,11 @@ from pathlib import Path
 from typing import Iterable, Iterator
 
 CLASSIFIER_LABELS = ("PROCEED", "MODIFY", "DO_NOT_PROCEED", "NEEDS_HUMAN_JUDGMENT")
-# The declared changed-verdict subset (docs/v4_citation_metric.md deviation 2:
-# NEEDS_HUMAN_JUDGMENT is a routing outcome, not a changed verdict).
-V4_CHANGED_LABELS = ("MODIFY", "DO_NOT_PROCEED")
+# The changed-verdict subset: every non-PROCEED label. Founder-ratified
+# 2026-08-09, returning to 3948's literal "recommendation differs" rubric —
+# a cited rejection that routes the collision to the human IS the wedge
+# firing. Numerator composition stays observable via cited_needs_human.
+V4_CHANGED_LABELS = ("MODIFY", "DO_NOT_PROCEED", "NEEDS_HUMAN_JUDGMENT")
 PASS_THRESHOLD_PCT = 5.0
 
 
@@ -104,9 +106,12 @@ def compute(rows: Iterable[dict | None]) -> dict:
         counts["citing"] += 1
         if recommendation in V4_CHANGED_LABELS:
             counts["changed_verdict"] += 1
-        elif recommendation == "PROCEED":
+        if recommendation == "PROCEED":
             counts["cited_proceed"] += 1
-        elif recommendation == "NEEDS_HUMAN_JUDGMENT":
+        # Independent composition observable (not an exclusion bucket since
+        # the 2026-08-09 ratification): how much of the numerator is
+        # human-routing rather than MODIFY/DO_NOT_PROCEED steering.
+        if recommendation == "NEEDS_HUMAN_JUDGMENT":
             counts["cited_needs_human"] += 1
     eligible = counts["eligible"]
     counts["citing_rate_pct"] = _pct(counts["citing"], eligible)
