@@ -36,6 +36,12 @@ import paths  # noqa: E402
 
 def _env(tmp_path: Path, kb_dir: Path) -> dict:
     env = os.environ.copy()
+    # The autouse isolated_scope_control fixture points LATCH_HOME at a bare
+    # tmp dir with no src/schema.sql; the launcher child needs the real
+    # checkout as its install home while LATCH_KB_DIR keeps the data plane
+    # in the disposable vault.
+    env["LATCH_HOME"] = str(SRC.parent)
+    env.pop("CLAUDE_KB_HOME", None)
     env["LATCH_ADAPTER"] = "cursor"
     env["LATCH_PYTHON"] = sys.executable
     env["LATCH_KB_DIR"] = str(kb_dir)

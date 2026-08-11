@@ -79,7 +79,7 @@ jobs:
           tests/test_bootstrap_install.py::test_git_bash_bootstrap_fresh_then_idempotent_on_windows
           tests/test_install_engine.py::test_absolute_kb_dir_normalizes_git_bash_path_on_windows
           tests/test_quickstart.py::test_seed_backend_follows_selected_agent_surface
-          tests/test_quickstart.py::test_quickstart_persists_transient_env_pin_for_later_processes
+          tests/test_quickstart.py::test_quickstart_persists_transient_env_pin_for_global_shared_access
 
   one-command-bootstrap-macos:
     name: one-command-bootstrap (macos-latest Bash 3.2)
