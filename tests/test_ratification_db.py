@@ -143,6 +143,59 @@ def test_reject_row_does_not_authorize_canonical_transition(conn):
     assert db.get_node(conn, node_id)["status"] == "staging"
 
 
+def test_latest_ratification_action_governs_and_history_remains_auditable(conn):
+    node_id = _node(conn)
+    reject_id = _insert_ratification(
+        conn,
+        node_id,
+        ratifier="session:founder",
+        decided_at="2026-08-10 12:00:00",
+        action="reject",
+        source="capture_decision",
+    )
+    with pytest.raises(_required_error_type()):
+        db.update_node(conn, node_id, status="canonical")
+
+    ratify_id = _insert_ratification(
+        conn,
+        node_id,
+        ratifier="session:founder",
+        decided_at="2026-08-10 12:01:00",
+        action="ratify",
+        source="latch_update",
+    )
+    db.update_node(conn, node_id, status="canonical")
+    db.update_node(conn, node_id, status="staging")
+
+    final_reject_id = _insert_ratification(
+        conn,
+        node_id,
+        ratifier="session:founder",
+        decided_at="2026-08-10 12:02:00",
+        action="reject",
+        source="capture_decision",
+    )
+
+    latest = db.ratification_for_node(conn, node_id)
+    assert latest is not None
+    assert latest["id"] == final_reject_id
+    assert latest["action"] == "reject"
+    history = db.list_ratifications(conn)
+    assert [row["id"] for row in history] == [
+        reject_id,
+        ratify_id,
+        final_reject_id,
+    ]
+    assert [row["action"] for row in history] == [
+        "reject",
+        "ratify",
+        "reject",
+    ]
+    with pytest.raises(_required_error_type()):
+        db.update_node(conn, node_id, status="canonical")
+    assert db.get_node(conn, node_id)["status"] == "staging"
+
+
 @pytest.mark.parametrize("source", ["capture_decision", "latch_update"])
 def test_ratify_row_authorizes_judgment_transition(conn, source):
     node_id = _node(conn, "preference")
@@ -155,6 +208,122 @@ def test_ratify_row_authorizes_judgment_transition(conn, source):
     )
     db.update_node(conn, node_id, status="canonical")
     assert db.get_node(conn, node_id)["status"] == "canonical"
+
+
+def test_unique_ratification_shape_migrates_without_version_bump(tmp_path):
+    project = tmp_path / "unique-ratification"
+    connection = db.connect(str(project))
+    node_id = _node(connection)
+    schema_before = schema_version.read(connection)
+    connection.execute("DROP TABLE ratification")
+    connection.execute(
+        """
+        CREATE TABLE ratification (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            node_id    INTEGER NOT NULL UNIQUE
+                       REFERENCES nodes(id) ON DELETE CASCADE,
+            ratifier   TEXT    NOT NULL CHECK (length(trim(ratifier)) > 0),
+            decided_at TEXT    NOT NULL DEFAULT (datetime('now')),
+            action     TEXT    NOT NULL CHECK (action IN ('ratify', 'reject')),
+            scope      TEXT    NOT NULL DEFAULT 'node'
+                               CHECK (scope IN ('node')),
+            source     TEXT    NOT NULL
+                               CHECK (source IN ('capture_decision', 'latch_update'))
+        )
+        """
+    )
+    original_id = connection.execute(
+        """
+        INSERT INTO ratification
+            (node_id, ratifier, decided_at, action, scope, source)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            node_id,
+            "session:founder",
+            "2026-08-10 12:00:00",
+            "reject",
+            "node",
+            "capture_decision",
+        ),
+    ).lastrowid
+    connection.commit()
+    connection.close()
+
+    reopened = db.connect(str(project))
+    try:
+        assert schema_version.read(reopened) == schema_before
+        original = db.ratification_for_node(reopened, node_id)
+        assert original is not None
+        assert original["id"] == original_id
+        assert original["action"] == "reject"
+
+        ratify_id = _insert_ratification(
+            reopened,
+            node_id,
+            ratifier="session:founder",
+            action="ratify",
+            source="latch_update",
+        )
+        assert ratify_id > original_id
+        assert [row["action"] for row in db.list_ratifications(reopened)] == [
+            "reject",
+            "ratify",
+        ]
+    finally:
+        reopened.close()
+
+    reopened_again = db.connect(str(project))
+    try:
+        assert schema_version.read(reopened_again) == schema_before
+        assert [
+            row["action"] for row in db.list_ratifications(reopened_again)
+        ] == ["reject", "ratify"]
+    finally:
+        reopened_again.close()
+
+
+def test_ratification_history_does_not_change_rejected_path_semantics(conn):
+    node_id = _node(conn)
+    rejected_before = db.count_rejected_paths(conn)
+    rejected_id = db.insert_rejected_path(
+        conn,
+        node_id,
+        option="Redis sessions",
+        reason="The operational cost is not justified.",
+        ratifier="session:founder",
+        decided_at="2026-08-10 12:00:00",
+        scope_predicate="session storage",
+        source="declared",
+    )
+    assert rejected_id is not None
+    rejected_snapshot = db.rejected_paths_for_node(conn, node_id)
+
+    _insert_ratification(
+        conn,
+        node_id,
+        ratifier="session:founder",
+        action="reject",
+        source="capture_decision",
+    )
+    _insert_ratification(
+        conn,
+        node_id,
+        ratifier="session:founder",
+        action="ratify",
+        source="latch_update",
+    )
+
+    duplicate = db.insert_rejected_path(
+        conn,
+        node_id,
+        option="Redis sessions",
+        reason="A duplicate remains a no-op.",
+        source="declared",
+    )
+    assert duplicate is None
+    assert db.count_rejected_paths(conn) == rejected_before + 1
+    assert db.rejected_paths_for_node(conn, node_id) == rejected_snapshot
 
 
 def test_legacy_canonical_judgment_is_grandfathered_without_backfill(tmp_path):

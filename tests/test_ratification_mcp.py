@@ -50,7 +50,7 @@ def _ratifications(project: Path) -> list[dict]:
         return [
             dict(row)
             for row in conn.execute(
-                "SELECT * FROM ratification ORDER BY node_id"
+                "SELECT * FROM ratification ORDER BY node_id, id"
             ).fetchall()
         ]
     finally:
@@ -201,6 +201,30 @@ def test_capture_reject_records_rejection_but_cannot_promote(
     assert rows[0]["ratifier"] == "reject-session"
     assert rows[0]["action"] == "reject"
     assert rows[0]["source"] == "capture_decision"
+
+
+def test_rejected_capture_can_later_be_ratified_by_latch_update(
+    mcp_vault: Path,
+) -> None:
+    rejected = mcp_server.kb_capture_decision(
+        title="Rejected, then reconsidered",
+        body="The founder may later ratify this same decision node.",
+        gate_request="Should this decision govern?",
+        human_action="reject",
+        session_id="reject-session",
+    )
+    node_id = int(rejected["id"])
+
+    promoted = mcp_server.kb_update(node_id, status="canonical")
+
+    assert promoted["ok"] is True
+    assert _node(mcp_vault, node_id)["status"] == "canonical"
+    rows = _ratifications(mcp_vault)
+    assert [row["action"] for row in rows] == ["reject", "ratify"]
+    assert [row["source"] for row in rows] == [
+        "capture_decision",
+        "latch_update",
+    ]
 
 
 def test_capture_absent_action_writes_nothing(mcp_vault: Path) -> None:

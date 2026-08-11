@@ -714,13 +714,18 @@ def _migrate_ratification(conn: sqlite3.Connection) -> None:
     This is additive side state on the same ratified precedent as
     ``rejected_path``: legacy canonical nodes remain valid as existing state,
     no synthetic rows are backfilled, and the compatibility boundary does not
-    move for a table older binaries never read.
+    move for a table older binaries never read.  The first V3 build briefly
+    created ``UNIQUE(node_id)``.  Rebuild that exact shape transactionally so
+    each node instead keeps an append-only history of human outcomes.
     """
-    conn.executescript(
-        """
-        CREATE TABLE IF NOT EXISTS ratification (
+    def create_table(table_name: str) -> None:
+        if table_name not in {"ratification", "ratification_append_history"}:
+            raise ValueError("unexpected ratification migration table")
+        conn.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {table_name} (
             id         INTEGER PRIMARY KEY AUTOINCREMENT,
-            node_id    INTEGER NOT NULL UNIQUE
+            node_id    INTEGER NOT NULL
                        REFERENCES nodes(id) ON DELETE CASCADE,
             ratifier   TEXT    NOT NULL CHECK (length(trim(ratifier)) > 0),
             decided_at TEXT    NOT NULL DEFAULT (datetime('now')),
@@ -729,15 +734,74 @@ def _migrate_ratification(conn: sqlite3.Connection) -> None:
                                CHECK (scope IN ('node')),
             source     TEXT    NOT NULL
                                CHECK (source IN ('capture_decision', 'latch_update'))
-        );
+            )
+            """
+        )
 
-        CREATE INDEX IF NOT EXISTS idx_ratification_action
-            ON ratification(action);
-        CREATE INDEX IF NOT EXISTS idx_ratification_source
-            ON ratification(source);
-        """
-    )
+    def node_id_is_unique() -> bool:
+        for index in conn.execute("PRAGMA index_list('ratification')").fetchall():
+            if not int(index["unique"]):
+                continue
+            index_name = str(index["name"]).replace("'", "''")
+            columns = [
+                row["name"]
+                for row in conn.execute(
+                    f"PRAGMA index_info('{index_name}')"
+                ).fetchall()
+            ]
+            if columns == ["node_id"]:
+                return True
+        return False
+
+    def create_indexes() -> None:
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ratification_node "
+            "ON ratification(node_id, id)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ratification_action "
+            "ON ratification(action)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ratification_source "
+            "ON ratification(source)"
+        )
+
+    create_table("ratification")
     conn.commit()
+    if node_id_is_unique():
+        leftover = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+            "AND name = 'ratification_append_history'"
+        ).fetchone()
+        if leftover is not None:
+            raise RuntimeError(
+                "cannot migrate ratification: temporary table already exists"
+            )
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            create_table("ratification_append_history")
+            conn.execute(
+                """
+                INSERT INTO ratification_append_history
+                    (id, node_id, ratifier, decided_at, action, scope, source)
+                SELECT id, node_id, ratifier, decided_at, action, scope, source
+                FROM ratification
+                ORDER BY id
+                """
+            )
+            conn.execute("DROP TABLE ratification")
+            conn.execute(
+                "ALTER TABLE ratification_append_history RENAME TO ratification"
+            )
+            create_indexes()
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+    else:
+        create_indexes()
+        conn.commit()
     _migrate_lifecycle_substrate(conn)
 
 
@@ -1956,10 +2020,11 @@ def finish_seed_import(
 
 def _has_ratifying_row(conn: sqlite3.Connection, node_id: int) -> bool:
     row = conn.execute(
-        "SELECT 1 FROM ratification WHERE node_id = ? AND action = 'ratify'",
+        "SELECT action FROM ratification WHERE node_id = ? "
+        "ORDER BY id DESC LIMIT 1",
         (int(node_id),),
     ).fetchone()
-    return row is not None
+    return row is not None and row["action"] == "ratify"
 
 
 def insert_node_nc(
@@ -2212,7 +2277,9 @@ def ratification_for_node(
     conn: sqlite3.Connection, node_id: int,
 ) -> dict | None:
     row = conn.execute(
-        "SELECT * FROM ratification WHERE node_id = ?", (int(node_id),)
+        "SELECT * FROM ratification WHERE node_id = ? "
+        "ORDER BY id DESC LIMIT 1",
+        (int(node_id),),
     ).fetchone()
     return dict(row) if row is not None else None
 
