@@ -20,7 +20,7 @@ if ($env:LATCH_UNLATCHED) {
   Write-Host "             still true: KB files stay local/unchanged; latch remains installed; control commands/MCP registration remain."
   Write-Host "             resume: unset LATCH_UNLATCHED, then run /latch"
 } elseif (Test-Path $unlatched) {
-  Write-Host "  [UNLATCHED-GLOBAL] legacy $unlatched exists - every project is OFF."
+  Write-Host "  [UNLATCHED-GLOBAL] $unlatched exists - every project is OFF."
   Write-Host "             disabled: prompt KB injection, compaction, self-heal, maintenance."
   Write-Host "             still true: KB files stay local/unchanged; latch remains installed; control commands/MCP registration remain."
   Write-Host "             resume: .\bin\latch_enable.ps1"

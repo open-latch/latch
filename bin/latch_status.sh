@@ -13,7 +13,7 @@ if [ -n "${LATCH_UNLATCHED:-}" ]; then
   echo "             still true: KB files stay local/unchanged; latch remains installed; control commands/MCP registration remain."
   echo "             resume: unset LATCH_UNLATCHED, then run /latch"
 elif [ -e "${KB_HOME}/UNLATCHED" ]; then
-  echo "  [UNLATCHED-GLOBAL] legacy ${KB_HOME}/UNLATCHED exists - every project is OFF."
+  echo "  [UNLATCHED-GLOBAL] ${KB_HOME}/UNLATCHED exists - every project is OFF."
   echo "             disabled: prompt KB injection, compaction, self-heal, maintenance."
   echo "             still true: KB files stay local/unchanged; latch remains installed; control commands/MCP registration remain."
   echo "             resume: bash bin/latch_enable.sh"
