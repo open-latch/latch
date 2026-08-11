@@ -614,7 +614,8 @@ def _stub_gate_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(gate, "classify_gate", lambda *_a, **_k: copy.deepcopy(verdict))
     monkeypatch.setattr(gate, "_should_fire_adversary", lambda _verdict: False)
     monkeypatch.setattr(gate, "_budget_count_snapshot", lambda _path: 0)
-    monkeypatch.setattr(gate, "LOG_RAW_QUERY", False)
+    # No raw-text opt-in to pin any more — gate.log is unconditionally
+    # structural-only since id=5141 / id=5216.
 
 
 def test_run_gate_result_invariance_and_exact_gate_join(

@@ -357,25 +357,26 @@ def test_gate_log_schema_is_unchanged():
         _cleanup(tmp, conn)
 
 
-def test_gate_log_never_carries_request_text_under_any_setting():
-    """The ``query_excerpt`` affordance is superseded (5141 item 1). Raw
-    request text has exactly one home now, so fact 3091 holds unconditionally
-    — including with the legacy opt-in forced on."""
+def test_gate_log_never_carries_request_text_and_has_no_opt_in_left():
+    """The whole ``CLAUDE_KB_LOG_RAW_QUERY`` affordance is retired (5141 item 1,
+    review round 1 / 5216). There is no setting that puts free text in gate.log,
+    so fact 3091 holds unconditionally rather than by default — pinned by the
+    absence of the flag itself, not merely by its default value."""
     tmp, conn = _fresh_db()
-    _prev = gate.LOG_RAW_QUERY
     try:
-        for flag in (False, True):
-            gate.LOG_RAW_QUERY = flag
-            _run(conn, tmp, SENTINEL)
-            raw = json.dumps(_gate_rows(tmp)[-1])
-            _assert("query_excerpt" not in raw,
-                    f"query_excerpt must be gone (LOG_RAW_QUERY={flag}): {raw[:400]}")
-            _assert("zqxjvbnm-sentinel-request-text" not in raw,
-                    f"raw request text must never reach gate.log "
-                    f"(LOG_RAW_QUERY={flag}): {raw[:400]}")
-        print("PASS gate_log_never_carries_request_text_under_any_setting")
+        os.environ["CLAUDE_KB_LOG_RAW_QUERY"] = "1"   # must be inert now
+        _assert(not hasattr(gate, "LOG_RAW_QUERY"),
+                "the opt-in flag must not exist; a flag that exists can be set")
+        _assert(not hasattr(gate, "LOG_QUERY_EXCERPT_CHARS"),
+                "the excerpt cap must not exist; nothing excerpts text any more")
+        _run(conn, tmp, SENTINEL)
+        raw = json.dumps(_gate_rows(tmp)[-1])
+        for banned in ("query_excerpt", "uncovered_claim_texts",
+                       "zqxjvbnm-sentinel-request-text"):
+            _assert(banned not in raw, f"{banned} must not reach gate.log: {raw[:400]}")
+        print("PASS gate_log_never_carries_request_text_and_has_no_opt_in_left")
     finally:
-        gate.LOG_RAW_QUERY = _prev
+        os.environ.pop("CLAUDE_KB_LOG_RAW_QUERY", None)
         _cleanup(tmp, conn)
 
 
@@ -383,12 +384,19 @@ def test_sweep_finds_request_text_only_in_the_private_store():
     """Item-2 acceptance: an automated sweep of every artifact a run produces
     finds zero raw request text outside the 0600 store."""
     tmp, conn = _fresh_db()
-    _prev = gate.LOG_RAW_QUERY
+    original = gate.classify_gate
     try:
-        gate.LOG_RAW_QUERY = True  # adversarial: legacy opt-in forced on
+        # Adversarial on two axes: the retired opt-in forced on in the
+        # environment, and a classifier that echoes the whole request back as a
+        # claim — the exact pair that leaked in review round 1.
+        os.environ["CLAUDE_KB_LOG_RAW_QUERY"] = "1"
+        gate.classify_gate = (
+            lambda chain_assembly, **kw: _verdict_echoing_the_request(SENTINEL)
+        )
         _ins(conn, "decision", "Redis session cache", "Redis session cache body")
-        _run(conn, tmp, SENTINEL, session_id="33333333-3333-3333-3333-333333333333",
-             host_adapter="claude")
+        gate.run_gate(conn, SENTINEL, project_path=tmp, use_llm=True,
+                      session_id="33333333-3333-3333-3333-333333333333",
+                      host_adapter="claude")
         conn.commit()
         store = request_text_store.store_path(tmp).resolve()
         vault = paths.project_dir(tmp).resolve()
@@ -407,7 +415,163 @@ def test_sweep_finds_request_text_only_in_the_private_store():
         print(f"PASS sweep_finds_request_text_only_in_the_private_store "
               f"({swept} artifacts swept)")
     finally:
-        gate.LOG_RAW_QUERY = _prev
+        os.environ.pop("CLAUDE_KB_LOG_RAW_QUERY", None)
+        gate.classify_gate = original
+        _cleanup(tmp, conn)
+
+
+def test_write_repairs_a_permissive_store_before_writing():
+    """A store left world-readable — created before this rule, or by a stray
+    umask — is tightened to 0600 *before* the first prompt byte reaches it,
+    not after."""
+    tmp, conn = _fresh_db()
+    try:
+        path = request_text_store.store_path(tmp)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch()
+        os.chmod(path, 0o644)
+        _run(conn, tmp, SENTINEL)
+        _assert(stat.S_IMODE(path.stat().st_mode) == 0o600,
+                f"permissive store must be repaired: {oct(stat.S_IMODE(path.stat().st_mode))}")
+        _assert(_records(tmp)[-1]["request_text"] == SENTINEL,
+                "and the record is written once it is private")
+        print("PASS write_repairs_a_permissive_store_before_writing")
+    finally:
+        _cleanup(tmp, conn)
+
+
+def test_write_fails_closed_when_the_mode_cannot_be_made_private():
+    """Review round 1, item 1(a): asserting the mode is not the same as
+    achieving it. `fchmod` is Unix-only and can fail outright — unsupported
+    filesystem, foreign ownership — and the old code swallowed that and wrote
+    anyway, putting cleartext prompts in a world-readable file. The mode is now
+    verified on the open descriptor and the write abandoned when it does not
+    hold. Losing one episode's text is the safe failure; leaking the prompt is
+    not."""
+    tmp, conn = _fresh_db()
+    real_fchmod = os.fchmod
+    try:
+        path = request_text_store.store_path(tmp)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch()
+        os.chmod(path, 0o644)
+
+        def _refuse(*_args, **_kwargs):
+            raise OSError("simulated: filesystem does not support fchmod")
+        os.fchmod = _refuse
+
+        _run(conn, tmp, SENTINEL)
+        _assert(path.read_bytes() == b"",
+                f"nothing may be written to a non-private store: "
+                f"{path.read_bytes()[:200]!r}")
+        _assert(stat.S_IMODE(path.stat().st_mode) == 0o644,
+                "and we do not silently claim a mode we could not set")
+        _assert(len(_gate_rows(tmp)) == 1,
+                "the structural log must still fire when the text write is refused")
+        print("PASS write_fails_closed_when_the_mode_cannot_be_made_private")
+    finally:
+        os.fchmod = real_fchmod
+        _cleanup(tmp, conn)
+
+
+def test_write_succeeds_when_an_existing_store_is_already_private():
+    """The fail-closed check must not reject the file this module itself
+    created on a previous call — appends to an existing 0600 store still work."""
+    tmp, conn = _fresh_db()
+    try:
+        _run(conn, tmp, SENTINEL)
+        _run(conn, tmp, SENTINEL + " second")
+        records = _records(tmp)
+        _assert(len(records) == 2, f"append to an existing 0600 store: {records}")
+        mode = stat.S_IMODE(request_text_store.store_path(tmp).stat().st_mode)
+        _assert(mode == 0o600, f"store must stay 0600 across appends: {oct(mode)}")
+        print("PASS write_succeeds_when_an_existing_store_is_already_private")
+    finally:
+        _cleanup(tmp, conn)
+
+
+def test_paired_records_share_a_daily_file_across_the_utc_midnight_boundary():
+    """Review round 1, item 1(b): both writers must derive their daily file
+    from the ONE shared timestamp. Sampling the date independently lets a call
+    that straddles midnight drop its two halves into different days, which
+    breaks the one-day join the store exists to support.
+
+    Simulated by freezing the shared stamp just before midnight while the
+    ambient clock has already rolled over."""
+    tmp, conn = _fresh_db()
+    frozen_ts = "2026-01-01T23:59:59.999Z"
+    _now, _today = log_utils.now_iso, log_utils._today_utc_date
+    try:
+        log_utils.now_iso = lambda: frozen_ts
+        log_utils._today_utc_date = lambda: "2026-01-02"   # clock already rolled
+        _run(conn, tmp, SENTINEL)
+        vault = paths.project_dir(tmp)
+        gate_day1 = vault / f"{gate.LOG_STREAM}-2026-01-01.log"
+        gate_day2 = vault / f"{gate.LOG_STREAM}-2026-01-02.log"
+        text_day1 = vault / f"{request_text_store.STREAM}-2026-01-01.jsonl"
+        text_day2 = vault / f"{request_text_store.STREAM}-2026-01-02.jsonl"
+        _assert(gate_day1.exists() and not gate_day2.exists(),
+                "gate row must land on the timestamp's day, not the clock's")
+        _assert(text_day1.exists() and not text_day2.exists(),
+                "text record must land on the timestamp's day, not the clock's")
+        row = json.loads(gate_day1.read_text(encoding="utf-8").strip())
+        record = json.loads(text_day1.read_text(encoding="utf-8").strip())
+        _assert(row["ts"] == frozen_ts == record["ts"], (row["ts"], record["ts"]))
+        _assert(row["query_hash"] == record["query_hash"],
+                f"pair must still join: {row['query_hash']} vs {record['query_hash']}")
+        print("PASS paired_records_share_a_daily_file_across_the_utc_midnight_boundary")
+    finally:
+        log_utils.now_iso, log_utils._today_utc_date = _now, _today
+        _cleanup(tmp, conn)
+
+
+def _verdict_echoing_the_request(request):
+    """A verdict whose uncovered claim repeats the request verbatim — the exact
+    shape review round 1 flagged as a leak path."""
+    return {
+        "recommendation": "MODIFY",
+        "summary": "s",
+        "decision_chain": [],
+        "evidence_nodes": [],
+        "load_bearing_claims": [
+            {"claim": request, "evidence_type": "none", "evidence_ref": None},
+        ],
+        "uncovered_claims": [{"claim": request, "gap_type": "unknowable"}],
+        "backend": "stub",
+        "prompt_chars": 10,
+    }
+
+
+def test_gate_log_omits_request_text_echoed_back_as_a_claim():
+    """Review round 1, item 2: claim text is not a separate privacy class from
+    request text — a classifier that repeats the request as an uncovered claim
+    would have carried the whole prompt into gate.log. The earlier sweep ran
+    with use_llm=False, so no claim ever existed to leak; this drives the
+    classifier path through a stub instead."""
+    tmp, conn = _fresh_db()
+    original = gate.classify_gate
+    try:
+        gate.classify_gate = (
+            lambda chain_assembly, **kw: _verdict_echoing_the_request(SENTINEL)
+        )
+        gate.run_gate(conn, SENTINEL, project_path=tmp, use_llm=True)
+        line = (
+            log_utils.today_log_path(gate.LOG_STREAM, tmp)
+            .read_text(encoding="utf-8").strip().splitlines()[-1]
+        )
+        entry = json.loads(line)
+        _assert(entry["uncovered_claim_count"] == 1,
+                f"the structural count must survive: {entry}")
+        _assert("uncovered_claim_texts" not in entry,
+                f"claim text must not be emitted: {entry}")
+        _assert("zqxjvbnm-sentinel-request-text" not in line,
+                f"request text reached gate.log via a claim: {line[:400]}")
+        # And the verbatim text is still captured where it belongs.
+        _assert(_records(tmp)[-1]["request_text"] == SENTINEL,
+                "the private store must still hold the verbatim request")
+        print("PASS gate_log_omits_request_text_echoed_back_as_a_claim")
+    finally:
+        gate.classify_gate = original
         _cleanup(tmp, conn)
 
 

@@ -277,19 +277,23 @@ EXCLUDED_SEED_KINDS: frozenset[str] = frozenset(
 # tuning (verdict distribution, MODIFY hedge rate, latency, budget burn) has
 # the data it needs after ~100 prompts.
 LOG_STREAM = "gate"
-LOG_QUERY_EXCERPT_CHARS = 200
 
-# Structural-only invariant (id=1108 §3 / id=3091): gate.log must not carry raw
-# prompt text. query_hash is the correlation key the Gap A+D correlator joins
+# Structural-only invariant (id=1108 §3 / id=3091): gate.log carries no free
+# text at all. query_hash is the correlation key the Gap A+D correlator joins
 # on, and the raw query is never a learning feature.
 #
-# The query_excerpt affordance that used to ride this flag is retired (id=5141):
-# a 200-char cap silently truncated 54% of real requests, so it was never a
-# usable text source, and verbatim text now has a private home of its own in
-# request_text_store. gate.log therefore carries no request text under any
-# setting. The flag survives only for uncovered_claim_texts, a separate
-# local-debug affordance over classifier claim text, not request text.
-LOG_RAW_QUERY = os.environ.get("CLAUDE_KB_LOG_RAW_QUERY") == "1"
+# The CLAUDE_KB_LOG_RAW_QUERY opt-in that used to relax this is retired
+# (id=5141, review round 1 / id=5216). It gated two payloads and both leaked
+# the prompt: query_excerpt copied it directly, capped at 200 chars — silently
+# truncating 54% of real requests, so it was never a usable text source anyway;
+# and uncovered_claim_texts copied the classifier's uncovered claims, which are
+# drawn FROM the request and routinely quote it verbatim. Treating claim text
+# as a separate privacy class from request text was the error. Verbatim text
+# now has one private home, request_text_store, and gate.log has none.
+#
+# Counts survive where the text does not: load_bearing_claim_count,
+# uncovered_claim_count, and the gap/evidence histograms are unchanged, so the
+# citation-gap signal (id=1220 / id=1253) keeps everything it actually used.
 
 
 def assemble_gate(
@@ -2808,23 +2812,18 @@ def _log_invocation(
             "evidence_type_counts": _evidence_type_histogram(verdict),
             "gap_type_counts": _gap_type_histogram(verdict),
         }
-        # Claim text is content, so it stays behind the local-debug opt-in.
-        # Request text is NOT here under any setting — see LOG_RAW_QUERY and
-        # the request_text_store write below.
-        if LOG_RAW_QUERY:
-            entry["uncovered_claim_texts"] = [
-                str(u.get("claim", ""))[:LOG_QUERY_EXCERPT_CHARS]
-                for u in (verdict.get("uncovered_claims") or [])
-            ]
-        # One timestamp for both writes, so the private text record joins this
-        # row exactly on (query_hash, ts) rather than on two near-identical
-        # clock reads (id=5141).
+        # One timestamp AND one derived date for both writes, so the private
+        # text record joins this row exactly on (query_hash, ts) rather than on
+        # two near-identical clock reads, and a call straddling UTC midnight
+        # cannot split the pair across daily files (id=5141 / id=5216).
         event_ts = log_utils.now_iso()
+        event_date = log_utils.date_from_ts(event_ts)
         log_utils.emit_event(
             LOG_STREAM, entry,
             project_path=project_path,
             session_id=session_id,
             ts=event_ts,
+            log_date=event_date,
         )
         # Verbatim request text, vault-local and 0600 (id=5141 / 4676 A4 v5).
         # Ordered after the structural row and internally best-effort, so the
@@ -2839,6 +2838,7 @@ def _log_invocation(
             session_id=session_id,
             host_adapter=measurement.get("host_adapter"),
             runtime_version=measurement.get("runtime_version"),
+            log_date=event_date,
         )
     except Exception:
         pass

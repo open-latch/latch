@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 from datetime import date, datetime, timezone
 from pathlib import Path
 
@@ -139,11 +140,37 @@ def _append_private(path: Path, line: str) -> None:
                 os.fchmod(descriptor, 0o600)
             except OSError:
                 pass
+        _assert_private(descriptor)
         payload = (line + "\n").encode("utf-8")
         while payload:
             payload = payload[os.write(descriptor, payload):]
     finally:
         os.close(descriptor)
+
+
+def _assert_private(descriptor: int) -> None:
+    """Raise unless the open descriptor is a regular file the owner alone can read.
+
+    Asserting the mode is not the same as achieving it: `fchmod` is Unix-only
+    and can fail outright (unsupported filesystem, foreign ownership), and a
+    store created before this rule existed may already be 0644. Setting the
+    mode and writing regardless would put cleartext prompts in a
+    world-readable file — so the mode is verified on the descriptor already
+    held, and a write that cannot be made private is abandoned instead.
+
+    Failing closed costs at most one episode's text, which a consumer then
+    treats as ineligible (4676 A4(f)). Failing open costs the privacy posture
+    the whole store rests on (4562). The missing record is detectable — its
+    gate.log row still exists and carries the same query_hash.
+    """
+    info = os.fstat(descriptor)
+    if not stat.S_ISREG(info.st_mode):
+        raise OSError("request-text store is not a regular file")
+    if stat.S_IMODE(info.st_mode) != 0o600:
+        raise OSError(
+            "refusing to write request text to a non-private store "
+            f"(mode {oct(stat.S_IMODE(info.st_mode))})"
+        )
 
 
 def record(
@@ -157,12 +184,18 @@ def record(
     session_id: str | None = None,
     host_adapter: str | None = None,
     runtime_version: str | None = None,
+    log_date: date | None = None,
 ) -> None:
     """Persist one verbatim request-text record. Best-effort, never raises.
 
     ``ts`` is the gate.log row's own timestamp, passed in rather than sampled
     here so ``(query_hash, ts)`` is an exact join key and not an approximate
-    one. ``request`` is written exactly as received — never trimmed, capped, or
+    one. ``log_date`` likewise comes from the caller and must be derived from
+    that same ``ts``: a call straddling UTC midnight would otherwise have each
+    writer sample the date on its own and drop the pair into different daily
+    files, breaking the one-day join this store exists to serve.
+
+    ``request`` is written exactly as received — never trimmed, capped, or
     normalized, because the consumer verifies it against ``query_hash`` and
     ``query_chars`` and any edit fails that check by design.
     """
@@ -184,7 +217,7 @@ def record(
             "request_text": request,
         }
         _append_private(
-            store_path(project_path),
+            store_path(project_path, log_date),
             json.dumps(row, ensure_ascii=False, default=str),
         )
     except Exception:

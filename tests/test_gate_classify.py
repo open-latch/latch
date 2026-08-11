@@ -15,6 +15,7 @@ we exercise:
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import sys
 import tempfile
@@ -469,9 +470,8 @@ def test_run_gate_log_records_length_of_long_query_without_text():
     Verbatim text lives in request_text_store, covered by
     tests/test_gate_request_text_store.py."""
     tmp, conn = _fresh_db()
-    _prev = gate.LOG_RAW_QUERY
-    gate.LOG_RAW_QUERY = True
     try:
+        os.environ["CLAUDE_KB_LOG_RAW_QUERY"] = "1"   # retired, must be inert
         long_q = "x" * 5000
         gate.run_gate(
             conn, long_q, project_path=tmp, use_llm=False,
@@ -490,37 +490,34 @@ def test_run_gate_log_records_length_of_long_query_without_text():
                 f"row must stay small next to a 5000-char prompt: {len(line)}")
         print("PASS run_gate_log_records_length_of_long_query_without_text")
     finally:
-        gate.LOG_RAW_QUERY = _prev
+        os.environ.pop("CLAUDE_KB_LOG_RAW_QUERY", None)
         _cleanup(tmp, conn)
 
 
 def test_run_gate_log_never_carries_raw_query():
     """query_hash + query_chars are always present; the request text never is,
-    under any value of CLAUDE_KB_LOG_RAW_QUERY. Structural-only invariant
-    id=1108 §3 / id=1225 / id=3091, now unconditional (id=5141)."""
+    and there is no longer any setting that changes that. Structural-only
+    invariant id=1108 §3 / id=1225 / id=3091, unconditional (id=5141 / id=5216)."""
     tmp, conn = _fresh_db()
-    _prev = gate.LOG_RAW_QUERY
     try:
-        for flag in (False, True):
-            gate.LOG_RAW_QUERY = flag
-            gate.run_gate(
-                conn, "secret prompt body", project_path=tmp, use_llm=False,
-            )
-            line = (
-                log_utils.today_log_path(gate.LOG_STREAM, tmp)
-                .read_text(encoding="utf-8").strip().splitlines()[-1]
-            )
-            entry = json.loads(line)
-            _assert("query_excerpt" not in entry,
-                    f"excerpt must be gone (LOG_RAW_QUERY={flag}): {entry}")
-            _assert("secret prompt body" not in line,
-                    f"raw text must never reach the row (LOG_RAW_QUERY={flag}): {line}")
-            _assert(len(entry["query_hash"]) == 12
-                    and entry["query_chars"] == len("secret prompt body"),
-                    f"hash + chars always present: {entry}")
+        os.environ["CLAUDE_KB_LOG_RAW_QUERY"] = "1"   # retired, must be inert
+        gate.run_gate(
+            conn, "secret prompt body", project_path=tmp, use_llm=False,
+        )
+        line = (
+            log_utils.today_log_path(gate.LOG_STREAM, tmp)
+            .read_text(encoding="utf-8").strip().splitlines()[-1]
+        )
+        entry = json.loads(line)
+        _assert("query_excerpt" not in entry, f"excerpt must be gone: {entry}")
+        _assert("secret prompt body" not in line,
+                f"raw text must never reach the row: {line}")
+        _assert(len(entry["query_hash"]) == 12
+                and entry["query_chars"] == len("secret prompt body"),
+                f"hash + chars always present: {entry}")
         print("PASS run_gate_log_never_carries_raw_query")
     finally:
-        gate.LOG_RAW_QUERY = _prev
+        os.environ.pop("CLAUDE_KB_LOG_RAW_QUERY", None)
         _cleanup(tmp, conn)
 
 
@@ -746,27 +743,33 @@ def test_run_gate_log_structural_claim_counts():
         _cleanup(tmp, conn)
 
 
-def test_run_gate_log_claim_texts_opt_in():
-    """Claim text is content — emitted only when CLAUDE_KB_LOG_RAW_QUERY is on,
-    same opt-in as query_excerpt."""
+def test_run_gate_log_never_emits_claim_texts():
+    """Claim text is not a separate privacy class from request text — uncovered
+    claims are drawn from the request and routinely quote it. The opt-in that
+    used to emit them is retired (id=5141 / id=5216); only the counts remain,
+    and setting the old env var changes nothing."""
     tmp, conn = _fresh_db()
-    _prev = gate.LOG_RAW_QUERY
     original = gate.classify_gate
     try:
+        os.environ["CLAUDE_KB_LOG_RAW_QUERY"] = "1"   # inert
         seed = _ins(conn, "decision", "seed", "seed body")
         gate.classify_gate = lambda chain_assembly, **kw: _stub_verdict_with_claims(seed)
-        gate.LOG_RAW_QUERY = True
         gate.run_gate(conn, "request text", project_path=tmp, use_llm=True)
-        entry = json.loads(
+        line = (
             log_utils.today_log_path(gate.LOG_STREAM, tmp)
             .read_text(encoding="utf-8").strip().splitlines()[-1]
         )
-        _assert(entry.get("uncovered_claim_texts") == ["claim_zzz_two"],
-                f"uncovered claim texts present when opted in: {entry}")
-        print("PASS run_gate_log_claim_texts_opt_in")
+        entry = json.loads(line)
+        _assert("uncovered_claim_texts" not in entry,
+                f"claim texts must never be emitted: {entry}")
+        _assert("claim_zzz_one" not in line and "claim_zzz_two" not in line,
+                f"no claim text anywhere in the row: {line}")
+        _assert(entry["uncovered_claim_count"] == 1,
+                f"the structural count still stands: {entry}")
+        print("PASS run_gate_log_never_emits_claim_texts")
     finally:
+        os.environ.pop("CLAUDE_KB_LOG_RAW_QUERY", None)
         gate.classify_gate = original
-        gate.LOG_RAW_QUERY = _prev
         _cleanup(tmp, conn)
 
 

@@ -54,6 +54,21 @@ def now_iso() -> str:
     return _now_iso()
 
 
+def date_from_ts(ts: str) -> date | None:
+    """Return the UTC date a `now_iso` stamp falls on, or None if unparsable.
+
+    Pairs with `now_iso`: a caller writing two correlated artifacts derives the
+    daily-file date from the shared stamp rather than letting each writer
+    sample the clock, which would otherwise split a pair written either side of
+    UTC midnight. None means "no opinion" — callers pass it straight through to
+    `emit_event(log_date=...)`, which then falls back to today as before.
+    """
+    try:
+        return date(int(ts[0:4]), int(ts[5:7]), int(ts[8:10]))
+    except (TypeError, ValueError, IndexError):
+        return None
+
+
 def _project_basename(project_path: str | os.PathLike | None) -> str:
     """Sanitized basename matching `project_dir`'s naming convention.
 
