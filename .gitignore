@@ -24,6 +24,9 @@ latch_settings.json
 # raw source coordinates (ruling 4562) — never committed, nor its writer lock.
 **/outcome-lineage.json
 **/outcome-lineage.json.lock
+# verbatim gate request text: the same vault-local private class (ruling 4562,
+# id=5141). Cleartext prompts, 0600, never committed.
+**/gate-request-text-*.jsonl
 
 # DB files and dumps (data layer — never committed under any path)
 *.db

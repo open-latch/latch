@@ -44,6 +44,16 @@ def _now_iso() -> str:
     return now.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now.microsecond // 1000:03d}Z"
 
 
+def now_iso() -> str:
+    """Public alias for the common-header timestamp format.
+
+    Callers that write a second, correlated artifact alongside a log row stamp
+    both from one call to this, then pass the value to `emit_event(ts=...)`, so
+    the two share a timestamp instead of sampling the clock twice.
+    """
+    return _now_iso()
+
+
 def _project_basename(project_path: str | os.PathLike | None) -> str:
     """Sanitized basename matching `project_dir`'s naming convention.
 
@@ -120,6 +130,7 @@ def emit_event(
     project_path: str | os.PathLike | None = None,
     session_id: str | None = None,
     log_date: date | None = None,
+    ts: str | None = None,
 ) -> None:
     """Append one JSONL row to the daily file for ``event_type``.
 
@@ -131,6 +142,10 @@ def emit_event(
     Used by the offline correlator (id=1098) so emitted gate_outcome rows
     land in the same daily file as the source gate.log row — required for
     cross-run dedup via ``read_log_range`` over the same date range.
+
+    ``ts`` overrides the header timestamp (default = now). Supplied by callers
+    that write a correlated artifact alongside the row and need both to carry
+    one timestamp; see `now_iso`. The header still wins over ``row``.
     """
     try:
         if log_date is None:
@@ -140,7 +155,7 @@ def emit_event(
         path = _project_log_dir(project_path) / f"{event_type}-{file_date}.log"
         path.parent.mkdir(parents=True, exist_ok=True)
         header = {
-            "ts": _now_iso(),
+            "ts": ts or _now_iso(),
             "project": _project_basename(project_path),
             "session_id": session_id,
             "event_type": event_type,

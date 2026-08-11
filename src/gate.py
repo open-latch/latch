@@ -79,6 +79,7 @@ import paths
 import priorities
 import profiles
 import project_proof
+import request_text_store
 import search
 
 
@@ -278,13 +279,16 @@ EXCLUDED_SEED_KINDS: frozenset[str] = frozenset(
 LOG_STREAM = "gate"
 LOG_QUERY_EXCERPT_CHARS = 200
 
-# Structural-only invariant (id=1108 §3): gate.log must not carry raw prompt
-# text by default. query_hash is the correlation key the Gap A+D correlator
-# joins on, and the raw query is never a learning feature — so the human-
-# readable query_excerpt is opt-in for local debugging only, default off,
-# mirroring the CLAUDE_KB_GIT_SNAPSHOT opt-in. Set CLAUDE_KB_LOG_RAW_QUERY=1
-# to restore it. (Resolves id=1225; reconciles the id=613 hash+excerpt
-# default, which predates the id=1108 structural-only lock.)
+# Structural-only invariant (id=1108 §3 / id=3091): gate.log must not carry raw
+# prompt text. query_hash is the correlation key the Gap A+D correlator joins
+# on, and the raw query is never a learning feature.
+#
+# The query_excerpt affordance that used to ride this flag is retired (id=5141):
+# a 200-char cap silently truncated 54% of real requests, so it was never a
+# usable text source, and verbatim text now has a private home of its own in
+# request_text_store. gate.log therefore carries no request text under any
+# setting. The flag survives only for uncovered_claim_texts, a separate
+# local-debug affordance over classifier claim text, not request text.
 LOG_RAW_QUERY = os.environ.get("CLAUDE_KB_LOG_RAW_QUERY") == "1"
 
 
@@ -2804,21 +2808,37 @@ def _log_invocation(
             "evidence_type_counts": _evidence_type_histogram(verdict),
             "gap_type_counts": _gap_type_histogram(verdict),
         }
-        # Raw query text is opt-in only (structural-only invariant, id=1108
-        # §3): query_hash above is the correlation key, query_excerpt is a
-        # local human-debug affordance. Default off; CLAUDE_KB_LOG_RAW_QUERY=1
-        # restores it.
+        # Claim text is content, so it stays behind the local-debug opt-in.
+        # Request text is NOT here under any setting — see LOG_RAW_QUERY and
+        # the request_text_store write below.
         if LOG_RAW_QUERY:
-            entry["query_excerpt"] = request[:LOG_QUERY_EXCERPT_CHARS]
-            # Claim text is content, gated behind the same opt-in as query text.
             entry["uncovered_claim_texts"] = [
                 str(u.get("claim", ""))[:LOG_QUERY_EXCERPT_CHARS]
                 for u in (verdict.get("uncovered_claims") or [])
             ]
+        # One timestamp for both writes, so the private text record joins this
+        # row exactly on (query_hash, ts) rather than on two near-identical
+        # clock reads (id=5141).
+        event_ts = log_utils.now_iso()
         log_utils.emit_event(
             LOG_STREAM, entry,
             project_path=project_path,
             session_id=session_id,
+            ts=event_ts,
+        )
+        # Verbatim request text, vault-local and 0600 (id=5141 / 4676 A4 v5).
+        # Ordered after the structural row and internally best-effort, so the
+        # log this function exists to write cannot be lost to a store failure.
+        request_text_store.record(
+            request=request,
+            query_hash=entry["query_hash"],
+            query_chars=entry["query_chars"],
+            ts=event_ts,
+            gate_call_id=gate_call_id,
+            project_path=project_path,
+            session_id=session_id,
+            host_adapter=measurement.get("host_adapter"),
+            runtime_version=measurement.get("runtime_version"),
         )
     except Exception:
         pass

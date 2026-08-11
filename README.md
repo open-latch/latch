@@ -326,6 +326,15 @@ For the standard shared MCP runtime, opt out by setting `"outcome_events": false
 `runtime_settings.json` vault-policy file printed by quickstart, preserving its other keys. Direct
 CLI processes can instead set the `LATCH_OUTCOME_EVENTS` environment variable to `0`.
 
+**Local request text.** Separately from those structural records, latch writes the verbatim text of
+each gate request to `gate-request-text-YYYY-MM-DD.jsonl` in the same local vault, so a prompt can
+still be read back after the fact — the structural logs keep only a hash. The file holds your prompt
+text in the clear and is created private (mode `0600`); it is never uploaded and never leaves the
+vault. Set the `LATCH_REQUEST_TEXT_CAPTURE` environment variable to `0` to turn it off, which
+suppresses the text while leaving the structural records untouched. Unlike the daily structural logs,
+this file is not compressed or expired by nightly maintenance — delete it yourself when you want it
+gone.
+
 **Overhead.** The per-prompt retrieval hook runs locally against the KB —
 roughly 120–150 ms on an Apple Silicon reference machine, inside a 250 ms
 budget — and injects at most five compact KB pointers. A healthy session start

@@ -44,7 +44,7 @@ _HEADER = {"ts", "project", "session_id", "event_type"}
 # that guarantee against future edits.
 _FORBIDDEN = {
     "title", "body", "node_title", "src_title", "dst_title",
-    "query_text", "query_excerpt", "raw_request", "prompt",
+    "query_text", "query_excerpt", "raw_request", "request_text", "prompt",
     "objection", "question", "claim", "description", "reason", "summary",
 }
 

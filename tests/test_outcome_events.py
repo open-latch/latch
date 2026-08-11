@@ -30,6 +30,7 @@ _FORBIDDEN_KEYS = {
     "query_text",
     "query_excerpt",
     "raw_request",
+    "request_text",
     "prompt",
     "claim",
     "description",
