@@ -153,3 +153,67 @@ def test_cursor_backend_environment_is_an_agent_context() -> None:
     assert project_config.is_agent_context(
         {"CURSOR_KB_COMPACTOR_BACKEND": "cursor"}
     )
+
+
+def test_duplicate_session_start_in_same_scope_stays_idempotent(
+    session_scope: tuple[Path, Path],
+) -> None:
+    root, _vault = session_scope
+    first = project_config.record_session_binding(root, "duplicate-start-task")
+    assert first is not None
+    assert project_config.record_session_binding(root, "duplicate-start-task") == first
+
+
+def test_racing_first_bindings_cannot_both_claim_one_session(
+    session_scope: tuple[Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The one-way session fence must hold even when two roots record the same
+    session id concurrently: exactly one exclusive create wins and the loser
+    fails closed instead of silently overwriting the receipt."""
+    import os
+
+    root, _vault = session_scope
+    test_root = paths.validated_test_root()
+    assert test_root is not None
+    other_root = tmp_path / "other-client"
+    other_root.mkdir()
+    other_vault = test_root / "vaults" / f"race-{tmp_path.name}"
+    other_vault.mkdir(parents=True)
+    project_config.create_scope(other_root, policy=project_config.POLICY_PRIVATE)
+    project_config.authorize_scope(other_root, kb_dir=other_vault)
+
+    session = "race-shared-session"
+    receipt = project_config._session_path(session)
+    original_open = os.open
+    state = {"raced": False}
+
+    def racing_open(path, flags, *args, **kwargs):  # type: ignore[no-untyped-def]
+        if (
+            not state["raced"]
+            and isinstance(path, (str, os.PathLike))
+            and Path(path) == receipt
+            and flags & os.O_EXCL
+        ):
+            state["raced"] = True
+            # The competitor's SessionStart in the other root lands between
+            # this caller's decision to bind and its exclusive create.
+            assert (
+                project_config.record_session_binding(other_root, session)
+                is not None
+            )
+        return original_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", racing_open)
+    with pytest.raises(
+        project_config.ProjectConfigError, match="older Latch scope"
+    ):
+        project_config.record_session_binding(root, session)
+    monkeypatch.setattr(os, "open", original_open)
+
+    # The winner's receipt survives byte-exact; the loser gained no authority.
+    assert project_config.current_session_revision(other_root, session) == (
+        project_config.resolve(other_root).revision
+    )
+    assert project_config.current_session_revision(root, session) is None

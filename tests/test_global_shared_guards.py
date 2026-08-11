@@ -49,6 +49,34 @@ def _pin(home, vault) -> None:
         refresh()
 
 
+def test_global_continuity_epoch_rotates_shared_revisions_only_when_present(
+    compatibility_scope_env: dict, tmp_path,
+) -> None:
+    """Absent epoch file preserves existing installs' revisions; every bump
+    permanently rotates the install-wide Shared revision (and with it every
+    session receipt recorded before an OFF/ON cycle)."""
+    project = tmp_path / "epoch-project"
+    project.mkdir()
+    assert not project_config.global_continuity_epoch_path().exists()
+    before = project_config.resolve(project)
+    assert before.state == project_config.MODE_LATCHED
+    assert project_config.resolve(project).revision == before.revision
+
+    session_revision = project_config.record_session_binding(project, "pre-cycle")
+    assert session_revision == before.revision
+
+    project_config.bump_global_continuity_epoch()
+    first_bump = project_config.resolve(project)
+    assert first_bump.state == project_config.MODE_LATCHED
+    assert first_bump.kb_dir == before.kb_dir
+    assert first_bump.revision != before.revision
+    assert project_config.current_session_revision(project, "pre-cycle") is None
+
+    project_config.bump_global_continuity_epoch()
+    second_bump = project_config.resolve(project)
+    assert second_bump.revision != first_bump.revision
+
+
 def test_inplace_vault_substitution_is_adopted_in_shared_mode(
     compatibility_scope_env: dict, tmp_path,
 ) -> None:

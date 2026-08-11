@@ -192,10 +192,22 @@ def _apply_global_latch(root: Path) -> int:
         messages = unlatch.enable(recorded_root)
     for message in messages:
         print(f"  {message}")
+    # Rotate the install-wide continuity epoch BEFORE removing the OFF
+    # receipts: a crash in between leaves the safer OFF state intact while
+    # pre-cycle session receipts are already permanently stale.
+    project_config.bump_global_continuity_epoch()
     for path in (paths.UNLATCHED_FILE, paths.DISABLE_FILE, paths.DISABLE_WRITE_FILE):
         if path.exists() or path.is_symlink():
             project_config.durable_unlink(path)
             print(f"  removed {path}")
+    target = project_config.resolve(root)
+    if target.state != project_config.MODE_LATCHED:
+        print("Global overrides were removed, but Latch is NOT latched.")
+        print(f"  state : {str(target.state).upper()}")
+        if target.reason:
+            print(f"  reason: {target.reason}")
+        print("Re-run the installer to repair the shared KB pin before relying on Latch.")
+        return 1
     print("Latch is LATCHED in global Shared mode.")
     if any(
         os.environ.get(name)
@@ -491,7 +503,17 @@ def apply_latch(
     enable_project_scopes: bool = False,
 ) -> int:
     root = _selected_root(project)
-    if project_config.read_machine_policy() != project_config.MACHINE_POLICY_SHARED:
+    try:
+        machine_policy = project_config.read_machine_policy()
+    except project_config.ProjectConfigError:
+        # A confirmed latch is the documented way to finish a one-way
+        # activation whose receipt write was interrupted; every other
+        # torn-state reader stays fail-closed.
+        with project_config.machine_policy_transition_lock():
+            if not project_config.repair_interrupted_explicit_activation():
+                raise
+        machine_policy = project_config.read_machine_policy()
+    if machine_policy != project_config.MACHINE_POLICY_SHARED:
         return _apply_project_latch(
             root,
             policy=policy,
@@ -513,6 +535,18 @@ def apply_latch(
             if policy not in project_config.POLICIES:
                 raise project_config.ProjectConfigError(
                     "enabling project scopes requires an explicit Shared or Private choice"
+                )
+            if (
+                policy == project_config.POLICY_PRIVATE
+                and not new_kb
+                and kb_dir is None
+            ):
+                # First activation can have no central binding to fall back on,
+                # so this invocation is statically doomed. Refuse it before the
+                # one-way machine-policy flip instead of after.
+                raise project_config.ProjectConfigError(
+                    "enabling project scopes with a Private choice requires "
+                    "--new-kb or --kb-dir"
                 )
             _assert_local_transition_allowed(enabling=True)
             global_target = project_config.resolve(root)
@@ -550,6 +584,13 @@ def apply_latch(
                 raise project_config.ProjectConfigError(
                     f"a {override} is active; recover it explicitly before latching"
                 )
+            if global_target.state != project_config.MODE_LATCHED:
+                print("Latch is NOT latched in global Shared mode. No state changed.")
+                print(f"  state : {str(global_target.state).upper()}")
+                if global_target.reason:
+                    print(f"  reason: {global_target.reason}")
+                print("Re-run the installer to repair the shared KB pin before relying on Latch.")
+                return 1
             print("Latch is already LATCHED in global Shared mode. No state changed.")
             return 0
 

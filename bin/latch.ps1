@@ -41,6 +41,9 @@ if ($Shared -and $Private) { throw "latch: choose Shared or Private, not both" }
 if ($EnableProjectScopes -and -not ($Shared -or $Private)) {
   throw "latch: -EnableProjectScopes requires an explicit -Shared or -Private choice"
 }
+if ($EnableProjectScopes -and $Private -and -not ($NewKb -or $KbDir)) {
+  throw "latch: -EnableProjectScopes -Private requires -NewKb or -KbDir"
+}
 
 $ModeArgs = @("latch", "--project", $ProjectInput, "--confirm", "latch")
 if ($Shared) { $ModeArgs += "--shared" }

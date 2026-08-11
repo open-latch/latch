@@ -209,7 +209,10 @@ def test_untouched_install_defaults_to_global_shared_without_policy_file(
 
     # Existing Shared users do not need a migration record. The persisted pin
     # remains the single authority until project mode is explicitly enabled.
+    # Drop the fixture's explicit-activation witness with the policy file so
+    # this models an install that never opted into project scopes.
     project_config.machine_policy_path().unlink()
+    project_config._explicit_activation_path().unlink()
     target = project_config.resolve(project)
     assert target.state == project_config.MODE_LATCHED
     assert target.source == project_config.SOURCE_GLOBAL
@@ -241,7 +244,10 @@ def test_missing_policy_fails_closed_after_project_state_exists(
     _shared_scope(root)
 
     project_config.machine_policy_path().unlink()
-    with pytest.raises(project_config.ProjectConfigError, match="policy.*missing|mode.*missing"):
+    with pytest.raises(
+        project_config.ProjectConfigError,
+        match="policy.*missing|mode.*missing|activation was interrupted",
+    ):
         project_config.resolve(root)
 
 
@@ -281,6 +287,31 @@ def test_recreated_kb_directory_fails_continuity_check(
     _private_scope(root, kb)
     kb.rmdir()
     kb.mkdir()
+    # A recreated directory can never carry the original timestamps; pin the
+    # recreated inode's mtime so the check stays deterministic even on a
+    # filesystem with coarse timestamp granularity.
+    os.utime(kb, ns=(0, 0))
+
+    target = project_config.resolve(root)
+    assert target.state == project_config.MODE_LOCKED
+    assert "identity changed" in (target.reason or "")
+
+
+def test_pre_identity_vault_recreation_locks_even_with_reused_inode(
+    scope_env: Path, tmp_path: Path,
+) -> None:
+    """Simulate the ext4 worst case: the recreated directory reuses the freed
+    inode, so path, st_dev, and st_ino all match the recorded fingerprint and
+    only the pre-identity timestamp anchor can fail closed."""
+    root = _directory(tmp_path / "client")
+    kb = _directory(tmp_path / "vault")
+    initial = _private_scope(root, kb)
+    assert initial.state == project_config.MODE_LATCHED
+    assert initial.vault_uuid is None
+
+    # Keeping the same directory keeps dev/ino identical by construction;
+    # moving its timestamps reproduces exactly what inode reuse looks like.
+    os.utime(kb, ns=(0, 0))
 
     target = project_config.resolve(root)
     assert target.state == project_config.MODE_LOCKED
@@ -601,31 +632,32 @@ def test_global_pin_cannot_be_redirected_to_a_private_vault(
     scope_env: Path, tmp_path: Path,
 ) -> None:
     _pin_shared(scope_env, tmp_path)
+    shared_root = _directory(tmp_path / "shared-root")
+    _shared_scope(shared_root)
     private_root = _directory(tmp_path / "private-client")
     private_kb = _directory(tmp_path / "private-vault")
     _private_scope(private_root, private_kb)
-    legacy_root = _directory(tmp_path / "legacy-root")
-    # Returning to global mode is intentionally unsupported after project
-    # scopes exist, so inspect the global resolver directly through a fresh
-    # Shared-mode control plane containing the copied Private reservation.
-    project_config.machine_policy_path().unlink()
-    project_config.atomic_json(
-        project_config.machine_policy_path(),
-        {"format": 1, "policy": project_config.MACHINE_POLICY_SHARED},
-    )
+    # Repoint the install pin at the Private vault: every Shared consumer of
+    # the pin must refuse to follow it into a Private reservation.
     (scope_env / "kb_location.json").write_text(
         json.dumps({"kb_dir": str(private_kb)}) + "\n", encoding="utf-8"
     )
 
-    target = project_config.resolve(legacy_root)
+    target = project_config.resolve(shared_root)
     assert target.state == project_config.MODE_LOCKED
     assert "collides with Private scope" in (target.reason or "")
+    with pytest.raises(
+        project_config.ProjectConfigError, match="collides with Private scope"
+    ):
+        project_config.reauthorize_shared_scope(shared_root)
 
 
 def test_global_shared_mode_without_a_pin_is_locked(
     scope_env: Path, tmp_path: Path,
 ) -> None:
     root = _directory(tmp_path / "legacy-root")
+    # Model a genuine unpinned Shared install: no explicit activation witness.
+    project_config._explicit_activation_path().unlink()
     project_config.atomic_json(
         project_config.machine_policy_path(),
         {"format": 1, "policy": project_config.MACHINE_POLICY_SHARED},

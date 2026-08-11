@@ -296,6 +296,7 @@ def test_project_scopes_require_one_explicit_opt_in_and_then_fail_closed(
 ) -> None:
     global_kb = _pin_global(lifecycle_env, tmp_path)
     project_config.machine_policy_path().unlink()
+    project_config._explicit_activation_path().unlink()
     project_config.write_machine_policy(project_config.MACHINE_POLICY_SHARED)
     root = _directory(tmp_path / "private-client")
     sibling = _directory(tmp_path / "unselected-client")
@@ -326,6 +327,116 @@ def test_project_scopes_require_one_explicit_opt_in_and_then_fail_closed(
     assert target.policy == project_config.POLICY_PRIVATE
     assert target.kb_dir == private_kb
     assert project_config.resolve(sibling).state == project_config.MODE_LOCKED
+
+
+def _enter_global_shared(
+    home: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> Path:
+    """Rebuild the untouched global Shared install inside the lifecycle env."""
+    kb = _pin_global(home, tmp_path)
+    project_config.machine_policy_path().unlink()
+    # The fixture activated explicit mode; drop its one-way witness so this
+    # models an install where project scopes were never enabled.
+    project_config._explicit_activation_path().unlink()
+    project_config.write_machine_policy(project_config.MACHINE_POLICY_SHARED)
+    monkeypatch.setattr(paths, "UNLATCHED_FILE", home / "UNLATCHED")
+    monkeypatch.setattr(paths, "DISABLE_FILE", home / "DISABLE")
+    monkeypatch.setattr(paths, "DISABLE_WRITE_FILE", home / "DISABLE_WRITE")
+    return kb
+
+
+def test_private_activation_without_kb_choice_fails_before_the_one_way_flip(
+    lifecycle_env: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    global_kb = _enter_global_shared(lifecycle_env, tmp_path, monkeypatch)
+    root = _directory(tmp_path / "private-client")
+
+    with pytest.raises(
+        project_config.ProjectConfigError,
+        match="requires --new-kb or --kb-dir",
+    ):
+        project_mode.apply_latch(
+            root,
+            policy=project_config.POLICY_PRIVATE,
+            enable_project_scopes=True,
+        )
+
+    # The statically invalid command must leave no trace: machine policy is
+    # still Shared, no marker was written, and every location keeps access.
+    assert project_config.read_machine_policy() == (
+        project_config.MACHINE_POLICY_SHARED
+    )
+    assert not (root / ".latch").exists()
+    target = project_config.resolve(root)
+    assert target.state == project_config.MODE_LATCHED
+    assert target.source == project_config.SOURCE_GLOBAL
+    assert target.kb_dir == global_kb
+
+
+def test_install_wide_relatch_permanently_stales_pre_off_sessions(
+    lifecycle_env: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _enter_global_shared(lifecycle_env, tmp_path, monkeypatch)
+    project = _directory(tmp_path / "daily-project")
+    before = project_config.resolve(project)
+    assert before.state == project_config.MODE_LATCHED
+    assert project_config.record_session_binding(project, "pre-off-task") == (
+        before.revision
+    )
+
+    assert project_mode.apply_unlatch(project) == 0
+    assert project_mode.apply_latch(project) == 0
+    capsys.readouterr()
+
+    after = project_config.resolve(project)
+    assert after.state == project_config.MODE_LATCHED
+    assert after.kb_dir == before.kb_dir
+    assert after.revision != before.revision
+    assert project_config.current_session_revision(project, "pre-off-task") is None
+    with pytest.raises(project_config.ProjectConfigError, match="older Latch scope"):
+        project_config.record_session_binding(project, "pre-off-task")
+    assert project_config.record_session_binding(project, "fresh-task") == (
+        after.revision
+    )
+
+
+def test_global_relatch_without_pin_reports_locked_instead_of_success(
+    lifecycle_env: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _enter_global_shared(lifecycle_env, tmp_path, monkeypatch)
+    project = _directory(tmp_path / "daily-project")
+    assert project_mode.apply_unlatch(project) == 0
+    (lifecycle_env / "kb_location.json").unlink()
+    capsys.readouterr()
+
+    assert project_mode.apply_latch(project) == 1
+    output = capsys.readouterr().out
+    assert "NOT latched" in output
+    assert "Latch is LATCHED in global Shared mode." not in output
+    assert "not pinned" in output
+
+    # The OFF receipts were genuinely cleared, but the install stays LOCKED
+    # and a repeat run must not claim an already-LATCHED success either.
+    assert not (lifecycle_env / "UNLATCHED").exists()
+    assert not (lifecycle_env / "DISABLE").exists()
+    target = project_config.resolve(project)
+    assert target.state == project_config.MODE_LOCKED
+    assert "not pinned" in (target.reason or "")
+
+    assert project_mode.apply_latch(project) == 1
+    repeat = capsys.readouterr().out
+    assert "already LATCHED" not in repeat
+    assert "NOT latched" in repeat
 
 
 def test_private_scope_selects_existing_vault_without_mutating_it(

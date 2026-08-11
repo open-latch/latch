@@ -50,6 +50,8 @@ ROOT_STATE_DIR_NAME = "root-state"
 RUNTIME_DIR_NAME = "runtime"
 UNLATCH_STATE_FILE_NAME = "instruction-state.json"
 CONTINUITY_EPOCH_FILE_NAME = "continuity-epoch.json"
+GLOBAL_EPOCH_FILE_NAME = "global-epoch.json"
+EXPLICIT_ACTIVATION_FILE_NAME = "explicit-activated.json"
 TRANSITION_LOCK_FILE_NAME = "transition.lock"
 
 ROOT_KIND_SCOPE = "scope"
@@ -153,6 +155,7 @@ class ScopeBinding:
     kb_fingerprint: str
     vault_uuid: str | None
     revision: str
+    pristine_fingerprint: str | None = None
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -430,6 +433,38 @@ def _bump_continuity_epoch(root: Path) -> None:
     )
 
 
+def global_continuity_epoch_path() -> Path:
+    return control_root() / GLOBAL_EPOCH_FILE_NAME
+
+
+def _global_continuity_epoch() -> str | None:
+    """Optional epoch folded into every global Shared revision.
+
+    Absent means no install-wide OFF cycle has completed yet, so existing
+    installs keep their current revisions until their first cycle.
+    """
+    path = global_continuity_epoch_path()
+    if not (path.exists() or path.is_symlink()):
+        return None
+    payload = _read_regular_json(path, label="global continuity epoch")
+    if set(payload) != {"format", "revision"} or payload.get("format") != FORMAT_VERSION:
+        raise ProjectConfigError(
+            f"global continuity epoch has unsupported fields: {path}"
+        )
+    return _hex(payload.get("revision"), 32, label="global continuity epoch revision")
+
+
+def bump_global_continuity_epoch() -> None:
+    """Permanently stale sessions from before an install-wide OFF cycle."""
+    atomic_json(
+        global_continuity_epoch_path(),
+        {
+            "format": FORMAT_VERSION,
+            "revision": secrets.token_hex(16),
+        },
+    )
+
+
 def access_lock_path(target_or_root: ResolvedScope | str | os.PathLike[str]) -> Path:
     if isinstance(target_or_root, ResolvedScope):
         key = target_or_root.lock_key
@@ -568,6 +603,27 @@ def _directory_fingerprint(directory: Path) -> str:
             os.path.normcase(str(canonical)),
             str(metadata.st_dev),
             str(metadata.st_ino),
+        )
+    )
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+
+def _pristine_directory_fingerprint(directory: Path) -> str:
+    """Continuity anchor for a Private vault that has no immutable identity yet.
+
+    The dev/ino pair in :func:`_directory_fingerprint` can be reused by the OS
+    when the directory is deleted and recreated, so a pre-identity binding also
+    folds in the timestamps, which a recreated directory cannot reproduce.
+    """
+    canonical = validated_kb_path(directory)
+    metadata = canonical.stat()
+    body = "\0".join(
+        (
+            os.path.normcase(str(canonical)),
+            str(metadata.st_dev),
+            str(metadata.st_ino),
+            str(metadata.st_mtime_ns),
+            str(metadata.st_ctime_ns),
         )
     )
     return hashlib.sha256(body.encode("utf-8")).hexdigest()
@@ -735,7 +791,13 @@ def _scope_binding_from_payload(
         "vault_uuid",
         "revision",
     }
-    if set(payload) != expected or payload.get("format") != FORMAT_VERSION:
+    # Optional: pre-identity continuity anchor; bindings persisted before the
+    # anchor existed stay valid and simply skip the extra continuity check.
+    optional = {"pristine_fingerprint"}
+    if (
+        not expected <= set(payload) <= expected | optional
+        or payload.get("format") != FORMAT_VERSION
+    ):
         raise ProjectConfigError(f"machine scope binding has unsupported fields: {path}")
     observed_id = _canonical_uuid(payload.get("scope_id"), label="scope_id")
     if expected_scope_id is not None and observed_id != expected_scope_id:
@@ -758,6 +820,12 @@ def _scope_binding_from_payload(
         else None
     )
     revision = _hex(payload.get("revision"), 32, label="scope revision")
+    raw_pristine = payload.get("pristine_fingerprint")
+    pristine = (
+        _hex(raw_pristine, 64, label="pristine KB fingerprint")
+        if raw_pristine is not None
+        else None
+    )
     return ScopeBinding(
         observed_id,
         path,
@@ -767,6 +835,7 @@ def _scope_binding_from_payload(
         fingerprint,
         vault_uuid,
         revision,
+        pristine,
     )
 
 
@@ -845,26 +914,38 @@ def _global_kb_dir(
     return selected
 
 
-def read_machine_policy() -> str:
-    """Return the mutually exclusive global-shared or project-scoped mode.
+def _project_scope_state_exists() -> bool:
+    return any(
+        directory.exists() or directory.is_symlink()
+        for directory in (
+            control_root() / ROOTS_DIR_NAME,
+            control_root() / SCOPES_DIR_NAME,
+        )
+    )
 
-    An install with no project-scope state is an untouched Shared installation,
-    which preserves the pre-scoping product.  Once project state exists, losing
-    the mode receipt must fail closed instead of silently reopening global access.
+
+def _explicit_activation_path() -> Path:
+    return control_root() / EXPLICIT_ACTIVATION_FILE_NAME
+
+
+def _explicit_mode_was_activated() -> bool:
+    path = _explicit_activation_path()
+    return path.exists() or path.is_symlink()
+
+
+def _record_explicit_activation() -> None:
+    """Durable one-way witness that the explicit machine mode was chosen.
+
+    The witness lands before the policy receipt so a crash in between leaves
+    the fail-closed torn state; the next confirmed latch completes the
+    interrupted activation via repair_interrupted_explicit_activation.
     """
-    path = machine_policy_path()
-    if not (path.exists() or path.is_symlink()):
-        roots = control_root() / ROOTS_DIR_NAME
-        scopes = control_root() / SCOPES_DIR_NAME
-        if any(
-            directory.exists() or directory.is_symlink()
-            for directory in (roots, scopes)
-        ):
-            raise ProjectConfigError(
-                "machine scope mode is missing while project-scope state exists; "
-                "re-run the installer to repair it"
-            )
-        return MACHINE_POLICY_SHARED
+    if not _explicit_mode_was_activated():
+        atomic_json(_explicit_activation_path(), {"format": FORMAT_VERSION})
+
+
+def _read_machine_policy_file(path: Path) -> str:
+    """Validate only the receipt itself, without the activation cross-check."""
     payload = _read_regular_json(path, label="machine scope policy")
     if set(payload) != {"format", "policy"} or payload.get("format") != FORMAT_VERSION:
         raise ProjectConfigError(f"machine scope policy has unsupported fields: {path}")
@@ -874,27 +955,81 @@ def read_machine_policy() -> str:
     return str(policy)
 
 
+def read_machine_policy() -> str:
+    """Return the mutually exclusive global-shared or project-scoped mode.
+
+    An install with no project-scope state is an untouched Shared installation,
+    which preserves the pre-scoping product.  Once project state exists, losing
+    the mode receipt must fail closed instead of silently reopening global
+    access.  A receipt that says Shared even though the one-way explicit
+    activation witness exists (a partial control-root restore or file-level
+    sync) must fail closed the same way instead of reopening global access.
+    """
+    path = machine_policy_path()
+    if not (path.exists() or path.is_symlink()):
+        if _explicit_mode_was_activated():
+            raise ProjectConfigError(
+                "the one-way project-scope activation was interrupted before "
+                "its receipt was written; run the confirmed latch command "
+                "again to complete the activation"
+            )
+        if _project_scope_state_exists():
+            raise ProjectConfigError(
+                "machine scope mode is missing while project-scope state exists; "
+                "re-run the installer to repair it"
+            )
+        return MACHINE_POLICY_SHARED
+    policy = _read_machine_policy_file(path)
+    if policy == MACHINE_POLICY_SHARED and _explicit_mode_was_activated():
+        raise ProjectConfigError(
+            "machine scope mode says global Shared after project scopes were "
+            "activated; re-run the installer to repair it"
+        )
+    return policy
+
+
 def write_machine_policy(policy: str) -> None:
     if policy not in MACHINE_POLICIES:
         raise ProjectConfigError(f"unsupported machine scope policy: {policy!r}")
     path = machine_policy_path()
     if path.exists() or path.is_symlink():
-        current = read_machine_policy()
+        # Read the raw receipt: overwriting a stale Shared receipt with the
+        # explicit policy is exactly the documented repair direction and must
+        # not be blocked by the read-side stale-shared cross-check.
+        current = _read_machine_policy_file(path)
         if current == MACHINE_POLICY_EXPLICIT and policy == MACHINE_POLICY_SHARED:
             raise ProjectConfigError(
                 "project-scoped mode cannot be downgraded to global Shared mode"
             )
-    elif policy == MACHINE_POLICY_SHARED:
-        roots = control_root() / ROOTS_DIR_NAME
-        scopes = control_root() / SCOPES_DIR_NAME
-        if any(
-            directory.exists() or directory.is_symlink()
-            for directory in (roots, scopes)
-        ):
+        if policy == MACHINE_POLICY_SHARED and _explicit_mode_was_activated():
             raise ProjectConfigError(
-                "cannot create global Shared mode while project-scope state exists"
+                "cannot select global Shared mode after project scopes were activated"
             )
+    elif policy == MACHINE_POLICY_SHARED and (
+        _project_scope_state_exists() or _explicit_mode_was_activated()
+    ):
+        raise ProjectConfigError(
+            "cannot create global Shared mode while project-scope state exists"
+        )
+    if policy == MACHINE_POLICY_EXPLICIT:
+        _record_explicit_activation()
     atomic_json(machine_policy_path(), {"format": FORMAT_VERSION, "policy": policy})
+
+
+def repair_interrupted_explicit_activation() -> bool:
+    """Complete a one-way activation whose receipt write was interrupted.
+
+    The witness is the durable proof of the explicit choice, so the only safe
+    repair direction is finishing the flip. No-op outside the exact torn state
+    (witness present, receipt missing).
+    """
+    path = machine_policy_path()
+    if path.exists() or path.is_symlink():
+        return False
+    if not _explicit_mode_was_activated():
+        return False
+    atomic_json(path, {"format": FORMAT_VERSION, "policy": MACHINE_POLICY_EXPLICIT})
+    return True
 
 
 def _candidate_flags(root: Path) -> tuple[bool, bool]:
@@ -1079,6 +1214,27 @@ def _validate_live_binding(binding: ScopeBinding) -> tuple[Path, str]:
         binding.vault_uuid, observed_uuid
     ):
         raise ProjectConfigError("bound KB immutable vault identity changed")
+    if binding.vault_uuid is None and observed_uuid is None and (
+        binding.pristine_fingerprint is not None
+    ):
+        # Pre-identity window: an empty directory whose timestamps moved is a
+        # recreated directory, even when the OS reused the dev/ino pair. The
+        # check is limited to a provably-empty directory so in-flight vault
+        # initialization (kb.db present) keeps its existing recovery paths.
+        database = current / "kb.db"
+        try:
+            empty = not (database.exists() or database.is_symlink()) and not any(
+                current.iterdir()
+            )
+        except OSError:
+            empty = False
+        if empty and not hmac.compare_digest(
+            _pristine_directory_fingerprint(current),
+            binding.pristine_fingerprint,
+        ):
+            raise ProjectConfigError(
+                f"bound KB directory identity changed: {binding.kb_dir}; explicitly repin it"
+            )
     if binding.policy == POLICY_SHARED:
         global_kb = _global_kb_dir(
             required=True,
@@ -1344,8 +1500,14 @@ def resolve(start: str | os.PathLike[str] | None = None) -> ResolvedScope:
             )
             assert kb_dir is not None
             fingerprint = _directory_fingerprint(kb_dir)
+            # Fold the install-wide continuity epoch so an OFF/ON cycle
+            # permanently stales every pre-cycle session receipt.
+            epoch = _global_continuity_epoch()
+            body = "global-shared\0" + os.path.normcase(str(kb_dir))
+            if epoch is not None:
+                body += "\0" + epoch
             base_revision = hashlib.sha256(
-                ("global-shared\0" + os.path.normcase(str(kb_dir))).encode("utf-8")
+                body.encode("utf-8")
             ).hexdigest()[:32]
             revision = _target_revision(base_revision, kb_dir, fingerprint)
         except ProjectConfigError as exc:
@@ -1507,19 +1669,25 @@ def _write_scope_binding(
     revision: str | None = None,
 ) -> ScopeBinding:
     path = scope_binding_path(scope_id)
-    atomic_json(
-        path,
-        {
-            "format": FORMAT_VERSION,
-            "scope_id": scope_id,
-            "policy": policy,
-            "mode": mode,
-            "kb_dir": str(kb_dir),
-            "kb_fingerprint": kb_fingerprint,
-            "vault_uuid": vault_uuid,
-            "revision": revision or secrets.token_hex(16),
-        },
-    )
+    payload: dict[str, object] = {
+        "format": FORMAT_VERSION,
+        "scope_id": scope_id,
+        "policy": policy,
+        "mode": mode,
+        "kb_dir": str(kb_dir),
+        "kb_fingerprint": kb_fingerprint,
+        "vault_uuid": vault_uuid,
+        "revision": revision or secrets.token_hex(16),
+    }
+    if vault_uuid is None and policy == POLICY_PRIVATE:
+        database = kb_dir / "kb.db"
+        if not (database.exists() or database.is_symlink()):
+            # Anchor the pre-identity window: until the immutable vault
+            # identity exists, dev/ino alone cannot prove directory continuity.
+            payload["pristine_fingerprint"] = _pristine_directory_fingerprint(
+                kb_dir
+            )
+    atomic_json(path, payload)
     return _load_scope_binding(scope_id)
 
 
@@ -2600,14 +2768,30 @@ def _record_session_target(
 ) -> str:
     path = _session_path(session_id)
     expected = _session_payload(target, root_value, inactive=inactive)
-    if path.exists() or path.is_symlink():
+    _ensure_real_directory(path.parent)
+    try:
+        # Exclusive create closes the check-then-write race: when two roots
+        # bind the same session near-simultaneously, exactly one receipt is
+        # created and the loser deterministically hits the compare below.
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except FileExistsError:
         existing = _read_regular_json(path, label="session scope receipt")
         if existing == expected:
             return target.revision
         raise ProjectConfigError(
             "this agent task already belongs to another or older Latch scope; start a fresh task"
         )
-    atomic_json(path, expected)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(json.dumps(expected, indent=2, sort_keys=True) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+    except OSError:
+        # Never leave a partial receipt permanently fencing this session.
+        with contextlib.suppress(OSError):
+            path.unlink(missing_ok=True)
+        raise
+    _fsync_directory(path.parent)
     return target.revision
 
 
