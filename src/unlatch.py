@@ -353,8 +353,9 @@ def _atomic_bytes(
     *,
     mode: int,
     expected: os.stat_result | None,
+    expected_body: bytes | None,
 ) -> None:
-    """Replace only the exact identity preflighted by the caller."""
+    """Replace only the exact identity and bytes preflighted by the caller."""
     current = _plain_metadata(path)
     if expected is None:
         if current is not None:
@@ -389,6 +390,19 @@ def _atomic_bytes(
             again.st_nlink,
         ) != (expected.st_dev, expected.st_ino, 1):
             raise _error(f"instruction file identity changed during transition: {path}")
+        if expected is not None and expected_body is not None:
+            # Same inode does not mean same bytes: an in-place editor save
+            # between the caller's preflight read and this replace would be
+            # silently clobbered by the stale restore. Fail closed instead.
+            reloaded = _read_regular(path, required=True)
+            assert reloaded is not None
+            current_body, _current_mode, current_stat = reloaded
+            if (
+                (current_stat.st_dev, current_stat.st_ino)
+                != (expected.st_dev, expected.st_ino)
+                or current_body != expected_body
+            ):
+                raise _error(f"instruction file changed during transition: {path}")
         os.replace(temp, path)
         _fsync_directory(path.parent)
     finally:
@@ -557,7 +571,7 @@ def _write_state(root: Path, state_file: Path, payload: dict[str, Any]) -> None:
     body = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
     if _plain_metadata(state_file) is not None:
         raise _error(f"instruction override state appeared during transition: {state_file}")
-    _atomic_bytes(state_file, body, mode=0o600, expected=None)
+    _atomic_bytes(state_file, body, mode=0o600, expected=None, expected_body=None)
 
 
 def _remove_state(state_file: Path) -> None:
@@ -683,7 +697,7 @@ def disable(project: Path, *, legacy_state: bool = False) -> list[str]:
 
     # Validate both files before the first write. Existing exact blocks are
     # accepted; an interrupted prior disable can resume from original bytes.
-    actions: list[tuple[Path, bytes, int, os.stat_result | None]] = []
+    actions: list[tuple[Path, bytes, int, os.stat_result | None, bytes]] = []
     for record in records:
         path = root / record["path"]
         loaded = _read_regular(path)
@@ -707,10 +721,12 @@ def disable(project: Path, *, legacy_state: bool = False) -> list[str]:
         masked = current + record["separator"] + record["block"]
         if _sha256(masked) != record["masked_sha256"]:
             raise _error(f"instruction override receipt is inconsistent for {path}")
-        actions.append((path, masked, current_mode, metadata))
+        actions.append((path, masked, current_mode, metadata, current))
 
-    for path, masked, mode, metadata in actions:
-        _atomic_bytes(path, masked, mode=mode, expected=metadata)
+    for path, masked, mode, metadata, preflight in actions:
+        _atomic_bytes(
+            path, masked, mode=mode, expected=metadata, expected_body=preflight
+        )
         messages.append(f"added root-local unlatched override to {path}")
     return messages
 
@@ -769,7 +785,7 @@ def _enable_legacy_global() -> list[str]:
         raise _error("legacy global Unlatch receipt has an unsafe project root")
     allowed = _legacy_ancestor_instruction_paths(project)
 
-    actions: list[tuple[Path, bytes, int, os.stat_result]] = []
+    actions: list[tuple[Path, bytes, int, os.stat_result, bytes]] = []
     messages: list[str] = []
     seen: set[Path] = set()
     for raw_record in raw_records:
@@ -808,14 +824,16 @@ def _enable_legacy_global() -> list[str]:
             )
         restored_body = restored.encode("utf-8")
         if restored_body != body:
-            actions.append((path, restored_body, mode, metadata))
+            actions.append((path, restored_body, mode, metadata, body))
             if removed:
                 messages.append(f"removed legacy global unlatched override from {path}")
             if had_managed:
                 messages.append(f"restored legacy managed instruction region in {path}")
 
-    for path, body, mode, metadata in actions:
-        _atomic_bytes(path, body, mode=mode, expected=metadata)
+    for path, body, mode, metadata, preflight in actions:
+        _atomic_bytes(
+            path, body, mode=mode, expected=metadata, expected_body=preflight
+        )
     _remove_state(LEGACY_STATE_FILE)
     messages.append(f"removed verified legacy receipt {LEGACY_STATE_FILE}")
     return messages
@@ -848,8 +866,10 @@ def enable(project: Path, *, legacy_state: bool = False) -> list[str]:
             newline = b"\r\n" if b"\r\n" in block else b"\r" if b"\r" in block else b"\n"
             restored, _separator = _strip_recovered(body, offset, block, newline)
             recovery.append((path, body, restored, mode, metadata))
-        for path, _body, restored, mode, metadata in recovery:
-            _atomic_bytes(path, restored, mode=mode, expected=metadata)
+        for path, body, restored, mode, metadata in recovery:
+            _atomic_bytes(
+                path, restored, mode=mode, expected=metadata, expected_body=body
+            )
             messages.append(f"removed recovered root-local override from {path}")
         return messages
 
@@ -876,7 +896,9 @@ def enable(project: Path, *, legacy_state: bool = False) -> list[str]:
             _unlink_exact(path, body)
             messages.append(f"removed Latch-created root instruction file {path}")
         else:
-            _atomic_bytes(path, restored, mode=mode, expected=metadata)
+            _atomic_bytes(
+                path, restored, mode=mode, expected=metadata, expected_body=body
+            )
             messages.append(f"removed root-local unlatched override from {path}")
     _remove_state(state_file)
     messages.append(f"removed machine-local instruction receipt {state_file}")

@@ -35,6 +35,7 @@ from __future__ import annotations
 import contextlib
 import errno
 import hmac
+import math
 import os
 import secrets
 import stat
@@ -187,7 +188,8 @@ def _lock_timeout_s() -> float:
         value = float(raw)
     except ValueError:
         return DEFAULT_LOCK_TIMEOUT_S
-    return value if value > 0 else DEFAULT_LOCK_TIMEOUT_S
+    # Non-finite values ("inf") would make the wait unbounded again.
+    return value if value > 0 and math.isfinite(value) else DEFAULT_LOCK_TIMEOUT_S
 
 
 def _lock_wait_message(path: Path | None, timeout_s: float) -> str:

@@ -58,6 +58,11 @@ def test_invalid_timeout_override_falls_back_to_default(monkeypatch):
     assert lockfile._lock_timeout_s() == lockfile.DEFAULT_LOCK_TIMEOUT_S
     monkeypatch.setenv(lockfile.LOCK_TIMEOUT_ENV, "-5")
     assert lockfile._lock_timeout_s() == lockfile.DEFAULT_LOCK_TIMEOUT_S
+    # A non-finite override would reintroduce the unbounded wait.
+    monkeypatch.setenv(lockfile.LOCK_TIMEOUT_ENV, "inf")
+    assert lockfile._lock_timeout_s() == lockfile.DEFAULT_LOCK_TIMEOUT_S
+    monkeypatch.setenv(lockfile.LOCK_TIMEOUT_ENV, "nan")
+    assert lockfile._lock_timeout_s() == lockfile.DEFAULT_LOCK_TIMEOUT_S
 
 
 def test_release_owned_lock_surfaces_cleanup_mutex_timeout(

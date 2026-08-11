@@ -247,10 +247,12 @@ def test_interrupted_disable_keeps_receipt_and_relatch_recovers(
         path.write_bytes(body)
     real_atomic = unlatch._atomic_bytes
 
-    def fail_agents(path, body, *, mode, expected):
+    def fail_agents(path, body, *, mode, expected, expected_body):
         if path == root / "AGENTS.md":
             raise OSError("injected instruction write failure")
-        return real_atomic(path, body, mode=mode, expected=expected)
+        return real_atomic(
+            path, body, mode=mode, expected=expected, expected_body=expected_body
+        )
 
     monkeypatch.setattr(unlatch, "_atomic_bytes", fail_agents)
     with pytest.raises(OSError, match="injected instruction write failure"):
@@ -267,6 +269,36 @@ def test_interrupted_disable_keeps_receipt_and_relatch_recovers(
         assert path.read_bytes() == body
 
 
+def test_same_inode_concurrent_edit_fails_closed_instead_of_clobbering(
+    tmp_path: Path,
+):
+    """An in-place editor save between preflight and replace keeps the same
+    inode; the write must fail closed on the changed bytes, not restore stale
+    content over the user's concurrent edit."""
+    target = tmp_path / "CLAUDE.md"
+    target.write_bytes(b"original rule\n")
+    loaded = unlatch._read_regular(target)
+    assert loaded is not None
+    body, mode, metadata = loaded
+    # Rewrite in place on the same inode (the common editor save pattern).
+    with target.open("r+b") as handle:
+        handle.truncate(0)
+        handle.write(b"user edit on the same inode\n")
+
+    with pytest.raises(
+        project_config.ProjectConfigError, match="changed during transition"
+    ):
+        unlatch._atomic_bytes(
+            target,
+            b"stale restore\n",
+            mode=mode,
+            expected=metadata,
+            expected_body=body,
+        )
+
+    assert target.read_bytes() == b"user edit on the same inode\n"
+
+
 def test_interrupted_relatch_is_retryable_without_remasking_restored_file(
     local_scope, monkeypatch: pytest.MonkeyPatch,
 ):
@@ -280,10 +312,12 @@ def test_interrupted_relatch_is_retryable_without_remasking_restored_file(
     unlatch.disable(child)
     real_atomic = unlatch._atomic_bytes
 
-    def fail_agents(path, body, *, mode, expected):
+    def fail_agents(path, body, *, mode, expected, expected_body):
         if path == root / "AGENTS.md":
             raise OSError("injected restore failure")
-        return real_atomic(path, body, mode=mode, expected=expected)
+        return real_atomic(
+            path, body, mode=mode, expected=expected, expected_body=expected_body
+        )
 
     monkeypatch.setattr(unlatch, "_atomic_bytes", fail_agents)
     with pytest.raises(OSError, match="injected restore failure"):
