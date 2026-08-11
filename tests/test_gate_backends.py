@@ -379,6 +379,27 @@ def test_shared_gate_missing_absolute_binary_fails_closed(monkeypatch):
     _assert("CODEX_BIN was not resolved" in str(error), error)
 
 
+def test_codex_classifier_permission_error_is_structured(monkeypatch):
+    def deny_launch(*_args, **_kwargs):
+        raise PermissionError(
+            5,
+            "Access is denied",
+            "C:/Program Files/WindowsApps/codex.exe",
+        )
+
+    monkeypatch.setattr(gate.subprocess, "run", deny_launch)
+
+    text, error, timed_out = gate._invoke_codex_classifier_once(
+        "classify",
+        timeout_s=1,
+        codex_bin="C:/Program Files/WindowsApps/codex.exe",
+    )
+
+    _assert(text is None and timed_out is False, (text, error, timed_out))
+    _assert("PermissionError" in str(error), error)
+    _assert("Access is denied" in str(error), error)
+
+
 def _restore_env(name: str, old: str | None) -> None:
     if old is None:
         os.environ.pop(name, None)

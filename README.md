@@ -151,8 +151,20 @@ decisions you've ratified, and the honest limits are in
 
 ## Get started
 
-**Prerequisites:** Git, and at least one installed agent CLI — **Claude Code**, **Codex**, or
-**Cursor Agent**.
+**Prerequisites:** Git, and a runnable CLI for every agent surface you choose to wire —
+**Claude Code**, **Codex**, or **Cursor Agent**.
+
+**Using Codex Desktop on Windows?** The desktop app does not by itself prove that Latch can launch
+the Codex CLI for model-backed gates, seeding, compaction, and maintenance. In PowerShell,
+`codex --version` must succeed. If it does not, install the standalone CLI, close and reopen
+PowerShell, and rerun the Latch installer:
+
+```powershell
+irm https://chatgpt.com/codex/install.ps1 | iex
+```
+
+Latch's local MCP search/get/insert server is Python-based; this CLI check is for the model-backed
+operations that Latch runs as subprocesses.
 
 **Install in one command.** Open a terminal in the repo you want latch to protect.
 
@@ -169,7 +181,9 @@ irm https://raw.githubusercontent.com/open-latch/latch/main/install.ps1 | iex
 ```
 
 That's the install. The quickstart wires your agent and then prompts you to
-seed. **Restart the agent** afterward so its tools and hooks load.
+seed. **Fully quit and reopen the agent, then create a new task** so its tools and hooks load. An
+already-open task is not a valid MCP check; in a new Codex task, ask it to call
+`latch_recent(limit=1)` for live host-level proof.
 
 **Then seed — this is the real first step, not an optional demo.** From here latch captures decisions
 as you work; seeding is how you skip the wait. It backfills what your project already settled, so the

@@ -1795,7 +1795,7 @@ def _invoke_codex_classifier_once(
             final_text = mcp_runtime.redact_subprocess_output(final_text)
     except subprocess.TimeoutExpired:
         return None, f"{purpose} timed out after {timeout_s}s", True
-    except FileNotFoundError as e:
+    except OSError as e:
         return None, f"subprocess failed: {type(e).__name__}: {e}", False
 
     if proc.returncode != 0:

@@ -58,6 +58,57 @@ def test_check_codex_config_ok_and_missing():
     print("PASS check_codex_config_ok_and_missing")
 
 
+def test_run_all_uses_canonical_windows_mcp_launch_pair():
+    d = _tmp()
+    original_system = cd.install_engine.platform.system
+    original_kb_access = cd.check_kb_access
+    try:
+        scripts = d / "venv" / "Scripts"
+        scripts.mkdir(parents=True)
+        python = scripts / "python.exe"
+        pythonw = scripts / "pythonw.exe"
+        python.write_text("", encoding="utf-8")
+        pythonw.write_text("", encoding="utf-8")
+
+        src = d / "repo" / "src"
+        src.mkdir(parents=True)
+        server = src / "mcp_server.py"
+        launcher = src / "mcp_launcher_win.py"
+        server.write_text("", encoding="utf-8")
+        launcher.write_text("", encoding="utf-8")
+
+        config = d / "config.toml"
+        body, _changes = ic.merge_config("", str(pythonw), str(launcher))
+        config.write_text(body, encoding="utf-8")
+
+        cd.install_engine.platform.system = lambda: "Windows"
+        cd.check_kb_access = lambda: cd.Check("Latch KB access", cd.OK, "ok")
+        checks = cd.run_all(
+            config_path=config,
+            hooks_path=d / "hooks.json",
+            agents_path=d / "AGENTS.md",
+            python_path=str(python),
+            server_py=str(server),
+            hook_py=str(src / "hooks" / "codex_session_start.py"),
+            session_id=None,
+            skip_agents=True,
+            skip_hooks=True,
+            skip_compact=True,
+            skip_summarizer=True,
+        )
+        config_check = next(c for c in checks if c.name == "Codex config.toml MCP block")
+        launch_check = next(c for c in checks if c.name == "Codex MCP launch target")
+        _assert(config_check.level == cd.OK, config_check)
+        _assert(launch_check.level == cd.OK, launch_check)
+        _assert(str(pythonw) in launch_check.detail, launch_check)
+        _assert(str(launcher) in launch_check.detail, launch_check)
+    finally:
+        cd.install_engine.platform.system = original_system
+        cd.check_kb_access = original_kb_access
+        shutil.rmtree(d, ignore_errors=True)
+    print("PASS run_all_uses_canonical_windows_mcp_launch_pair")
+
+
 def test_check_agents_md_status():
     d = _tmp()
     try:
@@ -431,8 +482,34 @@ def test_check_summarizer_backend():
     print("PASS check_summarizer_backend")
 
 
+def test_check_summarizer_backend_permission_error_is_structured_failure():
+    original_run = cd.compactor.subprocess.run
+
+    def deny_launch(*_args, **_kwargs):
+        raise PermissionError(
+            5,
+            "Access is denied",
+            "C:/Program Files/WindowsApps/codex.exe",
+        )
+
+    try:
+        cd.compactor.subprocess.run = deny_launch
+        result = cd.check_summarizer_backend(
+            backend="codex", codex_bin=sys.executable, timeout_s=1,
+        )
+        _assert(result.level == cd.FAIL, result)
+        _assert("PermissionError" in result.detail, result)
+        _assert("Access is denied" in result.detail, result)
+        payload = json.dumps({"ok": False, "checks": [result.__dict__]})
+        _assert('"level": "FAIL"' in payload, payload)
+    finally:
+        cd.compactor.subprocess.run = original_run
+    print("PASS check_summarizer_backend_permission_error_is_structured_failure")
+
+
 if __name__ == "__main__":
     test_check_codex_config_ok_and_missing()
+    test_run_all_uses_canonical_windows_mcp_launch_pair()
     test_check_agents_md_status()
     test_check_mcp_launch_target()
     test_check_kb_access_readable_fails_without_writes()
@@ -444,4 +521,5 @@ if __name__ == "__main__":
     test_check_codex_hooks()
     test_check_compact_resolution()
     test_check_summarizer_backend()
+    test_check_summarizer_backend_permission_error_is_structured_failure()
     print("\nAll codex_doctor tests pass.")

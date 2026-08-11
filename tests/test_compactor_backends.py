@@ -130,6 +130,29 @@ def test_invoke_codex_once_uses_isolated_exec_shape():
     print("PASS invoke_codex_once_uses_isolated_exec_shape")
 
 
+def test_invoke_codex_once_returns_launch_oserror():
+    original_run = compactor.subprocess.run
+
+    def deny_launch(*_args, **_kwargs):
+        raise PermissionError(
+            5,
+            "Access is denied",
+            "C:/Program Files/WindowsApps/codex.exe",
+        )
+
+    try:
+        compactor.subprocess.run = deny_launch
+        raw, err = compactor._invoke_codex_once(
+            "summarize this", codex_bin="codex.exe", timeout_s=1,
+        )
+        _assert(raw is None, raw)
+        _assert(err and err.startswith("PermissionError:"), err)
+        _assert("Access is denied" in err, err)
+    finally:
+        compactor.subprocess.run = original_run
+    print("PASS invoke_codex_once_returns_launch_oserror")
+
+
 def test_invoke_cursor_once_uses_isolated_ask_shape():
     d = _tmp()
     old_response = os.environ.get("FAKE_CURSOR_RESPONSE")
@@ -278,6 +301,7 @@ def test_invoke_summarizer_repairs_parsed_empty_result():
 if __name__ == "__main__":
     test_invoke_claude_once_disallows_action_tools()
     test_invoke_codex_once_uses_isolated_exec_shape()
+    test_invoke_codex_once_returns_launch_oserror()
     test_invoke_cursor_once_uses_isolated_ask_shape()
     test_invoke_summarizer_parses_codex_result()
     test_repair_prompt_is_self_contained_for_isolated_backend()

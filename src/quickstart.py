@@ -28,6 +28,8 @@ KB_HOME = Path(
 )
 
 AGENT_CHOICES = ("claude", "codex", "cursor", "both", "all")
+CODEX_VERSION_PROBE_TIMEOUT_SECONDS = 10.0
+WINDOWS_CREATE_NO_WINDOW = 0x08000000
 
 
 @dataclass(frozen=True)
@@ -75,13 +77,75 @@ def normalize_agents(value: str) -> tuple[str, ...]:
     raise ValueError(f"unsupported agent selection: {value}")
 
 
+def _codex_standalone_cli_guidance(platform_name: str) -> str:
+    if platform_name != "nt":
+        return "Install the Codex CLI and ensure `codex` is runnable from this terminal."
+    return (
+        "Install the standalone Codex CLI, open a new terminal, and restart Codex: "
+        "powershell -ExecutionPolicy Bypass -Command "
+        "\"irm https://chatgpt.com/codex/install.ps1 | iex\". "
+        "A Microsoft Store app alias that cannot launch as a subprocess is not sufficient."
+    )
+
+
+def _codex_cli_probe_error(
+    candidate: str,
+    *,
+    run: Callable[..., subprocess.CompletedProcess[str]],
+    platform_name: str,
+) -> str | None:
+    """Return an error when a resolved Codex command cannot run a cheap probe."""
+    try:
+        resolved = str(Path(candidate).expanduser().resolve(strict=False))
+    except OSError as e:
+        return (
+            f"Codex CLI (`codex`) path could not be resolved: {e}. "
+            f"{_codex_standalone_cli_guidance(platform_name)}"
+        )
+
+    run_kwargs: dict[str, object] = {
+        "capture_output": True,
+        "text": True,
+        "timeout": CODEX_VERSION_PROBE_TIMEOUT_SECONDS,
+        "check": False,
+    }
+    if platform_name == "nt":
+        run_kwargs["creationflags"] = getattr(
+            subprocess,
+            "CREATE_NO_WINDOW",
+            WINDOWS_CREATE_NO_WINDOW,
+        )
+
+    try:
+        result = run([resolved, "--version"], **run_kwargs)
+    except subprocess.TimeoutExpired:
+        detail = (
+            f"timed out after {CODEX_VERSION_PROBE_TIMEOUT_SECONDS:g}s"
+        )
+    except PermissionError as e:
+        detail = f"access denied ({e})"
+    except OSError as e:
+        detail = f"could not be launched ({type(e).__name__}: {e})"
+    else:
+        if result.returncode == 0:
+            return None
+        detail = f"exited with status {result.returncode}"
+
+    return (
+        f"Codex CLI (`codex`) was found at {resolved} but is not runnable: {detail}. "
+        f"{_codex_standalone_cli_guidance(platform_name)}"
+    )
+
+
 def agent_preflight_errors(
     agents: Sequence[str],
     *,
     cursor_model_backend: str | None = None,
     which: Callable[[str], str | None] = shutil.which,
+    run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+    platform_name: str = os.name,
 ) -> list[str]:
-    """Return all missing selected-agent CLIs before any config mutation.
+    """Return selected-agent CLI failures before any config mutation.
 
     The outer one-command bootstrap can install Latch's own runtime, but it
     must not silently install or guess a user's coding-agent product. Keeping
@@ -92,24 +156,49 @@ def agent_preflight_errors(
     errors: list[str] = []
     if "claude" in selected and which("claude") is None:
         errors.append("Claude Code CLI (`claude`) is not on PATH")
-    if "codex" in selected and which("codex") is None:
-        errors.append("Codex CLI (`codex`) is not on PATH")
     if (
         "cursor" in selected
         and which("agent") is None
         and which("cursor-agent") is None
     ):
         errors.append("Cursor Agent CLI (`agent` or `cursor-agent`) is not on PATH")
+
+    cursor_compatibility_backend = (
+        cursor_model_backend
+        if "cursor" in selected and cursor_model_backend in {"claude", "codex"}
+        else None
+    )
+    codex_required = "codex" in selected or cursor_compatibility_backend == "codex"
+    if codex_required:
+        codex_candidate = which("codex")
+        if codex_candidate is None:
+            if "codex" in selected:
+                message = "Codex CLI (`codex`) is not on PATH"
+            else:
+                message = (
+                    "Codex CLI (`codex`) selected as the Cursor model backend "
+                    "is not on PATH"
+                )
+            if platform_name == "nt":
+                message += f". {_codex_standalone_cli_guidance(platform_name)}"
+            errors.append(message)
+        else:
+            probe_error = _codex_cli_probe_error(
+                codex_candidate,
+                run=run,
+                platform_name=platform_name,
+            )
+            if probe_error:
+                errors.append(probe_error)
+
     if (
-        "cursor" in selected
-        and cursor_model_backend in {"claude", "codex"}
-        and cursor_model_backend not in selected
-        and which(cursor_model_backend) is None
+        cursor_compatibility_backend == "claude"
+        and "claude" not in selected
+        and which("claude") is None
     ):
-        label = "Claude Code" if cursor_model_backend == "claude" else "Codex"
         errors.append(
-            f"{label} CLI (`{cursor_model_backend}`) selected as the Cursor model "
-            "backend is not on PATH"
+            "Claude Code CLI (`claude`) selected as the Cursor model backend "
+            "is not on PATH"
         )
     return errors
 
