@@ -26,6 +26,14 @@ lineage checkpoint: the artifact never leaves the vault (ruling 4562). Nothing
 in this module is readable by the public-safe surface, and callers must keep it
 that way — this is the one place raw request text is allowed to land.
 
+That footing is weaker on Windows, and the weakness is inherited rather than
+introduced: POSIX mode bits are not a permission model there, so the 0600 this
+module requests is advisory and confidentiality rests on the vault directory's
+ACLs. The lineage checkpoint has always had the same exposure. Whether Windows
+warrants an enforced owner-only ACL, or is declared unsupported for capture, is
+a founder call recorded against id=5241 — not something this module decides by
+quietly writing nothing.
+
 One property worth knowing before consuming the store: ``gate._query_hash``
 folds a whitespace-only request to the empty string, so a blank request's
 stored text will *not* reproduce its ``query_hash``. That is faithful, not a
@@ -127,9 +135,13 @@ def _append_private(path: Path, line: str) -> None:
     instead of running an arm against corrupted text.
     """
     _mkdir_private(path.parent)
-    descriptor = os.open(
-        path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600,
-    )
+    # O_NONBLOCK so the open itself cannot hang: opening a FIFO write-only
+    # blocks until a reader appears, and this runs inside the gate's response
+    # path, where "logging must never break the caller" has to mean never
+    # stalling it either — an exception is swallowed, an indefinite block is
+    # not. On a regular file the flag is inert.
+    flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NONBLOCK", 0)
+    descriptor = os.open(path, flags, 0o600)
     try:
         # O_CREAT's mode applies only on creation and is masked by the umask,
         # so re-assert it on the descriptor already held rather than on the
@@ -148,24 +160,44 @@ def _append_private(path: Path, line: str) -> None:
         os.close(descriptor)
 
 
-def _assert_private(descriptor: int) -> None:
-    """Raise unless the open descriptor is a regular file the owner alone can read.
+# Whether POSIX permission bits mean anything on this platform. On Windows
+# they do not: CPython synthesizes st_mode from the read-only attribute alone
+# (0o666 for a writable regular file, 0o444 for a read-only one) and chmod
+# moves only that bit, so NO value of S_IMODE can express "owner only" and
+# fchmod is absent entirely. Asserting 0600 there would buy no privacy and
+# would refuse every write — see `_assert_private`.
+_POSIX_MODE_SEMANTICS = os.name == "posix"
 
-    Asserting the mode is not the same as achieving it: `fchmod` is Unix-only
-    and can fail outright (unsupported filesystem, foreign ownership), and a
-    store created before this rule existed may already be 0644. Setting the
-    mode and writing regardless would put cleartext prompts in a
-    world-readable file — so the mode is verified on the descriptor already
-    held, and a write that cannot be made private is abandoned instead.
+
+def _assert_private(descriptor: int) -> None:
+    """Raise unless the open descriptor is a regular file only the owner can read.
+
+    Asserting the mode is not the same as achieving it: `fchmod` can fail
+    outright (unsupported filesystem, foreign ownership) and a store created
+    before this rule existed may already be 0644. Setting the mode and writing
+    regardless would put cleartext prompts in a world-readable file — so the
+    mode is verified on the descriptor already held, and a write that cannot
+    be made private is abandoned instead.
 
     Failing closed costs at most one episode's text, which a consumer then
     treats as ineligible (4676 A4(f)). Failing open costs the privacy posture
     the whole store rests on (4562). The missing record is detectable — its
     gate.log row still exists and carries the same query_hash.
+
+    WINDOWS GAP, stated rather than hidden: where mode bits are not a
+    permission model, this check verifies only that the target is a regular
+    file, and the store's confidentiality rests on the vault directory's own
+    ACLs — the same guarantee, and the same limitation, as the outcome-audit
+    lineage checkpoint, which has shipped under ruling 4562 with exactly this
+    posture. This function deliberately does not decide whether that is good
+    enough on Windows; it declines to convert an unenforceable assertion into
+    a silent, total loss of capture on a supported platform (id=5241).
     """
     info = os.fstat(descriptor)
     if not stat.S_ISREG(info.st_mode):
         raise OSError("request-text store is not a regular file")
+    if not _POSIX_MODE_SEMANTICS:
+        return
     if stat.S_IMODE(info.st_mode) != 0o600:
         raise OSError(
             "refusing to write request text to a non-private store "

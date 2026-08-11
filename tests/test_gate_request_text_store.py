@@ -22,6 +22,7 @@ import shutil
 import stat
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parent.parent
@@ -448,6 +449,10 @@ def test_write_fails_closed_when_the_mode_cannot_be_made_private():
     verified on the open descriptor and the write abandoned when it does not
     hold. Losing one episode's text is the safe failure; leaking the prompt is
     not."""
+    if not hasattr(os, "fchmod") or os.name != "posix":
+        print("SKIP write_fails_closed_when_the_mode_cannot_be_made_private "
+              "(POSIX mode semantics only)")
+        return
     tmp, conn = _fresh_db()
     real_fchmod = os.fchmod
     try:
@@ -487,6 +492,82 @@ def test_write_succeeds_when_an_existing_store_is_already_private():
         _assert(mode == 0o600, f"store must stay 0600 across appends: {oct(mode)}")
         print("PASS write_succeeds_when_an_existing_store_is_already_private")
     finally:
+        _cleanup(tmp, conn)
+
+
+def test_capture_still_works_where_mode_bits_are_not_a_permission_model():
+    """Review round 2, item 1 (5241): on Windows CPython reports a writable
+    regular file as 0o666 and `chmod` moves only the read-only bit, so no
+    S_IMODE value can mean "owner only". An unconditional 0600 assertion is
+    therefore unsatisfiable there and silently suppressed EVERY capture —
+    V5 text availability would never have started on Windows.
+
+    Simulated on POSIX by turning off the platform flag, so the regression runs
+    on ordinary CI rather than only on a Windows host."""
+    tmp, conn = _fresh_db()
+    _prev = request_text_store._POSIX_MODE_SEMANTICS
+    try:
+        request_text_store._POSIX_MODE_SEMANTICS = False
+        path = request_text_store.store_path(tmp)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch()
+        os.chmod(path, 0o666)          # what Windows reports for a normal file
+        _run(conn, tmp, SENTINEL)
+        records = _records(tmp)
+        _assert(len(records) == 1,
+                f"capture must not be suppressed by an unenforceable mode: {records}")
+        _assert(records[0]["request_text"] == SENTINEL, records[0])
+        print("PASS capture_still_works_where_mode_bits_are_not_a_permission_model")
+    finally:
+        request_text_store._POSIX_MODE_SEMANTICS = _prev
+        _cleanup(tmp, conn)
+
+
+def test_non_regular_target_is_refused_on_every_platform():
+    """The one guarantee that survives without POSIX modes: never append
+    cleartext to something that is not a regular file. Checked directly,
+    because it must hold on the platform where the mode check does not."""
+    _prev = request_text_store._POSIX_MODE_SEMANTICS
+    read_fd, write_fd = os.pipe()
+    try:
+        request_text_store._POSIX_MODE_SEMANTICS = False   # weakest platform
+        try:
+            request_text_store._assert_private(write_fd)
+        except OSError as exc:
+            _assert("not a regular file" in str(exc), str(exc))
+        else:
+            raise AssertionError("a non-regular target must be refused")
+        print("PASS non_regular_target_is_refused_on_every_platform")
+    finally:
+        request_text_store._POSIX_MODE_SEMANTICS = _prev
+        os.close(read_fd)
+        os.close(write_fd)
+
+
+def test_a_fifo_store_path_cannot_hang_the_gate():
+    """`open(fifo, O_WRONLY)` blocks until a reader arrives. This runs inside
+    the gate's response path, so a blocking open would stall the verdict — a
+    logging concern escalating into a product outage. O_NONBLOCK makes it fail
+    fast instead, and the failure is swallowed like any other."""
+    if not hasattr(os, "mkfifo"):
+        print("SKIP a_fifo_store_path_cannot_hang_the_gate (no mkfifo)")
+        return
+    tmp, conn = _fresh_db()
+    try:
+        path = request_text_store.store_path(tmp)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        os.mkfifo(path)
+        started = time.monotonic()
+        _run(conn, tmp, SENTINEL)          # must return, not block
+        elapsed = time.monotonic() - started
+        _assert(elapsed < 10, f"gate must not stall on a fifo store: {elapsed:.1f}s")
+        _assert(len(_gate_rows(tmp)) == 1, "the structural log must still fire")
+        print("PASS a_fifo_store_path_cannot_hang_the_gate")
+    finally:
+        try:
+            request_text_store.store_path(tmp).unlink()
+        except OSError:
+            pass
         _cleanup(tmp, conn)
 
 
