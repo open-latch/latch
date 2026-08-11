@@ -372,6 +372,50 @@ def test_install_commands_preserves_user_owned_legacy_aliases():
         restore()
 
 
+def test_install_commands_preserves_user_owned_primary_collision():
+    # A pre-existing personal command with a colliding name (e.g. the user's own
+    # /latch) must survive install: the primary loop skips destinations that
+    # fail the ownership heuristic instead of clobbering them (PR84 P1-4).
+    _src, dest, restore = _tmp_commands_env(
+        "/new/latch", {
+            "latch.md": "bash <KB_HOME>/bin/latch.sh\n",
+            "latch-compact.md": "bash <KB_HOME>/bin/run_compact_now.sh\n",
+        })
+    try:
+        dest.mkdir()
+        custom = "my personal latch command that predates Latch\n"
+        (dest / "latch.md").write_text(custom, encoding="utf-8")
+
+        level, changes = ie.install_commands(dry_run=True)
+        _assert(level == "OK", f"expected OK, got {level}")
+        _assert(any("skipped latch.md (looks user-owned)" in c for c in changes),
+                f"dry-run must report the user-owned skip: {changes}")
+        _assert((dest / "latch.md").read_text(encoding="utf-8") == custom,
+                "dry-run must not touch the user-owned file")
+
+        level, changes = ie.install_commands(dry_run=False)
+        _assert(level == "OK", f"expected OK, got {level}")
+        _assert((dest / "latch.md").read_text(encoding="utf-8") == custom,
+                "user-owned primary-name command must not be overwritten")
+        _assert(any("skipped latch.md (looks user-owned)" in c for c in changes),
+                f"real install must report the user-owned skip: {changes}")
+        _assert(not any(c == "installed latch.md" for c in changes),
+                f"skipped file must not also be reported installed: {changes}")
+        installed_body = (dest / "latch-compact.md").read_text(encoding="utf-8")
+        _assert("/new/latch/bin/run_compact_now.sh" in installed_body,
+                f"non-colliding commands must still install: {installed_body!r}")
+        summary = ie._command_change_summary(changes)
+        _assert("1 user-owned file(s) skipped" in summary, summary)
+
+        # A latch-owned destination (from a prior install) still refreshes.
+        level, changes = ie.install_commands(dry_run=False)
+        _assert(any("installed latch-compact.md" in c for c in changes),
+                f"latch-owned destinations must keep overwriting: {changes}")
+        print("PASS install_commands_preserves_user_owned_primary_collision")
+    finally:
+        restore()
+
+
 def test_install_commands_prunes_stale_latch_owned_commands():
     _src, dest, restore = _tmp_commands_env(
         "/opt/latch", {"latch-gate.md": "bash <KB_HOME>/bin/run_latch_gate.sh\n"})
@@ -625,6 +669,39 @@ def test_pin_kb_dir_rejects_conflicting_effective_target():
             os.environ["CLAUDE_KB_DIR"] = saved_legacy
         shutil.rmtree(root, ignore_errors=True)
     print("PASS pin_kb_dir_rejects_conflicting_effective_target")
+
+
+def test_pin_kb_dir_errors_on_unpinned_legacy_install(tmp_path, monkeypatch):
+    # Legacy per-cwd routing no longer exists at runtime, so an upgrade over
+    # existing projects/*/kb.db without --kb-dir must stop the install (ERROR),
+    # not WARN-and-continue into an install that is LOCKED on every KB access
+    # (PR84 P1-3).
+    monkeypatch.setattr(ie, "KB_LOCATION_PATH", tmp_path / "kb_location.json")
+    monkeypatch.setattr(ie, "PROJECTS_DIR", tmp_path / "projects")
+    monkeypatch.delenv("LATCH_KB_DIR", raising=False)
+    monkeypatch.delenv("CLAUDE_KB_DIR", raising=False)
+    legacy = tmp_path / "projects" / "old-project"
+    legacy.mkdir(parents=True)
+    (legacy / "kb.db").write_bytes(b"")
+
+    level, message = ie.pin_kb_dir(None, False)
+
+    _assert(level == "ERROR",
+            f"unpinned legacy install must stop the install: {level}, {message}")
+    _assert("--kb-dir" in message,
+            f"error must tell the operator to pass --kb-dir: {message}")
+    _assert("LOCKED" in message and "keep" in message,
+            f"error must explain the LOCKED consequence and name the KB to keep: {message}")
+    _assert(not (tmp_path / "kb_location.json").exists(),
+            "the legacy-install error must not write a default pin")
+
+    # Naming the KB to keep resolves the error and writes the pin.
+    level, message = ie.pin_kb_dir(str(legacy), False)
+    _assert(level == "OK", f"explicit --kb-dir must pin the legacy KB: {level}, {message}")
+    recorded = json.loads(
+        (tmp_path / "kb_location.json").read_text(encoding="utf-8"))["kb_dir"]
+    _assert(Path(recorded) == legacy.resolve(),
+            f"pin must record the chosen legacy KB: {recorded}")
 
 
 def test_pin_kb_dir_default_stays_inside_authenticated_test_root(
@@ -1072,6 +1149,7 @@ if __name__ == "__main__":
     test_commands_status_missing_then_present_then_unresolved()
     test_install_commands_updates_existing_legacy_aliases()
     test_install_commands_preserves_user_owned_legacy_aliases()
+    test_install_commands_preserves_user_owned_primary_collision()
     test_install_commands_prunes_stale_latch_owned_commands()
     test_commands_status_flags_stale_latch_owned_commands()
     test_default_commands_hide_workstream_control_surfaces()

@@ -45,13 +45,6 @@ installed=0
 updated=0
 removed=0
 skipped=0
-for f in "$SRC_DIR"/*.md; do
-  [ -e "$f" ] || continue
-  name="$(basename "$f")"
-  sed "s|<KB_HOME>|$KB_HOME|g" "$f" > "$DEST_DIR/$name"
-  echo "installed $name"
-  installed=$((installed + 1))
-done
 
 is_latch_command() {
   local file="$1"
@@ -60,6 +53,19 @@ is_latch_command() {
   grep -Fq "$KB_HOME" "$file" && return 0
   grep -Eq '/bin/(run_kb_gate|run_latch_gate|latch_baseline|latch|unlatch|latch_gate_report|run_compact_now|run_latch_compact_now|run_kb_focus)\.sh|/bin/latch_direction\.sh|/src/(budget|maintenance)\.py|kb_profile_(active|bind)|mission-control verification profile|trust-and-go verification profile' "$file"
 }
+
+for f in "$SRC_DIR"/*.md; do
+  [ -e "$f" ] || continue
+  name="$(basename "$f")"
+  if [ -f "$DEST_DIR/$name" ] && ! is_latch_command "$DEST_DIR/$name"; then
+    echo "skipped $name (looks user-owned)"
+    skipped=$((skipped + 1))
+    continue
+  fi
+  sed "s|<KB_HOME>|$KB_HOME|g" "$f" > "$DEST_DIR/$name"
+  echo "installed $name"
+  installed=$((installed + 1))
+done
 
 update_legacy_alias() {
   local legacy="$1"

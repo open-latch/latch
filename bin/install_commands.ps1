@@ -35,14 +35,6 @@ $installed = 0
 $updated = 0
 $removed = 0
 $skipped = 0
-Get-ChildItem -Path $SrcDir -Filter *.md | ForEach-Object {
-    $content = Get-Content $_.FullName -Raw
-    $content = $content -replace [regex]::Escape('<KB_HOME>'), $KbHome
-    Set-Content -Path (Join-Path $DestDir $_.Name) -Value $content -NoNewline
-    Write-Host "installed $($_.Name)"
-    $script:installed++
-}
-
 function Test-LatchCommand($Path) {
     if (-not (Test-Path $Path)) { return $false }
     $body = Get-Content $Path -Raw
@@ -50,6 +42,20 @@ function Test-LatchCommand($Path) {
     if ($body.Contains('<KB_HOME>')) { return $true }
     if ($normalized.Contains($KbHome)) { return $true }
     return ($normalized -match '/bin/(run_kb_gate|run_latch_gate|latch_baseline|latch|unlatch|latch_gate_report|run_compact_now|run_latch_compact_now|run_kb_focus)\.sh|/bin/latch_direction\.sh|/src/(budget|maintenance)\.py|kb_profile_(active|bind)|mission-control verification profile|trust-and-go verification profile')
+}
+
+Get-ChildItem -Path $SrcDir -Filter *.md | ForEach-Object {
+    $destPath = Join-Path $DestDir $_.Name
+    if ((Test-Path $destPath) -and -not (Test-LatchCommand $destPath)) {
+        Write-Host "skipped $($_.Name) (looks user-owned)"
+        $script:skipped++
+        return
+    }
+    $content = Get-Content $_.FullName -Raw
+    $content = $content -replace [regex]::Escape('<KB_HOME>'), $KbHome
+    Set-Content -Path $destPath -Value $content -NoNewline
+    Write-Host "installed $($_.Name)"
+    $script:installed++
 }
 
 function Update-LegacyAlias($Legacy, $Primary) {

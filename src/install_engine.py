@@ -573,11 +573,13 @@ def pin_kb_dir(kb_dir_override: str | None, dry_run: bool) -> tuple[str, str]:
       * ``--kb-dir`` wins, then ``LATCH_KB_DIR`` / ``CLAUDE_KB_DIR``;
       * a FRESH install defaults to the platform production-data directory,
         outside this source checkout;
-      * an install that already has per-cwd KBs and no ``--kb-dir`` is LEFT in
-        legacy mode — writing a default would silently orphan existing
-        knowledge — with guidance to pin explicitly. This is the forward-only
-        migration stance of id=1556 (new installs pay nothing; existing
-        multi-DB users choose their one KB once, by hand).
+      * an install that already has per-cwd KBs and no ``--kb-dir`` is an
+        ERROR — legacy per-cwd routing no longer exists at runtime, so an
+        unpinned legacy install is LOCKED until pinned, and writing a default
+        would silently orphan existing knowledge. The operator must choose the
+        one KB to keep with ``--kb-dir``. This is the forward-only migration
+        stance of id=1556 (new installs pay nothing; existing multi-DB users
+        choose their one KB once, by hand).
     """
     latch_override = (os.environ.get("LATCH_KB_DIR") or "").strip() or None
     legacy_override = (os.environ.get("CLAUDE_KB_DIR") or "").strip() or None
@@ -641,11 +643,12 @@ def pin_kb_dir(kb_dir_override: str | None, dry_run: bool) -> tuple[str, str]:
     if effective_override:
         target = absolute_kb_dir(effective_override)
     elif _has_legacy_project_dbs():
-        return "WARN", (
-            "existing per-cwd KBs found under projects/ and no --kb-dir given - "
-            "leaving this install in LEGACY per-cwd mode (the wrong-DB bug class "
-            "stays live; id=1556). Re-run with --kb-dir <path> to pin the one KB "
-            "(e.g. the projects/<dir> you want to keep)."
+        return "ERROR", (
+            "existing per-cwd KBs found under projects/ and no --kb-dir given. "
+            "Legacy per-cwd routing no longer exists at runtime, so this unpinned "
+            "install stays LOCKED on every KB access (id=1556). Re-run with "
+            "--kb-dir <path> naming the one KB to keep (e.g. the projects/<dir> "
+            "you want to keep)."
         )
     else:
         test_root = paths.validated_test_root()
@@ -847,9 +850,11 @@ def install_commands(dry_run: bool) -> tuple[str, list[str]]:
     ``bin/install_commands.{sh,ps1}`` (kept for commands-only re-installs) so the
     one engine install also wires the commands — without this step ``/latch-compact``
     et al. error ``Unknown skill`` even though the engine + MCP are fully wired
-    (the gap that bit the 2026-06-07 Mac install, id=1468 #1). Overwrite-always,
-    matching the shell installers. Honors ``CLAUDE_COMMANDS_DIR`` via
-    ``COMMANDS_DEST``.
+    (the gap that bit the 2026-06-07 Mac install, id=1468 #1). Latch-owned
+    destinations are overwritten on every run; an existing destination that
+    fails ``_is_latch_command_body`` is skipped so a user's personal command
+    (e.g. their own ``latch.md``) is never clobbered — matching the shell
+    installers. Honors ``CLAUDE_COMMANDS_DIR`` via ``COMMANDS_DEST``.
 
     Returns ``(level, changes)``: 'OK' on success, 'WARN' if there is nothing to
     install (no ``commands/`` dir or no ``.md`` files).
@@ -863,10 +868,14 @@ def install_commands(dry_run: bool) -> tuple[str, list[str]]:
         COMMANDS_DEST.mkdir(parents=True, exist_ok=True)
     changes: list[str] = []
     for f in md_files:
+        dest = COMMANDS_DEST / f.name
+        if dest.exists() and not _is_latch_command_body(_read_text(dest)):
+            changes.append(f"skipped {f.name} (looks user-owned)")
+            continue
         if dry_run:
             changes.append(f"would install {f.name}")
             continue
-        _write_command(f, COMMANDS_DEST / f.name)
+        _write_command(f, dest)
         changes.append(f"installed {f.name}")
     for legacy_name, primary_name in LEGACY_COMMAND_ALIASES.items():
         legacy = COMMANDS_DEST / legacy_name
@@ -982,7 +991,7 @@ def check(python_path: str, server_py: str) -> int:
     rows.append(commands_status())
 
     # KB-dir pin (id=1556): env var wins; else kb_location.json; a legacy
-    # per-cwd install with no pin keeps the wrong-DB bug class live → flag it.
+    # per-cwd install with no pin is LOCKED at runtime → flag it.
     env_pin = os.environ.get("LATCH_KB_DIR") or os.environ.get("CLAUDE_KB_DIR")
     if env_pin and env_pin.strip():
         src = "LATCH_KB_DIR" if os.environ.get("LATCH_KB_DIR") else "CLAUDE_KB_DIR"
@@ -992,8 +1001,9 @@ def check(python_path: str, server_py: str) -> int:
         if pin:
             rows.append((True, f"KB pinned -> {pin} (kb_location.json)"))
         elif _has_legacy_project_dbs():
-            rows.append((False, "KB NOT pinned: legacy per-cwd mode with existing project "
-                                "KBs (wrong-DB bug class live - pin with --kb-dir; id=1556)"))
+            rows.append((False, "KB NOT pinned: existing per-cwd project KBs and no pin "
+                                "(unpinned legacy install is LOCKED until pinned - pin "
+                                "with --kb-dir; id=1556)"))
         else:
             rows.append((True, "KB not pinned yet (fresh install — pin defaults outside source)"))
     rows.extend(scope_configuration_status())
