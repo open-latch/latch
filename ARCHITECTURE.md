@@ -64,11 +64,17 @@ ${LATCH_HOME}/
 
 ## Concepts
 
-- **Selected local KB.** A configured install pins one KB directory through
-  `LATCH_KB_DIR` or `kb_location.json`; the current working directory scopes
-  artifacts but does not select the database. The historical
-  `projects/<sanitized-cwd>/kb.db` layout remains only as an unconfigured
-  compatibility fallback.
+- **Selected local KB.** Runtime wiring is installed once. Global Shared mode
+  preserves the existing product: every filesystem location uses the installed
+  global pin and project scope state is not consulted. Consulting mode is a
+  deliberate, one-way opt-in; only then does the current filesystem location
+  select a KB through the nearest explicit scope root.
+  Shared roots use the exact install-level global KB; Private roots use their
+  own external vault; UNLATCHED roots open no KB; unsafe or unscoped locations
+  under the explicit policy are LOCKED. Descendants inherit the nearest root.
+  The one-way transition drains global KB access before persisting explicit
+  mode and creating the first boundary. A direct `LATCH_KB_DIR` override remains
+  install-wide and therefore cannot claim project separation.
 - **Loose graph.** `nodes(kind, title, body, status, embedding)` +
   `edges(src, dst, relation)`. Relations are free-form strings; common
   patterns will emerge — codify later. Kinds: `fact`, `decision`, `progress`,
@@ -165,6 +171,12 @@ The engine installer (`bin/install_engine.{sh,ps1}`) is **not** a
   `~/.claude/commands/` with `<KB_HOME>` resolved (a plain `cp` would leave the
   placeholder unresolved). To (re)install only the commands after editing one:
   `bash bin/install_commands.sh` / `.\bin\install_commands.ps1` (idempotent).
+- **Preserves product mode during wiring.** Fresh installs and upgrades remain
+  Global Shared unless the user explicitly runs the consulting-mode latch
+  transition. Installers never activate project mode and cannot downgrade it
+  after activation. Global Shared has no second binding: the installed pin is
+  its single KB authority. Project mode uses only ordinary `ScopeBinding`
+  records.
 
 The interpreter is resolved automatically (`$LATCH_PYTHON`, legacy
 `$CLAUDE_KB_PYTHON`, else repo `.venv`); override with
@@ -272,6 +284,10 @@ leg and continues with other authorized sources.
   metadata-verified, non-subagent local IDE transcripts assigned to the current
   project after explicit `--cursor-history` consent; it excludes
   CLI/cloud/other-project/subagent data.
+- **Fences shell-backed maintenance and gate commands to the current chat.**
+  `latch-decay`, `latch-heal`, `latch-tree`, and the `latch-gate` shell fallback
+  must use the exact session id re-injected by `beforeSubmitPrompt` as
+  `LATCH_SESSION_ID`; omission or reuse of another chat id fails closed.
 - **Syncs `AGENTS.md`** using the same shared managed-region mechanics as
   Codex, branded for Cursor on first wiring.
 - **Optionally manages `.cursor/hooks.json`** when `--with-hooks` is passed.
@@ -344,8 +360,9 @@ runtime dependency is Python). Model-backed heal arbitration and tree summary
 generation use Claude by default for existing Claude installs; adapter env such
 as Codex's `LATCH_MODEL_BACKEND=codex` routes those calls through the selected
 backend. Run a pass manually with
-`python src/selfheal.py <project_dir>`, or via `/kb-heal` · `/kb-decay` ·
-`/kb-tree`.
+`python src/selfheal.py <project_dir>`, or via `/latch-heal` · `/latch-decay` ·
+`/latch-tree`. Existing `/kb-*` command files are updated as compatibility
+aliases when present; fresh command installs create only the `/latch-*` names.
 
 **Optional git snapshot (off by default).** Maintenance does not touch git — a
 forced `git push` would fail or hang on machines with no remote or credentials.
@@ -392,7 +409,10 @@ resumes; `bin/latch_status.sh` reports state. Finer:
 stops only the write-side hooks (Stop / SessionEnd / compactor) while leaving
 read-side prompt retrieval and silent host bootstrap live.
 `latch_enable.sh` leaves `DISABLE_WRITE` in place by default; `--all` removes
-it too. Windows: the `.ps1` equivalents.
+it too. A legacy install-wide `UNLATCHED` sentinel is global, not project-local;
+the enable wrapper clears it only after validating and restoring its recorded
+ancestor instruction files. Use `latch` / `unlatch` for the normal per-scope
+state cycle. Windows: the `.ps1` equivalents.
 
 ### Logs
 

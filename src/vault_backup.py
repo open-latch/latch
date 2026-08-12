@@ -414,12 +414,18 @@ def create_snapshot(
     *,
     reason: str = "cadence",
     now: datetime | None = None,
+    expected_binding_revision: str | None = None,
+    expected_kb_dir: str | os.PathLike[str] | None = None,
 ) -> dict[str, Any]:
     """Create and verify an atomic online snapshot of the selected vault."""
     import db  # local import keeps schema_version able to use this module later
 
     created = (now or _now()).astimezone(timezone.utc)
-    conn = db.connect(project_path)
+    conn = db.connect(
+        project_path,
+        expected_binding_revision=expected_binding_revision,
+        expected_kb_dir=expected_kb_dir,
+    )
     try:
         identity = getattr(conn, "_kb_vault_identity", None)
         if not isinstance(identity, vault_identity.VaultIdentity):
@@ -528,78 +534,95 @@ def prune_expired(
     project_path: str | None,
     *,
     now: datetime | None = None,
+    expected_binding_revision: str | None = None,
+    expected_kb_dir: str | os.PathLike[str] | None = None,
 ) -> dict[str, int]:
     """Delete only expired verified pairs; there is no force/protected override."""
     import db
 
     current = (now or _now()).astimezone(timezone.utc)
-    conn = db.connect(project_path)
+    conn = db.connect(
+        project_path,
+        expected_binding_revision=expected_binding_revision,
+        expected_kb_dir=expected_kb_dir,
+    )
     try:
         identity = getattr(conn, "_kb_vault_identity", None)
         if not isinstance(identity, vault_identity.VaultIdentity):
             raise BackupSafetyError("live connection has no validated vault identity")
-        snapshot_dir = _snapshot_dir(identity, paths.project_dir(project_path).resolve())
-    finally:
-        conn.close()
-    candidates = _manifests(snapshot_dir)
-    if not candidates:
-        return {"deleted": 0, "protected": 0, "skipped": 0}
-    result = {"deleted": 0, "protected": 0, "skipped": 0}
-    dated_candidates: list[
-        tuple[Path, dict[str, Any], Path, datetime, datetime]
-    ] = []
-    for manifest_path, manifest in candidates:
-        try:
-            manifest_path, snapshot, created_at, protected_until = (
+        database_rows = conn.execute("PRAGMA database_list").fetchall()
+        database_file = next(
+            (Path(str(row[2])) for row in database_rows if row[1] == "main" and row[2]),
+            None,
+        )
+        if (
+            database_file is None
+            or not database_file.is_absolute()
+            or database_file.name != "kb.db"
+        ):
+            raise BackupSafetyError("live connection has no exact KB database path")
+        snapshot_dir = _snapshot_dir(identity, database_file.parent)
+        candidates = _manifests(snapshot_dir)
+        if not candidates:
+            return {"deleted": 0, "protected": 0, "skipped": 0}
+        result = {"deleted": 0, "protected": 0, "skipped": 0}
+        dated_candidates: list[
+            tuple[Path, dict[str, Any], Path, datetime, datetime]
+        ] = []
+        for manifest_path, manifest in candidates:
+            try:
+                manifest_path, snapshot, created_at, protected_until = (
+                    _manifest_semantics(
+                        snapshot_dir,
+                        manifest_path,
+                        manifest,
+                        expected_vault_uuid=identity.vault_uuid,
+                    )
+                )
+            except BackupSafetyError:
+                result["skipped"] += 1
+                continue
+            dated_candidates.append(
+                (manifest_path, manifest, snapshot, created_at, protected_until)
+            )
+        if not dated_candidates:
+            return result
+        newest = max(dated_candidates, key=lambda item: item[3])[0]
+        for (
+            manifest_path,
+            manifest,
+            snapshot,
+            _created_at,
+            protected_until,
+        ) in dated_candidates:
+            if manifest_path == newest:
+                result["protected"] += 1
+                continue
+            if current < protected_until:
+                result["protected"] += 1
+                continue
+            if not all(
+                _make_opened_file_writable(path)
+                for path in (snapshot, manifest_path)
+            ):
+                result["skipped"] += 1
+                continue
+            try:
                 _manifest_semantics(
                     snapshot_dir,
                     manifest_path,
                     manifest,
                     expected_vault_uuid=identity.vault_uuid,
                 )
-            )
-        except BackupSafetyError:
-            result["skipped"] += 1
-            continue
-        dated_candidates.append(
-            (manifest_path, manifest, snapshot, created_at, protected_until)
-        )
-    if not dated_candidates:
+            except BackupSafetyError:
+                result["skipped"] += 1
+                continue
+            for path in (snapshot, manifest_path):
+                path.unlink()
+            result["deleted"] += 1
         return result
-    newest = max(dated_candidates, key=lambda item: item[3])[0]
-    for (
-        manifest_path,
-        manifest,
-        snapshot,
-        _created_at,
-        protected_until,
-    ) in dated_candidates:
-        if manifest_path == newest:
-            result["protected"] += 1
-            continue
-        if current < protected_until:
-            result["protected"] += 1
-            continue
-        if not all(
-            _make_opened_file_writable(path)
-            for path in (snapshot, manifest_path)
-        ):
-            result["skipped"] += 1
-            continue
-        try:
-            _manifest_semantics(
-                snapshot_dir,
-                manifest_path,
-                manifest,
-                expected_vault_uuid=identity.vault_uuid,
-            )
-        except BackupSafetyError:
-            result["skipped"] += 1
-            continue
-        for path in (snapshot, manifest_path):
-            path.unlink()
-        result["deleted"] += 1
-    return result
+    finally:
+        conn.close()
 
 
 def _verified_snapshot_source(manifest_path: Path) -> tuple[Path, dict[str, Any], Path]:

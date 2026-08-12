@@ -184,8 +184,10 @@ def create_fixture(root: Path) -> DemoFixture:
         encoding="utf-8",
     )
     test_root, capability, owns_test_root = _demo_test_identity(root)
+    kb_scope = root / "kb"
+    kb_scope.mkdir(parents=True, exist_ok=True)
     with _test_runtime(test_root, capability):
-        kb_dir = paths.project_dir(str(root / "kb"))
+        kb_dir = paths.project_dir(str(kb_scope))
         with pinned_kb_dir(kb_dir):
             conn = db.connect(str(project))
             try:

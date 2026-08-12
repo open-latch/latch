@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import re
+import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -16,6 +17,7 @@ import budget  # noqa: E402
 import db  # noqa: E402
 import model_backends  # noqa: E402
 import paths  # noqa: E402
+import project_config  # noqa: E402
 import seed  # noqa: E402
 
 
@@ -60,6 +62,13 @@ def _candidate(
         source_digests=[source.content_digest],
         source_excerpts=[source.text.removeprefix("[user] ")],
         llm_used=True,
+    )
+
+
+def _record_seed_session(project_path, session_id: str) -> None:
+    target = project_config.resolve(project_path)
+    assert project_config.record_session_binding(project_path, session_id) == (
+        target.revision
     )
 
 
@@ -485,7 +494,7 @@ def test_scoped_approval_can_choose_candidate_or_corroborated_cluster():
 
 
 def test_partial_approval_keeps_source_revision_retryable(tmp_path, monkeypatch):
-    monkeypatch.setattr(paths, "is_unlatched_mode", lambda: False)
+    monkeypatch.setattr(paths, "is_unlatched_mode", lambda *_args: False)
     project = tmp_path / "partial-review"
     project.mkdir()
     source = _source("codex:partial-review")
@@ -1030,7 +1039,7 @@ def test_scoped_apply_uses_exact_digest_bound_preview(
 def test_cursor_history_consent_is_bound_to_generic_preview_digest(
     tmp_path, monkeypatch, capsys,
 ):
-    monkeypatch.setattr(paths, "is_unlatched_mode", lambda: False)
+    monkeypatch.setattr(paths, "is_unlatched_mode", lambda *_args: False)
     source = _source(
         "cursor:history-consent",
         agent="cursor",
@@ -1171,7 +1180,7 @@ def test_cursor_history_main_signs_opt_in_into_preview(
 def test_scoped_apply_finalizes_review_and_dismisses_unselected_items(
     tmp_path, monkeypatch, capsys,
 ):
-    monkeypatch.setattr(paths, "is_unlatched_mode", lambda: False)
+    monkeypatch.setattr(paths, "is_unlatched_mode", lambda *_args: False)
     source = _source("codex:final-scoped-review")
     approved = _candidate(
         source,
@@ -1353,6 +1362,7 @@ def test_cursor_preview_cache_is_bounded_expiring_and_path_minimal(
     newest_digest = ""
     for index in range(seed.SEED_PREVIEW_CACHE_MAX_FILES + 3):
         newest_session = f"cursor-cache-{index}"
+        _record_seed_session(tmp_path, newest_session)
         newest_digest = seed.write_cursor_seed_preview(
             project_path=str(tmp_path),
             session_id=newest_session,
@@ -1493,6 +1503,7 @@ def test_opaque_source_identity_is_stable_across_preview_cache(
 def test_existing_seed_ledger_read_failure_stops_before_consent_or_model(
     tmp_path, monkeypatch, capsys,
 ):
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
     source = _source("codex:ledger-read-failure")
     db_file = tmp_path / "kb.db"
     db_file.write_bytes(b"existing")
@@ -1552,6 +1563,7 @@ def test_cursor_preview_cache_write_failure_is_sanitized_and_fail_closed(
         "write_cursor_seed_preview",
         lambda **_kwargs: (_ for _ in ()).throw(PermissionError(private_error)),
     )
+    _record_seed_session(tmp_path, "exact-session")
     rc = seed.main([
         "--project", str(tmp_path),
         "--source", "cursor",
@@ -1582,6 +1594,7 @@ def test_cursor_main_preview_writes_exact_session_cache(
         text="[user] We decided exact Cursor preview must create its bound receipt.",
     )
     monkeypatch.setattr(seed, "discover_sources", lambda **_kwargs: [source])
+    _record_seed_session(tmp_path, "exact-main-session")
     rc = seed.main([
         "--project", str(tmp_path),
         "--source", "cursor",
@@ -1771,7 +1784,7 @@ def test_json_invalid_apply_selection_is_structured(
 def test_digest_bound_dismiss_all_finalizes_sources_without_nodes(
     tmp_path, monkeypatch, capsys,
 ):
-    monkeypatch.setattr(paths, "is_unlatched_mode", lambda: False)
+    monkeypatch.setattr(paths, "is_unlatched_mode", lambda *_args: False)
     source = _source(
         "codex:dismiss-all",
         text="[user] We decided every candidate in this seed preview is noise.",
@@ -2065,6 +2078,7 @@ def test_mutated_cursor_preview_fails_closed(tmp_path):
         title="Keep Cursor previews tamper-evident",
         claim="Cursor apply must reject cached candidates edited after review.",
     )
+    _record_seed_session(tmp_path, "sid-tamper")
     digest = seed.write_cursor_seed_preview(
         project_path=str(tmp_path),
         session_id="sid-tamper",
@@ -2090,7 +2104,7 @@ def test_mutated_cursor_preview_fails_closed(tmp_path):
 def test_mutated_preview_apply_exits_closed_without_write(
     tmp_path, monkeypatch, capsys,
 ):
-    monkeypatch.setattr(paths, "is_unlatched_mode", lambda: False)
+    monkeypatch.setattr(paths, "is_unlatched_mode", lambda *_args: False)
     source = _source("codex:tamper-cli")
     candidate = _candidate(
         source,
@@ -2130,7 +2144,7 @@ def test_mutated_preview_apply_exits_closed_without_write(
 def test_incomplete_apply_reports_failures_and_keeps_preview_resumable(
     tmp_path, monkeypatch, capsys,
 ):
-    monkeypatch.setattr(paths, "is_unlatched_mode", lambda: False)
+    monkeypatch.setattr(paths, "is_unlatched_mode", lambda *_args: False)
     source = _source("codex:partial-apply-cli")
     candidate = _candidate(
         source,
@@ -2157,6 +2171,7 @@ def test_incomplete_apply_reports_failures_and_keeps_preview_resumable(
             failures=[{"error_code": "node_write_failed"}],
         )
 
+    original_apply_candidates = seed.apply_candidates
     monkeypatch.setattr(seed, "apply_candidates", partial_apply)
     rc = seed.main(list(cli_args))
     payload = json.loads(capsys.readouterr().out)
@@ -2169,8 +2184,7 @@ def test_incomplete_apply_reports_failures_and_keeps_preview_resumable(
     # Retention of the reviewed preview IS the resume mechanism.
     assert seed._seed_preview_path(str(tmp_path), digest).exists()
 
-    monkeypatch.undo()
-    monkeypatch.setattr(paths, "is_unlatched_mode", lambda: False)
+    monkeypatch.setattr(seed, "apply_candidates", original_apply_candidates)
     resume_rc = seed.main(list(cli_args))
     resume_payload = json.loads(capsys.readouterr().out)
     assert resume_rc == 0
@@ -2293,7 +2307,7 @@ def test_real_dogfood_duplicate_pair_clusters_with_corroboration():
 def test_whole_report_approval_applies_cluster_semantics(
     tmp_path, monkeypatch, capsys,
 ):
-    monkeypatch.setattr(paths, "is_unlatched_mode", lambda: False)
+    monkeypatch.setattr(paths, "is_unlatched_mode", lambda *_args: False)
     first_source = _source("codex:whole-report-a")
     second_source = _source(
         "codex:whole-report-b", mtime="2026-07-21T12:00:00+00:00",

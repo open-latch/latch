@@ -119,7 +119,9 @@ def test_disjoint_llm_supersede_allowed():
     a, b = _node(1, ref=10), _node(2, ref=1)
     captured = {}
 
-    def fake_nightly(older, newer, similarity, *, a_repos=FS(), b_repos=FS()):
+    def fake_nightly(
+        older, newer, similarity, *, a_repos=FS(), b_repos=FS(), **_kwargs,
+    ):
         captured["a_repos"], captured["b_repos"] = a_repos, b_repos
         return {"decision": "supersede_a", "reason": "global directive supersedes cross-repo"}
 
@@ -175,7 +177,7 @@ def test_inline_arbitrate_prompt_evidence():
     orig_invoke = heal.model_backends.invoke_prompt
     orig_dis, orig_inc = heal.paths.is_disabled, heal.paths.is_in_compact
     heal.model_backends.invoke_prompt = fake_invoke
-    heal.paths.is_disabled = lambda: False
+    heal.paths.is_disabled = lambda *_args: False
     heal.paths.is_in_compact = lambda: False
     heal._consecutive_arbitrate_timeouts = 0
     new = {"kind": "fact", "title": "t", "body": "b"}
@@ -201,7 +203,9 @@ def test_inline_insert_passes_evidence_before_arbitration():
     conn = _isolated_conn()
     captured = {}
 
-    def fake_arb(new, old, sim, *, new_repos=FS(), old_repos=FS()):
+    def fake_arb(
+        new, old, sim, *, new_repos=FS(), old_repos=FS(), **_kwargs,
+    ):
         captured["new_repos"], captured["old_repos"] = new_repos, old_repos
         return {"decision": "keep_both", "reason": "x"}
 

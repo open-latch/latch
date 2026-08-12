@@ -23,10 +23,11 @@ from typing import Any, BinaryIO
 
 import mcp_runtime
 import paths
+import project_config
 
 
-PROTOCOL_VERSION = 1
-PROXY_CAPABILITY_EPOCH = 4
+PROTOCOL_VERSION = 2
+PROXY_CAPABILITY_EPOCH = 6
 DISCOVERY_FILE = "mcp-daemon.json"
 START_LOCK_FILE = "mcp-daemon.start.lock"
 OWNER_FENCE_FILE = "mcp-daemon.owner.lock"
@@ -57,6 +58,7 @@ DAEMON_VAULT_ROOT_ENV_VARS = (
     "LATCH_PRODUCTION_DATA_ROOT",
     "LATCH_VAULT_REGISTRY_ROOT",
     "LATCH_DURABILITY_ROOT",
+    project_config.CONTROL_ROOT_ENV,
     "XDG_DATA_HOME",
     "XDG_STATE_HOME",
 )
@@ -71,10 +73,13 @@ VAULT_CONTEXT_PLATFORM_ENV_VARS = (
     "APPDATA",
     "LOCALAPPDATA",
 )
+OWNER_SCOPE_ENV = "LATCH_MCP_OWNER_SCOPE"
 
 
 class BrokerError(RuntimeError):
     pass
+
+
 
 
 def _canonical_context_path(value: str, *, name: str) -> str | None:
@@ -184,7 +189,47 @@ def _runtime_key() -> str:
 RUNTIME_KEY = _runtime_key()
 
 
+def _owner_scope_descriptor() -> mcp_runtime.ScopeDescriptor | None:
+    bound = mcp_runtime.current_runtime_scope()
+    if bound is not None:
+        return bound
+    raw = os.environ.get(OWNER_SCOPE_ENV)
+    if raw is None:
+        return None
+    try:
+        value = json.loads(raw)
+        return mcp_runtime.validate_scope_descriptor(value)
+    except (ValueError, TypeError) as exc:
+        raise BrokerError("invalid MCP owner scope handoff") from exc
+
+
+def validate_connection_scope(
+    project_cwd: str,
+    value: Any,
+) -> mcp_runtime.ScopeDescriptor:
+    """Re-resolve one proxy snapshot before any daemon/runtime assignment."""
+    try:
+        expected = mcp_runtime.validate_scope_descriptor(value)
+        current = resolve_connection_scope(project_cwd)
+    except (ValueError, project_config.ProjectConfigError) as exc:
+        raise BrokerError(f"MCP scope is not available: {exc}") from exc
+    if current != expected:
+        raise BrokerError(
+            "MCP project scope changed after initialization; start a fresh task"
+        )
+    return expected
+
+
+def resolve_connection_scope(project_cwd: str) -> mcp_runtime.ScopeDescriptor:
+    """Resolve the exact project authority used by one MCP connection."""
+    target = project_config.resolve(project_cwd)
+    return mcp_runtime.scope_descriptor_from_resolved(target)
+
+
 def runtime_dir() -> Path:
+    scope = _owner_scope_descriptor()
+    if scope is not None:
+        return Path(scope.kb_dir)
     return paths.ensure_project_dir()
 
 
@@ -1003,6 +1048,11 @@ def _daemon_environment(
     if test_root is not None:
         env[paths.TEST_ROOT_ENV] = str(test_root)
         env[paths.TEST_CAPABILITY_ENV] = values[paths.TEST_CAPABILITY_ENV]
+    owner_scope = _owner_scope_descriptor()
+    if owner_scope is not None:
+        env[OWNER_SCOPE_ENV] = json.dumps(
+            owner_scope.payload(), sort_keys=True, separators=(",", ":")
+        )
     env["LATCH_HOME"] = str(paths.KB_ROOT)
     env["LATCH_KB_DIR"] = str(runtime_dir())
     return env
@@ -1068,6 +1118,30 @@ def ensure_daemon(
     *,
     start_reason: str = "proxy_connect",
     windows_site_packages: str | None = None,
+    scope: Any = None,
+) -> dict[str, Any]:
+    try:
+        supplied = (
+            scope
+            if scope is not None
+            else resolve_connection_scope(project_cwd)
+        )
+        expected = validate_connection_scope(project_cwd, supplied)
+    except (ValueError, project_config.ProjectConfigError) as exc:
+        raise BrokerError(f"MCP scope is not available: {exc}") from exc
+    with mcp_runtime.bind_runtime_scope(expected):
+        return _ensure_daemon_bound(
+            project_cwd,
+            start_reason=start_reason,
+            windows_site_packages=windows_site_packages,
+        )
+
+
+def _ensure_daemon_bound(
+    project_cwd: str,
+    *,
+    start_reason: str = "proxy_connect",
+    windows_site_packages: str | None = None,
 ) -> dict[str, Any]:
     payload = _checked_discovery()
     if payload is not None and probe_discovery(payload):
@@ -1105,6 +1179,16 @@ def ensure_daemon(
 
 def request_daemon_start(project_cwd: str) -> bool:
     """Request a detached single-flight startup without blocking a hook."""
+    try:
+        expected = resolve_connection_scope(project_cwd)
+        expected = validate_connection_scope(project_cwd, expected)
+    except (ValueError, BrokerError, project_config.ProjectConfigError):
+        return False
+    with mcp_runtime.bind_runtime_scope(expected):
+        return _request_daemon_start_bound(project_cwd)
+
+
+def _request_daemon_start_bound(project_cwd: str) -> bool:
     payload = read_discovery()
     if payload is not None and probe_discovery(payload, timeout=0.02):
         return False
@@ -1155,6 +1239,22 @@ def connect_mcp(
     metadata: dict[str, Any], *, start_reason: str = "proxy_connect"
 ) -> tuple[socket.socket, dict[str, Any]]:
     project_cwd = str(metadata.get("project_cwd") or os.getcwd())
+    expected = validate_connection_scope(project_cwd, metadata.get("scope"))
+    with mcp_runtime.bind_runtime_scope(expected):
+        return _connect_mcp_bound(
+            metadata,
+            expected,
+            start_reason=start_reason,
+        )
+
+
+def _connect_mcp_bound(
+    metadata: dict[str, Any],
+    expected: mcp_runtime.ScopeDescriptor,
+    *,
+    start_reason: str,
+) -> tuple[socket.socket, dict[str, Any]]:
+    project_cwd = str(metadata["project_cwd"])
     local_digest = vault_context_digest()
     metadata_digest = metadata.get("vault_context_digest")
     capability_epoch = metadata.get("proxy_capability_epoch")
@@ -1167,7 +1267,11 @@ def connect_mcp(
         )
     ):
         raise BrokerError("MCP proxy vault context changed after initialization")
-    payload = ensure_daemon(project_cwd, start_reason=start_reason)
+    payload = ensure_daemon(
+        project_cwd,
+        start_reason=start_reason,
+        scope=expected,
+    )
     last_error: Exception | None = None
     for _attempt in range(2):
         try:
@@ -1188,7 +1292,11 @@ def connect_mcp(
             return sock, payload
         except OSError as exc:
             last_error = exc
-            payload = ensure_daemon(project_cwd, start_reason="connection_retry")
+            payload = ensure_daemon(
+                project_cwd,
+                start_reason="connection_retry",
+                scope=expected,
+            )
     raise BrokerError(f"could not connect to shared latch MCP daemon: {last_error}")
 
 
@@ -1202,10 +1310,13 @@ def publish_discovery(
     owner_runtime_key: str | None = None,
     compatibility: str = "migrate",
     legacy_path: bool = False,
+    protocol_version: int | None = None,
 ) -> Path:
     key = runtime_key or RUNTIME_KEY
     payload = {
-        "protocol": PROTOCOL_VERSION,
+        "protocol": (
+            PROTOCOL_VERSION if protocol_version is None else int(protocol_version)
+        ),
         "runtime_key": key,
         "owner_runtime_key": owner_runtime_key or RUNTIME_KEY,
         "required_proxy_capability_epoch": PROXY_CAPABILITY_EPOCH,

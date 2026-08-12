@@ -35,17 +35,44 @@ restore_unlatched_instructions() {
   local py
   if ! py="$(resolve_python)"; then
     echo "latch_enable: UNLATCHED is active but no Python was found to restore project instruction files." >&2
-    echo "set LATCH_PYTHON (legacy: CLAUDE_KB_PYTHON), then run: bash ${KB_HOME}/bin/unlatch.sh --confirm latch" >&2
+    echo "set LATCH_PYTHON (legacy: CLAUDE_KB_PYTHON), then run: bash ${KB_HOME}/bin/latch.sh --confirm latch" >&2
     exit 1
   fi
-  "$py" "${KB_HOME}/src/unlatch.py" on --project "$PROJECT_DIR"
+  if [ -e "${KB_HOME}/UNLATCH_STATE.json" ]; then
+    # Genuine legacy installs recover through the verified legacy receipt.
+    "$py" "${KB_HOME}/src/unlatch.py" on --project "$PROJECT_DIR" --legacy-state
+    return
+  fi
+  # New-style UNLATCHED sentinel (no legacy receipt): delegate to
+  # project_mode.py latch, which resolves the receipt-recorded project root,
+  # runs the per-scope enable, and durably removes UNLATCHED/DISABLE itself.
+  # The delegated latch also removes DISABLE_WRITE, but latch_enable without
+  # --all deliberately preserves that finer-grained switch — snapshot it and
+  # put it back afterwards.
+  local disable_write="${KB_HOME}/DISABLE_WRITE" keep=""
+  if ! $remove_all && [ -e "$disable_write" ]; then
+    keep="${disable_write}.latch-enable-keep"
+    cp -p "$disable_write" "$keep"
+  fi
+  local rc=0
+  "$py" "${KB_HOME}/src/project_mode.py" latch --project "$PROJECT_DIR" --confirm latch || rc=$?
+  if [ -n "$keep" ]; then
+    if [ ! -e "$disable_write" ]; then
+      mv -f "$keep" "$disable_write"
+    else
+      rm -f "$keep"
+    fi
+  fi
+  if [ "$rc" -ne 0 ]; then
+    exit "$rc"
+  fi
+  removed=true
 }
 
+removed=false
 if [ -e "${KB_HOME}/UNLATCHED" ] || [ -e "${KB_HOME}/UNLATCH_STATE.json" ]; then
   restore_unlatched_instructions
 fi
-
-removed=false
 if [ -e "${KB_HOME}/DISABLE" ]; then
   rm -f "${KB_HOME}/DISABLE"
   echo "removed ${KB_HOME}/DISABLE"

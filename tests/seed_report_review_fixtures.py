@@ -10,12 +10,14 @@ from __future__ import annotations
 import argparse
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
+import hashlib
 import json
 import os
 from pathlib import Path
 import shutil
 import subprocess
 import sys
+import tempfile
 
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "src"
@@ -118,7 +120,90 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def run_seed(cmd: list[str]) -> str:
-    result = subprocess.run(cmd, text=True, capture_output=True, check=False)
+    env = os.environ.copy()
+    try:
+        project = Path(cmd[cmd.index("--project") + 1]).resolve()
+    except (ValueError, IndexError) as exc:
+        raise RuntimeError("seed fixture command must include --project") from exc
+
+    key = hashlib.sha256(str(project).encode("utf-8")).hexdigest()[:16]
+    test_root_value = env.get("LATCH_TEST_ROOT")
+    if test_root_value:
+        test_root = Path(test_root_value).resolve()
+        runtime_root = test_root / "fixture-runtimes" / f"seed-report-{key}"
+        fixture_kb = test_root / "vaults" / f"seed-report-{key}"
+    else:
+        runtime_root = Path(tempfile.mkdtemp(prefix="latch-seed-review-runtime-"))
+        fixture_kb = runtime_root / "vault"
+    shutil.rmtree(runtime_root, ignore_errors=True)
+    if test_root_value:
+        shutil.rmtree(fixture_kb, ignore_errors=True)
+    install_home = runtime_root / "install"
+    control_root = runtime_root / "control"
+    install_home.mkdir(parents=True, exist_ok=True)
+    fixture_kb.mkdir(parents=True, exist_ok=True)
+    (install_home / "kb_location.json").write_text(
+        json.dumps({"kb_dir": str(fixture_kb)}) + "\n",
+        encoding="utf-8",
+    )
+
+    env["LATCH_HOME"] = str(install_home)
+    env["LATCH_SCOPE_STATE_ROOT"] = str(control_root)
+    env.pop("CLAUDE_KB_HOME", None)
+    env.pop("LATCH_KB_DIR", None)
+    env.pop("CLAUDE_KB_DIR", None)
+    # This is a standalone fixture CLI, not the Codex/Claude/Cursor task that
+    # launched pytest. It must not borrow that task's session authority.
+    for name in (
+        "LATCH_SESSION_ID",
+        "CLAUDE_CODE_SESSION_ID",
+        "CODEX_THREAD_ID",
+        "LATCH_ADAPTER",
+        "CLAUDECODE",
+    ):
+        env.pop(name, None)
+    existing_pythonpath = env.get("PYTHONPATH")
+    env["PYTHONPATH"] = (
+        str(SRC)
+        if not existing_pythonpath
+        else str(SRC) + os.pathsep + existing_pythonpath
+    )
+
+    setup = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import project_config; "
+                "project_config.write_machine_policy("
+                "project_config.MACHINE_POLICY_SHARED)"
+            ),
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+        env=env,
+    )
+    if setup.returncode != 0:
+        shutil.rmtree(runtime_root, ignore_errors=True)
+        if test_root_value:
+            shutil.rmtree(fixture_kb, ignore_errors=True)
+        raise RuntimeError(
+            f"could not configure disposable seed fixture scope ({setup.returncode})\n"
+            f"STDOUT:\n{setup.stdout}\nSTDERR:\n{setup.stderr}"
+        )
+    try:
+        result = subprocess.run(
+            cmd,
+            text=True,
+            capture_output=True,
+            check=False,
+            env=env,
+        )
+    finally:
+        shutil.rmtree(runtime_root, ignore_errors=True)
+        if test_root_value:
+            shutil.rmtree(fixture_kb, ignore_errors=True)
     if result.returncode != 0:
         raise RuntimeError(
             f"seed command failed with {result.returncode}\n"

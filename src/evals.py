@@ -323,7 +323,12 @@ def _grade_mode(
 
 def _connect_temp_kb(temp_root: Path):
     """Connect to a throwaway KB even on machines with a pinned install."""
-    kb_dir = temp_root / "kb"
+    test_root = paths.validated_test_root()
+    kb_dir = (
+        test_root / "vaults" / temp_root.name
+        if test_root is not None
+        else temp_root / "kb"
+    )
     old_latch_env = os.environ.pop("LATCH_KB_DIR", None)
     old_env = os.environ.pop("CLAUDE_KB_DIR", None)
     old_pin = paths._PINNED_DIR

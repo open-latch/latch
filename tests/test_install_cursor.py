@@ -408,6 +408,10 @@ def test_cursor_shell_workflows_pin_mcp_interpreter():
             _assert('"<CURSOR_MCP_PYTHON>"' in text, name)
         if name == "latch-decay.md":
             _assert('maintenance.py" weekly "$PWD"' in text, text)
+        if name in ic.CURSOR_SESSION_FENCED_COMMANDS:
+            _assert('LATCH_SESSION_ID="<CURRENT_CURSOR_SESSION_ID>"' in text, name)
+            _assert("current prompt context" in text, name)
+            _assert("beforeSubmitPrompt" in text and "Never omit" in text, name)
 
     for name in ic.CURSOR_SKILL_NAMES:
         if name == "source-command-latch-pm":
@@ -424,6 +428,13 @@ def test_cursor_shell_workflows_pin_mcp_interpreter():
             "source-command-latch-heal", "source-command-latch-tree",
         }:
             _assert("<CURSOR_MCP_PYTHON>" in text, path)
+        if name in {
+            "source-command-latch-decay", "source-command-latch-gate",
+            "source-command-latch-heal", "source-command-latch-tree",
+        }:
+            _assert("LATCH_SESSION_ID=<CURRENT_CURSOR_SESSION_ID>" in text, path)
+            _assert("current prompt context" in text, path)
+            _assert("beforeSubmitPrompt" in text and "Never omit" in text, path)
     print("PASS cursor_shell_workflows_pin_mcp_interpreter")
 
 
@@ -442,6 +453,9 @@ def test_check_mode_verifies_mcp_and_agents():
         cursor_rules_sync.sync(rule)
         ic.sync_cursor_commands(d / ".cursor" / "commands")
         ic.sync_cursor_skills(d / ".cursor" / "skills")
+        ic.project_config.write_machine_policy(
+            ic.project_config.MACHINE_POLICY_EXPLICIT
+        )
 
         rc = ic.main([
             "--python", sys.executable,
@@ -820,6 +834,44 @@ def test_with_hooks_installs_and_check_requires_hooks():
         _assert(rc == 1, rc)
     finally:
         shutil.rmtree(d, ignore_errors=True)
+
+
+def test_cursor_installer_preserves_global_mode_before_pin():
+    original = {
+        "scope_policy_for_install": ic.install_engine.scope_policy_for_install,
+        "configure_scope_policy": ic.install_engine.configure_scope_policy,
+        "pin_kb_dir": ic.install_engine.pin_kb_dir,
+    }
+    events: list[tuple[str, object]] = []
+    try:
+        ic.install_engine.scope_policy_for_install = lambda **kwargs: (
+            events.append(("plan", kwargs))
+            or ic.project_config.MACHINE_POLICY_SHARED
+        )
+        ic.install_engine.configure_scope_policy = lambda **kwargs: (
+            events.append(("policy", kwargs)) or ("OK", "shared")
+        )
+        ic.install_engine.pin_kb_dir = lambda value, dry_run: (
+            events.append(("pin", (value, dry_run))) or ("OK", "validated")
+        )
+        rc = ic.main([
+            "--python", sys.executable,
+            "--skip-mcp",
+            "--skip-agents",
+            "--skip-rules",
+            "--skip-commands",
+            "--skip-skills",
+        ])
+
+        _assert(rc == 0, f"Cursor scope wiring should complete: {events}")
+        _assert(events == [
+            ("plan", {}),
+            ("policy", {"dry_run": False}),
+            ("pin", (None, False)),
+        ], f"Cursor did not preserve global policy -> pin order: {events}")
+    finally:
+        for name, value in original.items():
+            setattr(ic.install_engine, name, value)
 
 
 if __name__ == "__main__":

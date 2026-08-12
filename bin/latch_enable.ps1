@@ -44,9 +44,40 @@ function Resolve-Python {
 function Restore-UnlatchedInstructions {
   $py = Resolve-Python
   if (-not $py) {
-    throw "latch_enable: UNLATCHED is active but no Python was found to restore project instruction files. Set LATCH_PYTHON (legacy: CLAUDE_KB_PYTHON), then run bin/unlatch.ps1 -Confirm latch."
+    throw "latch_enable: UNLATCHED is active but no Python was found to restore project instruction files. Set LATCH_PYTHON (legacy: CLAUDE_KB_PYTHON), then run bin/latch.ps1 -Confirm latch."
   }
-  & $py (Join-Path $KbHome "src/unlatch.py") on --project $ProjectDir
+  if (Test-Path $unlatchState) {
+    # Genuine legacy installs recover through the verified legacy receipt.
+    & $py (Join-Path $KbHome "src/unlatch.py") on --project $ProjectDir --legacy-state
+    if ($LASTEXITCODE -ne 0) {
+      throw "latch_enable: verified legacy Unlatch recovery failed; global UNLATCHED was not removed"
+    }
+    return
+  }
+  # New-style UNLATCHED sentinel (no legacy receipt): delegate to
+  # project_mode.py latch, which resolves the receipt-recorded project root,
+  # runs the per-scope enable, and durably removes UNLATCHED/DISABLE itself.
+  # The delegated latch also removes DISABLE_WRITE, but latch_enable without
+  # -All deliberately preserves that finer-grained switch — snapshot it and
+  # put it back afterwards.
+  $keep = $null
+  if (-not $All -and (Test-Path $disableWrite)) {
+    $keep = "$disableWrite.latch-enable-keep"
+    Copy-Item -Force $disableWrite $keep
+  }
+  & $py (Join-Path $KbHome "src/project_mode.py") latch --project $ProjectDir --confirm latch
+  $rc = $LASTEXITCODE
+  if ($keep) {
+    if (-not (Test-Path $disableWrite)) {
+      Move-Item -Force $keep $disableWrite
+    } else {
+      Remove-Item -Force $keep
+    }
+  }
+  if ($rc -ne 0) {
+    throw "latch_enable: delegated Unlatch recovery failed; global UNLATCHED was not removed"
+  }
+  $script:removed = $true
 }
 
 if ((Test-Path $unlatched) -or (Test-Path $unlatchState)) {

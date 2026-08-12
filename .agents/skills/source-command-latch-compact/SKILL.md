@@ -41,27 +41,17 @@ Steps:
    if [ -z "$latch_home" ] && [ -n "${CLAUDE_KB_HOME:-}" ]; then
      latch_home="$CLAUDE_KB_HOME"
    fi
-   if [ -z "$latch_home" ]; then
-     search_dir="$PWD"
-     while [ "$search_dir" != "/" ]; do
-       if [ -f "$search_dir/AGENTS.md" ]; then
-         latch_home="$(sed -n 's|.*Follow `\([^`]*\)/README\.md` per-user setup.*|\1|p' "$search_dir/AGENTS.md" | head -n 1)"
-         [ -n "$latch_home" ] && break
-       fi
-       search_dir="$(dirname "$search_dir")"
-     done
-   fi
-   if [ -z "$latch_home" ]; then
-     candidate="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
-     if [ -f "$candidate/src/mcp_server.py" ] && [ -d "$candidate/commands" ]; then
-       latch_home="$candidate"
-     fi
+   installed_latch_home=__LATCH_INSTALLED_HOME__
+   if [ -z "$latch_home" ] && [ -f "$installed_latch_home/src/mcp_server.py" ]; then
+     latch_home="$installed_latch_home"
    fi
    if [ ! -x "$latch_home/bin/run_codex_compact_now.sh" ]; then
-     echo "Could not find latch checkout; set LATCH_HOME to your latch install." >&2
+     echo "Installed Latch checkout is unavailable; re-run the Codex installer." >&2
      exit 1
    fi
-   bash "$latch_home/bin/run_codex_compact_now.sh" --background --wait
+   codex_task_id="${CODEX_THREAD_ID:-}"
+   test -n "$codex_task_id" || { echo "Current Codex task id unavailable." >&2; exit 1; }
+   bash "$latch_home/bin/run_codex_compact_now.sh" "$codex_task_id" --background --wait
    ```
 
    The parent process validates the Codex transcript before detaching, then

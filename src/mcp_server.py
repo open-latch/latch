@@ -68,6 +68,7 @@ import lockfile  # noqa: E402
 import mcp_broker  # noqa: E402
 import mcp_runtime  # noqa: E402
 import paths  # noqa: E402
+import project_config  # noqa: E402
 import project_direction  # noqa: E402
 import priorities  # noqa: E402
 import rolling  # noqa: E402
@@ -92,6 +93,30 @@ _LIFECYCLE_OWNED_EDGE_RELATIONS = frozenset({
     "closed_in_favor_of",
     "branched_from",
 })
+
+
+def project_binding_snapshot(
+    project_cwd: str,
+    *,
+    session_id: str | None = None,
+    require_session: bool = False,
+) -> tuple[str, str | None]:
+    """Snapshot the exact project binding and target for one MCP connection."""
+    try:
+        scope = mcp_broker.resolve_connection_scope(project_cwd)
+    except (ValueError, project_config.ProjectConfigError):
+        return "scope-unavailable", None
+    session_revision = (
+        project_config.current_session_revision(project_cwd, session_id)
+        if session_id
+        else None
+    )
+    if (session_id or require_session) and session_revision != scope.revision:
+        return "stale-session", None
+    return scope.revision, scope.kb_dir
+
+
+_DIRECT_BINDING_SNAPSHOT: tuple[str, str | None] | None = None
 
 
 def _is_codex_adapter_env(env: Mapping[str, str]) -> bool:
@@ -136,6 +161,24 @@ def _resolve_project_session_id(
 
 PROJECT_SESSION_ID = _resolve_project_session_id()
 
+if __name__ == "__main__":
+    # The direct stdio server is the explicit legacy fallback. Unlike the
+    # shared proxy it has no per-connection metadata, so bind it to the task
+    # that SessionStart authenticated and fail closed for adapter processes
+    # that cannot supply one.
+    adapter = (os.environ.get("LATCH_ADAPTER") or "").strip().lower()
+    require_session = bool(
+        adapter in {"claude", "codex", "cursor", "vscode"}
+        or os.environ.get("CLAUDECODE")
+        or _is_codex_adapter_env(os.environ)
+        or _is_cursor_adapter_env(os.environ)
+    )
+    _DIRECT_BINDING_SNAPSHOT = project_binding_snapshot(
+        PROJECT_CWD,
+        session_id=PROJECT_SESSION_ID,
+        require_session=require_session,
+    )
+
 
 def _project_cwd() -> str:
     context = mcp_runtime.current_connection()
@@ -169,6 +212,76 @@ def _project_session_id() -> str | None:
     if sid:
         PROJECT_SESSION_ID = sid
     return sid
+
+
+def _expected_connection_target() -> tuple[str | None, str | None]:
+    context = mcp_runtime.current_connection()
+    if context is not None:
+        return context.project_binding_revision, context.project_kb_dir
+    if _DIRECT_BINDING_SNAPSHOT is not None:
+        return _DIRECT_BINDING_SNAPSHOT
+    return None, None
+
+
+def _assert_connection_target(locked_kb: Path | None = None) -> None:
+    context = mcp_runtime.current_connection()
+    if context is not None and context.scope_descriptor is not None:
+        try:
+            current = mcp_broker.resolve_connection_scope(_project_cwd())
+        except (ValueError, project_config.ProjectConfigError) as exc:
+            raise db.ProjectTargetChangedError(
+                "this MCP connection no longer has a LATCHED project scope"
+            ) from exc
+        if current != context.scope_descriptor:
+            raise db.ProjectTargetChangedError(
+                "this MCP connection belongs to an older project scope; "
+                "start a fresh agent task before using Latch"
+            )
+        if context.session_id is not None and (
+            project_config.current_session_revision(
+                context.project_cwd,
+                context.session_id,
+            )
+            != context.scope_descriptor.revision
+        ):
+            raise db.ProjectTargetChangedError(
+                "this MCP connection belongs to an older agent task; "
+                "start a fresh agent task before using Latch"
+            )
+        if locked_kb is not None and os.path.normcase(str(locked_kb)) != os.path.normcase(
+            context.scope_descriptor.kb_dir
+        ):
+            raise db.ProjectTargetChangedError(
+                "this MCP connection belongs to a different project KB; "
+                "start a fresh agent task before using Latch"
+            )
+        return
+    expected_revision, expected_kb = _expected_connection_target()
+    if expected_revision is None:
+        return
+    try:
+        current = mcp_broker.resolve_connection_scope(_project_cwd())
+    except (ValueError, project_config.ProjectConfigError) as exc:
+        raise db.ProjectTargetChangedError(
+            "this MCP connection no longer has a LATCHED project scope"
+        ) from exc
+    if current.revision != expected_revision:
+        raise db.ProjectTargetChangedError(
+            "this MCP connection belongs to an older project KB binding; "
+            "start a fresh agent task before using Latch"
+        )
+    if expected_kb is not None:
+        current_kb = locked_kb or Path(current.kb_dir)
+        if (
+            os.path.normcase(str(current_kb))
+            != os.path.normcase(expected_kb)
+            or os.path.normcase(current.kb_dir)
+            != os.path.normcase(expected_kb)
+        ):
+            raise db.ProjectTargetChangedError(
+                "this MCP connection belongs to a different project KB; "
+                "start a fresh agent task before using Latch"
+            )
 
 # ---------- MCP payload size guardrails ----------
 #
@@ -205,10 +318,16 @@ def _log_compact(
             "safety_net_triggered": safety_net_triggered,
             "excerpt_strategy": excerpt_strategy,
         }
-        path = paths.project_dir(_project_cwd()) / COMPACT_LOG_FILE_NAME
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(entry, default=str) + "\n")
+        project_path = _project_cwd()
+        with lockfile.project_access_lock(project_path) as locked_kb:
+            _assert_connection_target(locked_kb)
+            expected_revision, _expected_kb = _expected_connection_target()
+            lockfile.append_project_log(
+                project_path,
+                COMPACT_LOG_FILE_NAME,
+                json.dumps(entry, default=str) + "\n",
+                expected_revision=expected_revision,
+            )
     except Exception:
         pass
 
@@ -316,7 +435,21 @@ def _stamp_list_activity(rows: list[dict], activity: dict) -> list[dict]:
 
 
 def _conn():
-    return db.connect(_project_cwd())
+    expected_revision, expected_kb = _expected_connection_target()
+    return db.connect(
+        _project_cwd(),
+        expected_binding_revision=expected_revision,
+        expected_kb_dir=expected_kb,
+    )
+
+
+def _readonly_conn():
+    expected_revision, expected_kb = _expected_connection_target()
+    return db.connect_readonly(
+        _project_cwd(),
+        expected_binding_revision=expected_revision,
+        expected_kb_dir=expected_kb,
+    )
 
 
 def _resolve_membership_for_mcp(
@@ -406,6 +539,17 @@ def _writer_lock_busy_response() -> dict:
     }
 
 
+def _project_target_changed_response() -> dict:
+    return {
+        "ok": False,
+        "reason": "project_target_changed",
+        "message": (
+            "This project's Latch KB changed while the write was waiting. "
+            "Nothing was written; start a fresh agent task in the intended project."
+        ),
+    }
+
+
 def _run_public_kb_mutation(
     operation: Callable[[Any], Any],
 ) -> Any:
@@ -423,11 +567,21 @@ def _run_public_kb_mutation(
     """
     project_path = _project_cwd()
     try:
-        with lockfile.writer_lock(project_path):
-            with _conn() as conn:
-                return operation(conn)
+        with lockfile.project_access_lock(project_path) as locked_kb:
+            _assert_connection_target(locked_kb)
+            with lockfile.writer_lock(project_path):
+                if paths.is_unlatched_mode(project_path):
+                    return _unlatched_response("kb_mutation")
+                with _conn() as conn:
+                    return operation(conn)
+    except lockfile.ProjectTargetChangedError as exc:
+        if exc.reason == "unlatched":
+            return _unlatched_response("kb_mutation")
+        return _project_target_changed_response()
     except lockfile.CompactionInProgressError:
         return _writer_lock_busy_response()
+    except db.ProjectTargetChangedError:
+        return _project_target_changed_response()
 
 
 def _kb_activity_carrier(result: Any) -> dict | None:
@@ -459,7 +613,7 @@ def _attach_pending_lifecycle_notice(result: Any) -> Any:
     if carrier is None:
         return result
     try:
-        with db.connect_readonly(_project_cwd()) as conn:
+        with _readonly_conn() as conn:
             pending = lifecycle_receipts.pending_surface_items(conn, limit=1)
     except Exception:
         return result
@@ -1514,7 +1668,7 @@ def _gate_status(verdict: dict) -> str:
         return "OK"
     if verdict.get("reason") == "unlatched":
         return (
-            "SKIPPED - Latch is currently UNLATCHED. Run /unlatch to re-latch. "
+            "SKIPPED - Latch is currently UNLATCHED. Run /latch to re-latch. "
             "If LATCH_UNLATCHED is set, unset it too."
         )
     if verdict.get("timed_out"):
@@ -1765,21 +1919,26 @@ def kb_capture_decision(
 
     # Emit the structural RL row AFTER the node exists (point-in-time, id=1108).
     # decision.log is a file write, not a DB write — do it outside the conn.
-    # Best-effort: emit_decision_event never raises, so logging can't break the
-    # capture that already succeeded.
+    # Reacquire the exact project target before the post-commit sidecar write.
+    # A repin after the DB commit must not put A's node id in B's log.
     decision_logged = False
     if new_id is not None:
-        capture_streams.emit_decision_event(
-            node_ids=[new_id],
-            confidence_tier=confidence_tier,
-            provenance=provenance,
-            was_confirmed=was_confirmed,
-            human_action=human_action,
-            query_hash=gate._query_hash(gate_request),
-            project_path=_project_cwd(),
-            session_id=sid,
-        )
-        decision_logged = True
+        try:
+            project_path = _project_cwd()
+            with lockfile.project_access_lock(project_path) as locked_kb:
+                _assert_connection_target(locked_kb)
+                decision_logged = capture_streams.emit_decision_event(
+                    node_ids=[new_id],
+                    confidence_tier=confidence_tier,
+                    provenance=provenance,
+                    was_confirmed=was_confirmed,
+                    human_action=human_action,
+                    query_hash=gate._query_hash(gate_request),
+                    project_path=project_path,
+                    session_id=sid,
+                )
+        except (lockfile.ProjectTargetChangedError, db.ProjectTargetChangedError):
+            decision_logged = False
 
     result["decision_logged"] = decision_logged
     result["human_action"] = human_action
@@ -2099,17 +2258,11 @@ def kb_runtime_status() -> dict:
     )
     other_owner_inventory = list(lease_state.get("other_live_owner") or [])
     observed_inventory = list(lease_state.get("observed_live") or [])
+    # Runtime status is a control-plane diagnostic.  It must remain available
+    # without opening the project database (including while a vault is locked,
+    # migrating, or missing its optional native SQLite extension).
     dropped_retrieval_events = None
     stale_tree_signals = None
-    try:
-        with _conn() as conn:
-            dropped_retrieval_events = db.retrieval_events_dropped(conn)
-            row = conn.execute(
-                "SELECT value FROM latch_meta WHERE key = 'stale_tree_signal'"
-            ).fetchone()
-            stale_tree_signals = int(row["value"]) if row is not None else 0
-    except Exception:
-        pass
     return {
         "mode": "shared_daemon" if daemon is not None else "legacy_stdio",
         "process_pid": os.getpid(),
@@ -2168,18 +2321,29 @@ def kb_runtime_status() -> dict:
     }
 
 
-def initialize_runtime(project_cwd: str, *, start_embed_listener: bool) -> None:
+def initialize_runtime(project_cwd: str, *, start_embed_listener: bool) -> bool:
     """Initialize heavyweight process-owned services exactly once.
 
     The shared daemon calls this before serving readiness probes. Legacy fallback
     calls the same path, preserving availability when broker startup fails.
     """
     global _RUNTIME_INITIALIZED
-    if paths.is_unlatched_mode() or _RUNTIME_INITIALIZED:
-        return
+    if _RUNTIME_INITIALIZED:
+        return True
     with _RUNTIME_INIT_LOCK:
         if _RUNTIME_INITIALIZED:
-            return
+            return True
+        if paths.is_unlatched_mode(project_cwd):
+            return False
+        try:
+            current_scope = mcp_broker.resolve_connection_scope(project_cwd)
+        except (ValueError, project_config.ProjectConfigError):
+            return False
+        owner_scope = mcp_broker._owner_scope_descriptor()
+        if owner_scope is not None and owner_scope != current_scope:
+            raise project_config.ProjectConfigError(
+                "MCP runtime owner scope changed before initialization"
+            )
         if start_embed_listener:
             _start_embed_listener(project_cwd)
         try:
@@ -2187,6 +2351,7 @@ def initialize_runtime(project_cwd: str, *, start_embed_listener: bool) -> None:
         except Exception as e:
             sys.stderr.write(f"[latch] embed pre-warm failed: {e}\n")
         _RUNTIME_INITIALIZED = True
+        return True
 
 
 def prune_hidden_surface_tools(server: FastMCP) -> list[str]:
@@ -2212,11 +2377,32 @@ def prune_hidden_surface_tools(server: FastMCP) -> list[str]:
     return removed
 
 
-if __name__ == "__main__":
-    initialize_runtime(PROJECT_CWD, start_embed_listener=True)
-    selfheal.maybe_trigger(PROJECT_CWD)
+def _run_direct_server() -> int:
+    expected_revision, expected_kb = _expected_connection_target()
+    if expected_revision in {"stale-session", "scope-unavailable"}:
+        sys.stderr.write(
+            "[latch] refusing stale or unavailable project-scoped MCP task; "
+            "start a fresh agent task\n"
+        )
+        return 2
+    if not initialize_runtime(PROJECT_CWD, start_embed_listener=True):
+        sys.stderr.write(
+            "[latch] refusing unavailable project-scoped MCP task; "
+            "latch the project and start a fresh agent task\n"
+        )
+        return 2
+    selfheal.maybe_trigger(
+        PROJECT_CWD,
+        expected_binding_revision=expected_revision,
+        expected_kb_dir=expected_kb,
+    )
     from mcp_proxy import trimmed_tool_surface
 
     if trimmed_tool_surface():
         prune_hidden_surface_tools(mcp)
     mcp.run()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(_run_direct_server())

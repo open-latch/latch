@@ -1,12 +1,14 @@
 """Tests for fail-closed Cursor gate state and mutation classification."""
 from __future__ import annotations
 
+import io
 import json
 import shlex
 import shutil
 import sys
 import tempfile
 import threading
+from contextlib import redirect_stdout
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -15,6 +17,7 @@ sys.path.insert(0, str(ROOT / "src" / "hooks"))
 
 import cursor_gate_state as cgs  # noqa: E402
 import paths  # noqa: E402
+import project_config  # noqa: E402
 
 
 def _tmp():
@@ -22,11 +25,59 @@ def _tmp():
     return root, paths.project_dir(root)
 
 
+def _begin_prompt(root: str | Path, sid: str, prompt: str):
+    """Model Cursor SessionStart before exercising later hook phases.
+
+    An already-stale receipt deliberately stays stale: the production
+    SessionStart path would refuse to overwrite it, and these tests should
+    continue into the later hook to assert that hook's fail-closed response.
+    """
+    try:
+        project_config.record_session_binding(root, sid)
+    except project_config.ProjectConfigError:
+        pass
+    return cgs.begin_prompt(root, sid, prompt)
+
+
+def _repinned_cursor_project(tmp_path: Path, sid: str):
+    project_config.write_machine_policy(project_config.MACHINE_POLICY_EXPLICIT)
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / ".git").mkdir()
+    vaults = paths.validated_test_root() / "vaults"
+    kb_a = vaults / f"cursor-session-a-{tmp_path.name}"
+    kb_b = vaults / f"cursor-session-b-{tmp_path.name}"
+    for kb_dir in (kb_a, kb_b):
+        kb_dir.mkdir(parents=True)
+        project_config.mark_kb_target(kb_dir)
+    binding_a = project_config.write_binding(
+        project,
+        mode=project_config.MODE_LATCHED,
+        kb_dir=kb_a,
+    )
+    assert project_config.record_session_binding(project, sid) == binding_a.revision
+    project_config.write_binding(
+        project,
+        mode=project_config.MODE_LATCHED,
+        kb_dir=kb_b,
+    )
+    assert project_config.current_session_revision(project, sid) is None
+    return project, kb_b
+
+
+def _file_snapshot(root: Path) -> dict[str, bytes]:
+    return {
+        str(path.relative_to(root)): path.read_bytes()
+        for path in root.rglob("*")
+        if path.is_file()
+    }
+
+
 def test_prompt_state_requires_exact_successful_gate_and_resets_each_turn():
     root, project_dir = _tmp()
     try:
         prompt = "Implement the Cursor gate"
-        state = cgs.begin_prompt(root, "conversation-1", prompt)
+        state = _begin_prompt(root, "conversation-1", prompt)
         assert state["prompt_hash"]
         assert prompt not in json.dumps(state)
         assert cgs.mutation_authorized(root, "conversation-1")[0] is False
@@ -38,7 +89,7 @@ def test_prompt_state_requires_exact_successful_gate_and_resets_each_turn():
         assert armed and detail == "PROCEED"
         assert cgs.mutation_authorized(root, "conversation-1") == (True, "PROCEED")
 
-        next_state = cgs.begin_prompt(root, "conversation-1", "Now update the docs")
+        next_state = _begin_prompt(root, "conversation-1", "Now update the docs")
         assert next_state["turn"] == 2
         assert next_state["gate_receipt"] is None
         assert cgs.mutation_authorized(root, "conversation-1")[0] is False
@@ -49,7 +100,7 @@ def test_prompt_state_requires_exact_successful_gate_and_resets_each_turn():
 def test_gate_rejects_rephrased_skipped_and_cross_session_receipts():
     root, project_dir = _tmp()
     try:
-        cgs.begin_prompt(root, "conversation-1", "Fix the bug verbatim")
+        _begin_prompt(root, "conversation-1", "Fix the bug verbatim")
         ok, detail = cgs.record_gate(
             root, "conversation-1", request="Fix that bug",
             gate_status="OK", recommendation="PROCEED",
@@ -91,18 +142,112 @@ def test_cursor_session_identity_never_falls_back_to_project_marker():
         shutil.rmtree(root, ignore_errors=True)
 
 
+def test_stale_cursor_before_submit_cannot_create_state_in_repinned_kb(
+    tmp_path: Path,
+    monkeypatch,
+):
+    import cursor_before_submit as cbefore
+
+    sid = "stale-before-submit"
+    project, kb_b = _repinned_cursor_project(tmp_path, sid)
+    payload = {
+        "workspaceRoot": str(project),
+        "conversation_id": sid,
+        "prompt": "Change the new client's code",
+    }
+    before = _file_snapshot(kb_b)
+    monkeypatch.setattr(cbefore, "read_hook_input", lambda: payload)
+    monkeypatch.setattr(cbefore, "is_disabled", lambda *_args: False)
+    monkeypatch.setattr(cbefore, "is_in_compact", lambda: False)
+    monkeypatch.setattr(cbefore, "is_unlatched_mode", lambda *_args: False)
+
+    output = io.StringIO()
+    with redirect_stdout(output):
+        assert cbefore.main() == 1
+
+    response = json.loads(output.getvalue())
+    assert response["continue"] is False
+    assert "fresh agent task" in response["additional_context"]
+    assert _file_snapshot(kb_b) == before
+
+
+def test_stale_cursor_pre_tool_cannot_consume_state_or_write_marker_in_repinned_kb(
+    tmp_path: Path,
+    monkeypatch,
+):
+    import cursor_pre_tool_use as cpre
+
+    sid = "stale-pre-tool"
+    project, kb_b = _repinned_cursor_project(tmp_path, sid)
+    _begin_prompt(project, sid, "/latch-compact")
+    before = _file_snapshot(kb_b)
+    payload = _shell(
+        f"bash {paths.KB_ROOT / 'bin' / 'run_cursor_compact_now.sh'} {sid}",
+        str(project),
+        sid,
+    )
+    payload["transcript_path"] = str(tmp_path / "transcript.jsonl")
+
+    result = cpre.decision(payload)
+
+    assert result["permission"] == "deny"
+    assert "fresh agent task" in result["user_message"]
+    stale_read = cpre.decision({
+        "workspaceRoot": str(project),
+        "conversation_id": sid,
+        "tool_name": "mcp__latch__latch_search",
+        "tool_input": {"query": "new client secrets"},
+    })
+    assert stale_read["permission"] == "deny"
+    assert "fresh agent task" in stale_read["user_message"]
+    assert _file_snapshot(kb_b) == before
+
+
+def test_stale_cursor_post_tool_cannot_arm_receipt_in_repinned_kb(
+    tmp_path: Path,
+    monkeypatch,
+):
+    import cursor_post_tool_use as cpost
+
+    sid = "stale-post-tool"
+    prompt = "Implement the old client's request"
+    project, kb_b = _repinned_cursor_project(tmp_path, sid)
+    _begin_prompt(project, sid, prompt)
+    before = _file_snapshot(kb_b)
+    payload = {
+        "workspaceRoot": str(project),
+        "conversation_id": sid,
+        "tool_name": "mcp__latch__latch_gate",
+        "tool_output": {
+            "request": prompt,
+            "gate_status": "OK",
+            "verdict": {"recommendation": "PROCEED"},
+        },
+    }
+    monkeypatch.setattr(cpost, "read_hook_input", lambda: payload)
+
+    output = io.StringIO()
+    with redirect_stdout(output):
+        assert cpost.main() == 0
+
+    response = json.loads(output.getvalue())
+    assert "fresh agent task" in response["additional_context"]
+    assert _file_snapshot(kb_b) == before
+    assert cgs.mutation_authorized(project, sid)[0] is False
+
+
 def test_interleaved_cursor_sessions_fail_closed():
     root, project_dir = _tmp()
     try:
         prompt_a = "Implement request A"
         prompt_b = "Implement request B"
-        cgs.begin_prompt(root, "conversation-a", prompt_a)
+        _begin_prompt(root, "conversation-a", prompt_a)
         assert cgs.record_gate(
             root, "conversation-a", request=prompt_a,
             gate_status="OK", recommendation="PROCEED",
         )[0]
 
-        cgs.begin_prompt(root, "conversation-b", prompt_b)
+        _begin_prompt(root, "conversation-b", prompt_b)
         assert cgs.mutation_authorized(root, "conversation-a")[0]
         assert not cgs.mutation_authorized(root, "conversation-b")[0]
         assert cgs.record_gate(
@@ -128,7 +273,7 @@ def test_gate_state_atomic_writes_survive_concurrent_hooks():
         try:
             start.wait()
             for turn in range(50):
-                cgs.begin_prompt(root, f"conversation-{index}", f"prompt {index}-{turn}")
+                _begin_prompt(root, f"conversation-{index}", f"prompt {index}-{turn}")
         except Exception as exc:  # pragma: no cover - diagnostic capture
             errors.append(exc)
 
@@ -152,7 +297,7 @@ def test_session_start_initialization_preserves_a_concurrent_first_prompt():
     root, project_dir = _tmp()
     try:
         prompt = "Implement the exact request"
-        started = cgs.begin_prompt(root, "conversation", prompt)
+        started = _begin_prompt(root, "conversation", prompt)
 
         initialized = cgs.initialize_session(root, "conversation")
 
@@ -265,18 +410,18 @@ def test_managed_operation_receipts_are_exact_and_single_use():
     sid = "operation-session"
     compact = paths.KB_ROOT / "bin" / "run_cursor_compact_now.sh"
     try:
-        cgs.begin_prompt(root, sid, "/latch-compact")
+        _begin_prompt(root, sid, "/latch-compact")
         payload = _shell(f"bash {compact} {sid}", root, sid)
         assert cpre.decision(payload) == {}
         assert cpre.decision(payload)["permission"] == "deny"
 
-        cgs.begin_prompt(root, sid, "/latch-compact")
+        _begin_prompt(root, sid, "/latch-compact")
         wrong_args = _shell(f"bash {compact} {sid} --final", root, sid)
         assert cpre.decision(wrong_args)["permission"] == "deny"
         outside = _shell("bash /tmp/run_cursor_compact_now.sh", root, sid)
         assert cpre.decision(outside)["permission"] == "deny"
 
-        cgs.begin_prompt(root, sid, "/latch-compact")
+        _begin_prompt(root, sid, "/latch-compact")
         compact_ps1 = paths.KB_ROOT / "bin" / "run_cursor_compact_now.ps1"
         powershell = (
             '$env:LATCH_COMPACTOR_BACKEND = "cursor"\n'
@@ -305,10 +450,10 @@ def test_managed_operations_reject_attacker_interpreter_paths(monkeypatch):
             ("/latch-compact", f"C:/Temp/powershell.exe {compact_ps1} {sid}"),
         ]
         for prompt, command in attacks:
-            cgs.begin_prompt(root, sid, prompt)
+            _begin_prompt(root, sid, prompt)
             assert cpre.decision(_shell(command, root, sid))["permission"] == "deny"
 
-        cgs.begin_prompt(root, sid, "/latch-heal")
+        _begin_prompt(root, sid, "/latch-heal")
         trusted_python = shlex.quote(sys.executable)
         assert cpre.decision(_shell(
             f"{trusted_python} {maintenance} nightly {root}", root, sid,
@@ -316,7 +461,7 @@ def test_managed_operations_reject_attacker_interpreter_paths(monkeypatch):
 
         configured = Path(root) / "configured-python"
         monkeypatch.setenv("LATCH_PYTHON", str(configured))
-        cgs.begin_prompt(root, sid, "/latch-heal")
+        _begin_prompt(root, sid, "/latch-heal")
         assert cpre.decision(_shell(
             f"{configured} {maintenance} nightly {root}", root, sid,
         )) == {}
@@ -333,28 +478,28 @@ def test_seed_operation_requires_preview_then_explicit_apply():
     preview_digest = "a" * 64
     seed = paths.KB_ROOT / "bin" / "latch_seed.sh"
     try:
-        cgs.begin_prompt(root, sid, "/latch-seed apply all")
+        _begin_prompt(root, sid, "/latch-seed apply all")
         apply_payload = _shell(
             f"bash {seed} --source cursor --cursor-session-id {sid} "
             f"--format json --preview-digest {preview_digest} --apply --yes", root, sid,
         )
         assert cpre.decision(apply_payload)["permission"] == "deny"
 
-        cgs.begin_prompt(root, sid, "/latch-seed")
+        _begin_prompt(root, sid, "/latch-seed")
         untrusted_python = _shell(
             f"LATCH_PYTHON=/tmp/python bash {seed} --source cursor "
             f"--cursor-session-id {sid} --format json", root, sid,
         )
         assert cpre.decision(untrusted_python)["permission"] == "deny"
 
-        cgs.begin_prompt(root, sid, "/latch-seed")
+        _begin_prompt(root, sid, "/latch-seed")
         path_python = _shell(
             f"LATCH_PYTHON=python3 bash {seed} --source cursor "
             f"--cursor-session-id {sid} --format json", root, sid,
         )
         assert cpre.decision(path_python)["permission"] == "deny"
 
-        cgs.begin_prompt(root, sid, "/latch-seed")
+        _begin_prompt(root, sid, "/latch-seed")
         preview = _shell(
             f"LATCH_PYTHON={sys.executable} bash {seed} --source cursor "
             f"--cursor-session-id {sid} --format json", root, sid,
@@ -362,14 +507,14 @@ def test_seed_operation_requires_preview_then_explicit_apply():
         assert cpre.decision(preview) == {}
         assert cpre.decision(preview)["permission"] == "deny"
 
-        cgs.begin_prompt(root, sid, "/latch-seed apply all")
+        _begin_prompt(root, sid, "/latch-seed apply all")
         apply_payload = _shell(
             f"LATCH_PYTHON={sys.executable} bash {seed} --source cursor --cursor-session-id {sid} "
             f"--format json --preview-digest {preview_digest} --apply --yes", root, sid,
         )
         assert cpre.decision(apply_payload)["permission"] == "deny"
 
-        cgs.begin_prompt(root, sid, "/latch-seed")
+        _begin_prompt(root, sid, "/latch-seed")
         assert cpre.decision(preview) == {}
         success = {
             **preview,
@@ -382,7 +527,7 @@ def test_seed_operation_requires_preview_then_explicit_apply():
         assert cpost.record_operation_success(success) == (
             True, "verified successful seed preview",
         )
-        cgs.begin_prompt(root, sid, "/latch-seed apply all")
+        _begin_prompt(root, sid, "/latch-seed apply all")
         assert cpre.decision(apply_payload) == {}
 
         for output in (
@@ -401,18 +546,18 @@ def test_seed_operation_requires_preview_then_explicit_apply():
             {"status": "skipped", "result": json.loads(success["tool_output"])},
             {"ok": 0, "result": json.loads(success["tool_output"])},
         ):
-            cgs.begin_prompt(root, sid, "/latch-seed")
+            _begin_prompt(root, sid, "/latch-seed")
             assert cpre.decision(preview) == {}
             failed = {**preview, "tool_output": output}
             recorded = cpost.record_operation_success(failed)
             assert recorded is not None and recorded[0] is False
-            cgs.begin_prompt(root, sid, "/latch-seed apply all")
+            _begin_prompt(root, sid, "/latch-seed apply all")
             assert cpre.decision(apply_payload)["permission"] == "deny"
 
-        cgs.begin_prompt(root, sid, "/latch-seed")
+        _begin_prompt(root, sid, "/latch-seed")
         unexecuted = {**preview, "tool_output": success["tool_output"]}
         assert cpost.record_operation_success(unexecuted) is None
-        cgs.begin_prompt(root, sid, "/latch-seed apply all")
+        _begin_prompt(root, sid, "/latch-seed apply all")
         assert cpre.decision(apply_payload)["permission"] == "deny"
     finally:
         shutil.rmtree(root, ignore_errors=True)
@@ -431,7 +576,7 @@ def test_seed_operation_binds_scoped_apply_ids_to_preview():
     other_cluster_id = "cluster-" + "f" * 12
 
     def arm_preview(sid: str):
-        cgs.begin_prompt(root, sid, "/latch-seed")
+        _begin_prompt(root, sid, "/latch-seed")
         preview = _shell(
             f"LATCH_PYTHON={sys.executable} bash {seed_script} "
             f"--source cursor --cursor-session-id {sid} --format json",
@@ -465,7 +610,7 @@ def test_seed_operation_binds_scoped_apply_ids_to_preview():
     try:
         allowed_sid = "seed-scoped-allowed"
         arm_preview(allowed_sid)
-        state = cgs.begin_prompt(
+        state = _begin_prompt(
             root,
             allowed_sid,
             f"/latch-seed apply {candidate_id} {cluster_id}",
@@ -495,7 +640,7 @@ def test_seed_operation_binds_scoped_apply_ids_to_preview():
 
         mismatch_sid = "seed-scoped-mismatch"
         arm_preview(mismatch_sid)
-        cgs.begin_prompt(
+        _begin_prompt(
             root,
             mismatch_sid,
             f"/latch-seed apply {candidate_id}",
@@ -535,7 +680,7 @@ def test_seed_operation_binds_scoped_apply_ids_to_preview():
 
         reverse_substitution_sid = "seed-scoped-reverse-substitution"
         arm_preview(reverse_substitution_sid)
-        cgs.begin_prompt(
+        _begin_prompt(
             root,
             reverse_substitution_sid,
             f"/latch-seed apply {cluster_id}",
@@ -605,7 +750,7 @@ def test_seed_operation_binds_scoped_apply_ids_to_preview():
         unknown_sid = "seed-scoped-unknown"
         arm_preview(unknown_sid)
         unknown_id = "cand-" + "0" * 12
-        state = cgs.begin_prompt(
+        state = _begin_prompt(
             root,
             unknown_sid,
             f"/latch-seed apply {unknown_id}",
@@ -623,7 +768,7 @@ def test_seed_operation_binds_scoped_apply_ids_to_preview():
 
         whole_sid = "seed-whole-allowed"
         arm_preview(whole_sid)
-        state = cgs.begin_prompt(root, whole_sid, "/latch-seed apply all")
+        state = _begin_prompt(root, whole_sid, "/latch-seed apply all")
         assert state["operation_receipt"]["selection_mode"] == "all"
         assert state["operation_receipt"]["candidate_ids"] == []
         assert state["operation_receipt"]["cluster_ids"] == []
@@ -638,7 +783,7 @@ def test_seed_operation_binds_scoped_apply_ids_to_preview():
 
         scoped_after_whole_sid = "seed-whole-mismatch"
         arm_preview(scoped_after_whole_sid)
-        cgs.begin_prompt(root, scoped_after_whole_sid, "/latch-seed apply all")
+        _begin_prompt(root, scoped_after_whole_sid, "/latch-seed apply all")
         scoped_after_whole = _shell(
             f"LATCH_PYTHON={sys.executable} bash {seed_script} "
             f"--source cursor --cursor-session-id {scoped_after_whole_sid} "
@@ -651,7 +796,7 @@ def test_seed_operation_binds_scoped_apply_ids_to_preview():
 
         powershell_sid = "seed-scoped-powershell"
         arm_preview(powershell_sid)
-        cgs.begin_prompt(
+        _begin_prompt(
             root,
             powershell_sid,
             f"/latch-seed apply {other_cluster_id}",
@@ -678,7 +823,7 @@ def test_seed_operation_binds_scoped_apply_ids_to_preview():
         ):
             invalid_sid = "seed-invalid-" + str(abs(hash(invalid_confirmation)))
             arm_preview(invalid_sid)
-            state = cgs.begin_prompt(root, invalid_sid, invalid_confirmation)
+            state = _begin_prompt(root, invalid_sid, invalid_confirmation)
             assert state["operation_receipt"] is None
     finally:
         shutil.rmtree(root, ignore_errors=True)
@@ -695,7 +840,7 @@ def test_seed_operation_binds_reject_all_to_nonempty_preview():
     candidate_id = "cand-" + "8" * 12
 
     def arm_preview(sid: str, candidates: list[dict[str, str]]):
-        cgs.begin_prompt(root, sid, "/latch-seed")
+        _begin_prompt(root, sid, "/latch-seed")
         preview = _shell(
             f"LATCH_PYTHON={sys.executable} bash {seed_script} "
             f"--source cursor --cursor-session-id {sid} --format json",
@@ -731,7 +876,7 @@ def test_seed_operation_binds_reject_all_to_nonempty_preview():
     try:
         allowed_sid = "seed-none-allowed"
         arm_preview(allowed_sid, [{"review_id": candidate_id}])
-        state = cgs.begin_prompt(root, allowed_sid, "/latch-seed apply none")
+        state = _begin_prompt(root, allowed_sid, "/latch-seed apply none")
         receipt = state["operation_receipt"]
         assert receipt["selection_mode"] == "none"
         assert receipt["candidate_ids"] == []
@@ -755,7 +900,7 @@ def test_seed_operation_binds_reject_all_to_nonempty_preview():
 
         empty_sid = "seed-none-empty"
         arm_preview(empty_sid, [])
-        state = cgs.begin_prompt(root, empty_sid, "/latch-seed apply none")
+        state = _begin_prompt(root, empty_sid, "/latch-seed apply none")
         assert state["operation_receipt"] is None
         assert cpre.decision(
             dismiss_payload(empty_sid, "--dismiss-all")
@@ -763,7 +908,7 @@ def test_seed_operation_binds_reject_all_to_nonempty_preview():
 
         powershell_sid = "seed-none-powershell"
         arm_preview(powershell_sid, [{"review_id": candidate_id}])
-        cgs.begin_prompt(root, powershell_sid, "/latch-seed apply none")
+        _begin_prompt(root, powershell_sid, "/latch-seed apply none")
         powershell_none = _shell(
             f'$env:LATCH_PYTHON = "{sys.executable}"\n'
             f'& "{seed_ps1}" --source cursor '
@@ -793,7 +938,7 @@ def test_pm_operation_receipt_binds_exact_previewed_content():
             ],
             "workstream_id": 1369,
         }
-        cgs.begin_prompt(root, sid, "/latch-pm apply")
+        _begin_prompt(root, sid, "/latch-pm apply")
         unprepared = {
             "workspaceRoot": root,
             "conversation_id": sid,
@@ -802,7 +947,7 @@ def test_pm_operation_receipt_binds_exact_previewed_content():
         }
         assert cpre.decision(unprepared)["permission"] == "deny"
 
-        cgs.begin_prompt(root, sid, "Latch operation id: latch-pm prepare")
+        _begin_prompt(root, sid, "Latch operation id: latch-pm prepare")
         preview = cgs.pm_preview_payload(candidate)
         preview_call = {
             "workspaceRoot": root,
@@ -815,7 +960,7 @@ def test_pm_operation_receipt_binds_exact_previewed_content():
         assert cpost.record_operation_success(preview_call) == (
             True, "verified PM preview and bound candidate digest",
         )
-        cgs.begin_prompt(root, sid, "/latch-pm apply")
+        _begin_prompt(root, sid, "/latch-pm apply")
         insert = {
             **unprepared,
             "tool_input": {
@@ -842,12 +987,12 @@ def test_pm_operation_receipt_binds_exact_previewed_content():
         assert cpre.decision(insert) == {}
         assert cpre.decision(insert)["permission"] == "deny"
 
-        cgs.begin_prompt(root, sid, "Latch operation id: latch-pm prepare")
+        _begin_prompt(root, sid, "Latch operation id: latch-pm prepare")
         bad_preview = {**preview, "candidate_digest": "0" * 64}
         failed = {**preview_call, "tool_output": bad_preview}
         recorded = cpost.record_operation_success(failed)
         assert recorded is not None and recorded[0] is False
-        cgs.begin_prompt(root, sid, "/latch-pm apply")
+        _begin_prompt(root, sid, "/latch-pm apply")
         assert cpre.decision(insert)["permission"] == "deny"
 
         for wrapper in (
@@ -858,11 +1003,11 @@ def test_pm_operation_receipt_binds_exact_previewed_content():
             {"status": "skipped", "result": preview},
             {"ok": 0, "result": preview},
         ):
-            cgs.begin_prompt(root, sid, "Latch operation id: latch-pm prepare")
+            _begin_prompt(root, sid, "Latch operation id: latch-pm prepare")
             failed = {**preview_call, "tool_output": wrapper}
             recorded = cpost.record_operation_success(failed)
             assert recorded is not None and recorded[0] is False
-            cgs.begin_prompt(root, sid, "/latch-pm apply")
+            _begin_prompt(root, sid, "/latch-pm apply")
             assert cpre.decision(insert)["permission"] == "deny"
     finally:
         shutil.rmtree(root, ignore_errors=True)
@@ -884,7 +1029,7 @@ def test_managed_operation_intent_never_falls_through_to_general_gate():
     try:
         seed = paths.KB_ROOT / "bin" / "latch_seed.sh"
         prompt = "/latch-seed apply all"
-        state = cgs.begin_prompt(root, sid, prompt)
+        state = _begin_prompt(root, sid, prompt)
         assert state["operation_intent"]["name"] == "latch-seed"
         assert state["operation_receipt"] is None
         assert cgs.managed_operation_intended(root, sid)[0]
@@ -908,7 +1053,7 @@ def test_managed_operation_intent_never_falls_through_to_general_gate():
             "kind": "decision", "status": "staging",
             "title": "Approved", "body": "Approved body", "links": [],
         }
-        cgs.begin_prompt(root, sid, "Latch operation id: latch-pm prepare")
+        _begin_prompt(root, sid, "Latch operation id: latch-pm prepare")
         preview_call = {
             "workspaceRoot": root,
             "conversation_id": sid,
@@ -918,7 +1063,7 @@ def test_managed_operation_intent_never_falls_through_to_general_gate():
         }
         assert cpost.record_operation_success(preview_call)[0]
         prompt = "/latch-pm apply"
-        cgs.begin_prompt(root, sid, prompt)
+        _begin_prompt(root, sid, prompt)
         arm(prompt)
         changed = {
             "workspaceRoot": root,
@@ -935,11 +1080,11 @@ def test_managed_operation_intent_never_falls_through_to_general_gate():
             f"python /tmp/maintenance.py nightly {root}",
             f"python {maintenance} nightly {root} extra",
         ):
-            cgs.begin_prompt(root, sid, prompt)
+            _begin_prompt(root, sid, prompt)
             arm(prompt)
             assert cpre.decision(_shell(command, root, sid))["permission"] == "deny"
 
-        cgs.begin_prompt(root, sid, prompt)
+        _begin_prompt(root, sid, prompt)
         arm(prompt)
         valid = _shell(
             f"{shlex.quote(sys.executable)} {maintenance} nightly {root}", root, sid,
@@ -958,34 +1103,95 @@ def test_other_managed_operations_match_only_expected_wrappers():
     python = shlex.quote(sys.executable)
     cases = [
         ("/latch-gate-report", f"bash {paths.KB_ROOT / 'bin' / 'latch_gate_report.sh'}"),
-        ("/latch-budget-approve", f"{python} {paths.KB_ROOT / 'src' / 'budget.py'} approve {root}"),
+        (
+            "/latch-budget-approve",
+            f"{python} {paths.KB_ROOT / 'src' / 'budget.py'} approve {root} "
+            f"--session-id {sid}",
+        ),
         ("/latch-decay", f"{python} {paths.KB_ROOT / 'src' / 'maintenance.py'} weekly {root}"),
         ("/latch-heal", f"{python} {paths.KB_ROOT / 'src' / 'maintenance.py'} nightly {root}"),
         ("/latch-tree", f"{python} {paths.KB_ROOT / 'src' / 'maintenance.py'} tree {root}"),
     ]
     try:
         for prompt, command in cases:
-            cgs.begin_prompt(root, sid, prompt)
+            _begin_prompt(root, sid, prompt)
             assert cpre.decision(_shell(command, root, sid)) == {}, prompt
 
         maintenance = paths.KB_ROOT / "src" / "maintenance.py"
-        cgs.begin_prompt(root, sid, "/latch-heal")
+        _begin_prompt(root, sid, "/latch-heal")
         assert cpre.decision(_shell(
             f'{python} {maintenance} nightly "$PWD"', root, sid,
         )) == {}
 
-        cgs.begin_prompt(root, sid, "/unlatch")
+        _begin_prompt(root, sid, "/unlatch")
         unlatch = paths.KB_ROOT / "bin" / "unlatch.sh"
         assert cpre.decision(_shell(f"bash {unlatch}", root, sid)) == {}
-        cgs.begin_prompt(root, sid, "unlatch")
+        _begin_prompt(root, sid, "unlatch")
         assert cpre.decision(_shell(f"bash {unlatch} --confirm unlatch", root, sid)) == {}
 
-        cgs.begin_prompt(root, sid, "Latch operation id: latch-compact run")
+        latch = paths.KB_ROOT / "bin" / "latch.sh"
+        _begin_prompt(root, sid, "/latch")
+        assert cpre.decision(_shell(f"bash {latch}", root, sid)) == {}
+        _begin_prompt(root, sid, "latch")
+        assert cpre.decision(_shell(
+            f"bash {latch} --confirm latch --new-kb", root, sid,
+        )) == {}
+
+        _begin_prompt(root, sid, "/latch")
+        assert cpre.decision(_shell(f"bash {latch}", root, sid)) == {}
+        _begin_prompt(root, sid, "latch")
+        client_kb = paths.validated_test_root() / "vaults" / "cursor-client-kb"
+        assert cpre.decision(_shell(
+            f"bash {latch} --confirm latch --kb-dir {client_kb}", root, sid,
+        )) == {}
+
+        _begin_prompt(root, sid, "/latch")
+        assert cpre.decision(_shell(f"bash {latch}", root, sid)) == {}
+        _begin_prompt(root, sid, "latch")
+        relative = _shell(
+            f"bash {latch} --confirm latch --kb-dir relative-kb", root, sid,
+        )
+        assert cpre.decision(relative)["permission"] == "deny"
+
+        _begin_prompt(root, sid, "Latch operation id: latch-compact run")
         compact = paths.KB_ROOT / "bin" / "run_cursor_compact_now.sh"
         assert cpre.decision(_shell(f"bash {compact} {sid}", root, sid)) == {}
 
-        cgs.begin_prompt(root, sid, "Explain the status")
+        _begin_prompt(root, sid, "Explain the status")
         assert cpre.decision(_shell(f"bash {compact} {sid}", root, sid))["permission"] == "deny"
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_native_powershell_latch_wrappers_match_managed_operation_lane():
+    import cursor_pre_tool_use as cpre
+
+    root, _project_dir = _tmp()
+    sid = "powershell-project-mode-session"
+    unlatch_ps = paths.KB_ROOT / "bin" / "unlatch.ps1"
+    latch_ps = paths.KB_ROOT / "bin" / "latch.ps1"
+    client_kb = paths.validated_test_root() / "vaults" / "cursor-powershell-client-kb"
+    try:
+        _begin_prompt(root, sid, "/unlatch")
+        assert cpre.decision(_shell(f'& "{unlatch_ps}"', root, sid)) == {}
+        _begin_prompt(root, sid, "unlatch")
+        assert cpre.decision(_shell(
+            f'& "{unlatch_ps}" -Confirm unlatch', root, sid,
+        )) == {}
+
+        _begin_prompt(root, sid, "/latch")
+        assert cpre.decision(_shell(f'& "{latch_ps}"', root, sid)) == {}
+        _begin_prompt(root, sid, "latch")
+        assert cpre.decision(_shell(
+            f'& "{latch_ps}" -Confirm latch -NewKb', root, sid,
+        )) == {}
+
+        _begin_prompt(root, sid, "/latch")
+        assert cpre.decision(_shell(f'& "{latch_ps}"', root, sid)) == {}
+        _begin_prompt(root, sid, "latch")
+        assert cpre.decision(_shell(
+            f'& "{latch_ps}" -Confirm latch -KbDir "{client_kb}"', root, sid,
+        )) == {}
     finally:
         shutil.rmtree(root, ignore_errors=True)
 
@@ -1001,7 +1207,7 @@ def test_managed_maintenance_receipt_rejects_wrong_project_and_script_path():
     official_script = paths.KB_ROOT / "src" / "maintenance.py"
     python = shlex.quote(sys.executable)
     try:
-        cgs.begin_prompt(root, sid, "/latch-heal")
+        _begin_prompt(root, sid, "/latch-heal")
         wrong_project = _shell(
             f"{python} {official_script} nightly {other_root}", root, sid,
         )
@@ -1009,13 +1215,13 @@ def test_managed_maintenance_receipt_rejects_wrong_project_and_script_path():
 
         attacker_dir.mkdir(exist_ok=True)
         attacker_script.write_text("# not a managed script\n", encoding="utf-8")
-        cgs.begin_prompt(root, sid, "/latch-heal")
+        _begin_prompt(root, sid, "/latch-heal")
         wrong_script = _shell(
             f"{python} {attacker_script} nightly {root}", root, sid,
         )
         assert cpre.decision(wrong_script)["permission"] == "deny"
 
-        cgs.begin_prompt(root, sid, "/latch-heal")
+        _begin_prompt(root, sid, "/latch-heal")
         expected = _shell(f"{python} {official_script} nightly {root}", root, sid)
         assert cpre.decision(expected) == {}
     finally:
@@ -1039,32 +1245,55 @@ def test_managed_budget_receipt_rejects_wrong_project_and_script_path():
     official_script = paths.KB_ROOT / "src" / "budget.py"
     python = shlex.quote(sys.executable)
     try:
-        cgs.begin_prompt(root, sid, "/latch-budget-approve")
+        _begin_prompt(root, sid, "/latch-budget-approve")
         wrong_project = _shell(
-            f"{python} {official_script} approve {other_root}", root, sid,
+            f"{python} {official_script} approve {other_root} --session-id {sid}",
+            root,
+            sid,
         )
         assert cpre.decision(wrong_project)["permission"] == "deny"
 
         attacker_dir.mkdir(exist_ok=True)
         attacker_script.write_text("# not a managed script\n", encoding="utf-8")
-        cgs.begin_prompt(root, sid, "/latch-budget-approve")
+        _begin_prompt(root, sid, "/latch-budget-approve")
         wrong_script = _shell(
-            f"{python} {attacker_script} approve {root}", root, sid,
+            f"{python} {attacker_script} approve {root} --session-id {sid}",
+            root,
+            sid,
         )
         assert cpre.decision(wrong_script)["permission"] == "deny"
 
-        cgs.begin_prompt(root, sid, "/latch-budget-approve")
-        expected = _shell(f"{python} {official_script} approve {root}", root, sid)
+        _begin_prompt(root, sid, "/latch-budget-approve")
+        expected = _shell(
+            f"{python} {official_script} approve {root} --session-id {sid}",
+            root,
+            sid,
+        )
         assert cpre.decision(expected) == {}
 
-        cgs.begin_prompt(root, sid, "/latch-budget-approve")
-        pwd_form = _shell(f'{python} {official_script} approve "$PWD"', root, sid)
+        _begin_prompt(root, sid, "/latch-budget-approve")
+        pwd_form = _shell(
+            f'{python} {official_script} approve "$PWD" --session-id {sid}',
+            root,
+            sid,
+        )
         assert cpre.decision(pwd_form) == {}
 
-        cgs.begin_prompt(root, sid, "/latch-budget-approve")
-        wrong_cwd = _shell(f'{python} {official_script} approve "$PWD"', root, sid)
+        _begin_prompt(root, sid, "/latch-budget-approve")
+        wrong_cwd = _shell(
+            f'{python} {official_script} approve "$PWD" --session-id {sid}',
+            root,
+            sid,
+        )
         wrong_cwd["tool_input"]["cwd"] = other_root
         assert cpre.decision(wrong_cwd)["permission"] == "deny"
+
+        for suffix in ("", " --session-id another-session"):
+            _begin_prompt(root, sid, "/latch-budget-approve")
+            wrong_session = _shell(
+                f"{python} {official_script} approve {root}{suffix}", root, sid,
+            )
+            assert cpre.decision(wrong_session)["permission"] == "deny"
     finally:
         attacker_script.unlink(missing_ok=True)
         try:

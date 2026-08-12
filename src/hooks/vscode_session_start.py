@@ -18,10 +18,22 @@ SRC = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(SRC))
 sys.path.insert(0, str(SRC / "hooks"))
 
-from _common import hook_field, log, read_hook_input  # noqa: E402
+from _common import (  # noqa: E402
+    fence_inactive_session,
+    hook_field,
+    log,
+    read_hook_input,
+    record_session_binding,
+    session_id,
+    session_start_transition,
+)
 
+import project_config  # noqa: E402
+from project_config import ProjectConfigError  # noqa: E402
 from paths import is_disabled, is_in_compact, is_unlatched_mode  # noqa: E402
 from session_start import (  # noqa: E402
+    _build_locked_notice,
+    _build_locked_system_message,
     _build_unlatched_notice,
     _build_unlatched_system_message,
     _emit_session_start_context,
@@ -45,19 +57,70 @@ def vscode_project_cwd(payload: dict) -> str:
 def main() -> int:
     if is_in_compact():
         return 0
-    if is_unlatched_mode():
-        _emit_session_start_context(
-            _build_unlatched_notice(),
-            system_message=_build_unlatched_system_message(),
-        )
-        return 0
-    if is_disabled():
-        return 0
-
     payload = read_hook_input()
     cwd = vscode_project_cwd(payload)
+    try:
+        with session_start_transition(cwd):
+            return _run_session_start(payload, cwd)
+    except (OSError, ProjectConfigError) as exc:
+        log(
+            f"vscode_session_start transition coordination failed: {exc}",
+            cwd,
+            expected_revision="stale-session",
+        )
+        _emit_session_start_context(
+            "_⚠ Latch could not safely complete project session setup; restart "
+            "the task after any latch/unlatch command finishes._"
+        )
+        return 0
 
-    agents_md_action = _auto_sync_agents_md(cwd)
+
+def _run_session_start(payload: dict, cwd: str) -> int:
+    sid = session_id(payload)
+    if is_unlatched_mode(cwd):
+        fence_inactive_session(cwd, sid)
+        _emit_session_start_context(
+            _build_unlatched_notice(cwd),
+            system_message=_build_unlatched_system_message(cwd),
+        )
+        return 0
+    target = project_config.resolve(cwd)
+    if target.state == project_config.MODE_LOCKED:
+        fence_inactive_session(cwd, sid)
+        _emit_session_start_context(
+            _build_locked_notice(target),
+            system_message=_build_locked_system_message(target),
+        )
+        return 0
+    try:
+        binding_revision = record_session_binding(cwd, sid)
+    except (OSError, ProjectConfigError) as exc:
+        log(
+            f"vscode_session_start binding snapshot failed: {exc}",
+            cwd,
+            expected_revision="stale-session",
+        )
+        _emit_session_start_context(
+            "_⚠ Latch could not safely bind this agent task to the project's "
+            "current KB. Start a fresh agent task in this project (do not "
+            "resume the old one)._"
+        )
+        return 0
+    if binding_revision is None:
+        log(
+            "vscode_session_start could not verify a session id for this binding",
+            cwd,
+            expected_revision="stale-session",
+        )
+        _emit_session_start_context(
+            "_⚠ Latch could not verify this agent task for the project's "
+            "current KB. Start a fresh agent task in this project._"
+        )
+        return 0
+    if is_disabled(cwd):
+        return 0
+
+    agents_md_action = _auto_sync_agents_md(cwd, binding_revision)
     wiring_notice = _managed_doc_wiring_notice(
         agents_md_action,
         doc_name="AGENTS.md",
@@ -72,7 +135,10 @@ def main() -> int:
     return 0
 
 
-def _auto_sync_agents_md(cwd: str) -> str | None:
+def _auto_sync_agents_md(
+    cwd: str,
+    expected_revision: str | None = None,
+) -> str | None:
     """Re-sync this project's AGENTS.md managed region when already wired."""
     try:
         import agents_md_sync
@@ -80,11 +146,19 @@ def _auto_sync_agents_md(cwd: str) -> str | None:
         target = Path(cwd) / "AGENTS.md"
         action = agents_md_sync.sync(target, create=False)
         if action == "synced":
-            log(f"agents_md auto-sync: re-synced managed region in {target} "
-                f"(backup: {target}.latchbak)")
+            log(
+                f"agents_md auto-sync: re-synced managed region in {target} "
+                f"(backup: {target}.latchbak)",
+                cwd,
+                expected_revision=expected_revision,
+            )
         return action
     except Exception as e:
-        log(f"agents_md auto-sync skipped: {e}")
+        log(
+            f"agents_md auto-sync skipped: {e}",
+            cwd,
+            expected_revision=expected_revision,
+        )
         return "error"
 
 

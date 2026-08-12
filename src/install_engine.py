@@ -73,6 +73,7 @@ import sys
 from pathlib import Path
 
 import paths
+import project_config
 import versioning
 import vault_identity
 
@@ -125,6 +126,7 @@ LATCH_COMMAND_MARKERS = (
     "/bin/run_kb_gate.sh",
     "/bin/run_latch_gate.sh",
     "/bin/latch_baseline.sh",
+    "/bin/latch.sh",
     "/bin/unlatch.sh",
     "/bin/latch_gate_report.sh",
     "/bin/run_compact_now.sh",
@@ -167,6 +169,78 @@ def seed_next_step_message(
         "rejected-path catch demo is a separate post-apply check, not a prerequisite "
         "for creating the initial KB. Until this review runs, the initial KB is pending."
     )
+
+
+def scope_first_next_step_message(
+    project: Path,
+    *,
+    target: project_config.ResolvedScope | None = None,
+    error: str | None = None,
+    windows: bool | None = None,
+) -> str:
+    """Explain the explicit scope step that must precede any seed."""
+    project = project.resolve()
+    windows = os.name == "nt" if windows is None else windows
+    if windows:
+        def powershell_quote(value: object) -> str:
+            return "'" + str(value).replace("'", "''") + "'"
+
+        latch_command = f"& {powershell_quote(KB_HOME / 'bin' / 'latch.ps1')}"
+        project_command = f"Set-Location {powershell_quote(project)}"
+        confirm = "-Confirm latch"
+        shared = "-Shared"
+        private_new = "-Private -NewKb"
+    else:
+        latch_command = format_command(["bash", str(KB_HOME / "bin" / "latch.sh")])
+        project_command = format_command(["cd", str(project)])
+        confirm = "--confirm latch"
+        shared = "--shared"
+        private_new = "--private --new-kb"
+    state = target.state.upper() if target is not None else "LOCKED"
+    reason = error or (target.reason if target is not None else "no safe KB target")
+
+    if target is not None and target.state == project_config.MODE_UNLATCHED:
+        return (
+            f"Latch is installed, but {project} is UNLATCHED. Seeding is disabled "
+            "until the project is latched again.\n"
+            f"  {project_command}\n"
+            f"  {latch_command} {confirm}\n"
+            "This restores only this project's previous KB binding."
+        )
+
+    return (
+        f"Latch is installed, but {project} is {state}: {reason}\n"
+        "Choose this filesystem scope's KB before seeding:\n"
+        f"  {project_command}\n"
+        f"  # Shared: use the existing global KB\n"
+        f"  {latch_command} {confirm} {shared}\n"
+        f"  # Private: create a clean, separate KB\n"
+        f"  {latch_command} {confirm} {private_new}\n"
+        "Run one choice from that project, then start a fresh agent task. "
+        "No KB content is copied between scopes."
+    )
+
+
+def seed_next_step_for_project(
+    *,
+    project: Path,
+    command: str,
+) -> str:
+    """Return a seed handoff only when the selected project is LATCHED."""
+    project = project.resolve()
+    handoff = _scope_handoff_for_project(project)
+    return handoff or seed_next_step_message(command)
+
+
+def _scope_handoff_for_project(project: Path) -> str | None:
+    """Return the fail-closed setup handoff, or None for a safe seed target."""
+    try:
+        target = project_config.resolve(project)
+    except (OSError, project_config.ProjectConfigError) as exc:
+        return scope_first_next_step_message(project, error=str(exc))
+    if target.state != project_config.MODE_LATCHED or target.kb_dir is None:
+        return scope_first_next_step_message(project, target=target)
+    return None
 
 
 def seed_command_args(
@@ -225,6 +299,13 @@ def offer_seed_after_install(
         backend=backend,
     )
     command_text = format_command(command)
+
+    handoff = _scope_handoff_for_project(project)
+    if handoff is not None:
+        print()
+        print(handoff)
+        print()
+        return
 
     print()
     print(seed_next_step_message(command_text))
@@ -492,23 +573,26 @@ def pin_kb_dir(kb_dir_override: str | None, dry_run: bool) -> tuple[str, str]:
       * ``--kb-dir`` wins, then ``LATCH_KB_DIR`` / ``CLAUDE_KB_DIR``;
       * a FRESH install defaults to the platform production-data directory,
         outside this source checkout;
-      * an install that already has per-cwd KBs and no ``--kb-dir`` is LEFT in
-        legacy mode — writing a default would silently orphan existing
-        knowledge — with guidance to pin explicitly. This is the forward-only
-        migration stance of id=1556 (new installs pay nothing; existing
-        multi-DB users choose their one KB once, by hand).
+      * an install that already has per-cwd KBs and no ``--kb-dir`` is an
+        ERROR — legacy per-cwd routing no longer exists at runtime, so an
+        unpinned legacy install is LOCKED until pinned, and writing a default
+        would silently orphan existing knowledge. The operator must choose the
+        one KB to keep with ``--kb-dir``. This is the forward-only migration
+        stance of id=1556 (new installs pay nothing; existing multi-DB users
+        choose their one KB once, by hand).
     """
-    environment_override = next(
-        (
-            value.strip()
-            for value in (
-                os.environ.get("LATCH_KB_DIR"),
-                os.environ.get("CLAUDE_KB_DIR"),
+    latch_override = (os.environ.get("LATCH_KB_DIR") or "").strip() or None
+    legacy_override = (os.environ.get("CLAUDE_KB_DIR") or "").strip() or None
+    if latch_override and legacy_override:
+        latch_path = absolute_kb_dir(latch_override)
+        legacy_path = absolute_kb_dir(legacy_override)
+        if _kb_path_key(latch_path) != _kb_path_key(legacy_path):
+            return "ERROR", (
+                f"LATCH_KB_DIR target {str(latch_path)!r} conflicts with "
+                f"CLAUDE_KB_DIR target {str(legacy_path)!r}; unset one or make "
+                "both name the same KB before installing."
             )
-            if value and value.strip()
-        ),
-        None,
-    )
+    environment_override = latch_override or legacy_override
     if kb_dir_override is not None and not kb_dir_override.strip():
         return "ERROR", "--kb-dir must name a non-empty directory"
     effective_override = (
@@ -559,11 +643,12 @@ def pin_kb_dir(kb_dir_override: str | None, dry_run: bool) -> tuple[str, str]:
     if effective_override:
         target = absolute_kb_dir(effective_override)
     elif _has_legacy_project_dbs():
-        return "WARN", (
-            "existing per-cwd KBs found under projects/ and no --kb-dir given - "
-            "leaving this install in LEGACY per-cwd mode (the wrong-DB bug class "
-            "stays live; id=1556). Re-run with --kb-dir <path> to pin the one KB "
-            "(e.g. the projects/<dir> you want to keep)."
+        return "ERROR", (
+            "existing per-cwd KBs found under projects/ and no --kb-dir given. "
+            "Legacy per-cwd routing no longer exists at runtime, so this unpinned "
+            "install stays LOCKED on every KB access (id=1556). Re-run with "
+            "--kb-dir <path> naming the one KB to keep (e.g. the projects/<dir> "
+            "you want to keep)."
         )
     else:
         test_root = paths.validated_test_root()
@@ -590,6 +675,53 @@ def pin_kb_dir(kb_dir_override: str | None, dry_run: bool) -> tuple[str, str]:
         json.dumps({"kb_dir": target_str}, indent=2) + "\n", encoding="utf-8"
     )
     return "OK", f"pinned KB dir -> {target_str}"
+
+
+def configure_scope_policy(
+    *,
+    dry_run: bool,
+) -> tuple[str, str]:
+    """Persist one mutually exclusive product mode.
+
+    Global Shared is the default and preserves the existing product. Project
+    scoping is one-way and is activated only by an explicit user choice.
+    """
+    path = project_config.machine_policy_path()
+    try:
+        current = project_config.read_machine_policy()
+    except project_config.ProjectConfigError as exc:
+        return "FAIL", f"existing scope policy is unsafe: {exc}"
+    if path.exists() or path.is_symlink():
+        return "OK", f"already configured -> {current} (left unchanged)"
+    if dry_run:
+        return "DRY", f"would configure machine scope policy -> {current}"
+    try:
+        project_config.write_machine_policy(current)
+    except (OSError, project_config.ProjectConfigError) as exc:
+        return "FAIL", f"could not persist machine scope policy: {exc}"
+    detail = (
+        "the existing global KB remains available in every project"
+        if current == project_config.MACHINE_POLICY_SHARED
+        else "unscoped locations stay LOCKED until explicitly latched Shared or Private"
+    )
+    return "OK", f"configured -> {current}; {detail}"
+
+
+def scope_policy_for_install() -> str:
+    """Return the installed mode; installers never activate project scoping."""
+    return project_config.read_machine_policy()
+
+
+def scope_configuration_status() -> list[tuple[bool, str]]:
+    """Return check rows for the persisted mutually exclusive product mode."""
+    path = project_config.machine_policy_path()
+    if not (path.exists() or path.is_symlink()):
+        return [(False, "machine scope policy is not persisted; re-run install")]
+    try:
+        policy = project_config.read_machine_policy()
+    except project_config.ProjectConfigError as exc:
+        return [(False, f"machine scope policy is unsafe: {exc}")]
+    return [(True, f"machine scope policy -> {policy}")]
 
 
 # --------------------------------------------------------------------------- #
@@ -718,9 +850,11 @@ def install_commands(dry_run: bool) -> tuple[str, list[str]]:
     ``bin/install_commands.{sh,ps1}`` (kept for commands-only re-installs) so the
     one engine install also wires the commands — without this step ``/latch-compact``
     et al. error ``Unknown skill`` even though the engine + MCP are fully wired
-    (the gap that bit the 2026-06-07 Mac install, id=1468 #1). Overwrite-always,
-    matching the shell installers. Honors ``CLAUDE_COMMANDS_DIR`` via
-    ``COMMANDS_DEST``.
+    (the gap that bit the 2026-06-07 Mac install, id=1468 #1). Latch-owned
+    destinations are overwritten on every run; an existing destination that
+    fails ``_is_latch_command_body`` is skipped so a user's personal command
+    (e.g. their own ``latch.md``) is never clobbered — matching the shell
+    installers. Honors ``CLAUDE_COMMANDS_DIR`` via ``COMMANDS_DEST``.
 
     Returns ``(level, changes)``: 'OK' on success, 'WARN' if there is nothing to
     install (no ``commands/`` dir or no ``.md`` files).
@@ -734,10 +868,14 @@ def install_commands(dry_run: bool) -> tuple[str, list[str]]:
         COMMANDS_DEST.mkdir(parents=True, exist_ok=True)
     changes: list[str] = []
     for f in md_files:
+        dest = COMMANDS_DEST / f.name
+        if dest.exists() and not _is_latch_command_body(_read_text(dest)):
+            changes.append(f"skipped {f.name} (looks user-owned)")
+            continue
         if dry_run:
             changes.append(f"would install {f.name}")
             continue
-        _write_command(f, COMMANDS_DEST / f.name)
+        _write_command(f, dest)
         changes.append(f"installed {f.name}")
     for legacy_name, primary_name in LEGACY_COMMAND_ALIASES.items():
         legacy = COMMANDS_DEST / legacy_name
@@ -853,7 +991,7 @@ def check(python_path: str, server_py: str) -> int:
     rows.append(commands_status())
 
     # KB-dir pin (id=1556): env var wins; else kb_location.json; a legacy
-    # per-cwd install with no pin keeps the wrong-DB bug class live → flag it.
+    # per-cwd install with no pin is LOCKED at runtime → flag it.
     env_pin = os.environ.get("LATCH_KB_DIR") or os.environ.get("CLAUDE_KB_DIR")
     if env_pin and env_pin.strip():
         src = "LATCH_KB_DIR" if os.environ.get("LATCH_KB_DIR") else "CLAUDE_KB_DIR"
@@ -863,10 +1001,12 @@ def check(python_path: str, server_py: str) -> int:
         if pin:
             rows.append((True, f"KB pinned -> {pin} (kb_location.json)"))
         elif _has_legacy_project_dbs():
-            rows.append((False, "KB NOT pinned: legacy per-cwd mode with existing project "
-                                "KBs (wrong-DB bug class live - pin with --kb-dir; id=1556)"))
+            rows.append((False, "KB NOT pinned: existing per-cwd project KBs and no pin "
+                                "(unpinned legacy install is LOCKED until pinned - pin "
+                                "with --kb-dir; id=1556)"))
         else:
             rows.append((True, "KB not pinned yet (fresh install — pin defaults outside source)"))
+    rows.extend(scope_configuration_status())
 
     failed = 0
     for ok, label in rows:
@@ -928,12 +1068,24 @@ def main(argv: list[str] | None = None) -> int:
         print("\nNo changes written.")
         return 2
 
+    try:
+        scope_policy_for_install()
+    except project_config.ProjectConfigError as exc:
+        print(f"  [FAIL] scopes: existing scope policy is unsafe: {exc}")
+        print("\nNo changes written.")
+        return 2
+    policy_level, policy_msg = configure_scope_policy(
+        dry_run=args.dry_run,
+    )
+    print(f"  [{policy_level:4}] scopes: {policy_msg}")
+    if policy_level == "FAIL":
+        print("\nNo changes written.")
+        return 2
     pin_level, pin_msg = pin_kb_dir(args.kb_dir, args.dry_run)
     print(f"  [{pin_level:4}] KB dir: {pin_msg}")
     if pin_level in {"ERROR", "FAIL"}:
-        print("\nNo changes written.")
+        print("\nScope policy is safely persisted; no further changes written.")
         return 2
-
     # --- 2. MCP registration -------------------------------------------------
     if not claude:
         print("  [WARN] claude CLI not found on PATH — cannot register the MCP server.")
@@ -982,20 +1134,25 @@ def main(argv: list[str] | None = None) -> int:
         print(restart_next_step_message())
         print("Verify env + wiring any time with: bash bin/latch_doctor.sh")
         if not args.suppress_seed_output:
+            project = Path.cwd().resolve()
             if args.no_seed_prompt:
                 print()
-                print(seed_next_step_message(format_command(seed_command_args(
-                    python_path=python_path,
-                    project=Path.cwd(),
-                    source="auto",
-                    backend="claude",
-                ))))
+                print(seed_next_step_for_project(
+                    project=project,
+                    command=format_command(seed_command_args(
+                        python_path=python_path,
+                        project=project,
+                        source="auto",
+                        backend="claude",
+                    )),
+                ))
                 print()
             else:
                 offer_seed_after_install(
                     python_path=python_path,
                     source="auto",
                     backend="claude",
+                    project=project,
                 )
     return 0
 

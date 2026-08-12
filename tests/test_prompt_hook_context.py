@@ -15,9 +15,14 @@ import user_prompt_submit as ups  # noqa: E402
 
 def _stub_main(monkeypatch, tmp_path: Path, *, prompt: str) -> list[dict]:
     logs: list[dict] = []
-    monkeypatch.setattr(ups, "is_unlatched_mode", lambda: False)
-    monkeypatch.setattr(ups, "is_disabled", lambda: False)
+    monkeypatch.setattr(ups, "is_unlatched_mode", lambda *_args: False)
+    monkeypatch.setattr(ups, "is_disabled", lambda *_args: False)
     monkeypatch.setattr(ups, "is_in_compact", lambda: False)
+    monkeypatch.setattr(
+        ups,
+        "current_session_revision",
+        lambda *_args: "legacy-unbound",
+    )
     monkeypatch.setattr(ups, "read_hook_input", lambda: {})
     monkeypatch.setattr(ups, "session_id", lambda _payload: "session-1")
     monkeypatch.setattr(ups, "project_cwd", lambda _payload: str(tmp_path))
@@ -26,9 +31,21 @@ def _stub_main(monkeypatch, tmp_path: Path, *, prompt: str) -> list[dict]:
         "hook_field",
         lambda _payload, *_keys, **_kwargs: prompt,
     )
-    monkeypatch.setattr(ups, "_mission_control_directive", lambda _cwd, _prompt: "")
-    monkeypatch.setattr(ups, "_take_cite_nudge", lambda _cwd, _sid: 0)
-    monkeypatch.setattr(ups, "_write_log", lambda _cwd, row: logs.append(dict(row)))
+    monkeypatch.setattr(
+        ups,
+        "_mission_control_directive",
+        lambda _cwd, _prompt, **_kwargs: "",
+    )
+    monkeypatch.setattr(
+        ups,
+        "_take_cite_nudge",
+        lambda _cwd, _sid, **_kwargs: 0,
+    )
+    monkeypatch.setattr(
+        ups,
+        "_write_log",
+        lambda _cwd, row, **_kwargs: logs.append(dict(row)),
+    )
     return logs
 
 
@@ -104,8 +121,12 @@ def test_degraded_path_keeps_profile_and_citation_nudges(
         tmp_path,
         prompt="switch to a completely different deployment problem",
     )
-    monkeypatch.setattr(ups, "_mission_control_directive", lambda *_args: "MISSION")
-    monkeypatch.setattr(ups, "_take_cite_nudge", lambda *_args: 2)
+    monkeypatch.setattr(
+        ups, "_mission_control_directive", lambda *_args, **_kwargs: "MISSION"
+    )
+    monkeypatch.setattr(
+        ups, "_take_cite_nudge", lambda *_args, **_kwargs: 2
+    )
     monkeypatch.setattr(
         ups,
         "profiles",
@@ -154,8 +175,12 @@ def test_retrieval_error_keeps_independent_safety_context(
         tmp_path,
         prompt="that stored decision is wrong and needs correction",
     )
-    monkeypatch.setattr(ups, "_mission_control_directive", lambda *_args: "MISSION")
-    monkeypatch.setattr(ups, "_take_cite_nudge", lambda *_args: 2)
+    monkeypatch.setattr(
+        ups, "_mission_control_directive", lambda *_args, **_kwargs: "MISSION"
+    )
+    monkeypatch.setattr(
+        ups, "_take_cite_nudge", lambda *_args, **_kwargs: 2
+    )
     monkeypatch.setattr(
         ups,
         "profiles",
@@ -170,7 +195,7 @@ def test_retrieval_error_keeps_independent_safety_context(
         "_retrieve_and_inject",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("boom")),
     )
-    monkeypatch.setattr(ups, "log", lambda _message: None)
+    monkeypatch.setattr(ups, "log", lambda *_args, **_kwargs: None)
 
     assert ups.main() == 0
     output = json.loads(capsys.readouterr().out)
@@ -203,7 +228,7 @@ def test_retrieval_error_without_nudges_is_still_visible(
             RuntimeError("private schema detail")
         ),
     )
-    monkeypatch.setattr(ups, "log", lambda _message: None)
+    monkeypatch.setattr(ups, "log", lambda *_args, **_kwargs: None)
 
     assert ups.main() == 0
     output = json.loads(capsys.readouterr().out)

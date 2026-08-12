@@ -58,6 +58,7 @@ def test_no_history_fixture_seeds_rule_and_gate_context_without_history():
 
 def test_no_history_demo_wrapper_uses_configured_python():
     env = dict(os.environ)
+    env["LATCH_HOME"] = str(KB_HOME)
     env["LATCH_PYTHON"] = "echo"
     env.pop("CLAUDE_KB_PYTHON", None)
     r = subprocess.run(

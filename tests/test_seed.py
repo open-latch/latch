@@ -14,6 +14,7 @@ import seed  # noqa: E402
 import cursor_session  # noqa: E402
 import cursor_transcript  # noqa: E402
 import paths  # noqa: E402
+import project_config  # noqa: E402
 
 
 def _assert(cond, msg):
@@ -1124,6 +1125,12 @@ def test_cursor_seed_apply_loads_exact_digest_bound_preview():
         llm_used=True,
     )
     try:
+        target = project_config.resolve(project)
+        _assert(
+            project_config.record_session_binding(project, "session")
+            == target.revision,
+            "Cursor preview test requires a current persisted session receipt",
+        )
         digest = seed.write_cursor_seed_preview(
             project_path=str(project),
             session_id="session",

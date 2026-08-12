@@ -10,6 +10,8 @@ from pathlib import Path
 
 import compactor
 import cursor_transcript
+import lockfile
+import project_config
 
 
 def _default_summarizer_backend() -> str:
@@ -39,23 +41,64 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     project = str(Path(args.project or Path.cwd()).expanduser().resolve())
-    try:
-        sid, transcript = cursor_transcript.resolve_current(
-            project,
-            session_id=args.session_id,
-            transcript_path=args.transcript,
+    target = project_config.resolve(project)
+    if target.state != project_config.MODE_LATCHED:
+        print(
+            f"cursor-latch-compact: Latch is {target.state} for {target.project_root}",
+            file=sys.stderr,
         )
-    except cursor_transcript.CursorTranscriptError as e:
-        print(f"cursor-latch-compact: {e}", file=sys.stderr)
+        return 1
+    if target.source == project_config.SOURCE_EXPLICIT and not args.session_id:
+        print(
+            "cursor-latch-compact: an explicit current Cursor conversation id "
+            "is required for this project binding",
+            file=sys.stderr,
+        )
+        return 1
+    requested_revision = (
+        project_config.current_session_revision(project, args.session_id)
+        if args.session_id
+        else None
+    )
+    if args.session_id and requested_revision != target.revision:
+        print(
+            "cursor-latch-compact: this conversation belongs to an older "
+            "project KB binding; start a fresh agent task",
+            file=sys.stderr,
+        )
         return 1
 
-    result = compactor.run_compaction(
-        sid,
-        project,
-        str(transcript),
-        final=args.final,
-        summarizer_backend=args.summarizer,
-    )
+    try:
+        with lockfile.project_access_lock(project) as locked_kb:
+            current = project_config.resolve(project)
+            if current.revision != target.revision:
+                raise lockfile.ProjectTargetChangedError(
+                    "target_changed", "project KB changed before Cursor compaction",
+                )
+            sid, transcript = cursor_transcript.resolve_current(
+                project,
+                session_id=args.session_id,
+                transcript_path=args.transcript,
+            )
+            binding_revision = project_config.current_session_revision(project, sid)
+            if binding_revision != target.revision:
+                raise lockfile.ProjectTargetChangedError(
+                    "stale_session_binding",
+                    "this Cursor conversation belongs to an older project KB binding",
+                )
+
+            result = compactor.run_compaction(
+                sid,
+                project,
+                str(transcript),
+                final=args.final,
+                summarizer_backend=args.summarizer,
+                binding_revision=binding_revision,
+                expected_kb_dir=str(locked_kb),
+            )
+    except (cursor_transcript.CursorTranscriptError, lockfile.ProjectTargetChangedError) as e:
+        print(f"cursor-latch-compact: {e}", file=sys.stderr)
+        return 1
     result["session_id"] = sid
     result["transcript_path"] = str(transcript)
     result["current_session_only"] = True

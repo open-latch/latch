@@ -15,6 +15,7 @@ import feeders
 import gate
 import model_backends
 import paths
+import project_config
 import seed
 
 
@@ -70,6 +71,13 @@ def _candidate(
         source_digests=[source.content_digest],
         llm_used=True,
         workstream_key=workstream_key,
+    )
+
+
+def _record_seed_session(project_path, session_id: str) -> None:
+    target = project_config.resolve(project_path)
+    assert project_config.record_session_binding(project_path, session_id) == (
+        target.revision
     )
 
 
@@ -210,6 +218,7 @@ def test_redaction_precedes_prompt_preview_cache_and_persisted_body(
     assert raw_secret not in candidates[0].body
     assert "<redacted:openai-key>" in candidates[0].body
 
+    _record_seed_session(project, "redacted-session")
     digest = seed.write_cursor_seed_preview(
         project_path=str(project),
         session_id="redacted-session",
@@ -373,7 +382,7 @@ def test_dedupe_unions_aligned_provenance_preserves_conflicts_and_balances_secti
 def test_apply_is_exactly_idempotent_staging_repo_scoped_and_source_ledged(
     tmp_path, monkeypatch,
 ):
-    monkeypatch.setattr(paths, "is_unlatched_mode", lambda: False)
+    monkeypatch.setattr(paths, "is_unlatched_mode", lambda *_args: False)
     project = tmp_path / "idempotent-project"
     project.mkdir()
     source = _source("claude:idempotent")
@@ -438,7 +447,7 @@ def test_apply_is_exactly_idempotent_staging_repo_scoped_and_source_ledged(
 def test_new_and_existing_workstreams_attach_reuse_and_do_not_gain_focus(
     tmp_path, monkeypatch,
 ):
-    monkeypatch.setattr(paths, "is_unlatched_mode", lambda: False)
+    monkeypatch.setattr(paths, "is_unlatched_mode", lambda *_args: False)
 
     existing_project = tmp_path / "existing-workstream"
     existing_project.mkdir()
@@ -526,7 +535,7 @@ def test_new_and_existing_workstreams_attach_reuse_and_do_not_gain_focus(
 def test_seeded_forward_looking_children_feed_attached_workstream(
     tmp_path, monkeypatch,
 ):
-    monkeypatch.setattr(paths, "is_unlatched_mode", lambda: False)
+    monkeypatch.setattr(paths, "is_unlatched_mode", lambda *_args: False)
     project = tmp_path / "seeded-feeders"
     project.mkdir()
     conn = db.connect(str(project))
@@ -579,7 +588,7 @@ def test_seeded_forward_looking_children_feed_attached_workstream(
 def test_partial_apply_recovers_checkpointed_nodes_without_duplicates(
     tmp_path, monkeypatch,
 ):
-    monkeypatch.setattr(paths, "is_unlatched_mode", lambda: False)
+    monkeypatch.setattr(paths, "is_unlatched_mode", lambda *_args: False)
     project = tmp_path / "partial-recovery"
     project.mkdir()
     source = _source("claude:partial")
@@ -650,7 +659,7 @@ def test_partial_apply_recovers_checkpointed_nodes_without_duplicates(
 def test_attached_candidate_write_failure_uses_write_telemetry_and_recovers(
     tmp_path, monkeypatch,
 ):
-    monkeypatch.setattr(paths, "is_unlatched_mode", lambda: False)
+    monkeypatch.setattr(paths, "is_unlatched_mode", lambda *_args: False)
     project = tmp_path / "attached-write-recovery"
     project.mkdir()
     conn = db.connect(str(project))
@@ -765,7 +774,7 @@ def test_unlatched_apply_blocks_before_lock_or_database_write(tmp_path, monkeypa
         database_touched = True
         raise AssertionError("database must not be opened while Unlatched")
 
-    monkeypatch.setattr(paths, "is_unlatched_mode", lambda: True)
+    monkeypatch.setattr(paths, "is_unlatched_mode", lambda *_args: True)
     monkeypatch.setattr(db, "connect", forbidden_connect)
     with pytest.raises(seed.SeedWriteBlocked) as exc_info:
         seed.apply_candidates(
@@ -780,7 +789,7 @@ def test_unlatched_apply_blocks_before_lock_or_database_write(tmp_path, monkeypa
 def test_same_source_id_revisions_keep_outcomes_separate_and_defer_unattempted(
     tmp_path, monkeypatch, capsys,
 ):
-    monkeypatch.setattr(paths, "is_unlatched_mode", lambda: False)
+    monkeypatch.setattr(paths, "is_unlatched_mode", lambda *_args: False)
     project = tmp_path / "source-revisions"
     project.mkdir()
     first = _source(
@@ -1082,7 +1091,7 @@ def test_targeted_new_workstream_accepts_only_explicit_requested_children():
 def test_hostile_existing_workstream_key_is_cleared_and_written_unattached(
     tmp_path, monkeypatch,
 ):
-    monkeypatch.setattr(paths, "is_unlatched_mode", lambda: False)
+    monkeypatch.setattr(paths, "is_unlatched_mode", lambda *_args: False)
     project = tmp_path / "hostile-existing-key"
     project.mkdir()
     source = _source("claude:hostile-key")
@@ -1115,7 +1124,7 @@ def test_hostile_existing_workstream_key_is_cleared_and_written_unattached(
 def test_cross_batch_workstream_reuse_and_ambiguous_or_stale_parent_fail_closed(
     tmp_path, monkeypatch,
 ):
-    monkeypatch.setattr(paths, "is_unlatched_mode", lambda: False)
+    monkeypatch.setattr(paths, "is_unlatched_mode", lambda *_args: False)
     project = tmp_path / "cross-batch-workstream"
     project.mkdir()
     source = _source("claude:cross-batch")
@@ -1186,6 +1195,19 @@ def test_cross_batch_workstream_reuse_and_ambiguous_or_stale_parent_fail_closed(
 
     ambiguous_project = tmp_path / "ambiguous-workstream"
     ambiguous_project.mkdir()
+    test_root = paths.validated_test_root()
+    assert test_root is not None
+    ambiguous_vault = test_root / "vaults" / f"ambiguous-{tmp_path.name}"
+    ambiguous_vault.mkdir(parents=True)
+    project_config.write_machine_policy(project_config.MACHINE_POLICY_EXPLICIT)
+    project_config.create_scope(
+        ambiguous_project,
+        policy=project_config.POLICY_PRIVATE,
+    )
+    project_config.authorize_scope(
+        ambiguous_project,
+        kb_dir=ambiguous_vault,
+    )
     first_parent = seed.new_workstream_candidate("First parent")
     ambiguous_key = first_parent.workstream_key
     assert ambiguous_key is not None
@@ -1226,6 +1248,7 @@ def test_cursor_cache_round_trips_apply_state_and_main_rejects_scope_mismatch(
     failure_codes = {
         seed.source_revision_token(second): "extractor_failed",
     }
+    _record_seed_session(project, "cursor-cache-session")
     digest = seed.write_cursor_seed_preview(
         project_path=str(project),
         session_id="cursor-cache-session",
@@ -1302,7 +1325,7 @@ def test_cursor_cache_round_trips_apply_state_and_main_rejects_scope_mismatch(
 def test_force_reimport_allows_touched_mtime_but_failed_force_returns_nonzero(
     tmp_path, monkeypatch, capsys,
 ):
-    monkeypatch.setattr(paths, "is_unlatched_mode", lambda: False)
+    monkeypatch.setattr(paths, "is_unlatched_mode", lambda *_args: False)
     project = tmp_path / "force-reimport"
     project.mkdir()
     original = _source(
@@ -1421,7 +1444,7 @@ def test_source_batch_finalization_rolls_back_every_outcome_on_one_failure(tmp_p
 def test_gate_relevance_uses_seed_observed_at_not_recent_import_time(
     tmp_path, monkeypatch,
 ):
-    monkeypatch.setattr(paths, "is_unlatched_mode", lambda: False)
+    monkeypatch.setattr(paths, "is_unlatched_mode", lambda *_args: False)
     project = tmp_path / "observed-at-gate"
     project.mkdir()
     old_source = _source(
@@ -1476,7 +1499,7 @@ def test_gate_relevance_uses_seed_observed_at_not_recent_import_time(
 def test_cross_batch_exact_claim_unions_provenance_across_extractor_upgrades(
     tmp_path, monkeypatch,
 ):
-    monkeypatch.setattr(paths, "is_unlatched_mode", lambda: False)
+    monkeypatch.setattr(paths, "is_unlatched_mode", lambda *_args: False)
     project = tmp_path / "cross-batch-claim"
     project.mkdir()
     first_source = _source(
@@ -1590,7 +1613,7 @@ def test_injected_excerpt_delimiter_cannot_hide_opposing_claims():
 def test_seed_nodes_require_explicit_promotion_even_after_many_references(
     tmp_path, monkeypatch,
 ):
-    monkeypatch.setattr(paths, "is_unlatched_mode", lambda: False)
+    monkeypatch.setattr(paths, "is_unlatched_mode", lambda *_args: False)
     project = tmp_path / "seed-authority"
     project.mkdir()
     source = _source("claude:authority")
@@ -1671,7 +1694,7 @@ def test_seed_nodes_require_explicit_promotion_even_after_many_references(
 def test_cross_batch_claim_reuse_fails_closed_after_user_change(
     tmp_path, monkeypatch, mutation,
 ):
-    monkeypatch.setattr(paths, "is_unlatched_mode", lambda: False)
+    monkeypatch.setattr(paths, "is_unlatched_mode", lambda *_args: False)
     project = tmp_path / f"changed-claim-{mutation}"
     project.mkdir()
     first_source = _source(f"claude:first-{mutation}")
@@ -1711,7 +1734,7 @@ def test_cross_batch_claim_reuse_fails_closed_after_user_change(
 def test_cross_batch_claim_reuse_fails_closed_after_workstream_move(
     tmp_path, monkeypatch,
 ):
-    monkeypatch.setattr(paths, "is_unlatched_mode", lambda: False)
+    monkeypatch.setattr(paths, "is_unlatched_mode", lambda *_args: False)
     project = tmp_path / "moved-seed-claim"
     project.mkdir()
     conn = db.connect(str(project))
@@ -1758,7 +1781,7 @@ def test_cross_batch_claim_reuse_fails_closed_after_workstream_move(
 def test_new_batch_reuses_semantically_intact_failed_claim_checkpoint(
     tmp_path, monkeypatch,
 ):
-    monkeypatch.setattr(paths, "is_unlatched_mode", lambda: False)
+    monkeypatch.setattr(paths, "is_unlatched_mode", lambda *_args: False)
     project = tmp_path / "failed-claim-checkpoint"
     project.mkdir()
     failed_source = _source("claude:failed-checkpoint")
@@ -1841,7 +1864,7 @@ def test_new_batch_reuses_semantically_intact_failed_claim_checkpoint(
 def test_pending_workstream_checkpoint_is_reused_by_stable_key(
     tmp_path, monkeypatch,
 ):
-    monkeypatch.setattr(paths, "is_unlatched_mode", lambda: False)
+    monkeypatch.setattr(paths, "is_unlatched_mode", lambda *_args: False)
     project = tmp_path / "pending-workstream-checkpoint"
     project.mkdir()
     original_parent = seed.new_workstream_candidate("Interrupted activation")
@@ -1966,7 +1989,7 @@ def test_pending_workstream_checkpoint_is_reused_by_stable_key(
 def test_source_ids_are_redacted_on_model_report_and_durable_surfaces(
     tmp_path, monkeypatch, capsys,
 ):
-    monkeypatch.setattr(paths, "is_unlatched_mode", lambda: False)
+    monkeypatch.setattr(paths, "is_unlatched_mode", lambda *_args: False)
     secret = "sk-proj-" + "Z" * 32
     source = _source(f"claude:{secret}")
     candidate = _candidate(source)
@@ -2051,7 +2074,7 @@ def test_untrusted_fields_cannot_redact_the_trusted_import_marker(tmp_path):
 def test_inline_corroboration_is_bounded_while_ledgers_remain_complete(
     tmp_path, monkeypatch,
 ):
-    monkeypatch.setattr(paths, "is_unlatched_mode", lambda: False)
+    monkeypatch.setattr(paths, "is_unlatched_mode", lambda *_args: False)
     project = tmp_path / "bounded-corroboration"
     project.mkdir()
     bodies: list[str] = []
@@ -2092,6 +2115,7 @@ def test_cursor_preview_is_bound_to_extractor_version(tmp_path, monkeypatch):
     project = tmp_path / "cursor-extractor-version"
     project.mkdir()
     source = _source("cursor:versioned", agent="cursor")
+    _record_seed_session(project, "cursor-versioned")
     digest = seed.write_cursor_seed_preview(
         project_path=str(project),
         session_id="cursor-versioned",
@@ -2157,7 +2181,7 @@ def test_gate_relevance_prefers_canonical_over_newer_staging_at_equal_hop():
 def test_legacy_null_claim_is_backfilled_before_cross_source_corroboration(
     tmp_path, monkeypatch,
 ):
-    monkeypatch.setattr(paths, "is_unlatched_mode", lambda: False)
+    monkeypatch.setattr(paths, "is_unlatched_mode", lambda *_args: False)
     project = tmp_path / "legacy-null-claim"
     project.mkdir()
     first_source = _source("claude:legacy-claim")

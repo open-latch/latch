@@ -2,9 +2,13 @@
 
 Goal: prove latch can catch a rejected path before a coding agent changes files.
 
-Run this after the quickstart script has connected Claude Code, Codex, Cursor, or all,
-and the doctor/check commands pass. The quickstart offers the seed step at the
-end; use the commands below when you skipped that prompt or want to rerun it.
+Run this after the quickstart has connected Claude Code, Codex, Cursor, or all,
+and the selected project reports LATCHED. Normal installs remain Global Shared
+and use the installed KB without project setup. If consulting mode was
+explicitly enabled, an unscoped location starts LOCKED: choose Shared (the
+existing global KB) or Private (a clean separate KB) with `latch` before any
+seed is offered. Descendants inherit the nearest filesystem scope.
+Use the commands below when you skipped the seed prompt or want to rerun it.
 
 For the proof-ready package with timed paths, exact receipt shapes, and
 verification commands, see

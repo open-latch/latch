@@ -20,6 +20,25 @@ import mcp_proxy  # noqa: E402
 import mcp_runtime  # noqa: E402
 
 
+def _test_scope(root: Path, kb_dir: Path) -> mcp_runtime.ScopeDescriptor:
+    """Build one valid, immutable scope handoff for lifecycle-only fixtures."""
+    return mcp_runtime.validate_scope_descriptor({
+        "root": str(root.resolve()),
+        "state": "latched",
+        "policy": "private",
+        "scope_id": "61bcd97f-1af4-4c0e-810f-52329de8a25b",
+        "revision": "1" * 32,
+        "kb_dir": str(kb_dir.resolve()),
+        "target_fingerprint": "2" * 64,
+        "lock_key": "lifecycle-test-scope",
+    })
+
+
+def _resolved_scope_metadata(root: Path = ROOT) -> dict[str, object]:
+    scope = mcp_broker.resolve_connection_scope(str(root))
+    return {"project_cwd": str(root.resolve()), "scope": scope.payload()}
+
+
 def test_windows_daemon_creation_flags_suppress_console_without_detaching():
     flags = mcp_broker._windows_creation_flags()
     assert flags & mcp_broker.WINDOWS_CREATE_NO_WINDOW
@@ -133,19 +152,24 @@ def test_daemon_environment_is_closed_and_shared_by_both_start_paths(
     }
     vault = tmp_path / "vault"
     vault.mkdir()
+    scope = _test_scope(ROOT, vault)
     install = tmp_path / "install"
     built = None
     monkeypatch.setattr(mcp_broker, "runtime_dir", lambda: vault)
     monkeypatch.setattr(mcp_broker.paths, "KB_ROOT", install)
     monkeypatch.setattr(mcp_broker, "read_discovery", lambda: None)
     monkeypatch.setattr(mcp_broker, "emit_lifecycle", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        mcp_broker, "resolve_connection_scope", lambda _project: scope
+    )
 
     with monkeypatch.context() as environment:
         for name in tuple(os.environ):
             environment.delenv(name, raising=False)
         for name, value in source.items():
             environment.setenv(name, value)
-        built = mcp_broker._daemon_environment()
+        with mcp_runtime.bind_runtime_scope(scope):
+            built = mcp_broker._daemon_environment()
 
         captured = []
 
@@ -160,8 +184,9 @@ def test_daemon_environment_is_closed_and_shared_by_both_start_paths(
             return FakeProcess()
 
         environment.setattr(mcp_broker.subprocess, "Popen", fake_popen)
-        mcp_broker._spawn_daemon(str(ROOT), start_reason="proxy_connect")
-        assert mcp_broker.request_daemon_start(str(ROOT)) is True
+        with mcp_runtime.bind_runtime_scope(scope):
+            mcp_broker._spawn_daemon(str(ROOT), start_reason="proxy_connect")
+            assert mcp_broker.request_daemon_start(str(ROOT)) is True
 
     assert built == {
         "PATH": "/safe/bin",
@@ -169,6 +194,9 @@ def test_daemon_environment_is_closed_and_shared_by_both_start_paths(
         "TEMP": "/safe/tmp",
         "LATCH_HOME": str(install),
         "LATCH_KB_DIR": str(vault),
+        mcp_broker.OWNER_SCOPE_ENV: json.dumps(
+            scope.payload(), sort_keys=True, separators=(",", ":")
+        ),
     }
     assert len(captured) == 2
     direct_env = captured[0][1]
@@ -192,6 +220,7 @@ def test_daemon_environment_is_closed_and_shared_by_both_start_paths(
             )
         assert env["LATCH_HOME"] == str(install)
         assert env["LATCH_KB_DIR"] == str(vault)
+        assert json.loads(env[mcp_broker.OWNER_SCOPE_ENV]) == scope.payload()
         assert "LATCH_MCP_DAEMON_PROCESS" not in env
 
 
@@ -208,6 +237,9 @@ def test_daemon_and_children_preserve_validated_vault_context(
         "LATCH_PRODUCTION_DATA_ROOT": str(tmp_path / "production"),
         "LATCH_VAULT_REGISTRY_ROOT": str(tmp_path / "registry"),
         "LATCH_DURABILITY_ROOT": str(tmp_path / "durability"),
+        mcp_broker.project_config.CONTROL_ROOT_ENV: str(
+            tmp_path / "scope-control"
+        ),
         "XDG_DATA_HOME": str(tmp_path / "xdg-data"),
         "XDG_STATE_HOME": str(tmp_path / "xdg-state"),
         mcp_broker.paths.TEST_ROOT_ENV: str(test_root),
@@ -224,6 +256,7 @@ def test_daemon_and_children_preserve_validated_vault_context(
         "LATCH_PRODUCTION_DATA_ROOT",
         "LATCH_VAULT_REGISTRY_ROOT",
         "LATCH_DURABILITY_ROOT",
+        mcp_broker.project_config.CONTROL_ROOT_ENV,
         "XDG_DATA_HOME",
         "XDG_STATE_HOME",
         mcp_broker.paths.TEST_ROOT_ENV,
@@ -327,9 +360,13 @@ def test_vault_context_digest_is_normalized_and_discovery_is_opaque(
 
 
 def test_daemon_context_revalidates_typed_connection_settings():
+    scope = mcp_broker.resolve_connection_scope(str(ROOT))
     metadata = {
         "project_cwd": str(ROOT),
         "proxy_pid": 123,
+        "scope": scope.payload(),
+        "project_binding_revision": scope.revision,
+        "project_kb_dir": scope.kb_dir,
         "in_compact": True,
         "unlatched": False,
         "disabled": False,
@@ -365,6 +402,8 @@ def test_daemon_context_revalidates_typed_connection_settings():
     invalid_values = (
         ("project_cwd", ""),
         ("project_cwd", "relative/path"),
+        ("project_binding_revision", None),
+        ("project_kb_dir", "relative/path"),
         ("in_compact", "true"),
         ("disabled", 1),
         ("in_maintenance", "false"),
@@ -478,10 +517,34 @@ def test_blue_green_registry_is_keyed_for_v1_v2_v1(monkeypatch, tmp_path):
 def test_daemon_owner_fence_survives_broker_death_and_releases_with_owner(
     monkeypatch, tmp_path
 ):
-    vault = mcp_broker.paths.project_dir(str(tmp_path / "owner-fence"))
+    project = tmp_path / "owner-fence"
+    project.mkdir()
+    vault = mcp_broker.paths.ensure_project_dir(str(project))
+    mcp_broker.project_config.mark_kb_target(vault)
+    mcp_broker.project_config.write_machine_policy(
+        mcp_broker.project_config.MACHINE_POLICY_EXPLICIT
+    )
+    mcp_broker.project_config.write_binding(
+        project,
+        mode=mcp_broker.project_config.MODE_LATCHED,
+        kb_dir=vault,
+    )
+    scope = mcp_broker.resolve_connection_scope(str(project))
     monkeypatch.setattr(mcp_broker, "runtime_dir", lambda: vault)
     env = os.environ.copy()
-    env.update({"LATCH_KB_DIR": str(vault), "PYTHONPATH": str(ROOT / "src")})
+    env.update({
+        "LATCH_HOME": str(ROOT),
+        "LATCH_KB_DIR": str(vault),
+        "LATCH_MCP_INITIAL_PROJECT_CWD": str(project),
+        "LATCH_MCP_PROTOCOL_VERSION": str(mcp_broker.PROTOCOL_VERSION),
+        "LATCH_MCP_PROXY_CAPABILITY_EPOCH": str(
+            mcp_broker.PROXY_CAPABILITY_EPOCH
+        ),
+        mcp_broker.OWNER_SCOPE_ENV: json.dumps(
+            scope.payload(), sort_keys=True, separators=(",", ":")
+        ),
+        "PYTHONPATH": str(ROOT / "src"),
+    })
     holder = subprocess.Popen(
         [
             sys.executable,
@@ -526,7 +589,19 @@ def test_daemon_owner_fence_survives_broker_death_and_releases_with_owner(
 def test_incompatible_upgrade_fails_before_owner_fence_and_heavy_imports(
     monkeypatch, tmp_path
 ):
-    vault = mcp_broker.paths.project_dir(str(tmp_path / "incompatible-upgrade"))
+    project = tmp_path / "incompatible-upgrade"
+    project.mkdir()
+    vault = mcp_broker.paths.ensure_project_dir(str(project))
+    mcp_broker.project_config.mark_kb_target(vault)
+    mcp_broker.project_config.write_machine_policy(
+        mcp_broker.project_config.MACHINE_POLICY_EXPLICIT
+    )
+    mcp_broker.project_config.write_binding(
+        project,
+        mode=mcp_broker.project_config.MODE_LATCHED,
+        kb_dir=vault,
+    )
+    scope = mcp_broker.resolve_connection_scope(str(project))
     site_dir = tmp_path / "site"
     site_dir.mkdir()
     (site_dir / "sitecustomize.py").write_text(
@@ -544,6 +619,10 @@ def test_incompatible_upgrade_fails_before_owner_fence_and_heavy_imports(
     env.update({
         "LATCH_HOME": str(ROOT),
         "LATCH_KB_DIR": str(vault),
+        "LATCH_MCP_INITIAL_PROJECT_CWD": str(project),
+        mcp_broker.OWNER_SCOPE_ENV: json.dumps(
+            scope.payload(), sort_keys=True, separators=(",", ":")
+        ),
         "LATCH_MCP_RUNTIME_KEY": requested_key,
         "LATCH_MCP_PROTOCOL_VERSION": "999",
         "PYTHONPATH": os.pathsep.join((str(site_dir), str(ROOT / "src"))),
@@ -569,7 +648,7 @@ def test_incompatible_upgrade_fails_before_owner_fence_and_heavy_imports(
     monkeypatch.setattr(mcp_broker, "runtime_dir", lambda: vault)
     monkeypatch.setattr(mcp_broker, "RUNTIME_KEY", requested_key)
     try:
-        mcp_broker.ensure_daemon(str(ROOT))
+        mcp_broker.ensure_daemon(str(project))
     except mcp_broker.BrokerError as exc:
         assert "Start a fresh task" in str(exc)
     else:
@@ -673,6 +752,7 @@ def test_proxy_cap_is_aggregated_across_capable_runtime_aliases(monkeypatch, tmp
         assert summary["proxy_high_water"] == 33
         assert summary["lease_scope"] == "owner_runtime_key"
         retiring = mcp_proxy.ProxyLease({
+            **_resolved_scope_metadata(),
             "connection_id": "lease-0",
             "proxy_pid": os.getpid(),
             "runtime_key": "runtime-v1",
@@ -713,6 +793,7 @@ def test_capable_proxy_lease_migrates_write_first_and_deduplicates(
             owner_runtime_key="owner-v2",
         )
         lease = mcp_proxy.ProxyLease({
+            **_resolved_scope_metadata(),
             "connection_id": "migrating-proxy",
             "proxy_pid": os.getpid(),
             "runtime_key": "alias-v1",
@@ -789,6 +870,12 @@ def test_idle_historical_keyed_leases_are_visible_before_alias_or_reconnect(
     """Reproduce the final review: 2 idle old leases plus 1 fresh lease."""
     vault = tmp_path / "idle-historical-evidence"
     monkeypatch.setattr(mcp_broker, "runtime_dir", lambda: vault)
+    database_calls: list[str] = []
+    monkeypatch.setattr(
+        mcp_daemon.mcp_server,
+        "_conn",
+        lambda: database_calls.append("DB"),
+    )
     original = mcp_broker.RUNTIME_KEY
     now = time.time()
     try:
@@ -833,6 +920,7 @@ def test_idle_historical_keyed_leases_are_visible_before_alias_or_reconnect(
         assert state["alias_runtime_keys"] == ["current-owner"]
         assert state["unassociated_runtime_keys"] == ["historical-key"]
         status = mcp_daemon.mcp_server.kb_runtime_status()["proxy_pool"]
+        assert database_calls == []
         assert status["live_leases"] == 1
         assert status["legacy_incompatible_leases"] == 2
         assert status["observed_live_leases"] == 3
@@ -901,6 +989,7 @@ def test_unassociated_capable_leases_join_cap_but_other_live_owner_does_not(
         assert summary["unassociated_capable_leases"] == 1
         assert summary["other_live_owner_leases"] == 1
         retiring = mcp_proxy.ProxyLease({
+            **_resolved_scope_metadata(),
             "connection_id": "pool-0",
             "proxy_pid": os.getpid(),
             "runtime_key": "current-owner",
@@ -918,6 +1007,7 @@ def test_discovery_aliases_are_not_published_before_runtime_initialization(
     monkeypatch, tmp_path
 ):
     vault = tmp_path / "readiness-publication"
+    scope = mcp_broker.resolve_connection_scope(str(ROOT))
     monkeypatch.setattr(mcp_broker, "runtime_dir", lambda: vault)
     monkeypatch.setattr(mcp_daemon.mcp_broker, "runtime_dir", lambda: vault)
     monkeypatch.setattr(mcp_daemon, "_REQUESTED_RUNTIME_KEY", "retained-v1")
@@ -938,12 +1028,12 @@ def test_discovery_aliases_are_not_published_before_runtime_initialization(
     monkeypatch.setattr(mcp_daemon.mcp_server, "initialize_runtime", fail_after_check)
     mcp_daemon._OWNER_FENCE = None
     try:
-        try:
-            mcp_daemon.anyio.run(mcp_daemon._main_async)
-        except StopInitialization:
-            pass
-        else:
-            raise AssertionError("synthetic initialization failure was swallowed")
+        with pytest.raises(
+            RuntimeError, match="MCP runtime initialization failed"
+        ) as failure:
+            with mcp_runtime.bind_runtime_scope(scope):
+                mcp_daemon.anyio.run(mcp_daemon._main_async)
+        assert isinstance(failure.value.__cause__, StopInitialization)
     finally:
         if mcp_daemon._OWNER_FENCE is not None:
             mcp_daemon._OWNER_FENCE.close()
@@ -1018,10 +1108,10 @@ def test_sustained_over_cap_duration_is_visible_from_live_leases(
 def test_disconnect_reports_unknown_mutation_outcome_without_retry_advice(monkeypatch):
     monkeypatch.setattr(mcp_broker, "emit_lifecycle", lambda *_args, **_kwargs: None)
     metadata = {
+        **_resolved_scope_metadata(),
         "connection_id": "receipt-test",
         "proxy_pid": os.getpid(),
         "runtime_key": mcp_broker.RUNTIME_KEY,
-        "project_cwd": str(ROOT),
     }
     bridge = mcp_proxy.ProxyBridge(metadata)
     emitted: list[tuple[object, str]] = []
@@ -1055,10 +1145,10 @@ def test_partial_replay_flush_fails_pending_and_deferred_tail(monkeypatch):
             pass
 
     bridge = mcp_proxy.ProxyBridge({
+        **_resolved_scope_metadata(),
         "connection_id": "partial-flush",
         "proxy_pid": os.getpid(),
         "runtime_key": mcp_broker.RUNTIME_KEY,
-        "project_cwd": str(ROOT),
     })
     bridge._sock = FailingSocket()
     bridge._initialized_line = b'{"jsonrpc":"2.0","method":"notifications/initialized"}\n'
@@ -1096,10 +1186,10 @@ def test_reconnect_success_is_emitted_only_after_initialize_reply(monkeypatch):
             pass
 
     bridge = mcp_proxy.ProxyBridge({
+        **_resolved_scope_metadata(),
         "connection_id": "reconnect-timing",
         "proxy_pid": os.getpid(),
         "runtime_key": mcp_broker.RUNTIME_KEY,
-        "project_cwd": str(ROOT),
     })
     bridge._sock = Socket()
     bridge._replaying = True
@@ -1183,10 +1273,10 @@ def test_reconnect_failure_emits_lifecycle_signal(monkeypatch):
         ),
     )
     metadata = {
+        **_resolved_scope_metadata(),
         "connection_id": "reconnect-receipt",
         "proxy_pid": os.getpid(),
         "runtime_key": mcp_broker.RUNTIME_KEY,
-        "project_cwd": str(ROOT),
     }
     bridge = mcp_proxy.ProxyBridge(metadata)
     bridge._init_line = b'{"jsonrpc":"2.0","id":1,"method":"initialize"}\n'
@@ -1206,10 +1296,10 @@ def test_reconnect_failure_emits_lifecycle_signal(monkeypatch):
 
 def test_dead_local_owner_is_reconnected_before_new_request_is_sent(monkeypatch):
     metadata = {
+        **_resolved_scope_metadata(),
         "connection_id": "dead-owner-preflight",
         "proxy_pid": os.getpid(),
         "runtime_key": mcp_broker.RUNTIME_KEY,
-        "project_cwd": str(ROOT),
     }
 
     class Socket:
@@ -1281,11 +1371,10 @@ def test_shared_start_failure_is_visible_and_legacy_is_opt_in(monkeypatch, capsy
     assert "daemon_start_failed" in events
 
 
-def test_forced_legacy_precedes_shared_connection_validation(monkeypatch):
+def test_forced_legacy_validates_scope_but_skips_shared_runtime(monkeypatch):
     events: list[str] = []
     legacy_called = []
     monkeypatch.setenv("LATCH_MCP_FORCE_LEGACY", "1")
-    monkeypatch.setenv("LATCH_GATE_BACKEND", "future-backend")
     monkeypatch.setattr(
         mcp_broker,
         "emit_lifecycle",

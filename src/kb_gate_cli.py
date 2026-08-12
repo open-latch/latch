@@ -17,6 +17,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 import paths
+import project_config
 
 
 def _emit(obj: dict) -> int:
@@ -66,7 +67,7 @@ def _unlatched_findings(verdict: dict) -> dict:
         "receipt": {
             "summary": (
                 "Latch gate was skipped because Latch is currently UNLATCHED. "
-                "Run /unlatch to re-latch. If LATCH_UNLATCHED is set, unset it too."
+                "Run /latch to re-latch. If LATCH_UNLATCHED is set, unset it too."
             ),
             "source": "latch_gate",
             "used": {
@@ -82,7 +83,7 @@ def _unlatched_findings(verdict: dict) -> dict:
         },
         "why_it_matters": (
             "Latch gate was skipped because Latch is currently UNLATCHED. "
-            "Run /unlatch to re-latch. If LATCH_UNLATCHED is set, unset it too."
+            "Run /latch to re-latch. If LATCH_UNLATCHED is set, unset it too."
         ),
     }
 
@@ -98,7 +99,7 @@ def main(argv: list[str]) -> int:
     request = " ".join(argv[2:]).strip()
     if not request:
         return _emit({"ok": False, "error": "empty request"})
-    if paths.is_unlatched_mode():
+    if paths.is_unlatched_mode(cwd):
         verdict = _unlatched_verdict()
         return _emit({
             "ok": False,
@@ -118,7 +119,43 @@ def main(argv: list[str]) -> int:
     import db
     import gate
 
-    conn = db.connect(cwd)
+    expected_revision = None
+    expected_kb_dir = None
+    sid = project_config.current_agent_session_id()
+    if sid is not None:
+        try:
+            target = project_config.resolve(cwd)
+            expected_revision = project_config.current_session_revision(
+                cwd,
+                sid,
+                resolved_target=target,
+            )
+            selected = project_config.validated_bound_kb_dir(target)
+        except project_config.ProjectConfigError as exc:
+            return _emit({
+                "ok": False,
+                "reason": "stale_session_binding",
+                "error": str(exc),
+            })
+        if expected_revision is None or selected is None:
+            return _emit({
+                "ok": False,
+                "reason": "stale_session_binding",
+                "error": "gate session belongs to another or older Latch scope",
+            })
+        expected_kb_dir = str(selected)
+    elif project_config.is_agent_context():
+        return _emit({
+            "ok": False,
+            "reason": "stale_session_binding",
+            "error": "gate requires the exact current agent session id",
+        })
+
+    conn = db.connect(
+        cwd,
+        expected_binding_revision=expected_revision,
+        expected_kb_dir=expected_kb_dir,
+    )
     try:
         out = gate.run_gate(conn, request, project_path=cwd)
     finally:

@@ -14,7 +14,9 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
+import uuid
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass, field
@@ -152,11 +154,127 @@ _VAULT_CHILD_ENV_VARS = (
     "LATCH_PRODUCTION_DATA_ROOT",
     "LATCH_VAULT_REGISTRY_ROOT",
     "LATCH_DURABILITY_ROOT",
+    "LATCH_SCOPE_STATE_ROOT",
     "LATCH_TEST_ROOT",
     "LATCH_TEST_CAPABILITY",
     "XDG_DATA_HOME",
     "XDG_STATE_HOME",
 )
+
+_HEX_32 = re.compile(r"^[0-9a-f]{32}$")
+_HEX_64 = re.compile(r"^[0-9a-f]{64}$")
+_LOCK_KEY = re.compile(r"^[A-Za-z0-9._-]{1,160}$")
+
+
+@dataclass(frozen=True)
+class ScopeDescriptor:
+    """Immutable, exact data-plane authority carried by one MCP connection."""
+
+    root: str
+    state: str
+    policy: str
+    scope_id: str | None
+    revision: str
+    kb_dir: str
+    target_fingerprint: str
+    lock_key: str
+
+    def payload(self) -> dict[str, str | None]:
+        return asdict(self)
+
+
+def _canonical_directory(value: Any, *, label: str) -> str:
+    if not isinstance(value, str) or not value or not os.path.isabs(value):
+        raise ValueError(f"invalid MCP scope {label}")
+    lexical = os.path.abspath(os.path.normpath(value))
+    if os.path.normcase(value) != os.path.normcase(lexical):
+        raise ValueError(f"MCP scope {label} must use its canonical spelling")
+    canonical = os.path.realpath(lexical)
+    if (
+        os.path.normcase(lexical) != os.path.normcase(canonical)
+        or not os.path.isdir(canonical)
+    ):
+        raise ValueError(f"MCP scope {label} must be one canonical existing directory")
+    return canonical
+
+
+def validate_scope_descriptor(value: Any) -> ScopeDescriptor:
+    """Parse one exact LATCHED scope; denied states have no MCP data plane."""
+    if isinstance(value, ScopeDescriptor):
+        payload = value.payload()
+    elif isinstance(value, dict):
+        payload = value
+    else:
+        raise ValueError("invalid MCP scope descriptor")
+    expected = {
+        "root",
+        "state",
+        "policy",
+        "scope_id",
+        "revision",
+        "kb_dir",
+        "target_fingerprint",
+        "lock_key",
+    }
+    if set(payload) != expected:
+        raise ValueError("invalid MCP scope descriptor fields")
+    if payload.get("state") != "latched":
+        raise ValueError("MCP data plane requires a LATCHED scope")
+    policy = payload.get("policy")
+    if policy not in {"shared", "private"}:
+        raise ValueError("invalid MCP scope policy")
+    raw_scope_id = payload.get("scope_id")
+    scope_id: str | None
+    if raw_scope_id is None:
+        if policy != "shared":
+            raise ValueError("a Private MCP scope requires a scope id")
+        scope_id = None
+    elif isinstance(raw_scope_id, str):
+        try:
+            scope_id = str(uuid.UUID(raw_scope_id))
+        except ValueError as exc:
+            raise ValueError("invalid MCP scope id") from exc
+        if scope_id != raw_scope_id:
+            raise ValueError("invalid MCP scope id")
+    else:
+        raise ValueError("invalid MCP scope id")
+    revision = payload.get("revision")
+    fingerprint = payload.get("target_fingerprint")
+    lock_key = payload.get("lock_key")
+    if not isinstance(revision, str) or _HEX_32.fullmatch(revision) is None:
+        raise ValueError("invalid MCP scope revision")
+    if not isinstance(fingerprint, str) or _HEX_64.fullmatch(fingerprint) is None:
+        raise ValueError("invalid MCP target fingerprint")
+    if not isinstance(lock_key, str) or _LOCK_KEY.fullmatch(lock_key) is None:
+        raise ValueError("invalid MCP scope lock key")
+    return ScopeDescriptor(
+        root=_canonical_directory(payload.get("root"), label="root"),
+        state="latched",
+        policy=str(policy),
+        scope_id=scope_id,
+        revision=revision,
+        kb_dir=_canonical_directory(payload.get("kb_dir"), label="KB target"),
+        target_fingerprint=fingerprint,
+        lock_key=lock_key,
+    )
+
+
+def scope_descriptor_from_resolved(target: Any) -> ScopeDescriptor:
+    """Freeze a project_config.ResolvedScope without importing that module."""
+    return validate_scope_descriptor({
+        "root": str(getattr(target, "project_root", "")),
+        "state": getattr(target, "state", None),
+        "policy": getattr(target, "policy", None),
+        "scope_id": getattr(target, "scope_id", None),
+        "revision": getattr(target, "revision", None),
+        "kb_dir": (
+            str(getattr(target, "kb_dir"))
+            if getattr(target, "kb_dir", None) is not None
+            else None
+        ),
+        "target_fingerprint": getattr(target, "target_fingerprint", None),
+        "lock_key": getattr(target, "lock_key", None),
+    })
 
 
 @dataclass(frozen=True)
@@ -168,6 +286,9 @@ class ConnectionContext:
     proxy_pid: int
     proxy_started_at: str
     runtime_key: str
+    project_binding_revision: str | None = None
+    project_kb_dir: str | None = None
+    scope_descriptor: ScopeDescriptor | None = None
     in_compact: bool = False
     unlatched: bool = False
     disabled: bool = False
@@ -200,6 +321,9 @@ _CONNECTION: ContextVar[ConnectionContext | None] = ContextVar(
 _PRIVATE_CHILD_ENV: ContextVar[PrivateChildEnvironment | None] = ContextVar(
     "latch_mcp_private_child_environment", default=None
 )
+_RUNTIME_SCOPE: ContextVar[ScopeDescriptor | None] = ContextVar(
+    "latch_mcp_runtime_scope", default=None
+)
 _DAEMON_STATE: RuntimeState | None = None
 
 
@@ -222,6 +346,20 @@ def bind_connection(
 
 def current_connection() -> ConnectionContext | None:
     return _CONNECTION.get()
+
+
+@contextmanager
+def bind_runtime_scope(scope: ScopeDescriptor) -> Iterator[None]:
+    """Bind broker filesystem activity to one already validated exact vault."""
+    token = _RUNTIME_SCOPE.set(validate_scope_descriptor(scope))
+    try:
+        yield
+    finally:
+        _RUNTIME_SCOPE.reset(token)
+
+
+def current_runtime_scope() -> ScopeDescriptor | None:
+    return _RUNTIME_SCOPE.get()
 
 
 def resolve_executable_on_path(command: str, path: str | None) -> str | None:

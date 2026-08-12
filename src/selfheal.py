@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import stat
 import sys
 import threading
 from datetime import datetime, timedelta, timezone
@@ -38,6 +39,7 @@ import lockfile  # noqa: E402
 import maintenance  # noqa: E402
 import mcp_runtime  # noqa: E402
 import paths  # noqa: E402
+import project_config  # noqa: E402
 import vault_backup  # noqa: E402
 
 # ---- cadence (hours). Defaults preserve the old schtask cadence. ----
@@ -67,8 +69,10 @@ IN_MAINTENANCE_ENV = "CLAUDE_KB_IN_MAINTENANCE"
 # otherwise allocate its own console window. 0 on POSIX (no-op).
 CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 _TRIGGER_LOCK = threading.Lock()
-_TRIGGER_CHECKED = False
-_TRIGGER_FAILURE_SIGNATURE: tuple[str, int | None, int | None] | None = None
+_TRIGGER_CHECKED: set[tuple[str, str, str]] = set()
+_TRIGGER_FAILURE_SIGNATURE: dict[
+    tuple[str, str, str], tuple[str, int | None, int | None]
+] = {}
 
 
 # ---------------- state ----------------
@@ -79,8 +83,13 @@ def _state_path(project_path: str | None) -> Path:
 
 def _load_state(project_path: str | None) -> dict:
     p = _state_path(project_path)
-    if not p.exists():
+    if not (p.exists() or p.is_symlink()):
         return {}
+    metadata = p.lstat()
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+        raise project_config.ProjectConfigError(
+            f"unsafe maintenance state file: {p}"
+        )
     try:
         data = json.loads(p.read_text(encoding="utf-8"))
         return data if isinstance(data, dict) else {}
@@ -93,9 +102,7 @@ def _load_state(project_path: str | None) -> dict:
 def _save_state(project_path: str | None, state: dict) -> None:
     p = _state_path(project_path)
     p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(state, indent=2), encoding="utf-8")
-    os.replace(tmp, p)
+    project_config.atomic_json(p, state)
 
 
 def _parse(ts: str | None) -> datetime | None:
@@ -134,14 +141,26 @@ def _any_due(state: dict, now: datetime) -> bool:
 
 # ---------------- trigger (runs on the MCP startup path) ----------------
 
-def _trigger_blocked() -> bool:
+def _trigger_blocked(project_path: str | None) -> bool:
     connection = mcp_runtime.current_connection()
     return bool(
-        paths.is_unlatched_mode()
-        or paths.is_disabled()
+        paths.is_unlatched_mode(project_path)
+        or paths.is_disabled(project_path)
         or paths.is_in_compact()
         or os.environ.get(IN_MAINTENANCE_ENV)
         or (connection is not None and connection.in_maintenance)
+    )
+
+
+def _trigger_key(
+    project_path: str,
+    binding_revision: str,
+    kb_dir: Path,
+) -> tuple[str, str, str]:
+    return (
+        os.path.normcase(str(Path(project_path).resolve())),
+        binding_revision,
+        os.path.normcase(str(kb_dir)),
     )
 
 
@@ -159,38 +178,86 @@ def _runner_policy_signature(
         return str(path), None, None
 
 
-def maybe_trigger(project_path: str | None) -> None:
+def _matches_expected_target(
+    project_path: str,
+    locked_kb: Path,
+    expected_binding_revision: str | None,
+    expected_kb_dir: str | None,
+) -> bool:
+    if expected_binding_revision is None:
+        return True
+    current_revision = project_config.resolve(project_path).revision
+    return bool(
+        expected_binding_revision != "stale-session"
+        and current_revision == expected_binding_revision
+        and expected_kb_dir is not None
+        and os.path.normcase(str(locked_kb))
+        == os.path.normcase(str(Path(expected_kb_dir)))
+    )
+
+
+def maybe_trigger(
+    project_path: str | None,
+    *,
+    expected_binding_revision: str | None = None,
+    expected_kb_dir: str | None = None,
+) -> None:
     """Cheap, never-raises. Spawn a detached maintenance pass iff something is
-    due. In shared mode, the first eligible authenticated connection performs
-    the check; guarded connections do not consume the process-wide attempt."""
-    global _TRIGGER_CHECKED, _TRIGGER_FAILURE_SIGNATURE
+    due. In shared mode, each exact project binding gets one process-local
+    cadence check; one project's check never consumes another project's."""
     try:
-        signature = _runner_policy_signature(project_path)
-        if (
-            _TRIGGER_CHECKED
-            or _TRIGGER_FAILURE_SIGNATURE == signature
-            or _trigger_blocked()
+        project = str(project_path or os.getcwd())
+        connection = mcp_runtime.current_connection()
+        if connection is not None and connection.project_binding_revision is not None:
+            expected_binding_revision = connection.project_binding_revision
+            expected_kb_dir = connection.project_kb_dir
+        if expected_binding_revision == "stale-session" or (
+            expected_binding_revision is not None and expected_kb_dir is None
         ):
             return
-        with _TRIGGER_LOCK:
-            signature = _runner_policy_signature(project_path)
-            if (
-                _TRIGGER_CHECKED
-                or _TRIGGER_FAILURE_SIGNATURE == signature
-                or _trigger_blocked()
+        if expected_binding_revision is not None:
+            current_revision = project_config.resolve(project).revision
+            if current_revision != expected_binding_revision:
+                return
+        with lockfile.project_access_lock(project) as locked_kb:
+            if not _matches_expected_target(
+                project,
+                locked_kb,
+                expected_binding_revision,
+                expected_kb_dir,
             ):
                 return
-            state = _load_state(project_path)
-            if _any_due(state, datetime.now(timezone.utc)):
-                try:
-                    spawn_detached(project_path)
-                except Exception:
-                    # Suppress repeat noise for unchanged broken policy while
-                    # allowing quickstart/config repair to retry in-place.
-                    _TRIGGER_FAILURE_SIGNATURE = signature
-                    raise
-            _TRIGGER_FAILURE_SIGNATURE = None
-            _TRIGGER_CHECKED = True
+            current_revision = project_config.resolve(project).revision
+            key = _trigger_key(project, current_revision, locked_kb)
+            if key in _TRIGGER_CHECKED or _trigger_blocked(project_path):
+                return
+            signature = _runner_policy_signature(project_path)
+            if _TRIGGER_FAILURE_SIGNATURE.get(key) == signature:
+                return
+            with _TRIGGER_LOCK:
+                if key in _TRIGGER_CHECKED or _trigger_blocked(project_path):
+                    return
+                if not _matches_expected_target(
+                    project,
+                    locked_kb,
+                    expected_binding_revision,
+                    expected_kb_dir,
+                ):
+                    return
+                signature = _runner_policy_signature(project_path)
+                if _TRIGGER_FAILURE_SIGNATURE.get(key) == signature:
+                    return
+                state = _load_state(project_path)
+                if _any_due(state, datetime.now(timezone.utc)):
+                    try:
+                        spawn_detached(project_path)
+                    except Exception:
+                        # Suppress repeat noise for unchanged broken policy while
+                        # allowing quickstart/config repair to retry in-place.
+                        _TRIGGER_FAILURE_SIGNATURE[key] = signature
+                        raise
+                _TRIGGER_FAILURE_SIGNATURE.pop(key, None)
+                _TRIGGER_CHECKED.add(key)
     except Exception as e:
         # Never let a maintenance trigger break MCP startup.
         sys.stderr.write(f"[latch] selfheal.maybe_trigger error: {e}\n")
@@ -199,60 +266,104 @@ def maybe_trigger(project_path: str | None) -> None:
 def spawn_detached(project_path: str | None) -> None:
     """Launch `selfheal.py <project_path>` as a detached background process
     that outlives this MCP server. Cross-platform detach (id=1071 audit)."""
-    proj_dir = paths.ensure_project_dir(project_path)
-    log_path = proj_dir / SPAWN_LOG_FILENAME
-    _rotate_spawn_log(log_path)
+    project = str(project_path or os.getcwd())
+    # Keep the target stable until the child has inherited its explicit
+    # snapshot. The child rechecks it under the same project access lock before
+    # touching maintenance state or either vault.
+    with lockfile.project_access_lock(project) as locked_kb:
+        prepared_kb = paths.ensure_project_dir(project)
+        if os.path.normcase(str(prepared_kb)) != os.path.normcase(str(locked_kb)):
+            raise lockfile.ProjectTargetChangedError(
+                "target_changed",
+                "maintenance target changed during detached spawn",
+            )
+        binding_revision = project_config.resolve(project).revision
+        kb_dir = str(locked_kb)
+        connection = mcp_runtime.current_connection()
+        if connection is not None and connection.project_binding_revision is not None:
+            expected_kb = connection.project_kb_dir
+            if (
+                connection.project_binding_revision != binding_revision
+                or expected_kb is None
+                or os.path.normcase(str(Path(expected_kb)))
+                != os.path.normcase(kb_dir)
+            ):
+                raise lockfile.ProjectTargetChangedError(
+                    "stale_connection",
+                    "maintenance connection belongs to an older project KB binding",
+                )
 
-    connection = mcp_runtime.current_connection()
-    env = mcp_runtime.autonomous_subprocess_environment()
-    if connection is not None:
-        backend, executable, maintenance_home, maintenance_path = (
-            paths.configured_maintenance_runner(project_path=project_path)
+        log_path = locked_kb / SPAWN_LOG_FILENAME
+        _rotate_spawn_log(log_path)
+
+        env = mcp_runtime.autonomous_subprocess_environment()
+        if connection is not None:
+            backend, executable, maintenance_home, maintenance_path = (
+                paths.configured_maintenance_runner(project_path=project)
+            )
+            env["LATCH_MAINTENANCE_BACKEND"] = backend
+            env[paths.MAINTENANCE_EXECUTABLE_ENV[backend]] = executable
+            env["HOME"] = maintenance_home
+            env["PATH"] = maintenance_path
+            if sys.platform == "win32":
+                env["USERPROFILE"] = maintenance_home
+            else:
+                env.pop("USERPROFILE", None)
+            env.pop("HOMEDRIVE", None)
+            env.pop("HOMEPATH", None)
+        if connection is not None and sys.platform == "win32":
+            raw_site_packages = os.environ.get(
+                mcp_runtime.WINDOWS_VENV_SITE_PACKAGES_ENV
+            )
+            if raw_site_packages:
+                site_packages = Path(raw_site_packages)
+                if not site_packages.is_absolute() or not site_packages.is_dir():
+                    raise ValueError("invalid broker-owned Windows site-packages path")
+                env["PYTHONPATH"] = str(site_packages)
+        env[IN_MAINTENANCE_ENV] = "1"
+
+        args = [
+            sys.executable,
+            str(Path(__file__).resolve()),
+            project,
+            binding_revision,
+            kb_dir,
+        ]
+        kwargs: dict = dict(
+            stdin=subprocess.DEVNULL,
+            env=env,
+            close_fds=True,
         )
-        env["LATCH_MAINTENANCE_BACKEND"] = backend
-        env[paths.MAINTENANCE_EXECUTABLE_ENV[backend]] = executable
-        env["HOME"] = maintenance_home
-        env["PATH"] = maintenance_path
         if sys.platform == "win32":
-            env["USERPROFILE"] = maintenance_home
+            DETACHED_PROCESS = 0x00000008
+            CREATE_NEW_PROCESS_GROUP = 0x00000200
+            kwargs["creationflags"] = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
         else:
-            env.pop("USERPROFILE", None)
-        env.pop("HOMEDRIVE", None)
-        env.pop("HOMEPATH", None)
-    if connection is not None and sys.platform == "win32":
-        raw_site_packages = os.environ.get(
-            mcp_runtime.WINDOWS_VENV_SITE_PACKAGES_ENV
-        )
-        if raw_site_packages:
-            site_packages = Path(raw_site_packages)
-            if not site_packages.is_absolute() or not site_packages.is_dir():
-                raise ValueError("invalid broker-owned Windows site-packages path")
-            env["PYTHONPATH"] = str(site_packages)
-    env[IN_MAINTENANCE_ENV] = "1"
+            kwargs["start_new_session"] = True
 
-    args = [sys.executable, str(Path(__file__).resolve()), str(project_path or os.getcwd())]
-    kwargs: dict = dict(
-        stdin=subprocess.DEVNULL,
-        env=env,
-        close_fds=True,
-    )
-    if sys.platform == "win32":
-        DETACHED_PROCESS = 0x00000008
-        CREATE_NEW_PROCESS_GROUP = 0x00000200
-        kwargs["creationflags"] = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
-    else:
-        kwargs["start_new_session"] = True
-
-    # Capture the detached child's stdout/stderr (any crash traceback) to the
-    # spawn log. The parent's handle is closed right after Popen; the child
-    # keeps its own inherited handle.
-    with open(log_path, "a", encoding="utf-8") as log:
-        subprocess.Popen(args, stdout=log, stderr=log, **kwargs)
+        # Capture the detached child's stdout/stderr (any crash traceback) to
+        # the snapshotted vault log. The child retains its inherited handle.
+        flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
+        log_fd = os.open(log_path, flags, 0o600)
+        try:
+            lockfile._validate_advisory_file(log_path, log_fd)
+        except Exception:
+            os.close(log_fd)
+            raise
+        with os.fdopen(log_fd, "a", encoding="utf-8") as log:
+            subprocess.Popen(args, stdout=log, stderr=log, **kwargs)
 
 
 def _rotate_spawn_log(log_path: Path) -> None:
     try:
-        if log_path.exists() and log_path.stat().st_size > SPAWN_LOG_MAX_BYTES:
+        if not (log_path.exists() or log_path.is_symlink()):
+            return
+        metadata = log_path.lstat()
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            raise project_config.ProjectConfigError(
+                f"unsafe detached maintenance log: {log_path}"
+            )
+        if metadata.st_size > SPAWN_LOG_MAX_BYTES:
             log_path.unlink()
     except OSError:
         pass
@@ -260,25 +371,84 @@ def _rotate_spawn_log(log_path: Path) -> None:
 
 # ---------------- the pass (runs in the detached child) ----------------
 
-def run_selfheal(project_path: str | None) -> dict:
+def run_selfheal(
+    project_path: str | None,
+    *,
+    expected_binding_revision: str | None = None,
+    expected_kb_dir: str | None = None,
+) -> dict:
     """The maintenance pass. Single-flight via the shared compactor lock;
     each op runs only when its cadence is due. Backup always runs first when
     any mutating op will run, so heal/weekly never mutate without a snapshot."""
-    if paths.is_unlatched_mode():
+    project = str(project_path or os.getcwd())
+    # Honor the cheap control-plane stops before attempting to resolve or lease
+    # a vault.  _run_selfheal_locked() checks them again under the lease so a
+    # concurrent transition still fails closed.
+    if paths.is_unlatched_mode(project):
         return {
             "ok": False,
             "reason": "unlatched",
             "message": paths.UNLATCHED_MESSAGE,
         }
-    if paths.is_disabled():
+    if paths.is_disabled(project):
         return {"ok": False, "reason": "disabled"}
+    if (expected_binding_revision is None) != (expected_kb_dir is None):
+        return {"ok": False, "reason": "target_changed"}
+    try:
+        with lockfile.project_access_lock(project) as locked_kb:
+            current_revision = project_config.resolve(project).revision
+            if (
+                expected_binding_revision is not None
+                and current_revision != expected_binding_revision
+            ) or (
+                expected_kb_dir is not None
+                and os.path.normcase(str(locked_kb))
+                != os.path.normcase(str(Path(expected_kb_dir)))
+            ):
+                return {"ok": False, "reason": "target_changed"}
+            return _run_selfheal_locked(
+                project,
+                expected_binding_revision=expected_binding_revision,
+                expected_kb_dir=expected_kb_dir,
+            )
+    except lockfile.ProjectTargetChangedError as exc:
+        return {"ok": False, "reason": exc.reason}
+
+
+def _run_selfheal_locked(
+    project_path: str,
+    *,
+    expected_binding_revision: str | None = None,
+    expected_kb_dir: str | None = None,
+) -> dict:
+    """Run while shared project access prevents latch/unlatch or repinning."""
+    if paths.is_unlatched_mode(project_path):
+        return {
+            "ok": False,
+            "reason": "unlatched",
+            "message": paths.UNLATCHED_MESSAGE,
+        }
+    if paths.is_disabled(project_path):
+        return {"ok": False, "reason": "disabled"}
+    binding_kwargs = (
+        {
+            "expected_binding_revision": expected_binding_revision,
+            "expected_kb_dir": expected_kb_dir,
+        }
+        if expected_binding_revision is not None or expected_kb_dir is not None
+        else {}
+    )
 
     run_governed_after_unlock = False
     automation_result: dict | None = None
     with lockfile.compactor_lock(project_path) as acquired:
         if not acquired:
             # A compaction or another selfheal pass already holds the lock.
-            _log(f"lock held for {project_path} — skipping pass")
+            _log(
+                project_path,
+                "maintenance lock held — skipping pass",
+                expected_revision=expected_binding_revision,
+            )
             return {"ok": False, "reason": "locked"}
 
         state = _load_state(project_path)
@@ -300,40 +470,54 @@ def run_selfheal(project_path: str | None) -> dict:
         backup_failed = False
         if backup_due or heal_due or weekly_due or workstream_shadow_due:
             try:
-                backup_created = _backup_db(project_path)
+                backup_created = _backup_db(
+                    project_path,
+                    **binding_kwargs,
+                )
             except BackupCreationError:
                 backup_failed = True
                 backup_created = False
             if backup_created:
-                _prune_backups(project_path)
+                _prune_backups(
+                    project_path,
+                    **binding_kwargs,
+                )
                 state["last_backup_at"] = now.isoformat()
                 ran.append("backup")
 
         blocked: list[str] = []
         if heal_due and backup_failed:
             blocked.append("heal")
-            _log(f"heal blocked for {project_path}: required protected backup failed")
+            _log(project_path, "heal blocked: required protected backup failed")
         elif heal_due:
             try:
                 maintenance.run_nightly_heal(
-                    project_path, already_locked=True,
+                    project_path,
+                    already_locked=True,
+                    **binding_kwargs,
                 )  # budget-gated internally
                 state["last_heal_at"] = now.isoformat()
                 ran.append("heal")
             except Exception as e:
-                _log(f"heal failed for {project_path}: {e}")
+                _log(project_path, f"heal failed: {e}")
 
         if weekly_due and backup_failed:
             blocked.append("weekly")
-            _log(f"weekly/tree blocked for {project_path}: required protected backup failed")
+            _log(project_path, "weekly/tree blocked: required protected backup failed")
         elif weekly_due:
             try:
-                maintenance.run_weekly_maintenance(project_path)
-                maintenance.run_tree_rebuild(project_path)
+                maintenance.run_weekly_maintenance(
+                    project_path,
+                    **binding_kwargs,
+                )
+                maintenance.run_tree_rebuild(
+                    project_path,
+                    **binding_kwargs,
+                )
                 state["last_weekly_at"] = now.isoformat()
                 ran.append("weekly")
             except Exception as e:
-                _log(f"weekly/tree failed for {project_path}: {e}")
+                _log(project_path, f"weekly/tree failed: {e}")
 
         # Independent cadence: lifecycle detection must still run on days when
         # the contradiction healer is not due (or fails). It derives candidates
@@ -341,13 +525,15 @@ def run_selfheal(project_path: str | None) -> dict:
         if workstream_shadow_due and backup_failed:
             blocked.append("workstream_shadow")
             _log(
-                f"workstream shadow blocked for {project_path}: "
-                "required protected backup failed"
+                project_path,
+                "workstream shadow blocked: required protected backup failed",
             )
         elif workstream_shadow_due:
             try:
                 maintenance.run_workstream_shadow(
-                    project_path, already_locked=True,
+                    project_path,
+                    already_locked=True,
+                    **binding_kwargs,
                 )
                 state["last_workstream_shadow_at"] = now.isoformat()
                 ran.append("workstream_shadow")
@@ -356,23 +542,32 @@ def run_selfheal(project_path: str | None) -> dict:
                 # released instead of self-deadlocking here.
                 run_governed_after_unlock = True
             except Exception as e:
-                _log(f"workstream shadow failed for {project_path}: {e}")
+                _log(project_path, f"workstream shadow failed: {e}")
 
         _prune_legacy_logs(project_path)
 
         if ran and os.environ.get("CLAUDE_KB_GIT_SNAPSHOT") == "1":
-            _git_snapshot(project_path)
+            if (
+                project_config.resolve(project_path).source
+                == project_config.SOURCE_GLOBAL
+            ):
+                _git_snapshot(project_path)
+            else:
+                _log(project_path, "git snapshot skipped for project-scoped KB")
 
         _save_state(project_path, state)
 
     if run_governed_after_unlock:
         try:
-            automation_result = maintenance.run_workstream_governed(project_path)
+            automation_result = maintenance.run_workstream_governed(
+                project_path,
+                **binding_kwargs,
+            )
             ran.append("workstream_automation")
         except Exception as e:
-            _log(f"workstream automation failed for {project_path}: {e}")
+            _log(project_path, f"workstream automation failed: {e}")
 
-    _log(f"pass complete for {project_path}: ran={ran}")
+    _log(project_path, f"pass complete: ran={ran}")
     result = {"ok": not backup_failed, "ran": ran}
     if backup_failed:
         result.update({
@@ -391,27 +586,47 @@ def run_selfheal(project_path: str | None) -> dict:
     return result
 
 
-def _backup_db(project_path: str | None) -> bool:
+def _backup_db(
+    project_path: str | None,
+    *,
+    expected_binding_revision: str | None = None,
+    expected_kb_dir: str | None = None,
+) -> bool:
     """Create a protected online snapshot outside the live vault."""
     if not paths.db_path(project_path).exists():
-        _log(f"no kb.db at {paths.db_path(project_path)} — skipping backup")
+        _log(project_path, "no kb.db — skipping backup")
         return False
     try:
-        receipt = vault_backup.create_snapshot(project_path, reason="selfheal")
-        _log(f"protected backup created: {receipt['manifest']}")
+        receipt = vault_backup.create_snapshot(
+            project_path,
+            reason="selfheal",
+            expected_binding_revision=expected_binding_revision,
+            expected_kb_dir=expected_kb_dir,
+        )
+        _log(project_path, f"protected backup created: {receipt['manifest']}")
         return True
     except Exception as e:
-        _log(f"protected backup failed: {e}")
+        _log(project_path, f"protected backup failed: {e}")
         raise BackupCreationError("required protected backup failed") from e
 
 
-def _prune_backups(project_path: str | None, keep: int | None = None) -> None:
+def _prune_backups(
+    project_path: str | None,
+    keep: int | None = None,
+    *,
+    expected_binding_revision: str | None = None,
+    expected_kb_dir: str | None = None,
+) -> None:
     """Prune only snapshots whose signed-in-code protection window expired."""
     del keep  # compatibility with older focused tests; count retention is gone.
     try:
-        vault_backup.prune_expired(project_path)
+        vault_backup.prune_expired(
+            project_path,
+            expected_binding_revision=expected_binding_revision,
+            expected_kb_dir=expected_kb_dir,
+        )
     except Exception as e:
-        _log(f"protected backup prune failed: {e}")
+        _log(project_path, f"protected backup prune failed: {e}")
 
 
 def _prune_legacy_logs(project_path: str | None) -> None:
@@ -449,21 +664,36 @@ def _git_snapshot(project_path: str | None) -> None:
         subprocess.run(["git", "-C", kb_home, "push"],
                        capture_output=True, timeout=120, check=False,
                        creationflags=CREATE_NO_WINDOW)
-        _log("git snapshot attempted (opt-in)")
+        _log(project_path, "git snapshot attempted (opt-in)")
     except Exception as e:
-        _log(f"git snapshot failed (ignored): {e}")
+        _log(project_path, f"git snapshot failed (ignored): {e}")
 
 
-def _log(msg: str) -> None:
-    log_path = paths.KB_ROOT / "maintenance.log"
+def _log(
+    project_path: str | None,
+    msg: str,
+    *,
+    expected_revision: str | None = None,
+) -> None:
     try:
-        with log_path.open("a", encoding="utf-8") as f:
-            f.write(f"[{datetime.now().isoformat(timespec='seconds')}] selfheal: {msg}\n")
+        lockfile.append_project_log(
+            project_path,
+            "maintenance.log",
+            f"[{datetime.now().isoformat(timespec='seconds')}] selfheal: {msg}\n",
+            expected_revision=expected_revision,
+        )
     except Exception:
         pass
 
 
 if __name__ == "__main__":
-    # Detached entry point: python selfheal.py <project_path>
+    # Detached entry point:
+    # python selfheal.py <project_path> [binding_revision] [kb_dir]
     project = sys.argv[1] if len(sys.argv) > 1 else os.getcwd()
-    print(json.dumps(run_selfheal(project)))
+    expected_revision = sys.argv[2] if len(sys.argv) > 2 else None
+    expected_kb = sys.argv[3] if len(sys.argv) > 3 else None
+    print(json.dumps(run_selfheal(
+        project,
+        expected_binding_revision=expected_revision,
+        expected_kb_dir=expected_kb,
+    )))

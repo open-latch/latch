@@ -18,17 +18,14 @@ def test_codex_source_commands_match_claude_latch_commands():
         path.stem
         for path in (ROOT / "commands").glob("latch-*.md")
     }
-    unlatch_command = ROOT / "commands" / "unlatch.md"
-    if unlatch_command.exists():
-        claude_commands.add("unlatch")
+    for standalone in ("latch", "unlatch"):
+        if (ROOT / "commands" / f"{standalone}.md").exists():
+            claude_commands.add(standalone)
     codex_skills = {
         path.parent.name[len(prefix):]
-        for path in (ROOT / ".agents" / "skills").glob("source-command-latch-*/SKILL.md")
+        for path in (ROOT / ".agents" / "skills").glob("source-command-*/SKILL.md")
         if path.parent.name.startswith(prefix)
     }
-    unlatch_skill = ROOT / ".agents" / "skills" / "source-command-unlatch" / "SKILL.md"
-    if unlatch_skill.exists():
-        codex_skills.add("unlatch")
 
     assert codex_skills == claude_commands
 
@@ -104,7 +101,7 @@ def test_latch_gate_report_codex_skill_uses_explicit_filter_array():
     assert 'bash "$latch_home/bin/latch_gate_report.sh" "${filters[@]}"' in text
 
 
-def test_shell_backed_codex_skills_do_not_treat_project_root_as_latch_home():
+def test_shell_backed_codex_skills_use_only_installer_stamped_launchers():
     shell_backed_commands = {
         "latch-budget-approve",
         "latch-compact",
@@ -112,6 +109,7 @@ def test_shell_backed_codex_skills_do_not_treat_project_root_as_latch_home():
         "latch-gate",
         "latch-gate-report",
         "latch-heal",
+        "latch",
         "latch-tree",
         "unlatch",
     }
@@ -125,10 +123,13 @@ def test_shell_backed_codex_skills_do_not_treat_project_root_as_latch_home():
             / "SKILL.md"
         ).read_text(encoding="utf-8")
 
-        assert "CLAUDE_KB_HOME" in text
-        assert "AGENTS.md" in text
-        assert "src/mcp_server.py" in text
-        assert "Could not find latch checkout" in text
+        if command in {"latch", "unlatch"}:
+            assert "__LATCH_POSIX_WRAPPER__" in text
+            assert "__LATCH_POWERSHELL_WRAPPER__" in text
+        else:
+            assert "__LATCH_INSTALLED_HOME__" in text
+        assert "git rev-parse" not in text
+        assert "AGENTS.md" not in text
         assert 'latch_home="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"' not in text
 
 
@@ -158,3 +159,34 @@ def test_model_backed_codex_shell_fallbacks_default_to_codex():
     assert "export LATCH_GATE_BACKEND=codex" in gate
     assert "export LATCH_MAINTENANCE_BACKEND=codex" in heal
     assert "export LATCH_MAINTENANCE_BACKEND=codex" in tree
+
+
+def test_db_backed_codex_skills_pass_the_exact_task_id():
+    commands = {
+        "latch-budget-approve",
+        "latch-compact",
+        "latch-decay",
+        "latch-gate",
+        "latch-gate-report",
+        "latch-heal",
+        "latch-tree",
+    }
+    for command in commands:
+        text = (
+            ROOT
+            / ".agents"
+            / "skills"
+            / f"source-command-{command}"
+            / "SKILL.md"
+        ).read_text(encoding="utf-8")
+        assert 'codex_task_id="${CODEX_THREAD_ID:-}"' in text
+        assert 'test -n "$codex_task_id"' in text or '[ -z "$codex_task_id" ]' in text
+        propagated = any(
+            exact in text
+            for exact in (
+                '--session-id "$codex_task_id"',
+                'LATCH_SESSION_ID="$codex_task_id"',
+                'run_codex_compact_now.sh" "$codex_task_id"',
+            )
+        )
+        assert propagated

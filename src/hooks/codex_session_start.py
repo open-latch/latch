@@ -16,12 +16,24 @@ SRC = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(SRC))
 sys.path.insert(0, str(SRC / "hooks"))
 
-from _common import hook_field, log, read_hook_input, transcript_path  # noqa: E402
+from _common import (  # noqa: E402
+    fence_inactive_session,
+    hook_field,
+    log,
+    read_hook_input,
+    record_session_binding,
+    session_start_transition,
+    transcript_path,
+)
 
 import codex_session  # noqa: E402
+import project_config  # noqa: E402
+from project_config import ProjectConfigError  # noqa: E402
 from paths import is_disabled, is_in_compact, is_unlatched_mode  # noqa: E402
 from session_start import (  # noqa: E402
     _SESSION_SETUP_NOTICE,
+    _build_locked_notice,
+    _build_locked_system_message,
     _build_unlatched_notice,
     _build_unlatched_system_message,
     _emit_session_start_context,
@@ -51,21 +63,66 @@ def codex_session_id(payload: dict) -> str | None:
 def main() -> int:
     if is_in_compact():
         return 0
-    if is_unlatched_mode():
-        _emit_session_start_context(
-            _build_unlatched_notice(),
-            system_message=_build_unlatched_system_message(),
-        )
-        return 0
-    if is_disabled():
-        return 0
-
     payload = read_hook_input()
     cwd = codex_project_cwd(payload)
+    try:
+        with session_start_transition(cwd):
+            return _run_session_start(payload, cwd)
+    except (OSError, ProjectConfigError) as exc:
+        log(
+            f"codex_session_start transition coordination failed: {exc}",
+            cwd,
+            expected_revision="stale-session",
+        )
+        _emit_session_start_context(_SESSION_SETUP_NOTICE)
+        return 0
+
+
+def _run_session_start(payload: dict, cwd: str) -> int:
     sid = codex_session_id(payload)
     tpath = transcript_path(payload)
 
     setup_degraded = not bool(sid)
+    if is_unlatched_mode(cwd):
+        fence_inactive_session(cwd, sid)
+        _emit_session_start_context(
+            _build_unlatched_notice(cwd),
+            system_message=_build_unlatched_system_message(cwd),
+        )
+        return 0
+    target = project_config.resolve(cwd)
+    if target.state == project_config.MODE_LOCKED:
+        fence_inactive_session(cwd, sid)
+        _emit_session_start_context(
+            _build_locked_notice(target),
+            system_message=_build_locked_system_message(target),
+        )
+        return 0
+    try:
+        binding_revision = record_session_binding(cwd, sid)
+    except (OSError, ProjectConfigError) as exc:
+        # A resumed task can fail here after another fresh task has re-pinned
+        # the project and written its marker.  Tombstone that shared workspace
+        # handoff so the stale task cannot inherit the fresh task's identity.
+        _invalidate_workspace_marker(cwd)
+        log(
+            f"codex_session_start binding snapshot failed: {exc}",
+            cwd,
+            expected_revision="stale-session",
+        )
+        _emit_session_start_context(_SESSION_SETUP_NOTICE)
+        return 0
+    if binding_revision is None:
+        _invalidate_workspace_marker(cwd)
+        log(
+            "codex_session_start could not verify a session id for this project binding",
+            cwd,
+            expected_revision="stale-session",
+        )
+        _emit_session_start_context(_SESSION_SETUP_NOTICE)
+        return 0
+    if is_disabled(cwd):
+        return 0
     if sid:
         # Session attribution is independent of KB setup.  In particular, a
         # readable external vault may be outside this hook's writable sandbox;
@@ -76,7 +133,12 @@ def main() -> int:
             )
         except Exception as e:
             setup_degraded = True
-            log(f"codex_session_start marker write failed: {e}")
+            _invalidate_workspace_marker(cwd)
+            log(
+                f"codex_session_start marker write failed: {e}",
+                cwd,
+                expected_revision=binding_revision,
+            )
     else:
         # A missing current id must invalidate any prior workspace marker;
         # otherwise an MCP process without CODEX_THREAD_ID can inherit the
@@ -84,9 +146,16 @@ def main() -> int:
         try:
             codex_session.invalidate_marker(cwd)
         except Exception as e:
-            log(f"codex_session_start marker invalidation failed: {e}")
+            log(
+                f"codex_session_start marker invalidation failed: {e}",
+                cwd,
+                expected_revision=binding_revision,
+            )
 
-    agents_md_action = _auto_sync_agents_md(cwd)
+    agents_md_action = _auto_sync_agents_md(
+        cwd,
+        expected_revision=binding_revision,
+    )
     wiring_notice = _managed_doc_wiring_notice(
         agents_md_action,
         doc_name="AGENTS.md",
@@ -103,7 +172,20 @@ def main() -> int:
     return 0
 
 
-def _auto_sync_agents_md(cwd: str) -> str | None:
+def _invalidate_workspace_marker(cwd: str) -> bool:
+    """Best-effort fail-closed invalidation without selecting a KB for logs."""
+    try:
+        codex_session.invalidate_marker(cwd)
+    except Exception:
+        return False
+    return True
+
+
+def _auto_sync_agents_md(
+    cwd: str,
+    *,
+    expected_revision: str | None = None,
+) -> str | None:
     """Re-sync this project's AGENTS.md managed region when already wired.
 
     Mirrors Claude's CLAUDE.md hot-path behavior: ``create=False`` means a
@@ -116,11 +198,19 @@ def _auto_sync_agents_md(cwd: str) -> str | None:
         target = Path(cwd) / "AGENTS.md"
         action = agents_md_sync.sync_if_outdated(target)
         if action == "synced":
-            log(f"agents_md auto-sync: re-synced managed region in {target} "
-                f"(backup: {target}.latchbak)")
+            log(
+                f"agents_md auto-sync: re-synced managed region in {target} "
+                f"(backup: {target}.latchbak)",
+                cwd,
+                expected_revision=expected_revision,
+            )
         return action
     except Exception as e:
-        log(f"agents_md auto-sync skipped: {e}")
+        log(
+            f"agents_md auto-sync skipped: {e}",
+            cwd,
+            expected_revision=expected_revision,
+        )
         return "error"
 
 

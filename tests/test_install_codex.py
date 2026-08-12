@@ -8,6 +8,7 @@ import sys
 import tempfile
 import tomllib
 from pathlib import Path
+from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
@@ -438,6 +439,19 @@ def test_codex_skills_sync_status_and_collision():
         )
         _assert(ic.CODEX_SKILL_MARKER in compact.read_text(encoding="utf-8"),
                 "installed skill should carry the ownership marker")
+        for name in ic.CODEX_SKILLS_REQUIRING_HOME:
+            source_body = (
+                ic.CODEX_SKILLS_SRC / name / "SKILL.md"
+            ).read_text(encoding="utf-8")
+            installed_body = (
+                skills / name / "SKILL.md"
+            ).read_text(encoding="utf-8")
+            _assert(ic.CODEX_SKILL_HOME_TOKEN in source_body,
+                    f"{name} source lacks installed-home discovery")
+            _assert(ic.CODEX_SKILL_HOME_TOKEN not in installed_body,
+                    f"installed {name} kept an unresolved checkout token")
+            _assert(str(ic.KB_HOME.resolve()) in installed_body,
+                    f"installed {name} cannot locate its checkout")
         _assert(metadata.read_text(encoding="utf-8") == (
             ic.CODEX_SKILLS_SRC
             / "source-command-latch-compact"
@@ -507,8 +521,14 @@ def test_main_installs_and_checks_codex_skills():
 def test_no_seed_prompt_prints_seed_handoff_unless_suppressed():
     d = Path(tempfile.mkdtemp(prefix="latch-codex-seed-output-"))
     original_pin = ic.install_engine.pin_kb_dir
+    original_resolve = ic.install_engine.project_config.resolve
     try:
         ic.install_engine.pin_kb_dir = lambda _value, _dry: ("OK", "pinned")
+        ic.install_engine.project_config.resolve = lambda project: SimpleNamespace(
+            state=ic.project_config.MODE_LATCHED,
+            kb_dir=Path(project) / ".test-kb",
+            reason="test scope",
+        )
         config = d / "config.toml"
         hooks = d / "hooks.json"
         agents = d / "AGENTS.md"
@@ -560,7 +580,44 @@ def test_no_seed_prompt_prints_seed_handoff_unless_suppressed():
         print("PASS no_seed_prompt_prints_seed_handoff_unless_suppressed")
     finally:
         ic.install_engine.pin_kb_dir = original_pin
+        ic.install_engine.project_config.resolve = original_resolve
         shutil.rmtree(d, ignore_errors=True)
+
+
+def test_locked_codex_project_prints_scope_handoff_instead_of_seed():
+    d = Path(tempfile.mkdtemp(prefix="latch-codex-locked-handoff-"))
+    original_pin = ic.install_engine.pin_kb_dir
+    original_resolve = ic.install_engine.project_config.resolve
+    try:
+        ic.install_engine.pin_kb_dir = lambda _value, _dry: ("OK", "pinned")
+        ic.install_engine.project_config.resolve = lambda _project: SimpleNamespace(
+            state=ic.project_config.MODE_LOCKED,
+            kb_dir=None,
+            reason="outside every authorized Latch scope",
+        )
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            rc = ic.main([
+                "--python", sys.executable,
+                "--config", str(d / "config.toml"),
+                "--hooks", str(d / "hooks.json"),
+                "--agents-md", str(d / "client" / "AGENTS.md"),
+                "--skip-agents",
+                "--skip-hooks",
+                "--skip-skills",
+                "--no-seed-prompt",
+            ])
+        text = output.getvalue()
+        _assert(rc == 0, f"Codex installer should complete, got {rc}:\n{text}")
+        _assert("is LOCKED" in text and "before seeding" in text, text)
+        _assert("--confirm latch --shared" in text, text)
+        _assert("--confirm latch --private --new-kb" in text, text)
+        _assert("Seed latch from prior work" not in text, text)
+    finally:
+        ic.install_engine.pin_kb_dir = original_pin
+        ic.install_engine.project_config.resolve = original_resolve
+        shutil.rmtree(d, ignore_errors=True)
+    print("PASS locked_codex_project_prints_scope_handoff_instead_of_seed")
 
 
 def test_interactive_seed_offer_uses_codex_backend():
@@ -626,6 +683,47 @@ def test_pin_conflict_stops_before_codex_config_write():
     print("PASS pin_conflict_stops_before_codex_config_write")
 
 
+def test_codex_installer_preserves_global_mode_before_pin():
+    d = Path(tempfile.mkdtemp(prefix="latch-codex-scope-order-"))
+    original = {
+        "scope_policy_for_install": ic.install_engine.scope_policy_for_install,
+        "configure_scope_policy": ic.install_engine.configure_scope_policy,
+        "pin_kb_dir": ic.install_engine.pin_kb_dir,
+    }
+    events: list[tuple[str, object]] = []
+    try:
+        ic.install_engine.scope_policy_for_install = lambda **kwargs: (
+            events.append(("plan", kwargs))
+            or ic.project_config.MACHINE_POLICY_SHARED
+        )
+        ic.install_engine.configure_scope_policy = lambda **kwargs: (
+            events.append(("policy", kwargs)) or ("OK", "shared")
+        )
+        ic.install_engine.pin_kb_dir = lambda value, dry_run: (
+            events.append(("pin", (value, dry_run))) or ("OK", "validated")
+        )
+        rc = ic.main([
+            "--python", sys.executable,
+            "--config", str(d / "config.toml"),
+            "--skip-agents",
+            "--skip-hooks",
+            "--skip-skills",
+            "--no-seed-prompt",
+            "--suppress-seed-output",
+        ])
+
+        _assert(rc == 0, f"Codex scope wiring should complete: {events}")
+        _assert(events == [
+            ("plan", {}),
+            ("policy", {"dry_run": False}),
+            ("pin", (None, False)),
+        ], f"Codex did not preserve global policy -> pin order: {events}")
+    finally:
+        for name, value in original.items():
+            setattr(ic.install_engine, name, value)
+        shutil.rmtree(d, ignore_errors=True)
+
+
 if __name__ == "__main__":
     test_render_mcp_block_uses_codex_shape()
     test_merge_config_preserves_unrelated_tables()
@@ -647,6 +745,8 @@ if __name__ == "__main__":
     test_codex_skills_sync_status_and_collision()
     test_main_installs_and_checks_codex_skills()
     test_no_seed_prompt_prints_seed_handoff_unless_suppressed()
+    test_locked_codex_project_prints_scope_handoff_instead_of_seed()
     test_interactive_seed_offer_uses_codex_backend()
     test_pin_conflict_stops_before_codex_config_write()
+    test_codex_installer_preserves_global_mode_before_pin()
     print("\nAll install_codex tests pass.")

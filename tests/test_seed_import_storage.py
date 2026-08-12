@@ -20,6 +20,12 @@ import schema_version  # noqa: E402
 DEAD_PID = 9_999_991
 
 
+def _project(tmp_path: Path, name: str) -> str:
+    path = tmp_path / name
+    path.mkdir()
+    return str(path)
+
+
 def _source_args(**overrides):
     values = {
         "import_key": "source-key-1",
@@ -52,7 +58,7 @@ def _candidate_args(**overrides):
 
 
 def test_additive_seed_ledger_migration_survives_reconnect(tmp_path):
-    project = str(tmp_path / "legacy-project")
+    project = _project(tmp_path, "legacy-project")
     conn = db.connect(project)
     installed_version = schema_version.read(conn)
     conn.execute("DROP TABLE seed_import")
@@ -86,7 +92,7 @@ def test_additive_seed_ledger_migration_survives_reconnect(tmp_path):
 
 
 def test_additive_seed_candidate_columns_migrate_existing_ledger(tmp_path):
-    project = str(tmp_path / "legacy-candidate-ledger")
+    project = _project(tmp_path, "legacy-candidate-ledger")
     conn = db.connect(project)
     conn.execute("DROP TABLE seed_import")
     conn.executescript(
@@ -185,7 +191,7 @@ def test_additive_seed_candidate_columns_migrate_existing_ledger(tmp_path):
 
 
 def test_source_import_ledger_is_idempotent_and_retryable(tmp_path):
-    conn = db.connect(str(tmp_path / "source-ledger"))
+    conn = db.connect(_project(tmp_path, "source-ledger"))
     try:
         first = db.begin_seed_source_import(conn, **_source_args())
         assert first["created"] is True
@@ -255,7 +261,7 @@ def test_source_import_ledger_is_idempotent_and_retryable(tmp_path):
 def test_source_import_batch_rolls_back_when_pending_precondition_changes(
     tmp_path, monkeypatch,
 ):
-    project = str(tmp_path / "source-batch-precondition")
+    project = _project(tmp_path, "source-batch-precondition")
 
     class PreconditionRaceConnection(db._Connection):
         race_injected = False
@@ -343,7 +349,7 @@ def test_source_import_batch_rolls_back_when_pending_precondition_changes(
 
 
 def test_candidate_ledger_preserves_provenance_node_and_failure_resume(tmp_path):
-    conn = db.connect(str(tmp_path / "candidate-ledger"))
+    conn = db.connect(_project(tmp_path, "candidate-ledger"))
     try:
         workstream_id = db.insert_node(
             conn,
@@ -419,7 +425,7 @@ def test_candidate_ledger_preserves_provenance_node_and_failure_resume(tmp_path)
 
 
 def test_error_code_enum_is_closed_in_sqlite_too(tmp_path):
-    conn = db.connect(str(tmp_path / "closed-error-code"))
+    conn = db.connect(_project(tmp_path, "closed-error-code"))
     try:
         with pytest.raises(sqlite3.IntegrityError):
             conn.execute(
@@ -442,7 +448,7 @@ def test_error_code_enum_is_closed_in_sqlite_too(tmp_path):
 
 
 def test_writer_lock_holds_shared_lock_for_entire_batch(tmp_path):
-    project = str(tmp_path / "writer-batch")
+    project = _project(tmp_path, "writer-batch")
     lock_path = lockfile._lock_path(project)
     with lockfile.writer_lock(project, timeout_s=0.2, poll_interval_s=0.01):
         assert lock_path.exists()
@@ -457,7 +463,7 @@ def test_writer_lock_holds_shared_lock_for_entire_batch(tmp_path):
 
 
 def test_writer_lock_times_out_on_live_holder_and_releases_after_error(tmp_path):
-    project = str(tmp_path / "writer-timeout")
+    project = _project(tmp_path, "writer-timeout")
     ready = threading.Event()
     release = threading.Event()
     holder_errors: list[BaseException] = []
@@ -495,7 +501,7 @@ def test_writer_lock_times_out_on_live_holder_and_releases_after_error(tmp_path)
 
 
 def test_writer_lock_evicts_stale_dead_pid(tmp_path):
-    project = str(tmp_path / "writer-stale")
+    project = _project(tmp_path, "writer-stale")
     lock_path = lockfile._lock_path(project)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     lock_path.write_text(

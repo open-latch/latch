@@ -37,7 +37,9 @@ def _assert(cond, msg):
 
 
 def _tmp() -> Path:
-    return Path(tempfile.mkdtemp(prefix="latch-gate-backends-"))
+    root = Path(tempfile.mkdtemp(prefix="latch-gate-backends-"))
+    (root / "project").mkdir()
+    return root
 
 
 def _fake_exe(path: Path, body: str) -> Path:
@@ -269,10 +271,12 @@ def test_connection_gate_backend_outranks_daemon_environment():
     print("PASS connection_gate_backend_outranks_daemon_environment")
 
 
-def test_connection_gate_policy_and_private_codex_environment(monkeypatch):
+def test_connection_gate_policy_and_private_codex_environment(monkeypatch, tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
     context = mcp_runtime.ConnectionContext(
         connection_id="codex-private",
-        project_cwd="/tmp/project",
+        project_cwd=str(project),
         session_id=None,
         session_source="test",
         proxy_pid=123,
@@ -308,7 +312,7 @@ def test_connection_gate_policy_and_private_codex_environment(monkeypatch):
     )
     with mcp_runtime.bind_connection(context, child_environment=private):
         verdict = gate.classify_gate(
-            _chain(), project_path="/tmp/project", backend="codex"
+            _chain(), project_path=str(project), backend="codex"
         )
         _assert(verdict["recommendation"] == "PROCEED", verdict)
         _assert(policy_calls[0]["timeout_s"] == 17, policy_calls)

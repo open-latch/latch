@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""latch engine uninstaller — the strict inverse of ``install_engine.py``.
+"""latch engine uninstaller — the strict inverse of installer wiring.
 
-Reverses exactly what the install did, and nothing more. It reuses
+Reverses exactly what the install wired, and nothing more. Data and durable
+scope-routing state are intentionally outside that contract. It reuses
 ``install_engine``'s own constants and helpers (``SERVER_NAME``,
 ``MANAGED_EVENTS``, ``LATCH_HOOK_MARKER``, ``_is_latch_hook_entry``,
 ``mcp_status``, ``find_claude``, ``resolve_python`` …) so the two halves can
@@ -42,6 +43,10 @@ What it does NOT remove unless asked:
     are left in place so a user can uninstall the wiring without losing their
     accumulated KB. ``--purge`` now removes only kill-switch files; there is no
     uninstall option that deletes a production KB.
+  * **Machine-local project scope associations.** Shared/Private root bindings
+    are durable routing state, not wiring. They remain so reinstalling Latch
+    cannot silently reopen a Private client root onto the global KB. Latch has
+    no uninstall path that merges or deletes those vaults.
   * **Project-local Cursor wiring** is removed only when ``--cursor-project`` is
     supplied. Pass ``--cursor-only`` to leave the global Claude Code engine
     wiring untouched. That path removes latch-owned ``.cursor/mcp.json`` server entries,

@@ -7,6 +7,7 @@ compactor.  This path is fail-closed and never searches Claude transcripts.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import subprocess
@@ -17,13 +18,59 @@ from pathlib import Path
 
 import codex_transcript
 import compactor
+import lockfile
 import paths
+import project_config
 
 
 DETACHED_PROCESS = 0x00000008
 CREATE_NEW_PROCESS_GROUP = 0x00000200
 DEFAULT_WAIT_TIMEOUT_S = 300.0
 DEFAULT_POLL_INTERVAL_S = 1.0
+
+
+def _path_key(value: str | os.PathLike[str]) -> str:
+    return os.path.normcase(
+        str(Path(value).expanduser().resolve(strict=False))
+    )
+
+
+@contextlib.contextmanager
+def _validated_project_target(
+    project: str,
+    session_id: str,
+    *,
+    expected_revision: str | None = None,
+    expected_kb_dir: str | None = None,
+):
+    """Lease one exact session-bound KB target across a compact operation."""
+    with lockfile.project_access_lock(project) as locked_kb:
+        target = project_config.resolve(project)
+        revision = target.revision
+        session_revision = project_config.current_session_revision(project, session_id)
+        if session_revision != revision or (
+            expected_revision is not None and expected_revision != revision
+        ):
+            raise lockfile.ProjectTargetChangedError(
+                "stale_session_binding",
+                "this Codex task belongs to an older project KB binding; "
+                "start a fresh agent task",
+            )
+        if (
+            expected_kb_dir is not None
+            and _path_key(expected_kb_dir) != _path_key(locked_kb)
+        ):
+            raise lockfile.ProjectTargetChangedError(
+                "target_changed",
+                "project KB changed before Codex compaction",
+            )
+        prepared_kb = paths.ensure_project_dir(project)
+        if _path_key(prepared_kb) != _path_key(locked_kb):
+            raise lockfile.ProjectTargetChangedError(
+                "target_changed",
+                "project KB changed while preparing Codex compaction",
+            )
+        yield revision, locked_kb
 
 
 def _default_summarizer_backend() -> str:
@@ -41,35 +88,59 @@ def _start_background_process(
     project: str,
     final: bool,
     summarizer_backend: str,
+    expected_revision: str | None = None,
+    expected_kb_dir: str | None = None,
 ) -> tuple[subprocess.Popen, Path, int, str]:
     """Start a Codex compaction child and return its log path + start offset."""
+    project = str(Path(project).expanduser().resolve())
     script = Path(__file__).resolve()
     launch_id = uuid.uuid4().hex
-    args = [
-        sys.executable,
-        str(script),
+    with _validated_project_target(
+        project,
         session_id,
-        "--project", project,
-        "--summarizer", summarizer_backend,
-        "--launch-id", launch_id,
-    ]
-    if final:
-        args.append("--final")
+        expected_revision=expected_revision,
+        expected_kb_dir=expected_kb_dir,
+    ) as (binding_revision, locked_kb):
+        args = [
+            sys.executable,
+            str(script),
+            session_id,
+            "--project", project,
+            "--summarizer", summarizer_backend,
+            "--launch-id", launch_id,
+            "--binding-revision", binding_revision,
+            "--kb-dir", str(locked_kb),
+        ]
+        if final:
+            args.append("--final")
 
-    log_dir = paths.ensure_project_dir(project)
-    log_path = log_dir / "codex_compact_background.log"
-    start_offset = log_path.stat().st_size if log_path.exists() else 0
-    popen_kwargs = dict(
-        stdin=subprocess.DEVNULL,
-        close_fds=True,
-    )
-    if os.name == "nt":
-        popen_kwargs["creationflags"] = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
-    else:
-        popen_kwargs["start_new_session"] = True
+        log_path = locked_kb / "codex_compact_background.log"
+        flags = (
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_APPEND
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        log_fd = os.open(log_path, flags, 0o600)
+        try:
+            lockfile._validate_advisory_file(log_path, log_fd)
+        except Exception:
+            os.close(log_fd)
+            raise
+        start_offset = os.fstat(log_fd).st_size
+        popen_kwargs = dict(
+            stdin=subprocess.DEVNULL,
+            close_fds=True,
+        )
+        if os.name == "nt":
+            popen_kwargs["creationflags"] = (
+                DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+            )
+        else:
+            popen_kwargs["start_new_session"] = True
 
-    with log_path.open("ab") as log:
-        proc = subprocess.Popen(args, stdout=log, stderr=log, **popen_kwargs)
+        with os.fdopen(log_fd, "ab") as log:
+            proc = subprocess.Popen(args, stdout=log, stderr=log, **popen_kwargs)
 
     return proc, log_path, start_offset, launch_id
 
@@ -234,9 +305,15 @@ def main(argv: list[str] | None = None) -> int:
                     help="seconds between log polls with --background --wait")
     ap.add_argument("--launch-id", default=None,
                     help=argparse.SUPPRESS)
+    ap.add_argument("--binding-revision", default=None,
+                    help=argparse.SUPPRESS)
+    ap.add_argument("--kb-dir", default=None,
+                    help=argparse.SUPPRESS)
     args = ap.parse_args(argv)
     if args.wait and not args.background:
         ap.error("--wait requires --background")
+    if bool(args.binding_revision) != bool(args.kb_dir):
+        ap.error("--binding-revision and --kb-dir must be supplied together")
 
     try:
         session_id = codex_transcript.resolve_session_id(args.session_id)
@@ -245,14 +322,24 @@ def main(argv: list[str] | None = None) -> int:
         print(f"codex-latch-compact: {e}", file=sys.stderr)
         return 1
 
-    project = args.project or str(Path.cwd())
+    project = str(Path(args.project or Path.cwd()).expanduser().resolve())
     if args.background:
-        proc, log_path, start_offset, launch_id = _start_background_process(
-            session_id=session_id,
-            project=project,
-            final=args.final,
-            summarizer_backend=args.summarizer,
-        )
+        try:
+            proc, log_path, start_offset, launch_id = _start_background_process(
+                session_id=session_id,
+                project=project,
+                final=args.final,
+                summarizer_backend=args.summarizer,
+                expected_revision=args.binding_revision,
+                expected_kb_dir=args.kb_dir,
+            )
+        except (
+            lockfile.ProjectTargetChangedError,
+            project_config.ProjectConfigError,
+            OSError,
+        ) as e:
+            print(f"codex-latch-compact: {e}", file=sys.stderr)
+            return 1
         result = {
             "ok": True,
             "background": True,
@@ -284,13 +371,29 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(result))
         return 0 if result.get("ok") else 1
 
-    result = compactor.run_compaction(
-        session_id,
-        project,
-        str(transcript),
-        final=args.final,
-        summarizer_backend=args.summarizer,
-    )
+    try:
+        with _validated_project_target(
+            project,
+            session_id,
+            expected_revision=args.binding_revision,
+            expected_kb_dir=args.kb_dir,
+        ) as (binding_revision, locked_kb):
+            result = compactor.run_compaction(
+                session_id,
+                project,
+                str(transcript),
+                final=args.final,
+                summarizer_backend=args.summarizer,
+                binding_revision=binding_revision,
+                expected_kb_dir=str(locked_kb),
+            )
+    except (
+        lockfile.ProjectTargetChangedError,
+        project_config.ProjectConfigError,
+        OSError,
+    ) as e:
+        print(f"codex-latch-compact: {e}", file=sys.stderr)
+        return 1
     result["session_id"] = session_id
     if args.launch_id:
         result["launch_id"] = args.launch_id

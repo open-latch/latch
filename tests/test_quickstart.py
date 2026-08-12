@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import json
 import os
 import shutil
 import subprocess
@@ -268,6 +269,8 @@ def test_dry_run_reports_unresolved_maintenance_cli_without_stopping(
         "--agents", "codex",
         "--project", str(project),
         "--python", sys.executable,
+        "--scope", "shared",
+        "--enable-project-scopes",
         "--dry-run",
     ])
 
@@ -440,7 +443,7 @@ def test_quickstart_pin_uses_explicit_or_environment_override():
     print("PASS quickstart_pin_uses_explicit_or_environment_override")
 
 
-def test_quickstart_persists_transient_env_pin_for_later_processes():
+def test_quickstart_persists_transient_env_pin_for_global_shared_access():
     root = Path(tempfile.mkdtemp(prefix="latch-quickstart-durable-pin-"))
     target = (
         qs.paths.validated_test_root()
@@ -477,19 +480,40 @@ def test_quickstart_persists_transient_env_pin_for_later_processes():
         env.pop("LATCH_KB_DIR", None)
         env.pop(qs.paths.TEST_ROOT_ENV, None)
         env.pop(qs.paths.TEST_CAPABILITY_ENV, None)
-        later_db = subprocess.check_output(
-            [sys.executable, "-c", "import paths; print(paths.db_path())"],
+        persisted = subprocess.check_output(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import json, paths; "
+                    "print(json.loads(paths.KB_LOCATION_FILE.read_text())['kb_dir'])"
+                ),
+            ],
             cwd=mcp_cwd,
             env=env,
             text=True,
         ).strip()
-        expected_db = str(target / "kb.db")
-        _assert(later_db == expected_db,
-                f"later MCP must use the persisted seed target: "
-                f"got={later_db}, expected={expected_db}")
+        # The pin is stored with forward slashes on every platform
+        # (install_engine.pin_kb_dir), so compare paths, not raw strings.
+        _assert(
+            Path(persisted) == target,
+            f"later process must see the persisted target: {persisted}",
+        )
+        resolved = subprocess.run(
+            [sys.executable, "-c", "import paths; print(paths.db_path())"],
+            cwd=mcp_cwd,
+            env=env,
+            text=True,
+            capture_output=True,
+        )
+        _assert(resolved.returncode == 0, resolved.stderr)
+        _assert(
+            resolved.stdout.strip() == str(target / "kb.db"),
+            "ordinary Shared mode no longer followed its installed global pin",
+        )
     finally:
         shutil.rmtree(root, ignore_errors=True)
-    print("PASS quickstart_persists_transient_env_pin_for_later_processes")
+    print("PASS quickstart_persists_transient_env_pin_for_global_shared_access")
 
 
 def test_quickstart_pins_after_preflight_before_wiring():
@@ -500,12 +524,16 @@ def test_quickstart_pins_after_preflight_before_wiring():
         "resolve_python": qs.install_engine.resolve_python,
         "agent_preflight_errors": qs.agent_preflight_errors,
         "pin_kb_for_quickstart": qs.pin_kb_for_quickstart,
+        "scope_policy_for_install": qs.install_engine.scope_policy_for_install,
+        "configure_scope_policy": qs.install_engine.configure_scope_policy,
         "build_install_steps": qs.build_install_steps,
         "build_doctor_steps": qs.build_doctor_steps,
         "run_steps": qs.run_steps,
         "resolve_maintenance_executable": qs.paths.resolve_maintenance_executable,
         "write_maintenance_runner": qs.paths.write_maintenance_runner,
         "refresh_pinned_dir": qs.paths.refresh_pinned_dir,
+        "apply_latch": qs.project_mode.apply_latch,
+        "require_latched": qs.project_config.require_latched,
     }
     events: list[tuple[str, object]] = []
     try:
@@ -519,7 +547,26 @@ def test_quickstart_pins_after_preflight_before_wiring():
         qs.pin_kb_for_quickstart = lambda value, *, dry_run: (
             events.append(("pin", (value, dry_run))) or ("OK", "pinned")
         )
+        qs.install_engine.scope_policy_for_install = lambda **kwargs: (
+            events.append(("plan_policy", kwargs))
+            or qs.project_config.MACHINE_POLICY_EXPLICIT
+        )
+        qs.install_engine.configure_scope_policy = lambda **kwargs: (
+            events.append(("policy", kwargs)) or ("OK", "explicit")
+        )
         qs.paths.refresh_pinned_dir = lambda: events.append(("refresh", None))
+        qs.project_mode.apply_latch = lambda project, **kwargs: (
+            events.append(("scope", (Path(project), kwargs))) or 0
+        )
+        qs.project_config.require_latched = lambda _project: type(
+            "ActiveScope",
+            (),
+            {
+                "source": qs.project_config.SOURCE_EXPLICIT,
+                "project_root": project.resolve(),
+                "policy": qs.project_config.POLICY_SHARED,
+            },
+        )()
         qs.build_install_steps = lambda **_kwargs: [
             qs.Step("wire", ["wire"], project),
         ]
@@ -531,13 +578,31 @@ def test_quickstart_pins_after_preflight_before_wiring():
             "--agents", "codex",
             "--project", str(project),
             "--kb-dir", str(root / "isolated kb"),
+            "--scope", "shared",
+            "--enable-project-scopes",
             "--skip-doctor",
             "--no-seed",
         ])
         _assert(rc == 0, f"quickstart should complete, got {rc}")
-        _assert(events[:4] == [
+        _assert(events[:7] == [
+            ("plan_policy", {}),
+            (
+                "policy",
+                {"dry_run": False},
+            ),
             ("pin", (str(root / "isolated kb"), False)),
             ("refresh", None),
+            (
+                "scope",
+                (
+                    project.resolve(),
+                    {
+                        "policy": "shared",
+                        "new_kb": False,
+                        "enable_project_scopes": True,
+                    },
+                ),
+            ),
             ("runtime_settings", project.resolve()),
             ("run", ["wire"]),
         ], f"runtime settings must be written after pinning and before wiring: {events}")
@@ -545,6 +610,12 @@ def test_quickstart_pins_after_preflight_before_wiring():
         qs.install_engine.resolve_python = original["resolve_python"]
         qs.agent_preflight_errors = original["agent_preflight_errors"]
         qs.pin_kb_for_quickstart = original["pin_kb_for_quickstart"]
+        qs.install_engine.scope_policy_for_install = original[
+            "scope_policy_for_install"
+        ]
+        qs.install_engine.configure_scope_policy = original[
+            "configure_scope_policy"
+        ]
         qs.build_install_steps = original["build_install_steps"]
         qs.build_doctor_steps = original["build_doctor_steps"]
         qs.run_steps = original["run_steps"]
@@ -555,8 +626,513 @@ def test_quickstart_pins_after_preflight_before_wiring():
             "write_maintenance_runner"
         ]
         qs.paths.refresh_pinned_dir = original["refresh_pinned_dir"]
+        qs.project_mode.apply_latch = original["apply_latch"]
+        qs.project_config.require_latched = original["require_latched"]
         shutil.rmtree(root, ignore_errors=True)
     print("PASS quickstart_pins_after_preflight_before_wiring")
+
+
+def _run_scope_only_quickstart(
+    monkeypatch,
+    project: Path,
+    kb_dir: Path,
+    *,
+    scope: str | None,
+    activate: bool = True,
+) -> int:
+    monkeypatch.setattr(qs, "agent_preflight_errors", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        qs.paths,
+        "resolve_maintenance_executable",
+        lambda _backend: "/bin/codex",
+    )
+    monkeypatch.setattr(
+        qs.paths,
+        "write_maintenance_runner",
+        lambda **_kwargs: project.parent / "runtime_settings.json",
+    )
+    monkeypatch.setattr(qs.paths, "refresh_pinned_dir", lambda: None)
+    monkeypatch.setattr(qs, "build_install_steps", lambda **_kwargs: [])
+    monkeypatch.setattr(qs, "build_doctor_steps", lambda **_kwargs: [])
+    args = [
+        "--agents", "codex",
+        "--project", str(project),
+        "--kb-dir", str(kb_dir),
+        "--skip-doctor",
+        "--no-seed",
+    ]
+    if scope is not None:
+        args.extend(["--scope", scope])
+        if activate:
+            args.append("--enable-project-scopes")
+    return qs.main(args)
+
+
+def test_fresh_quickstart_creates_explicit_shared_scope_with_global_pin(
+    monkeypatch, tmp_path,
+):
+    test_root = qs.paths.validated_test_root()
+    _assert(test_root is not None, "pytest isolation root is required")
+    home = tmp_path / "fresh-home"
+    home.mkdir()
+    project = tmp_path / "fresh-project"
+    project.mkdir()
+    vault = test_root / "vaults" / f"fresh-quickstart-{tmp_path.name}"
+    monkeypatch.setenv("LATCH_HOME", str(home))
+    monkeypatch.setenv(
+        qs.project_config.CONTROL_ROOT_ENV,
+        str(test_root / "fresh-quickstart-control" / tmp_path.name),
+    )
+    monkeypatch.delenv("CLAUDE_KB_HOME", raising=False)
+    monkeypatch.delenv("LATCH_KB_DIR", raising=False)
+    monkeypatch.delenv("CLAUDE_KB_DIR", raising=False)
+    monkeypatch.setattr(qs.install_engine, "KB_LOCATION_PATH", home / "kb_location.json")
+
+    rc = _run_scope_only_quickstart(
+        monkeypatch,
+        project,
+        vault,
+        scope="shared",
+    )
+
+    _assert(rc == 0, f"fresh quickstart failed with {rc}")
+    _assert(
+        qs.project_config.read_machine_policy()
+        == qs.project_config.MACHINE_POLICY_EXPLICIT,
+        "the pin created by this invocation reclassified a fresh install",
+    )
+    target = qs.project_config.resolve(project)
+    _assert(target.state == qs.project_config.MODE_LATCHED, target)
+    _assert(target.source == qs.project_config.SOURCE_EXPLICIT, target)
+    _assert(target.project_root == project.resolve(), target)
+    _assert(target.policy == qs.project_config.POLICY_SHARED, target)
+    _assert(target.kb_dir == vault.resolve(), target)
+
+
+def test_fresh_quickstart_creates_new_explicit_private_vault(
+    monkeypatch, tmp_path,
+):
+    test_root = qs.paths.validated_test_root()
+    _assert(test_root is not None, "pytest isolation root is required")
+    home = tmp_path / "private-home"
+    home.mkdir()
+    project = tmp_path / "private-project"
+    project.mkdir()
+    global_vault = test_root / "vaults" / f"private-global-{tmp_path.name}"
+    monkeypatch.setenv("LATCH_HOME", str(home))
+    monkeypatch.setenv(
+        qs.project_config.CONTROL_ROOT_ENV,
+        str(test_root / "private-quickstart-control" / tmp_path.name),
+    )
+    monkeypatch.delenv("CLAUDE_KB_HOME", raising=False)
+    monkeypatch.delenv("LATCH_KB_DIR", raising=False)
+    monkeypatch.delenv("CLAUDE_KB_DIR", raising=False)
+    monkeypatch.setattr(qs.install_engine, "KB_LOCATION_PATH", home / "kb_location.json")
+
+    rc = _run_scope_only_quickstart(
+        monkeypatch,
+        project,
+        global_vault,
+        scope="private",
+    )
+
+    _assert(rc == 0, f"private quickstart failed with {rc}")
+    target = qs.project_config.resolve(project)
+    _assert(target.state == qs.project_config.MODE_LATCHED, target)
+    _assert(target.source == qs.project_config.SOURCE_EXPLICIT, target)
+    _assert(target.project_root == project.resolve(), target)
+    _assert(target.policy == qs.project_config.POLICY_PRIVATE, target)
+    _assert(target.kb_dir is not None and target.kb_dir.is_dir(), target)
+    _assert(target.kb_dir != global_vault.resolve(), target)
+    _assert(list(target.kb_dir.iterdir()) == [], "new Private vault should start empty")
+    pin = json.loads((home / "kb_location.json").read_text(encoding="utf-8"))
+    _assert(pin["kb_dir"] == str(global_vault.resolve()), pin)
+
+
+def test_existing_pin_project_opt_in_scopes_selected_project_and_locks_sibling(
+    monkeypatch, tmp_path,
+):
+    test_root = qs.paths.validated_test_root()
+    _assert(test_root is not None, "pytest isolation root is required")
+    home = tmp_path / "existing-home"
+    home.mkdir()
+    project = tmp_path / "existing-project"
+    project.mkdir()
+    sibling = tmp_path / "existing-sibling"
+    sibling.mkdir()
+    vault = test_root / "vaults" / f"existing-quickstart-{tmp_path.name}"
+    vault.mkdir(parents=True)
+    pin = home / "kb_location.json"
+    pin.write_text(json.dumps({"kb_dir": str(vault)}) + "\n", encoding="utf-8")
+    monkeypatch.setenv("LATCH_HOME", str(home))
+    monkeypatch.setenv(
+        qs.project_config.CONTROL_ROOT_ENV,
+        str(test_root / "existing-quickstart-control" / tmp_path.name),
+    )
+    monkeypatch.delenv("CLAUDE_KB_HOME", raising=False)
+    monkeypatch.delenv("LATCH_KB_DIR", raising=False)
+    monkeypatch.delenv("CLAUDE_KB_DIR", raising=False)
+    monkeypatch.setattr(qs.install_engine, "KB_LOCATION_PATH", pin)
+
+    rc = _run_scope_only_quickstart(
+        monkeypatch,
+        project,
+        vault,
+        scope="shared",
+    )
+
+    _assert(rc == 0, f"existing-install quickstart failed with {rc}")
+    _assert(
+        qs.project_config.read_machine_policy()
+        == qs.project_config.MACHINE_POLICY_EXPLICIT,
+        "explicit --scope choice did not activate project mode",
+    )
+    target = qs.project_config.resolve(project)
+    _assert(
+        target.state == qs.project_config.MODE_LATCHED
+        and target.source == qs.project_config.SOURCE_EXPLICIT
+        and target.project_root == project.resolve()
+        and target.kb_dir == vault.resolve(),
+        "selected project did not gain an exact Shared boundary",
+    )
+    sibling_target = qs.project_config.resolve(sibling)
+    _assert(
+        sibling_target.state == qs.project_config.MODE_LOCKED
+        and sibling_target.kb_dir is None,
+        "project-mode activation left an unselected sibling globally accessible",
+    )
+
+
+def test_global_shared_access_needs_no_project_scope_choice(
+    compatibility_scope_env, tmp_path,
+):
+    project = tmp_path / "global-project"
+    project.mkdir()
+    choice, target = qs.resolve_scope_choice(
+        project,
+        None,
+        dry_run=False,
+        is_tty=False,
+    )
+    _assert(choice is None, choice)
+    _assert(target.source == qs.project_config.SOURCE_GLOBAL, target)
+    _assert(target.state == qs.project_config.MODE_LATCHED, target)
+
+
+def test_scope_flag_without_activation_confirmation_is_refused(
+    monkeypatch, tmp_path,
+):
+    test_root = qs.paths.validated_test_root()
+    _assert(test_root is not None, "pytest isolation root is required")
+    project = tmp_path / "unconfirmed-scope-project"
+    project.mkdir()
+    home = tmp_path / "unconfirmed-scope-home"
+    home.mkdir()
+    control = test_root / "unconfirmed-scope-control" / tmp_path.name
+    monkeypatch.setenv("LATCH_HOME", str(home))
+    monkeypatch.setenv(qs.project_config.CONTROL_ROOT_ENV, str(control))
+    monkeypatch.delenv("LATCH_KB_DIR", raising=False)
+    monkeypatch.delenv("CLAUDE_KB_DIR", raising=False)
+    monkeypatch.setattr(qs.install_engine, "KB_LOCATION_PATH", home / "kb_location.json")
+    vault = test_root / "vaults" / f"unconfirmed-scope-{tmp_path.name}"
+    rc = _run_scope_only_quickstart(
+        monkeypatch,
+        project,
+        vault,
+        scope="shared",
+        activate=False,
+    )
+
+    _assert(rc == 2, rc)
+    _assert(
+        qs.project_config.read_machine_policy()
+        == qs.project_config.MACHINE_POLICY_SHARED,
+        "unconfirmed --scope still activated project mode",
+    )
+    _assert(not (project / ".latch").exists(), "unconfirmed --scope wrote a boundary")
+    _assert(not control.exists(), "unconfirmed --scope wrote scope control state")
+
+
+def test_interactive_activation_requires_exact_latch_word(
+    compatibility_scope_env, tmp_path,
+):
+    project = tmp_path / "ceremony-refused-project"
+    project.mkdir()
+    responses = iter(["projects", "shared", "yes"])
+    prompts: list[str] = []
+    try:
+        qs.resolve_scope_choice(
+            project,
+            None,
+            dry_run=False,
+            is_tty=True,
+            input_fn=lambda prompt: prompts.append(prompt) or next(responses),
+        )
+    except ValueError as exc:
+        _assert("not confirmed" in str(exc), str(exc))
+    else:
+        raise AssertionError("casual 'yes' was accepted as one-way activation consent")
+    _assert(len(prompts) == 3, prompts)
+    _assert("exactly 'latch'" in prompts[-1], prompts[-1])
+    _assert(
+        qs.project_config.read_machine_policy()
+        == qs.project_config.MACHINE_POLICY_SHARED,
+        "refused ceremony still activated project mode",
+    )
+
+
+def test_interactive_activation_proceeds_after_exact_latch_word(
+    compatibility_scope_env, tmp_path, capsys,
+):
+    project = tmp_path / "ceremony-confirmed-project"
+    project.mkdir()
+    responses = iter(["projects", "private", "latch"])
+
+    choice, _target = qs.resolve_scope_choice(
+        project,
+        None,
+        dry_run=False,
+        is_tty=True,
+        input_fn=lambda _prompt: next(responses),
+    )
+
+    _assert(choice == "private", choice)
+    out = capsys.readouterr().out
+    _assert("One-way change" in out, out)
+
+
+def test_quickstart_without_scope_keeps_global_shared_mode(
+    monkeypatch, tmp_path,
+):
+    test_root = qs.paths.validated_test_root()
+    _assert(test_root is not None, "pytest isolation root is required")
+    project = tmp_path / "missing-scope-project"
+    project.mkdir()
+    home = tmp_path / "missing-scope-home"
+    home.mkdir()
+    control = test_root / "missing-scope-control" / tmp_path.name
+    monkeypatch.setenv("LATCH_HOME", str(home))
+    monkeypatch.setenv(qs.project_config.CONTROL_ROOT_ENV, str(control))
+    monkeypatch.delenv("LATCH_KB_DIR", raising=False)
+    monkeypatch.delenv("CLAUDE_KB_DIR", raising=False)
+    monkeypatch.setattr(qs.install_engine, "KB_LOCATION_PATH", home / "kb_location.json")
+    vault = test_root / "vaults" / f"global-default-{tmp_path.name}"
+    rc = _run_scope_only_quickstart(
+        monkeypatch,
+        project,
+        vault,
+        scope=None,
+    )
+
+    _assert(rc == 0, rc)
+    _assert(
+        qs.project_config.read_machine_policy()
+        == qs.project_config.MACHINE_POLICY_SHARED,
+        "ordinary quickstart unexpectedly activated project mode",
+    )
+    target = qs.project_config.resolve(project)
+    _assert(target.source == qs.project_config.SOURCE_GLOBAL, target)
+    _assert(target.kb_dir == vault.resolve(), target)
+    _assert(not (project / ".latch").exists(), "global mode wrote a project boundary")
+
+
+def test_dry_run_scope_plan_writes_nothing(
+    monkeypatch, tmp_path, capsys,
+):
+    test_root = qs.paths.validated_test_root()
+    _assert(test_root is not None, "pytest isolation root is required")
+    project = tmp_path / "dry-run-project"
+    project.mkdir()
+    home = tmp_path / "dry-run-home"
+    home.mkdir()
+    control = test_root / "dry-run-control" / tmp_path.name
+    global_vault = test_root / "vaults" / f"dry-run-global-{tmp_path.name}"
+    monkeypatch.setenv("LATCH_HOME", str(home))
+    monkeypatch.setenv(qs.project_config.CONTROL_ROOT_ENV, str(control))
+    monkeypatch.delenv("LATCH_KB_DIR", raising=False)
+    monkeypatch.delenv("CLAUDE_KB_DIR", raising=False)
+    monkeypatch.setattr(qs.install_engine, "KB_LOCATION_PATH", home / "kb_location.json")
+    monkeypatch.setattr(qs, "agent_preflight_errors", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        qs.paths,
+        "resolve_maintenance_executable",
+        lambda _backend: "/bin/codex",
+    )
+    monkeypatch.setattr(
+        qs.paths,
+        "resolve_maintenance_path",
+        lambda _executable: "/bin",
+    )
+
+    rc = qs.main([
+        "--agents", "codex",
+        "--project", str(project),
+        "--kb-dir", str(global_vault),
+        "--scope", "private",
+        "--enable-project-scopes",
+        "--dry-run",
+        "--no-seed",
+    ])
+
+    captured = capsys.readouterr()
+    _assert(rc == 0, captured)
+    _assert(
+        f"create an explicit private boundary at {project.resolve()}" in captured.out,
+        captured.out,
+    )
+    _assert(list(project.iterdir()) == [], "dry-run wrote into the project")
+    _assert(list(home.iterdir()) == [], "dry-run wrote install state")
+    _assert(not control.exists(), "dry-run wrote scope control state")
+    _assert(not global_vault.exists(), "dry-run created the global KB directory")
+
+
+def test_dry_run_without_scope_previews_unchanged_global_mode(
+    monkeypatch, tmp_path, capsys,
+):
+    test_root = qs.paths.validated_test_root()
+    _assert(test_root is not None, "pytest isolation root is required")
+    project = tmp_path / "dry-run-missing-project"
+    project.mkdir()
+    home = tmp_path / "dry-run-missing-home"
+    home.mkdir()
+    control = test_root / "dry-run-missing-control" / tmp_path.name
+    monkeypatch.setenv("LATCH_HOME", str(home))
+    monkeypatch.setenv(qs.project_config.CONTROL_ROOT_ENV, str(control))
+    monkeypatch.setattr(qs.install_engine, "KB_LOCATION_PATH", home / "kb_location.json")
+
+    rc = qs.main([
+        "--agents", "codex",
+        "--project", str(project),
+        "--dry-run",
+    ])
+
+    captured = capsys.readouterr()
+    _assert(rc == 0, rc)
+    _assert("guided quickstart plan" in captured.out, captured.out)
+    _assert("preserve global Shared mode" in captured.out, captured.out)
+    _assert(list(project.iterdir()) == [], "failed dry-run wrote into project")
+    _assert(list(home.iterdir()) == [], "failed dry-run wrote install state")
+    _assert(not control.exists(), "failed dry-run wrote scope control state")
+
+
+def test_inherited_latched_scope_is_preserved_without_prompt_or_apply(
+    monkeypatch, tmp_path,
+):
+    test_root = qs.paths.validated_test_root()
+    _assert(test_root is not None, "pytest isolation root is required")
+    home = tmp_path / "inherited-home"
+    home.mkdir()
+    parent = tmp_path / "consulting-root"
+    child = parent / "client-repo"
+    child.mkdir(parents=True)
+    global_vault = test_root / "vaults" / f"inherited-global-{tmp_path.name}"
+    global_vault.mkdir(parents=True)
+    (home / "kb_location.json").write_text(
+        json.dumps({"kb_dir": str(global_vault)}) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("LATCH_HOME", str(home))
+    monkeypatch.setenv(
+        qs.project_config.CONTROL_ROOT_ENV,
+        str(test_root / "inherited-control" / tmp_path.name),
+    )
+    monkeypatch.setattr(qs.install_engine, "KB_LOCATION_PATH", home / "kb_location.json")
+    qs.project_config.write_machine_policy(qs.project_config.MACHINE_POLICY_EXPLICIT)
+    qs.project_mode.apply_latch(parent, policy=qs.project_config.POLICY_SHARED)
+    applied: list[bool] = []
+    monkeypatch.setattr(
+        qs.project_mode,
+        "apply_latch",
+        lambda *_args, **_kwargs: applied.append(True) or 0,
+    )
+
+    rc = _run_scope_only_quickstart(
+        monkeypatch,
+        child,
+        global_vault,
+        scope=None,
+    )
+
+    _assert(rc == 0, rc)
+    _assert(applied == [], "inherited scope was unnecessarily re-applied")
+    target = qs.project_config.resolve(child)
+    _assert(target.project_root == parent.resolve(), target)
+    _assert(target.policy == qs.project_config.POLICY_SHARED, target)
+    _assert(not (child / ".latch").exists(), "quickstart added a child boundary")
+
+
+def test_scope_prompt_has_no_default(monkeypatch, tmp_path):
+    test_root = qs.paths.validated_test_root()
+    _assert(test_root is not None, "pytest isolation root is required")
+    project = tmp_path / "prompt-project"
+    project.mkdir()
+    monkeypatch.setenv(
+        qs.project_config.CONTROL_ROOT_ENV,
+        str(test_root / "prompt-control" / tmp_path.name),
+    )
+    qs.project_config.write_machine_policy(qs.project_config.MACHINE_POLICY_EXPLICIT)
+    responses = iter(["", "private"])
+    prompts: list[str] = []
+
+    choice, _target = qs.resolve_scope_choice(
+        project,
+        None,
+        dry_run=False,
+        is_tty=True,
+        input_fn=lambda prompt: prompts.append(prompt) or next(responses),
+    )
+
+    _assert(choice == "private", choice)
+    _assert(len(prompts) == 2, "empty input should not select a default")
+
+
+def test_quickstart_does_not_repair_off_or_unsafe_locked_state(
+    monkeypatch, tmp_path,
+):
+    test_root = qs.paths.validated_test_root()
+    _assert(test_root is not None, "pytest isolation root is required")
+    home = tmp_path / "unsafe-home"
+    home.mkdir()
+    global_vault = test_root / "vaults" / f"unsafe-global-{tmp_path.name}"
+    global_vault.mkdir(parents=True)
+    (home / "kb_location.json").write_text(
+        json.dumps({"kb_dir": str(global_vault)}) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("LATCH_HOME", str(home))
+    monkeypatch.setenv(
+        qs.project_config.CONTROL_ROOT_ENV,
+        str(test_root / "unsafe-control" / tmp_path.name),
+    )
+    qs.project_config.write_machine_policy(qs.project_config.MACHINE_POLICY_EXPLICIT)
+
+    outer = tmp_path / "unsafe-outer"
+    off_child = outer / "off-child"
+    unauthorized = tmp_path / "unauthorized"
+    off_child.mkdir(parents=True)
+    unauthorized.mkdir()
+    qs.project_mode.apply_latch(outer, policy=qs.project_config.POLICY_SHARED)
+    qs.project_mode.apply_unlatch(off_child)
+    qs.project_config.create_scope(
+        unauthorized,
+        policy=qs.project_config.POLICY_SHARED,
+    )
+
+    for project, expected in (
+        (off_child, "UNLATCHED"),
+        (unauthorized, "LOCKED"),
+    ):
+        try:
+            qs.resolve_scope_choice(
+                project,
+                "private",
+                dry_run=False,
+                is_tty=False,
+            )
+        except ValueError as exc:
+            _assert(expected in str(exc), str(exc))
+        else:
+            raise AssertionError(f"quickstart implicitly repaired {expected} state")
 
 
 def test_quickstart_preflight_failure_does_not_pin():
@@ -608,6 +1184,8 @@ def test_quickstart_pin_conflict_stops_before_wiring():
             rc = qs.main([
                 "--agents", "codex",
                 "--project", str(project),
+                "--scope", "shared",
+                "--enable-project-scopes",
                 "--skip-doctor",
                 "--no-seed",
             ])
@@ -648,7 +1226,7 @@ if __name__ == "__main__":
     test_run_steps_stops_before_later_steps_on_failure()
     test_quickstart_seed_handoff_prints_once_noninteractive()
     test_quickstart_pin_uses_explicit_or_environment_override()
-    test_quickstart_persists_transient_env_pin_for_later_processes()
+    test_quickstart_persists_transient_env_pin_for_global_shared_access()
     test_quickstart_pins_after_preflight_before_wiring()
     test_quickstart_preflight_failure_does_not_pin()
     test_quickstart_pin_conflict_stops_before_wiring()

@@ -173,7 +173,7 @@ def emit_decision_event(
     query_hash: str | None = None,
     project_path: str | None = None,
     session_id: str | None = None,
-) -> None:
+) -> bool:
     """Emit one ``decision.log`` row (point-in-time, at capture).
 
     Structural-only; never raises.
@@ -192,7 +192,7 @@ def emit_decision_event(
             label; None for a Type-2 inferred signal with no human action.
         query_hash: optional join hash to the originating prompt.
     """
-    log_utils.emit_event(
+    return log_utils.emit_event(
         DECISION_STREAM,
         {
             "node_ids": [int(n) for n in node_ids],

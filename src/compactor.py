@@ -31,6 +31,7 @@ import lifecycle_signals  # noqa: E402
 import lockfile  # noqa: E402
 import log_utils  # noqa: E402
 import paths  # noqa: E402
+import project_config  # noqa: E402
 import workstreams  # noqa: E402
 
 # On Windows, subprocess.run([...]) with shell=False calls CreateProcess, which
@@ -493,13 +494,27 @@ def _candidate_evidence_line(
 
 
 @contextlib.contextmanager
-def _project_lock(project_path: str):
+def _project_lock(
+    project_path: str,
+    *,
+    expected_revision: str | None = None,
+    expected_kb_dir: str | None = None,
+):
     """Backwards-compat shim — the lock primitive moved to `lockfile.py` so
     MCP write tools can also consult it via `wait_for_compaction`. Behavior
     unchanged: acquire-or-skip, yielding True/False."""
     with lockfile.compactor_lock(project_path) as acquired:
         if not acquired:
-            _log(f"compactor lock held at {lockfile._lock_path(project_path)} — skipping")
+            lock_path = (
+                Path(expected_kb_dir) / lockfile.LOCK_FILENAME
+                if expected_kb_dir is not None
+                else lockfile._lock_path(project_path)
+            )
+            _log(
+                f"compactor lock held at {lock_path} — skipping",
+                project_path,
+                expected_revision=expected_revision,
+            )
         yield acquired
 
 
@@ -510,17 +525,44 @@ def run_compaction(
     *,
     final: bool = False,
     summarizer_backend: str | None = None,
+    binding_revision: str | None = None,
+    expected_kb_dir: str | None = None,
 ) -> dict:
     """Run one compaction pass. Returns a small status dict."""
-    if paths.is_unlatched_mode():
+    if paths.is_unlatched_mode(project_path):
         return {
             "ok": False,
             "reason": "unlatched",
             "message": paths.UNLATCHED_MESSAGE,
             "session_id": session_id,
         }
-    if paths.is_disabled():
+    if paths.is_disabled(project_path):
         return {"ok": False, "reason": "disabled", "session_id": session_id}
+    target = project_config.resolve(project_path)
+    if target.state != project_config.MODE_LATCHED or target.kb_dir is None:
+        return {
+            "ok": False,
+            "reason": "locked",
+            "session_id": session_id,
+        }
+    if binding_revision is None:
+        binding_revision = project_config.current_session_revision(
+            project_path, session_id,
+        )
+    if (
+        binding_revision is None
+        or target.revision != binding_revision
+        or (
+            expected_kb_dir is not None
+            and os.path.normcase(str(target.kb_dir))
+            != os.path.normcase(expected_kb_dir)
+        )
+    ):
+        return {
+            "ok": False,
+            "reason": "stale_session_binding",
+            "session_id": session_id,
+        }
     if paths.is_in_compact():
         # Should never happen in practice — hooks guard this path — but if the
         # compactor is ever invoked inside a compactor-spawned summarizer
@@ -535,26 +577,41 @@ def run_compaction(
             "error": str(e),
             "session_id": session_id,
         }
-    with _project_lock(project_path) as acquired:
+    with _project_lock(
+        project_path,
+        expected_revision=binding_revision,
+        expected_kb_dir=expected_kb_dir or str(target.kb_dir),
+    ) as acquired:
         if not acquired:
             return {"ok": False, "reason": "locked", "session_id": session_id}
+        current = project_config.resolve(project_path)
+        if current.state != project_config.MODE_LATCHED or current.revision != binding_revision:
+            return {
+                "ok": False,
+                "reason": "stale_session_binding",
+                "session_id": session_id,
+            }
         # Budget gate — the backstop against auto-hook runaways. Check AND
         # reserve in one shot so the count is accurate even if the compaction
         # itself fails afterward (tokens were still spent).
         try:
             allowed, state = budget.check_and_record(project_path, category="nonheal")
         except OSError as exc:
-            _log(f"budget state unavailable for {project_path}: {exc} — "
-                 f"compaction blocked without spend")
+            _log(
+                f"budget state unavailable: {exc} — compaction blocked without spend",
+                project_path,
+            )
             return {
                 "ok": False,
                 "reason": "budget_state_error",
                 "session_id": session_id,
             }
         if not allowed:
-            _log(f"budget cap hit for {project_path}: "
-                 f"{state['count_nonheal']}/day non-heal — "
-                 f"run /latch-budget-approve to unlock")
+            _log(
+                f"budget cap hit: {state['count_nonheal']}/day non-heal — "
+                "run /latch-budget-approve to unlock",
+                project_path,
+            )
             return {
                 "ok": False,
                 "reason": "budget_cap",
@@ -566,6 +623,8 @@ def run_compaction(
         return _run_compaction_locked(
             session_id, project_path, transcript_path, final=final,
             summarizer_backend=backend,
+            binding_revision=binding_revision,
+            expected_kb_dir=expected_kb_dir or str(target.kb_dir),
         )
 
 
@@ -576,8 +635,14 @@ def _run_compaction_locked(
     *,
     final: bool = False,
     summarizer_backend: str = "claude",
+    binding_revision: str | None = None,
+    expected_kb_dir: str | None = None,
 ) -> dict:
-    conn = db.connect(project_path)
+    conn = db.connect(
+        project_path,
+        expected_binding_revision=binding_revision,
+        expected_kb_dir=expected_kb_dir,
+    )
     try:
         sess = db.get_session(conn, session_id)
         if sess is None:
@@ -637,7 +702,8 @@ def _run_compaction_locked(
         if write_count == 0:
             _log(
                 "compactor produced no summary body, extracted nodes, or links; "
-                f"leaving session {session_id} uncompacted"
+                f"leaving session {session_id} uncompacted",
+                project_path,
             )
             return {
                 "ok": False,
@@ -660,10 +726,13 @@ def _run_compaction_locked(
                 conn, session_id, transcript_path, project_path,
             )
             if n_enriched:
-                _log(f"artifact auto-observe: enriched {n_enriched} node(s) "
-                     f"for session {session_id}")
+                _log(
+                    f"artifact auto-observe: enriched {n_enriched} node(s) "
+                    f"for session {session_id}",
+                    project_path,
+                )
         except Exception as e:  # noqa: BLE001
-            _log(f"artifact auto-observe failed (non-fatal): {e}")
+            _log(f"artifact auto-observe failed (non-fatal): {e}", project_path)
         db.mark_compacted(conn, session_id, sess["turn_count"], summary_node_id)
         if final:
             db.mark_ended(conn, session_id)
@@ -713,6 +782,7 @@ def _invoke_summarizer(payload: dict, *, backend: str = "claude") -> dict | None
     so retry cost is bounded per compaction.
     """
     backend = _summarizer_backend(backend, default="claude")
+    project_path = payload.get("project_path")
     user_msg = (
         COMPACT_PROMPT
         + "\n\n--- PRIOR SUMMARY ---\n"
@@ -725,7 +795,10 @@ def _invoke_summarizer(payload: dict, *, backend: str = "claude") -> dict | None
 
     stdout, err = _invoke_summarizer_once(user_msg, backend=backend)
     if stdout is None:
-        _log(f"compactor first-attempt {backend} subprocess failed: {err}")
+        _log(
+            f"compactor first-attempt {backend} subprocess failed: {err}",
+            project_path,
+        )
         return None
 
     obj, parse_err = _parse_json_envelope(stdout)
@@ -734,7 +807,10 @@ def _invoke_summarizer(payload: dict, *, backend: str = "claude") -> dict | None
     if obj is not None:
         parse_err = "parsed JSON had no summary body, extracted nodes, or links"
 
-    _log(f"compactor first-attempt parse failed ({parse_err}); attempting repair")
+    _log(
+        f"compactor first-attempt parse failed ({parse_err}); attempting repair",
+        project_path,
+    )
     repair_msg = _repair_prompt(
         payload=payload,
         parse_err=parse_err,
@@ -742,22 +818,25 @@ def _invoke_summarizer(payload: dict, *, backend: str = "claude") -> dict | None
     )
     stdout2, err2 = _invoke_summarizer_once(repair_msg, backend=backend)
     if stdout2 is None:
-        _log(f"compactor repair {backend} subprocess failed: {err2}")
+        _log(
+            f"compactor repair {backend} subprocess failed: {err2}",
+            project_path,
+        )
         _save_failed_compact(payload, stdout, None,
                              reason=f"first:{parse_err};repair_subprocess:{err2}")
         return None
 
     obj2, parse_err2 = _parse_json_envelope(stdout2)
     if obj2 is not None and _has_compaction_content(obj2):
-        _log("compactor repair succeeded")
+        _log("compactor repair succeeded", project_path)
         return obj2
     if obj2 is not None:
-        _log("compactor repair parsed JSON but result was empty")
+        _log("compactor repair parsed JSON but result was empty", project_path)
         _save_failed_compact(payload, stdout, stdout2,
                              reason=f"first:{parse_err};repair_empty")
         return obj2
 
-    _log(f"compactor repair parse also failed: {parse_err2}")
+    _log(f"compactor repair parse also failed: {parse_err2}", project_path)
     _save_failed_compact(payload, stdout, stdout2,
                          reason=f"first:{parse_err};repair:{parse_err2}")
     return None
@@ -989,22 +1068,35 @@ def _save_failed_compact(payload: dict, raw1: str | None, raw2: str | None, reas
     from datetime import datetime
     try:
         project_path = payload.get("project_path")
-        project = paths.project_dir(project_path) if project_path else paths.KB_ROOT
-        fail_dir = project / "failed_compact"
-        fail_dir.mkdir(parents=True, exist_ok=True)
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        parts = [
-            f"session_id: {payload.get('session_id')}",
-            f"reason: {reason}",
-            "",
-            "--- first attempt raw output ---",
-            raw1 if raw1 is not None else "(subprocess failed; no stdout)",
-        ]
-        if raw2 is not None:
-            parts += ["", "--- repair attempt raw output ---", raw2]
-        (fail_dir / f"{ts}.txt").write_text("\n".join(parts), encoding="utf-8")
+        project = str(project_path or os.getcwd())
+        with lockfile.project_access_lock(project) as locked_kb:
+            fail_dir = locked_kb / "failed_compact"
+            if fail_dir.is_symlink() or (
+                fail_dir.exists() and not fail_dir.is_dir()
+            ):
+                raise project_config.ProjectConfigError(
+                    f"unsafe failed compact directory: {fail_dir}"
+                )
+            fail_dir.mkdir(parents=True, exist_ok=True)
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            parts = [
+                f"session_id: {payload.get('session_id')}",
+                f"reason: {reason}",
+                "",
+                "--- first attempt raw output ---",
+                raw1 if raw1 is not None else "(subprocess failed; no stdout)",
+            ]
+            if raw2 is not None:
+                parts += ["", "--- repair attempt raw output ---", raw2]
+            project_config.atomic_text(
+                fail_dir / f"{ts}.txt",
+                "\n".join(parts),
+            )
     except Exception as e:
-        _log(f"failed to archive failed_compact: {e}")
+        _log(
+            f"failed to archive failed_compact: {e}",
+            payload.get("project_path"),
+        )
 
 
 def _lifecycle_event_key(kind: str, candidate_key: str, session_id: str | None) -> str:
@@ -1376,6 +1468,7 @@ def _record_proposal_rejection(
     reasons: list[str],
     latest_by_key: Mapping[str, Mapping[str, Any]],
     index: int,
+    project_path: str | None = None,
 ) -> bool:
     supplied = str(proposal.get("candidate_key") or "").strip()
     candidate_key = supplied or (
@@ -1401,7 +1494,10 @@ def _record_proposal_rejection(
         )
         return True
     except Exception as exc:
-        _log(f"workstream proposal rejection event failed: {type(exc).__name__}")
+        _log(
+            f"workstream proposal rejection event failed: {type(exc).__name__}",
+            project_path,
+        )
         return False
 
 
@@ -1411,6 +1507,7 @@ def _apply_lifecycle_judgments(
     result: Mapping[str, Any],
     *,
     title_to_id: Mapping[str, int],
+    project_path: str | None = None,
 ) -> dict:
     """Validate model judgments and append events; never mutate workstreams."""
     latest = db.latest_workstream_derivation_candidates(conn)
@@ -1458,7 +1555,10 @@ def _apply_lifecycle_judgments(
                 require_latest_candidate=True,
             )
         except Exception as exc:
-            _log(f"workstream attestation event failed: {type(exc).__name__}")
+            _log(
+                f"workstream attestation event failed: {type(exc).__name__}",
+                project_path,
+            )
             continue
         lifecycle_events += 1
         attestations_recorded += 1
@@ -1485,6 +1585,7 @@ def _apply_lifecycle_judgments(
                 reasons=reasons,
                 latest_by_key=latest_by_key,
                 index=index,
+                project_path=project_path,
             ):
                 lifecycle_events += 1
                 proposals_rejected += 1
@@ -1502,7 +1603,10 @@ def _apply_lifecycle_judgments(
                 require_latest_candidate=True,
             )
         except Exception as exc:
-            _log(f"workstream proposal event failed: {type(exc).__name__}")
+            _log(
+                f"workstream proposal event failed: {type(exc).__name__}",
+                project_path,
+            )
             continue
         lifecycle_events += 1
         proposals_accepted += 1
@@ -1646,7 +1750,7 @@ def _apply_compaction(
             )
             linked_edges += 1
         except Exception as e:
-            _log(f"edge insert failed: {e}")
+            _log(f"edge insert failed: {e}", project_path)
 
     if written_node_ids:
         db.record_retrieval_events(
@@ -1661,6 +1765,7 @@ def _apply_compaction(
         session_id,
         result,
         title_to_id=title_to_id,
+        project_path=project_path,
     )
 
     return {
@@ -1672,25 +1777,61 @@ def _apply_compaction(
     }
 
 
-def _log(msg: str) -> None:
-    log_path = paths.KB_ROOT / "compactor.log"
+def _log(
+    msg: str,
+    project_path: str | None = None,
+    *,
+    expected_revision: str | None = None,
+) -> None:
     try:
-        with log_path.open("a", encoding="utf-8") as f:
-            from datetime import datetime
-            f.write(f"[{datetime.now().isoformat(timespec='seconds')}] {msg}\n")
+        from datetime import datetime
+
+        lockfile.append_project_log(
+            project_path,
+            "compactor.log",
+            f"[{datetime.now().isoformat(timespec='seconds')}] {msg}\n",
+            expected_revision=expected_revision,
+        )
     except Exception:
         pass
 
 
 if __name__ == "__main__":
-    # Manual invocation: python compactor.py <session_id> <project_path> [transcript_path] [--final]
+    # Manual invocation: python compactor.py <session_id> <project_path>
+    # [transcript_path] [--final] [--binding-revision REV] [--kb-dir DIR]
     args = sys.argv[1:]
     final = "--final" in args
     args = [a for a in args if a != "--final"]
+    binding_revision = None
+    if "--binding-revision" in args:
+        index = args.index("--binding-revision")
+        if index + 1 >= len(args):
+            print("--binding-revision requires a value", file=sys.stderr)
+            sys.exit(2)
+        binding_revision = args[index + 1]
+        del args[index:index + 2]
+    expected_kb_dir = None
+    if "--kb-dir" in args:
+        index = args.index("--kb-dir")
+        if index + 1 >= len(args):
+            print("--kb-dir requires a value", file=sys.stderr)
+            sys.exit(2)
+        expected_kb_dir = args[index + 1]
+        del args[index:index + 2]
     if len(args) < 2:
-        print("usage: compactor.py <session_id> <project_path> [transcript_path] [--final]")
+        print(
+            "usage: compactor.py <session_id> <project_path> [transcript_path] "
+            "[--final] [--binding-revision REV] [--kb-dir DIR]"
+        )
         sys.exit(2)
     session_id = args[0]
     project_path = args[1]
     transcript_path = args[2] if len(args) >= 3 else None
-    print(json.dumps(run_compaction(session_id, project_path, transcript_path, final=final)))
+    print(json.dumps(run_compaction(
+        session_id,
+        project_path,
+        transcript_path,
+        final=final,
+        binding_revision=binding_revision,
+        expected_kb_dir=expected_kb_dir,
+    )))

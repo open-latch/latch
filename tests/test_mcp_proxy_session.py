@@ -16,6 +16,7 @@ when the Cursor install uses Codex model backends or stale Codex markers exist.
 from __future__ import annotations
 
 import io
+import os
 import shutil
 import sys
 import tempfile
@@ -30,6 +31,7 @@ import mcp_broker  # noqa: E402
 import mcp_proxy  # noqa: E402
 import mcp_runtime  # noqa: E402
 import paths  # noqa: E402
+import project_config  # noqa: E402
 
 
 def _assert(cond, msg):
@@ -46,7 +48,12 @@ def _clean_env(**overrides):
     """
     isolated = {
         name: mcp_proxy.os.environ[name]
-        for name in (paths.TEST_ROOT_ENV, paths.TEST_CAPABILITY_ENV)
+        for name in (
+            paths.TEST_ROOT_ENV,
+            paths.TEST_CAPABILITY_ENV,
+            project_config.CONTROL_ROOT_ENV,
+            "LATCH_HOME",
+        )
         if name in mcp_proxy.os.environ
     }
     isolated.update(overrides)
@@ -152,31 +159,84 @@ def test_resolve_session_reports_missing_codex_marker():
     print("PASS resolve_session_reports_missing_codex_marker")
 
 
+def test_known_agent_without_current_session_cannot_open_repinned_project_kb():
+    root = Path(tempfile.mkdtemp(prefix="mcp_proxy_repin_"))
+    project = root / "project"
+    project.mkdir()
+    (project / ".git").mkdir()
+    kb_a = paths.validated_test_root() / "vaults" / f"proxy-a-{root.name}"
+    kb_b = paths.validated_test_root() / "vaults" / f"proxy-b-{root.name}"
+    kb_a.mkdir(parents=True)
+    kb_b.mkdir(parents=True)
+    try:
+        project_config.create_scope(
+            project,
+            policy=project_config.POLICY_PRIVATE,
+        )
+        project_config.authorize_scope(project, kb_dir=kb_a)
+        project_config.record_session_binding(project, "old-task")
+        project_config.repin_private_scope(project, kb_b)
+        with _clean_env(LATCH_MODEL_BACKEND="codex"):
+            try:
+                mcp_proxy.connection_metadata(str(project))
+            except ValueError as exc:
+                _assert("verified agent session" in str(exc), exc)
+            else:
+                raise AssertionError("unattributed proxy received MCP metadata")
+        _assert(not (kb_b / "kb.db").exists(), "proxy touched the new KB")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+        shutil.rmtree(kb_a, ignore_errors=True)
+        shutil.rmtree(kb_b, ignore_errors=True)
+    print("PASS known_agent_without_current_session_cannot_open_repinned_project_kb")
+
+
 def test_connection_metadata_carries_typed_settings_and_private_child_env():
-    with _clean_env(
-        LATCH_IN_COMPACT="1",
-        LATCH_UNLATCHED="1",
-        LATCH_DISABLE_WRITE="1",
-        CLAUDE_KB_IN_MAINTENANCE="1",
-        LATCH_GATE_BACKEND=" CoDeX ",
-        LATCH_MAINTENANCE_BACKEND="CURSOR",
-        LATCH_GATE_CLASSIFIER_TIMEOUT_S="44",
-        CLAUDE_KB_GATE_ADVERSARY_TIMEOUT_S="22",
-        CLAUDE_KB_ADVERSARY="0",
-        LATCH_MCP_PROXY_CAP="7",
-        LATCH_MCP_PROXY_RETIRE_IDLE_SEC="11",
-        LATCH_MCP_PROXY_HEARTBEAT_SEC="3",
-        LATCH_MCP_PROXY_STALE_SEC="19",
-        OPENAI_API_KEY="private-openai-secret",
-        ANTHROPIC_API_KEY="private-anthropic-secret",
-        LATCH_ARBITRARY_POISON="must-not-be-serialized",
-    ):
-        metadata = mcp_proxy.connection_metadata("/tmp/x")
+    project = Path(tempfile.mkdtemp(prefix="mcp_proxy_metadata_"))
+    project_config.record_session_binding(project, "metadata-session")
+    settings = {
+        "LATCH_SESSION_ID": "metadata-session",
+        "LATCH_IN_COMPACT": "1",
+        "LATCH_DISABLE_WRITE": "1",
+        "CLAUDE_KB_IN_MAINTENANCE": "1",
+        "LATCH_GATE_BACKEND": " CoDeX ",
+        "LATCH_MAINTENANCE_BACKEND": "CURSOR",
+        "LATCH_GATE_CLASSIFIER_TIMEOUT_S": "44",
+        "CLAUDE_KB_GATE_ADVERSARY_TIMEOUT_S": "22",
+        "CLAUDE_KB_ADVERSARY": "0",
+        "LATCH_MCP_PROXY_CAP": "7",
+        "LATCH_MCP_PROXY_RETIRE_IDLE_SEC": "11",
+        "LATCH_MCP_PROXY_HEARTBEAT_SEC": "3",
+        "LATCH_MCP_PROXY_STALE_SEC": "19",
+        "OPENAI_API_KEY": "private-openai-secret",
+        "ANTHROPIC_API_KEY": "private-anthropic-secret",
+        "LATCH_ARBITRARY_POISON": "must-not-be-serialized",
+    }
+    try:
+        with _clean_env(**settings, LATCH_UNLATCHED="1"):
+            try:
+                mcp_proxy.connection_metadata(str(project))
+            except ValueError as exc:
+                _assert("UNLATCHED" in str(exc), exc)
+            else:
+                raise AssertionError("UNLATCHED proxy received MCP metadata")
+        with _clean_env(**settings):
+            metadata = mcp_proxy.connection_metadata(str(project))
+    finally:
+        shutil.rmtree(project, ignore_errors=True)
     _assert(metadata["in_compact"] is True, metadata)
-    _assert(metadata["unlatched"] is True, metadata)
+    _assert(metadata["unlatched"] is False, metadata)
     _assert(metadata["disabled"] is False, metadata)
     _assert(metadata["write_disabled"] is True, metadata)
     _assert(metadata["in_maintenance"] is True, metadata)
+    _assert(
+        isinstance(metadata["project_binding_revision"], str), metadata
+    )
+    _assert(
+        metadata["project_kb_dir"] is None
+        or os.path.isabs(metadata["project_kb_dir"]),
+        metadata,
+    )
     _assert(metadata["gate_backend"] == "codex", metadata)
     _assert(metadata["maintenance_backend"] == "cursor", metadata)
     _assert(metadata["gate_classifier_timeout_s"] == 44, metadata)
@@ -210,8 +270,9 @@ def test_connection_metadata_carries_typed_settings_and_private_child_env():
     )
     _assert("LATCH_ARBITRARY_POISON" not in private, private)
 
+    defaults_project = Path(tempfile.mkdtemp(prefix="mcp_proxy_defaults_"))
     with _clean_env():
-        defaults = mcp_proxy.connection_metadata("/tmp/x")
+        defaults = mcp_proxy.connection_metadata(str(defaults_project))
     _assert(defaults["in_compact"] is False, defaults)
     _assert(defaults["in_maintenance"] is False, defaults)
     _assert(defaults["gate_backend"] == "claude", defaults)
@@ -222,11 +283,12 @@ def test_connection_metadata_carries_typed_settings_and_private_child_env():
 
     with _clean_env(LATCH_GATE_BACKEND="not-a-backend"):
         try:
-            mcp_proxy.connection_metadata("/tmp/x")
+            mcp_proxy.connection_metadata(str(defaults_project))
         except ValueError as exc:
             _assert("unsupported gate backend" in str(exc), exc)
         else:
             raise AssertionError("invalid backend did not fail before startup")
+    shutil.rmtree(defaults_project, ignore_errors=True)
     print("PASS connection_metadata_carries_typed_settings_and_private_child_env")
 
 
@@ -279,10 +341,17 @@ def test_empty_vault_root_override_reads_as_unset():
     ``XDG_DATA_HOME`` / ``XDG_STATE_HOME``), so the daemon fence must agree —
     otherwise a legitimate environment cannot start the proxy at all.
     """
+    descriptor = mcp_broker.resolve_connection_scope(os.getcwd())
     for name in mcp_broker.DAEMON_VAULT_ROOT_ENV_VARS:
-        with _clean_env():
+        with mcp_runtime.bind_runtime_scope(descriptor), _clean_env():
+            mcp_proxy.os.environ.pop(name, None)
             absent = mcp_broker.vault_context_digest()
-        with _clean_env(**{name: ""}):
+        with mcp_runtime.bind_runtime_scope(descriptor), _clean_env(**{name: ""}), \
+                mock.patch.object(
+                    mcp_broker,
+                    "resolve_connection_scope",
+                    return_value=descriptor,
+                ):
             blank = mcp_broker.vault_context_digest()
             metadata = mcp_proxy.connection_metadata()
         _assert(blank == absent, f"{name}='' must digest as unset")
@@ -339,6 +408,7 @@ if __name__ == "__main__":
     test_resolve_session_leaves_cursor_mcp_calls_unattributed()
     test_resolve_session_reads_codex_marker_when_env_lacks_thread()
     test_resolve_session_reports_missing_codex_marker()
+    test_known_agent_without_current_session_cannot_open_repinned_project_kb()
     test_connection_metadata_carries_typed_settings_and_private_child_env()
     test_command_resolution_cannot_preempt_explicit_path_with_cwd()
     test_windows_child_environment_deduplicates_case_insensitive_names()

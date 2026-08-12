@@ -1,0 +1,4 @@
+interface:
+  display_name: "Latch Project"
+  short_description: "Latch this project to one KB"
+  default_prompt: "Show this project's Latch mode and KB, then ask before latching or changing its KB binding."

@@ -12,6 +12,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+import pytest
+
 _SRC = Path(__file__).resolve().parent.parent / "src"
 sys.path.insert(0, str(_SRC))
 sys.path.insert(0, str(_SRC / "hooks"))
@@ -325,6 +327,44 @@ def test_last_prompt_embedding_roundtrip():
         print("PASS last_prompt_embedding_roundtrip")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_binding_lookup_error_is_visible_and_skips_kb(monkeypatch, capsys):
+    logged = []
+    monkeypatch.setattr(
+        ups,
+        "read_hook_input",
+        lambda: {"cwd": "/safe/project", "session_id": "session"},
+    )
+    monkeypatch.setattr(ups, "project_cwd", lambda _payload: "/safe/project")
+    monkeypatch.setattr(ups, "is_unlatched_mode", lambda _cwd: False)
+    monkeypatch.setattr(ups, "is_disabled", lambda _cwd: False)
+    monkeypatch.setattr(ups, "is_in_compact", lambda: False)
+    monkeypatch.setattr(
+        ups,
+        "current_session_revision",
+        lambda *_args: (_ for _ in ()).throw(OSError("unsafe binding file")),
+    )
+    monkeypatch.setattr(
+        ups,
+        "log",
+        lambda message, project_path=None, **kwargs: logged.append(
+            (message, project_path, kwargs)
+        ),
+    )
+
+    assert ups.main() == 0
+    payload = json.loads(capsys.readouterr().out)
+    context = payload["hookSpecificOutput"]["additionalContext"]
+    assert "skipped KB access for safety" in context
+    assert "restart" in context.lower()
+    assert logged == [
+        (
+            "user_prompt_submit session binding error: unsafe binding file",
+            "/safe/project",
+            {"expected_revision": "stale-session"},
+        )
+    ]
 
 
 if __name__ == "__main__":

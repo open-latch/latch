@@ -85,6 +85,7 @@ def _publish_upgrade_alias(
     payload: dict[str, Any],
     *,
     capable: bool,
+    requested_protocol: int,
 ) -> bool:
     compatibility = "migrate" if capable else "fresh_task_required"
     values = {
@@ -112,9 +113,16 @@ def _publish_upgrade_alias(
                 payload.get("owner_runtime_key") or payload.get("runtime_key")
             ),
         )
-    mcp_broker.publish_discovery(**values)
+    mcp_broker.publish_discovery(
+        **values,
+        protocol_version=requested_protocol,
+    )
     if not capable:
-        mcp_broker.publish_discovery(**values, legacy_path=True)
+        mcp_broker.publish_discovery(
+            **values,
+            legacy_path=True,
+            protocol_version=requested_protocol,
+        )
     return embed_alias is not None
 
 
@@ -125,7 +133,10 @@ def _alias_ready_owner(runtime_key: str, *, capable: bool) -> bool:
         payload = mcp_broker.read_discovery()
         if payload is not None and mcp_broker.probe_discovery(payload):
             embed_alias_published = _publish_upgrade_alias(
-                runtime_key, payload, capable=capable
+                runtime_key,
+                payload,
+                capable=capable,
+                requested_protocol=_requested_protocol_version(),
             )
             mcp_broker.emit_lifecycle(
                 "daemon_upgrade_alias_published",
@@ -141,12 +152,35 @@ def _alias_ready_owner(runtime_key: str, *, capable: bool) -> bool:
 
 if __name__ == "__main__":
     try:
+        _initial_project = (
+            os.environ.get("LATCH_MCP_INITIAL_PROJECT_CWD") or os.getcwd()
+        )
+        _owner_scope = mcp_broker._owner_scope_descriptor()
+        if _owner_scope is None:
+            requested_protocol = _requested_protocol_version()
+            requested_capability = _requested_proxy_capability_epoch()
+            if (
+                requested_protocol == mcp_broker.PROTOCOL_VERSION
+                and requested_capability >= mcp_broker.PROXY_CAPABILITY_EPOCH
+            ):
+                raise mcp_broker.BrokerError("missing MCP owner scope handoff")
+            # An already-running pre-scope proxy can launch this newer daemon
+            # during an in-place upgrade without changing protocol numbers.
+            # Resolve its initial project with current fail-closed authority
+            # solely so the protocol/capability rejection can be published in
+            # the correct vault. A pre-capability connection is routed only to
+            # _run_fresh_task_rejection and never reaches a FastMCP tool.
+            _owner_scope = mcp_broker.resolve_connection_scope(_initial_project)
+            os.environ[mcp_broker.OWNER_SCOPE_ENV] = json.dumps(
+                _owner_scope.payload(), sort_keys=True, separators=(",", ":")
+            )
+        mcp_broker.validate_connection_scope(_initial_project, _owner_scope)
         mcp_broker.runtime_key_dir(_REQUESTED_RUNTIME_KEY)
-    except ValueError as exc:
+    except (ValueError, mcp_broker.BrokerError) as exc:
         sys.stderr.write(f"[latch] invalid requested MCP runtime key: {exc}\n")
         raise SystemExit(1)
     requested_protocol = _requested_protocol_version()
-    if requested_protocol != mcp_broker.PROTOCOL_VERSION:
+    if requested_protocol < 1 or requested_protocol > mcp_broker.PROTOCOL_VERSION:
         message = (
             "Latch was upgraded across an incompatible MCP runtime protocol. "
             "Start a fresh task so the host launches a compatible proxy."
@@ -171,7 +205,10 @@ if __name__ == "__main__":
             current_proxy_capability_epoch=mcp_broker.PROXY_CAPABILITY_EPOCH,
         )
         raise SystemExit(1)
-    requested_capable = requested_capability >= mcp_broker.PROXY_CAPABILITY_EPOCH
+    requested_capable = bool(
+        requested_protocol == mcp_broker.PROTOCOL_VERSION
+        and requested_capability >= mcp_broker.PROXY_CAPABILITY_EPOCH
+    )
     _OWNER_FENCE = mcp_broker.acquire_owner_fence()
     if _OWNER_FENCE is None:
         if (
@@ -213,7 +250,12 @@ def _utc_now() -> str:
 
 
 def _idle_ttl() -> float:
-    return paths.configured_daemon_idle_ttl(default=DEFAULT_IDLE_TTL_S)
+    return paths.configured_daemon_idle_ttl(
+        default=DEFAULT_IDLE_TTL_S,
+        runtime_settings_file=(
+            mcp_broker.runtime_dir() / paths.VAULT_RUNTIME_SETTINGS_FILENAME
+        ),
+    )
 
 
 def _cold_start_duration_ms() -> float:
@@ -367,6 +409,29 @@ def _context_from(metadata: dict[str, Any], connection_id: str) -> mcp_runtime.C
     proxy_pid = metadata.get("proxy_pid")
     if not isinstance(proxy_pid, int):
         proxy_pid = -1
+    project_binding_revision = metadata.get("project_binding_revision")
+    if (
+        not isinstance(project_binding_revision, str)
+        or not project_binding_revision.strip()
+        or len(project_binding_revision) > 64
+    ):
+        raise ValueError("invalid project_binding_revision connection metadata")
+    project_kb_dir = metadata.get("project_kb_dir")
+    if project_kb_dir is not None and (
+        not isinstance(project_kb_dir, str)
+        or not project_kb_dir
+        or not os.path.isabs(project_kb_dir)
+    ):
+        raise ValueError("invalid project_kb_dir connection metadata")
+    scope = mcp_runtime.validate_scope_descriptor(metadata.get("scope"))
+    if project_binding_revision != scope.revision:
+        raise ValueError("project binding revision disagrees with MCP scope")
+    if (
+        project_kb_dir is None
+        or os.path.normcase(os.path.realpath(project_kb_dir))
+        != os.path.normcase(scope.kb_dir)
+    ):
+        raise ValueError("project KB path disagrees with MCP scope")
 
     def required_bool(name: str) -> bool:
         value = metadata.get(name)
@@ -410,6 +475,9 @@ def _context_from(metadata: dict[str, Any], connection_id: str) -> mcp_runtime.C
         return policy
 
     proxy_policy = required_proxy_policy()
+    unlatched = required_bool("unlatched")
+    if unlatched:
+        raise ValueError("UNLATCHED connections have no MCP data plane")
     return mcp_runtime.ConnectionContext(
         connection_id=connection_id,
         project_cwd=os.path.abspath(project_cwd),
@@ -418,8 +486,11 @@ def _context_from(metadata: dict[str, Any], connection_id: str) -> mcp_runtime.C
         proxy_pid=proxy_pid,
         proxy_started_at=str(metadata.get("proxy_started_at") or "unknown"),
         runtime_key=str(metadata.get("runtime_key") or "unknown"),
+        project_binding_revision=project_binding_revision,
+        project_kb_dir=project_kb_dir,
+        scope_descriptor=scope,
         in_compact=required_bool("in_compact"),
-        unlatched=required_bool("unlatched"),
+        unlatched=unlatched,
         disabled=required_bool("disabled"),
         write_disabled=required_bool("write_disabled"),
         in_maintenance=required_bool("in_maintenance"),
@@ -636,7 +707,16 @@ async def _handle_connection(stream: SocketStream, state: DaemonState, token: st
         if not secrets.compare_digest(supplied, token):
             await stream.send(b'{"ok":false,"error":"unauthorized"}\n')
             return
-        if metadata.get("protocol") != mcp_broker.PROTOCOL_VERSION:
+        protocol = metadata.get("protocol")
+        capability_epoch = metadata.get("proxy_capability_epoch")
+        if not isinstance(capability_epoch, int):
+            capability_epoch = 0
+        legacy_rejection = bool(
+            isinstance(protocol, int)
+            and 0 < protocol < mcp_broker.PROTOCOL_VERSION
+            and capability_epoch < mcp_broker.PROXY_CAPABILITY_EPOCH
+        )
+        if protocol != mcp_broker.PROTOCOL_VERSION and not legacy_rejection:
             await stream.send(b'{"ok":false,"error":"protocol_mismatch"}\n')
             return
         runtime_key = metadata.get("runtime_key")
@@ -672,9 +752,6 @@ async def _handle_connection(stream: SocketStream, state: DaemonState, token: st
         if op != "mcp":
             await stream.send(b'{"ok":false,"error":"unknown_operation"}\n')
             return
-        capability_epoch = metadata.get("proxy_capability_epoch")
-        if not isinstance(capability_epoch, int):
-            capability_epoch = 0
         if capability_epoch < mcp_broker.PROXY_CAPABILITY_EPOCH:
             await _run_fresh_task_rejection(stream, buffer, metadata, state)
             return
@@ -687,6 +764,14 @@ async def _handle_connection(stream: SocketStream, state: DaemonState, token: st
             await stream.send(
                 b'{"ok":false,"error":"vault_context_mismatch"}\n'
             )
+            return
+        try:
+            mcp_broker.validate_connection_scope(
+                str(metadata.get("project_cwd") or ""),
+                metadata.get("scope"),
+            )
+        except mcp_broker.BrokerError:
+            await stream.send(b'{"ok":false,"error":"scope_mismatch"}\n')
             return
         await _run_mcp_connection(stream, buffer, metadata, state)
     except (anyio.EndOfStream, anyio.ClosedResourceError, anyio.BrokenResourceError):
@@ -739,7 +824,22 @@ async def _main_async() -> None:
     initialized = False
     try:
         initial_cwd = os.environ.get("LATCH_MCP_INITIAL_PROJECT_CWD") or os.getcwd()
-        mcp_server.initialize_runtime(initial_cwd, start_embed_listener=True)
+        owner_scope = mcp_broker._owner_scope_descriptor()
+        if owner_scope is None:
+            raise RuntimeError("missing MCP owner scope handoff")
+        try:
+            mcp_broker.validate_connection_scope(initial_cwd, owner_scope)
+            initialized_scope = mcp_server.initialize_runtime(
+                initial_cwd, start_embed_listener=True
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                f"MCP runtime initialization failed for {initial_cwd}: {exc}"
+            ) from exc
+        if not initialized_scope:
+            raise RuntimeError(
+                f"MCP owner scope became unavailable before startup: {initial_cwd}"
+            )
         initialized = True
         async with anyio.create_task_group() as tg:
             mcp_broker.publish_discovery(
@@ -758,6 +858,7 @@ async def _main_async() -> None:
                         _requested_proxy_capability_epoch()
                         >= mcp_broker.PROXY_CAPABILITY_EPOCH
                     ),
+                    requested_protocol=_requested_protocol_version(),
                 )
             mcp_broker.emit_lifecycle(
                 "daemon_started",

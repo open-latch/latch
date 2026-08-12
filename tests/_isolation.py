@@ -33,6 +33,15 @@ _CAPABILITY = secrets.token_hex(32)
 
 os.environ.pop("LATCH_KB_DIR", None)
 os.environ.pop("CLAUDE_KB_DIR", None)
+for _session_name in (
+    "LATCH_SESSION_ID",
+    "CLAUDE_CODE_SESSION_ID",
+    "CODEX_THREAD_ID",
+    "CLAUDECODE",
+    "CURSOR_PLUGIN_ROOT",
+    "LATCH_ADAPTER",
+):
+    os.environ.pop(_session_name, None)
 os.environ["LATCH_TEST_ROOT"] = str(_TEST_ROOT)
 os.environ["LATCH_TEST_CAPABILITY"] = _CAPABILITY
 
