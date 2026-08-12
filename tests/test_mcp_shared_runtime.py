@@ -1198,7 +1198,16 @@ def test_prompt_after_idle_exit_wakes_owner_and_emits_truthful_bounded_receipt()
         _assert("temporarily unavailable" in context, context)
         _assert("not similarity-scored" in context, context)
         _assert("none auto-retrieved (sim below floor)" not in context.lower(), context)
-        _assert(wall_ms < 250, f"idle prompt hook blocked for {wall_ms:.1f} ms")
+        # wall_ms includes a full interpreter spawn, which alone costs several
+        # hundred ms on Windows. The regression this guards — the hook waiting
+        # synchronously for the daemon wake below — costs seconds, so the
+        # platform allowance keeps the check meaningful without measuring
+        # process-startup cost.
+        idle_hook_budget_ms = 1000 if sys.platform == "win32" else 250
+        _assert(
+            wall_ms < idle_hook_budget_ms,
+            f"idle prompt hook blocked for {wall_ms:.1f} ms",
+        )
 
         deadline = time.monotonic() + 35.0
         new_pid = None

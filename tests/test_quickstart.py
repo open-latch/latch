@@ -493,8 +493,10 @@ def test_quickstart_persists_transient_env_pin_for_global_shared_access():
             env=env,
             text=True,
         ).strip()
+        # The pin is stored with forward slashes on every platform
+        # (install_engine.pin_kb_dir), so compare paths, not raw strings.
         _assert(
-            persisted == str(target),
+            Path(persisted) == target,
             f"later process must see the persisted target: {persisted}",
         )
         resolved = subprocess.run(
