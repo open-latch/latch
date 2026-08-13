@@ -1945,14 +1945,6 @@ def kb_capture_decision(
         "approve": "ratify",
         "reject": "reject",
     }.get(human_action)
-    if ratification_action is not None and not sid:
-        return {
-            "ok": False,
-            "error": (
-                "a verified session identity is required to ratify or reject "
-                "a decision"
-            ),
-        }
 
     def _capture(conn) -> tuple[dict, dict | None] | dict:
         priority_error = _priority_edge_error(
@@ -1960,6 +1952,14 @@ def kb_capture_decision(
         )
         if priority_error is not None:
             return priority_error
+        if ratification_action is not None and not sid:
+            return {
+                "ok": False,
+                "error": (
+                    "a verified session identity is required to ratify or "
+                    "reject a decision"
+                ),
+            }
         resolved_workstream_id, workstream_resolution, scope_error = (
             _resolve_membership_for_mcp(conn, workstream_id)
         )

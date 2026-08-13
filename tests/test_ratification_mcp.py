@@ -203,6 +203,40 @@ def test_capture_reject_records_rejection_but_cannot_promote(
     assert rows[0]["source"] == "capture_decision"
 
 
+@pytest.mark.parametrize("human_action", ["approve", "reject"])
+def test_capture_ratification_requires_session_before_embedding_or_writes(
+    mcp_vault: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    human_action: str,
+) -> None:
+    before = _node_count(mcp_vault)
+    monkeypatch.setattr(mcp_server, "_project_session_id", lambda: None)
+
+    def unexpected_call(*_args, **_kwargs):
+        raise AssertionError("missing-session capture must stop before side effects")
+
+    monkeypatch.setattr(mcp_server.embeddings, "embed", unexpected_call)
+    monkeypatch.setattr(
+        mcp_server.capture_streams,
+        "emit_decision_event",
+        unexpected_call,
+    )
+
+    result = mcp_server.kb_capture_decision(
+        title="Unattributed decision",
+        body="Ratification requires a verified human session.",
+        gate_request="Should this decision govern?",
+        human_action=human_action,
+    )
+
+    assert result["ok"] is False
+    assert "verified session identity" in result["error"]
+    assert "id" not in result
+    assert "decision_logged" not in result
+    assert _node_count(mcp_vault) == before
+    assert _ratifications(mcp_vault) == []
+
+
 def test_rejected_capture_can_later_be_ratified_by_latch_update(
     mcp_vault: Path,
 ) -> None:
