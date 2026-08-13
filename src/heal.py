@@ -998,6 +998,12 @@ def insert_with_heal(
             plan-freshness can track it. See compute_ship_edge_hint (id=1194 §4).
       }
     """
+    if kind in db.JUDGMENT_KINDS and status == "canonical":
+        raise db.RatificationRequiredError(
+            "unattended heal cannot mint canonical judgment; insert staging "
+            "and use an explicit ratification surface"
+        )
+
     t0 = time.perf_counter()
     vec = embeddings.embed(f"{title}\n\n{body}")
 

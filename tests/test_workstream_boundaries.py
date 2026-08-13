@@ -390,6 +390,7 @@ def test_public_graph_writers_cannot_attach_edges_to_priorities(
     boundary_kb, monkeypatch,
 ):
     _, conn = boundary_kb
+    monkeypatch.setattr(mcp_server, "_project_session_id", lambda: None)
     priority_id = int(priorities.add_priority(conn, "Protected priority")["id"])
     source = db.insert_node(conn, kind="fact", title="Source", body="Source")
     before_nodes = conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0]

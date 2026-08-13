@@ -22,6 +22,16 @@ from paths import SCHEMA_PATH, db_path, ensure_project_dir
 
 VEC_DIM = 384  # all-MiniLM-L6-v2
 
+# V3 authority lanes (ratified by KB id=5143).  Only kinds that represent
+# human judgment require ratification before acquiring canonical authority.
+# Evidence promotion is intentionally narrower than "all non-judgment kinds":
+# entity/idea/open_question receive no new unattended promotion authority.
+JUDGMENT_KINDS = frozenset({"decision", "preference"})
+EVIDENCE_PROMOTION_KINDS = frozenset({"fact", "progress"})
+RATIFICATION_ACTIONS = frozenset({"ratify", "reject"})
+RATIFICATION_SCOPES = frozenset({"node"})
+RATIFICATION_SOURCES = frozenset({"capture_decision", "latch_update"})
+
 # Closed, privacy-safe outcomes for the seed import ledgers.  Store the code,
 # never raw exception text (which can contain transcript excerpts or secrets).
 SEED_IMPORT_STATES = frozenset({"pending", "applied", "failed"})
@@ -100,6 +110,10 @@ WORKSTREAM_REVERSAL_PAYLOAD_KEYS: dict[str, frozenset[str]] = {
 
 class SeedImportLedgerError(ValueError):
     """Base class for invalid seed-ledger operations."""
+
+
+class RatificationRequiredError(ValueError):
+    """A judgment node tried to acquire canonical authority without proof."""
 
 
 class SeedImportConflictError(SeedImportLedgerError):
@@ -691,6 +705,103 @@ def _migrate_rejected_path(conn: sqlite3.Connection) -> None:
         """
     )
     conn.commit()
+    _migrate_ratification(conn)
+
+
+def _migrate_ratification(conn: sqlite3.Connection) -> None:
+    """Add V3's authority-bearing judgment ratification rows.
+
+    This is additive side state on the same ratified precedent as
+    ``rejected_path``: legacy canonical nodes remain valid as existing state,
+    no synthetic rows are backfilled, and the compatibility boundary does not
+    move for a table older binaries never read.  The first V3 build briefly
+    created ``UNIQUE(node_id)``.  Rebuild that exact shape transactionally so
+    each node instead keeps an append-only history of human outcomes.
+    """
+    def create_table(table_name: str) -> None:
+        if table_name not in {"ratification", "ratification_append_history"}:
+            raise ValueError("unexpected ratification migration table")
+        conn.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {table_name} (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            node_id    INTEGER NOT NULL
+                       REFERENCES nodes(id) ON DELETE CASCADE,
+            ratifier   TEXT    NOT NULL CHECK (length(trim(ratifier)) > 0),
+            decided_at TEXT    NOT NULL DEFAULT (datetime('now')),
+            action     TEXT    NOT NULL CHECK (action IN ('ratify', 'reject')),
+            scope      TEXT    NOT NULL DEFAULT 'node'
+                               CHECK (scope IN ('node')),
+            source     TEXT    NOT NULL
+                               CHECK (source IN ('capture_decision', 'latch_update'))
+            )
+            """
+        )
+
+    def node_id_is_unique() -> bool:
+        for index in conn.execute("PRAGMA index_list('ratification')").fetchall():
+            if not int(index["unique"]):
+                continue
+            index_name = str(index["name"]).replace("'", "''")
+            columns = [
+                row["name"]
+                for row in conn.execute(
+                    f"PRAGMA index_info('{index_name}')"
+                ).fetchall()
+            ]
+            if columns == ["node_id"]:
+                return True
+        return False
+
+    def create_indexes() -> None:
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ratification_node "
+            "ON ratification(node_id, id)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ratification_action "
+            "ON ratification(action)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ratification_source "
+            "ON ratification(source)"
+        )
+
+    create_table("ratification")
+    conn.commit()
+    if node_id_is_unique():
+        leftover = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+            "AND name = 'ratification_append_history'"
+        ).fetchone()
+        if leftover is not None:
+            raise RuntimeError(
+                "cannot migrate ratification: temporary table already exists"
+            )
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            create_table("ratification_append_history")
+            conn.execute(
+                """
+                INSERT INTO ratification_append_history
+                    (id, node_id, ratifier, decided_at, action, scope, source)
+                SELECT id, node_id, ratifier, decided_at, action, scope, source
+                FROM ratification
+                ORDER BY id
+                """
+            )
+            conn.execute("DROP TABLE ratification")
+            conn.execute(
+                "ALTER TABLE ratification_append_history RENAME TO ratification"
+            )
+            create_indexes()
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+    else:
+        create_indexes()
+        conn.commit()
     _migrate_lifecycle_substrate(conn)
 
 
@@ -1906,6 +2017,16 @@ def finish_seed_import(
 
 # ---------- nodes ----------
 
+
+def _has_ratifying_row(conn: sqlite3.Connection, node_id: int) -> bool:
+    row = conn.execute(
+        "SELECT action FROM ratification WHERE node_id = ? "
+        "ORDER BY id DESC LIMIT 1",
+        (int(node_id),),
+    ).fetchone()
+    return row is not None and row["action"] == "ratify"
+
+
 def insert_node_nc(
     conn: sqlite3.Connection,
     *,
@@ -1973,6 +2094,20 @@ def update_node_nc(
     embedding: bytes | None = None,
 ) -> None:
     """Update a node without committing the surrounding transaction."""
+    if status == "canonical":
+        current = conn.execute(
+            "SELECT kind, status FROM nodes WHERE id = ?", (int(node_id),)
+        ).fetchone()
+        if (
+            current is not None
+            and current["kind"] in JUDGMENT_KINDS
+            and current["status"] != "canonical"
+            and not _has_ratifying_row(conn, node_id)
+        ):
+            raise RatificationRequiredError(
+                f"{current['kind']} node {int(node_id)} requires ratification "
+                "before canonical promotion"
+            )
     fields, values = [], []
     if title is not None:
         fields.append("title = ?"); values.append(title)
@@ -2084,6 +2219,102 @@ def compact_row(row: dict, *, body_chars: int = COMPACT_BODY_CHARS,
 def get_node(conn: sqlite3.Connection, node_id: int) -> dict | None:
     row = conn.execute("SELECT * FROM nodes WHERE id = ?", (node_id,)).fetchone()
     return dict(row) if row else None
+
+
+def insert_ratification_nc(
+    conn: sqlite3.Connection,
+    node_id: int,
+    *,
+    ratifier: str,
+    action: str,
+    source: str,
+    scope: str = "node",
+    decided_at: str | None = None,
+) -> int:
+    """Record one closed, authority-bearing outcome without committing.
+
+    The caller owns the transaction that binds this row to a node transition.
+    In particular, the two authorized public surfaces insert this row and then
+    call :func:`update_node_nc` in the same transaction.  No prose is accepted.
+    """
+    if not isinstance(ratifier, str) or not ratifier.strip():
+        raise ValueError("ratification.ratifier must be non-empty")
+    if action not in RATIFICATION_ACTIONS:
+        raise ValueError(
+            f"ratification.action must be one of {sorted(RATIFICATION_ACTIONS)}"
+        )
+    if scope not in RATIFICATION_SCOPES:
+        raise ValueError(
+            f"ratification.scope must be one of {sorted(RATIFICATION_SCOPES)}"
+        )
+    if source not in RATIFICATION_SOURCES:
+        raise ValueError(
+            f"ratification.source must be one of {sorted(RATIFICATION_SOURCES)}"
+        )
+    if decided_at is None:
+        decided_at = _now()
+    elif not isinstance(decided_at, str) or not decided_at.strip():
+        raise ValueError("ratification.decided_at must be non-empty")
+    cur = conn.execute(
+        """
+        INSERT INTO ratification
+            (node_id, ratifier, decided_at, action, scope, source)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            int(node_id),
+            ratifier.strip(),
+            decided_at.strip(),
+            action,
+            scope,
+            source,
+        ),
+    )
+    return int(cur.lastrowid)
+
+
+def ratification_for_node(
+    conn: sqlite3.Connection, node_id: int,
+) -> dict | None:
+    row = conn.execute(
+        "SELECT * FROM ratification WHERE node_id = ? "
+        "ORDER BY id DESC LIMIT 1",
+        (int(node_id),),
+    ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def list_ratifications(
+    conn: sqlite3.Connection,
+    *,
+    action: str | None = None,
+    source: str | None = None,
+) -> list[dict]:
+    if action is not None and action not in RATIFICATION_ACTIONS:
+        raise ValueError(
+            f"ratification.action must be one of {sorted(RATIFICATION_ACTIONS)}"
+        )
+    if source is not None and source not in RATIFICATION_SOURCES:
+        raise ValueError(
+            f"ratification.source must be one of {sorted(RATIFICATION_SOURCES)}"
+        )
+    where: list[str] = []
+    params: list[str] = []
+    if action is not None:
+        where.append("action = ?")
+        params.append(action)
+    if source is not None:
+        where.append("source = ?")
+        params.append(source)
+    query = "SELECT * FROM ratification"
+    if where:
+        query += " WHERE " + " AND ".join(where)
+    query += " ORDER BY id"
+    return [dict(row) for row in conn.execute(query, params).fetchall()]
+
+
+def count_ratifications(conn: sqlite3.Connection) -> int:
+    return int(conn.execute("SELECT COUNT(*) FROM ratification").fetchone()[0])
 
 
 def insert_rejected_path_nc(
@@ -2286,18 +2517,21 @@ def promote_by_ref_count(
 ) -> list[int]:
     """Promote eligible staging nodes when ref_count reaches the threshold.
 
-    Imported seed nodes remain staging until explicit review; citation volume
-    is relevance evidence, not user authority. Status change IS an edit, so
-    updated_at bumps here (unlike bump_ref_count). Stale nodes are untouched.
+    Only the ratified evidence lane (fact/progress) is eligible. Judgment kinds
+    and every unclassified/machine kind remain staging; citation volume is
+    relevance evidence, not user authority. Imported seed nodes also remain
+    staging until explicit review. Status change IS an edit, so updated_at
+    bumps here (unlike bump_ref_count). Stale nodes are untouched.
     """
+    evidence_kinds = tuple(sorted(EVIDENCE_PROMOTION_KINDS))
     rows = conn.execute(
         "SELECT n.id FROM nodes n "
         "WHERE n.status = 'staging' AND n.ref_count >= ? "
-        "AND n.kind != 'workstream' "
+        "AND n.kind IN (?, ?) "
         "AND instr(COALESCE(n.body, ''), 'Latch-Seed-Import-Key:') = 0 "
         "AND NOT EXISTS (SELECT 1 FROM seed_import si "
         "WHERE si.node_id = n.id)",
-        (min_ref_count,),
+        (min_ref_count, *evidence_kinds),
     ).fetchall()
     ids = [r["id"] for r in rows]
     if not ids:
