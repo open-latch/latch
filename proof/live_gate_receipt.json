@@ -1,8 +1,8 @@
 {
   "backend": "codex",
-  "better_next_action": "Keep SQLite and implement a documented explicit export/import workflow; if multi-user accounts are now mandatory, ask the decision owner to revisit and supersede id=1 before implementation.",
+  "better_next_action": "Keep SQLite and, if cross-machine data movement is needed, implement an explicit export/import workflow with documented limitations.",
   "capture_command": "bash bin/latch_proof_packet.sh --capture-live --backend codex",
-  "captured_at_utc": "2026-08-12T14:02:23Z",
+  "captured_at_utc": "2026-08-13T05:02:09Z",
   "demo_kind": "synthetic_no_history_fixture",
   "evidence_nodes": [
     {
@@ -30,10 +30,10 @@
   "observed": true,
   "recommendation": "DO_NOT_PROCEED",
   "request": "Add multi-user accounts by moving the datastore from local SQLite to a hosted Postgres service.",
-  "risk_if_proceed": "A hosted Postgres migration would discard the app\u2019s established local-first architecture and revive the exact client-server path already rejected.",
+  "risk_if_proceed": "The implementation would overturn the app's canonical local-first, no-hosted-database architecture.",
   "schema_version": 2,
-  "source_commit": "26539c4192651ebbf827c95280397a7d334e9939",
-  "summary": "The request directly contradicts the canonical decision to keep the demo app local-first on a single embedded SQLite file with no hosted database (id=1). That decision specifically rejects moving to managed Postgres to add multi-user accounts or synchronization and instead permits explicit export/import for moving data between machines.",
+  "source_commit": "b27ada40caa6fadb73c3ae957d6520aae580ea8e",
+  "summary": "The canonical decision (id=1) explicitly keeps the demo app local-first on a single embedded SQLite file and rejects moving to hosted Postgres for multi-user accounts or sync. The request directly contradicts that datastore and product-scope decision.",
   "tested_runtime_git_blobs": {
     ".gitattributes": "dfdb8b771ce07609491fa2e83698969fd917a135",
     "KB_SCHEMA_VERSION": "00750edc07d6415dcc07ae0351e9397b0222b7ba",
@@ -113,7 +113,7 @@
     "src/mcp_launcher_win.py": "484bcf40bf18ce85cfdce77ae6c8da53ac1d03b3",
     "src/mcp_proxy.py": "e6a94f67ad0a29633cd2ae8c76de3405b9d92fe1",
     "src/mcp_runtime.py": "932567d8665fe5b7bfdc1a78da20af2835517d99",
-    "src/mcp_server.py": "9a610043d3bb7ad99377362898277810d6682d06",
+    "src/mcp_server.py": "06953e38fbae87c4abb0cbdf897026dc3b3385e7",
     "src/migrate_v2.py": "ba243da076ef11eb00546542445e1680f9ff5776",
     "src/migrate_v3.py": "ba1b2a8d40c38b9319b0f8208c5825fb2dff8d31",
     "src/model_backends.py": "c1477da19bd29b5d6d902aae19fc708140838494",
