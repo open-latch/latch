@@ -199,6 +199,42 @@ def test_apply_keep_both_adds_related_edge():
         _cleanup(tmp, conn)
 
 
+def test_prepare_edge_is_transaction_neutral():
+    """_prepare_edge writes via db.add_edge_nc only: nothing is visible on an
+    independent connection until the caller commits, nothing is emitted, and
+    the prepared envelope carries no elapsed_ms (the post-commit emitter
+    stamps it at emission time)."""
+    tmp, conn = _fresh_db()
+    other = db.connect(tmp)
+    try:
+        a = db.insert_node(conn, kind="fact", title="winner", body="w")
+        b = db.insert_node(conn, kind="fact", title="loser", body="l")
+        events = heal._prepare_edge(conn, a, b, "supersedes")
+        _assert(conn.in_transaction,
+                "prepare must leave the caller's transaction open, not commit it")
+        row = other.execute(
+            "SELECT 1 FROM edges WHERE src = ? AND dst = ?", (a, b)
+        ).fetchone()
+        _assert(row is None,
+                "prepared edge must not be visible before the caller commits")
+        _assert(len(events) == 1,
+                f"supersedes must prepare exactly one reconciliation envelope: {events}")
+        env = events[0]
+        _assert(env["stream"] == "reconciliation", env)
+        _assert("elapsed_ms" not in env["payload"],
+                f"envelope must not carry elapsed_ms pre-emission: {env['payload']}")
+        _assert(env["payload"]["src_status_before"] == "staging", env["payload"])
+        _assert(heal._prepare_edge(conn, b, a, "related_to") == [],
+                "related_to must prepare no reconciliation envelope")
+        conn.rollback()
+        _assert(not heal.edge_exists_between(conn, a, b),
+                "rollback must discard the prepared edge")
+        print("PASS prepare_edge_is_transaction_neutral")
+    finally:
+        other.close()
+        _cleanup(tmp, conn)
+
+
 # ---------- insert_with_heal end-to-end ----------
 
 def test_insert_with_heal_no_match():
@@ -1002,6 +1038,7 @@ if __name__ == "__main__":
     test_public_vector_search_preserves_workstream_id()
     test_apply_supersede_marks_stale_and_edges()
     test_apply_keep_both_adds_related_edge()
+    test_prepare_edge_is_transaction_neutral()
     test_insert_with_heal_no_match()
     test_insert_with_heal_no_llm_keeps_both_on_match()
     test_insert_with_heal_respects_kind_filter()

@@ -666,6 +666,66 @@ def edge_exists_between(conn, x: int, y: int) -> bool:
     return row is not None
 
 
+# ---------- prepared structural events (transaction-neutral write path) ----------
+#
+# The prepare/commit/emit contract (PR #93 P1 discharge, KB id=5648):
+# transaction-neutral helpers write via db.*_nc only and return prepared event
+# envelopes [{"stream", "payload", "started_at"?}, ...]; the caller owns the
+# transaction and calls emit_prepared_events AFTER its commit, so a rollback
+# emits nothing — mechanically, not by per-caller review.
+
+
+def _prepare_edge(conn, src: int, dst: int, relation: str) -> list[dict]:
+    """Add/reactivate an edge without committing or emitting.
+
+    Captures the reconciliation.log payload BEFORE the edge write (the KB
+    id=1097/id=1121 capture-before-mutation rule) and returns it as a prepared
+    envelope — empty list for non-reconciliation relations. The envelope
+    carries `started_at`, never `elapsed_ms`; the post-commit emitter stamps
+    the elapsed time at emission.
+    """
+    canonical = db.canonicalize_relation(str(relation))
+    started_at = time.perf_counter()
+    captured = None
+    if canonical in db.RECONCILIATION_RELATIONS:
+        captured = db._capture_reconciliation_state(conn, src, dst, canonical)
+    db.add_edge_nc(conn, src, dst, canonical)
+    if captured is None:
+        return []
+    return [{
+        "stream": "reconciliation",
+        "payload": captured,
+        "started_at": started_at,
+    }]
+
+
+def emit_prepared_events(
+    prepared_events: list[dict],
+    *,
+    project_path: str | None = None,
+    session_id: str | None = None,
+) -> None:
+    """The single post-commit emitter for prepared structural events.
+
+    Callers invoke this once, AFTER their transaction commits — never inside
+    it — so telemetry for rolled-back writes cannot exist. Envelopes carrying
+    `started_at` get `elapsed_ms` stamped at emission time.
+    """
+    for event in prepared_events:
+        payload = dict(event["payload"])
+        started_at = event.get("started_at")
+        if started_at is not None:
+            payload["elapsed_ms"] = int(
+                (time.perf_counter() - float(started_at)) * 1000
+            )
+        log_utils.emit_event(
+            event["stream"],
+            payload,
+            project_path=project_path,
+            session_id=session_id,
+        )
+
+
 # Supersede/replace lineage verbs: audit edges that must stay anchored on the
 # (now stale) loser. Everything else is structural and inherits to the winner.
 _LINEAGE_RELATIONS = {"supersedes", "replaces"}
@@ -776,8 +836,16 @@ def apply_supersede(
 
 
 def apply_keep_both(conn, new_id: int, old_id: int) -> None:
-    """Add a related_to edge new -> old."""
-    db.add_edge(conn, src=new_id, dst=old_id, relation="related_to")
+    """Add a related_to edge new -> old. Commit+emit wrapper over the shared
+    edge preparer — related_to prepares no envelopes today, but the wrapper
+    keeps the prepare/commit/emit shape mechanical rather than special-cased."""
+    try:
+        prepared = _prepare_edge(conn, new_id, old_id, "related_to")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    emit_prepared_events(prepared)
 
 
 # ---------- plan-freshness hint ----------
