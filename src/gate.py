@@ -60,6 +60,7 @@ import os
 import shutil
 import subprocess
 import sqlite3
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -294,6 +295,32 @@ LOG_STREAM = "gate"
 # Counts survive where the text does not: load_bearing_claim_count,
 # uncovered_claim_count, and the gap/evidence histograms are unchanged, so the
 # citation-gap signal (id=1220 / id=1253) keeps everything it actually used.
+
+# The retired opt-in above is inert, but silently inert is operator-hostile:
+# someone who sets it gets no signal that it does nothing (id=5300 item 5).
+# One non-fatal notice per process, on stderr — never stdout, which is the MCP
+# JSON-RPC channel — following the [latch] diagnostic convention.
+_RAW_QUERY_RETIRED_ENV = "CLAUDE_KB_LOG_RAW_QUERY"
+_raw_query_notice_emitted = False
+
+
+def _notice_raw_query_flag_retired() -> None:
+    """Warn once, on stderr, if the retired raw-query flag is set. Never raises."""
+    global _raw_query_notice_emitted
+    if _raw_query_notice_emitted:
+        return
+    if os.environ.get(_RAW_QUERY_RETIRED_ENV) is None:
+        return
+    _raw_query_notice_emitted = True
+    try:
+        sys.stderr.write(
+            f"[latch] {_RAW_QUERY_RETIRED_ENV} is retired and ignored: gate.log "
+            "never carries request text. Verbatim capture lives in the private "
+            "request-text store (opt out with LATCH_REQUEST_TEXT_CAPTURE=0 or "
+            'the "request_text_capture" vault-policy key).\n'
+        )
+    except Exception:
+        pass
 
 
 def assemble_gate(
@@ -2746,6 +2773,7 @@ def _log_invocation(
     mcp_server passes `PROJECT_SESSION_ID` (captured from
     `CLAUDE_CODE_SESSION_ID` at module load).
     """
+    _notice_raw_query_flag_retired()
     try:
         seeds = chain_assembly.get("seeds") or []
         if measurement is None:

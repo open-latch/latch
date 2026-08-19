@@ -329,15 +329,23 @@ CLI processes can instead set the `LATCH_OUTCOME_EVENTS` environment variable to
 **Local request text.** Separately from those structural records, latch writes the verbatim text of
 each gate request to `gate-request-text-YYYY-MM-DD.jsonl` in the same local vault, so a prompt can
 still be read back after the fact — the structural logs keep only a hash. The file holds your prompt
-text in the clear; it is never uploaded and never leaves the vault. Set the
-`LATCH_REQUEST_TEXT_CAPTURE` environment variable to `0` to turn it off, which suppresses the text
-while leaving the structural records untouched. Unlike the daily structural logs, this file is not
-compressed or expired by nightly maintenance — delete it yourself when you want it gone.
+text in the clear; it is never uploaded and never leaves the vault. To turn it off for the standard
+shared MCP runtime, set `"request_text_capture": false` in the same `runtime_settings.json`
+vault-policy file, preserving its other keys; direct CLI processes can instead set the
+`LATCH_REQUEST_TEXT_CAPTURE` environment variable to `0`. Either control suppresses the text while
+leaving the structural records untouched. Nightly maintenance retires these files on the same clock
+as the structural logs — compressed after 30 days, deleted after one year, today's file never
+touched — but through a dedicated sweep whose archives are created owner-only rather than with the
+ambient umask; if that maintenance is disabled, the files remain local until removed. If a write is
+ever refused (for example, the file cannot be kept private), latch records a small structural
+entry — a reason code and identifiers, never the prompt — in `request_text_suppression-YYYY-MM-DD.log`
+so the gap is visible.
 
-On macOS and Linux the file is owner-only (mode `0600`), and latch refuses to write prompt text to it
-if that cannot be guaranteed. On Windows, file modes are not a permission model — latch requests the
-same restriction, but the file's confidentiality rests on the permissions of the vault directory
-itself, so put your vault somewhere only you can read.
+On macOS and Linux the file — and any compressed archive nightly maintenance produces from it — is
+owner-only (mode `0600`), and latch refuses to write prompt text to anything it cannot verify private.
+On Windows, file modes are not a permission model — latch requests the same restriction, but the
+file's confidentiality rests on the permissions of the vault directory itself, so put your vault
+somewhere only you can read.
 
 **Overhead.** The per-prompt retrieval hook runs locally against the KB —
 roughly 120–150 ms on an Apple Silicon reference machine, inside a 250 ms
