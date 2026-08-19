@@ -401,6 +401,58 @@ def test_exactly_two_public_ratification_writers_are_registered():
     })
 
 
+# The private-pipeline calls kb_capture_decision._capture may never regrow
+# (5648 item 6). Leaf-name matching on purpose: an aliased import must not
+# slip past the ratchet.
+_CAPTURE_FORBIDDEN_PIPELINE_CALLS = frozenset({
+    "embeddings.embed",
+    "heal.find_near_duplicates",
+    "db.insert_node_nc",
+    "db.add_edge_nc",
+    "db._capture_reconciliation_state",
+})
+
+
+def test_capture_decision_has_no_private_insert_pipeline():
+    """Anti-drift ratchet (5648 item 6): kb_capture_decision._capture must
+    consume heal's shared DECIDE/PREPARE phases and may never regrow a private
+    copy of the insert pipeline. Red against e7194b4, where _capture called
+    every one of the forbidden functions directly."""
+    tree = ast.parse(
+        (SRC / "mcp_server.py").read_text(encoding="utf-8"),
+        filename="src/mcp_server.py",
+    )
+    capture_fn = None
+    for outer in ast.walk(tree):
+        if (
+            isinstance(outer, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and outer.name == "kb_capture_decision"
+        ):
+            for inner in ast.walk(outer):
+                if isinstance(inner, ast.FunctionDef) and inner.name == "_capture":
+                    capture_fn = inner
+                    break
+    assert capture_fn is not None, "kb_capture_decision._capture not found"
+
+    called = {
+        _dotted_name(node.func)
+        for node in ast.walk(capture_fn)
+        if isinstance(node, ast.Call)
+    }
+    forbidden_leaves = {
+        name.rsplit(".", 1)[-1] for name in _CAPTURE_FORBIDDEN_PIPELINE_CALLS
+    }
+    leaked = {
+        name for name in called
+        if name in _CAPTURE_FORBIDDEN_PIPELINE_CALLS
+        or name.rsplit(".", 1)[-1] in forbidden_leaves
+    }
+    assert leaked == set(), (
+        "kb_capture_decision._capture regrew a private insert pipeline; "
+        f"forbidden calls: {sorted(leaked)}"
+    )
+
+
 def test_ratification_kind_mapping_is_exact():
     assert db.JUDGMENT_KINDS == JUDGMENT_KINDS
     assert db.EVIDENCE_PROMOTION_KINDS == EVIDENCE_PROMOTION_KINDS
