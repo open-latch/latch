@@ -7,6 +7,7 @@ supersedes audit edge is preserved.
 """
 from __future__ import annotations
 
+import json
 import shutil
 import sys
 import tempfile
@@ -17,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 import db  # noqa: E402
 import embeddings  # noqa: E402
 import heal  # noqa: E402
+import log_utils  # noqa: E402
 
 
 def _assert(cond, msg):
@@ -153,6 +155,45 @@ def test_reconciled_by_inbound_migrates():
         _cleanup(tmp, conn)
 
 
+def _read_recon_rows(tmp):
+    path = log_utils.today_log_path("reconciliation", tmp)
+    if not path.exists():
+        return []
+    return [
+        json.loads(l)
+        for l in path.read_text(encoding="utf-8").splitlines() if l.strip()
+    ]
+
+
+def test_inherited_reconciled_by_emits_reconciliation_row():
+    """The migrated Y->winner reconciled_by edge must emit a reconciliation.log
+    row. Previously uncovered: test_reconciled_by_inbound_migrates asserts edge
+    status only and never reads the log, so this row could be dropped silently
+    by a refactor of the inheritance write path."""
+    tmp, conn = _fresh_db()
+    try:
+        winner, loser, Y = _mk(conn, "w"), _mk(conn, "l"), _mk(conn, "Y")
+        db.add_edge(conn, src=Y, dst=loser, relation="reconciled_by")
+
+        heal.apply_nightly_supersede(conn, winner, loser, project_path=tmp)
+
+        rows = _read_recon_rows(tmp)
+        migrated = [
+            r for r in rows
+            if r["relation"] == "reconciled_by"
+            and r["src_id"] == Y and r["dst_id"] == winner
+        ]
+        _assert(len(migrated) == 1,
+                f"inherited reconciled_by edge must emit one reconciliation "
+                f"row, got {rows}")
+        supersede_rows = [r for r in rows if r["relation"] == "supersedes"]
+        _assert(len(supersede_rows) == 1,
+                f"the supersede itself must also emit exactly one row: {rows}")
+        print("PASS inherited_reconciled_by_emits_reconciliation_row")
+    finally:
+        _cleanup(tmp, conn)
+
+
 def test_oninsert_apply_supersede_also_inherits():
     """The on-insert path (apply_supersede: new supersedes old) inherits too."""
     tmp, conn = _fresh_db()
@@ -177,5 +218,6 @@ if __name__ == "__main__":
     test_loser_to_winner_link_retired_no_selfloop()
     test_idempotent_when_winner_already_has_edge()
     test_reconciled_by_inbound_migrates()
+    test_inherited_reconciled_by_emits_reconciliation_row()
     test_oninsert_apply_supersede_also_inherits()
     print("\nAll edge-inheritance tests pass.")

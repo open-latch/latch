@@ -731,10 +731,7 @@ def emit_prepared_events(
 _LINEAGE_RELATIONS = {"supersedes", "replaces"}
 
 
-def _inherit_edges(
-    conn, winner_id: int, loser_id: int,
-    *, project_path: str | None = None, session_id: str | None = None,
-) -> int:
+def _inherit_edges(conn, winner_id: int, loser_id: int) -> tuple[int, list[dict]]:
     """Re-point the loser's structural edges onto the winner so a supersede
     doesn't orphan them on a node that drops out of default reads (KB id=1118).
 
@@ -744,11 +741,15 @@ def _inherit_edges(
     edges whose other endpoint is the winner are skipped (the just-added
     `supersedes` winner->loser edge is one such — and is lineage anyway).
 
-    Call AFTER the `supersedes` edge is recorded (so reconciliation.log captures
-    the supersede with the loser still non-stale) and BEFORE the loser is staled
-    — the capture-before-mutation order (KB id=1121). Returns the count migrated.
+    Transaction-neutral: writes via the shared edge preparer and
+    db.tombstone_edge_nc only. Call AFTER the `supersedes` edge is recorded (so
+    reconciliation.log captures the supersede with the loser still non-stale)
+    and BEFORE the loser is staled — the capture-before-mutation order (KB
+    id=1121). Returns (migrated_count, prepared_events) for the owning wrapper
+    to commit and emit.
     """
     migrated = 0
+    prepared: list[dict] = []
     for e in db.neighbors(conn, loser_id):
         rel = e["relation"]
         if rel in _LINEAGE_RELATIONS:
@@ -759,17 +760,31 @@ def _inherit_edges(
             # A loser<->winner non-lineage link or a loser self-loop: re-pointing
             # would self-loop on the winner, and it's redundant once the loser is
             # subsumed. Retire it rather than leave it active on a stale node.
-            db.tombstone_edge(conn, src=src, dst=dst, relation=rel)
+            db.tombstone_edge_nc(conn, src=src, dst=dst, relation=rel)
             continue
         new_src = winner_id if src == loser_id else src
         new_dst = winner_id if dst == loser_id else dst
-        db.add_edge(
-            conn, src=new_src, dst=new_dst, relation=rel,
-            project_path=project_path, session_id=session_id,
-        )
-        db.tombstone_edge(conn, src=src, dst=dst, relation=rel)
+        prepared.extend(_prepare_edge(conn, new_src, new_dst, rel))
+        db.tombstone_edge_nc(conn, src=src, dst=dst, relation=rel)
         migrated += 1
-    return migrated
+    return migrated, prepared
+
+
+def _apply_supersede_nc(conn, winner_id: int, loser_id: int) -> list[dict]:
+    """Transaction-neutral supersede lineage: supersedes edge winner -> loser,
+    structural edge inheritance, loser staled — in that order.
+
+    The supersedes capture runs BEFORE inheritance and the stale mutation so
+    reconciliation.log reflects the loser's pre-stale status (KB id=1097/
+    id=1121 capture-before-mutation rule); inheritance (KB id=1118) runs before
+    the stale so the loser's structural edges migrate rather than orphan.
+    Returns the prepared events for the owning wrapper to commit and emit.
+    """
+    prepared = _prepare_edge(conn, winner_id, loser_id, "supersedes")
+    _migrated, inherit_events = _inherit_edges(conn, winner_id, loser_id)
+    prepared.extend(inherit_events)
+    db.update_node_nc(conn, loser_id, status="stale")
+    return prepared
 
 
 def apply_nightly_supersede(
@@ -779,20 +794,21 @@ def apply_nightly_supersede(
     """Winner stays as-is; loser's structural edges inherit to the winner; loser
     marked stale; supersedes edge winner -> loser.
 
-    `add_edge` runs BEFORE `_inherit_edges` and `update_node` so reconciliation.log
-    captures the loser's pre-stale status (KB id=1097/id=1121 capture-before-
-    mutation rule). Edge inheritance (KB id=1118) runs before the stale mutation
-    so the loser's structural edges are migrated to the winner, not orphaned.
+    Thin commit+emit wrapper over `_apply_supersede_nc` — the nightly integrity
+    path still self-commits (priority 2483: internal integrity/maintenance
+    paths are out of the simplification surface). Kept separate from
+    `apply_supersede` deliberately: collapsing the two widens the blast radius
+    to every caller for no behavioral gain.
     """
-    db.add_edge(
-        conn, src=winner_id, dst=loser_id, relation="supersedes",
-        project_path=project_path, session_id=session_id,
+    try:
+        prepared = _apply_supersede_nc(conn, winner_id, loser_id)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    emit_prepared_events(
+        prepared, project_path=project_path, session_id=session_id,
     )
-    _inherit_edges(
-        conn, winner_id, loser_id,
-        project_path=project_path, session_id=session_id,
-    )
-    db.update_node(conn, loser_id, status="stale")
 
 
 def apply_nightly_reconciled_by(
@@ -820,19 +836,18 @@ def apply_supersede(
     """Mark old stale and add a supersedes edge new -> old. Audit trail kept.
     The old node's structural edges inherit to the new node (KB id=1118).
 
-    `add_edge` runs BEFORE `_inherit_edges` and `update_node` so reconciliation.log
-    captures the old node's pre-stale status (KB id=1097/id=1121 capture-before-
-    mutation rule).
+    Thin commit+emit wrapper over `_apply_supersede_nc`, which preserves the
+    capture-before-mutation ordering (KB id=1097/id=1121).
     """
-    db.add_edge(
-        conn, src=new_id, dst=old_id, relation="supersedes",
-        project_path=project_path, session_id=session_id,
+    try:
+        prepared = _apply_supersede_nc(conn, new_id, old_id)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    emit_prepared_events(
+        prepared, project_path=project_path, session_id=session_id,
     )
-    _inherit_edges(
-        conn, new_id, old_id,
-        project_path=project_path, session_id=session_id,
-    )
-    db.update_node(conn, old_id, status="stale")
 
 
 def apply_keep_both(conn, new_id: int, old_id: int) -> None:

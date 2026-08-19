@@ -253,6 +253,49 @@ def test_apply_nightly_supersede_marks_stale_and_links():
 
 # ---------- _order_by_age ----------
 
+def test_nightly_supersede_commit_boundary_unchanged():
+    """apply_nightly_supersede is a self-committing integrity path (priority
+    2483: internal integrity/maintenance paths are out of the simplification
+    surface): after it returns, an INDEPENDENT connection must already see the
+    staled loser and the inherited edges — the nightly pass never commits at a
+    higher level."""
+    tmp, conn = _fresh_db()
+    other = db.connect(tmp)
+    try:
+        w = _mk(conn, title="winner", body="w")
+        l = _mk(conn, title="loser", body="l")
+        a = _mk(conn, title="anchor", body="a")
+        db.add_edge(conn, src=l, dst=a, relation="implements")
+
+        heal.apply_nightly_supersede(conn, w, l)
+
+        _assert(not conn.in_transaction,
+                "nightly supersede must not leave a transaction open")
+        row = other.execute(
+            "SELECT status FROM nodes WHERE id = ?", (l,)
+        ).fetchone()
+        _assert(row["status"] == "stale",
+                f"independent connection must see the staled loser, got {row['status']!r}")
+        inherited = other.execute(
+            "SELECT status FROM edges WHERE src = ? AND dst = ? "
+            "AND relation = 'implements'",
+            (w, a),
+        ).fetchone()
+        _assert(inherited is not None and inherited["status"] == "active",
+                f"independent connection must see the inherited edge: {inherited}")
+        audit = other.execute(
+            "SELECT status FROM edges WHERE src = ? AND dst = ? "
+            "AND relation = 'supersedes'",
+            (w, l),
+        ).fetchone()
+        _assert(audit is not None and audit["status"] == "active",
+                f"independent connection must see the supersedes audit edge: {audit}")
+        print("PASS nightly_supersede_commit_boundary_unchanged")
+    finally:
+        other.close()
+        _cleanup(tmp, conn)
+
+
 def test_order_by_age_uses_updated_at():
     """Older = smaller updated_at."""
     older = {"id": 10, "updated_at": "2026-01-01 00:00:00",
@@ -906,6 +949,7 @@ if __name__ == "__main__":
     test_llm_pass_skip_when_use_llm_false()
     test_edge_exists_between_detects_either_direction()
     test_apply_nightly_supersede_marks_stale_and_links()
+    test_nightly_supersede_commit_boundary_unchanged()
     test_order_by_age_uses_updated_at()
     test_order_by_age_falls_back_to_id()
     test_apply_nightly_reconciled_by_adds_edge_and_keeps_canonical()
