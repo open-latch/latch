@@ -1967,16 +1967,14 @@ def kb_capture_decision(
             return scope_error
         # Capture first lands as staging, then the authority row is written,
         # then an approval transitions the node to canonical. All three DB
-        # mutations share one transaction. This cannot route through
-        # heal.insert_with_heal because that helper commits the node before the
-        # ratification row exists.
+        # mutations share one transaction — which is why this path consumes
+        # heal's transaction-neutral PREPARE primitive rather than the
+        # committing insert_with_heal wrapper. DECIDE (embed + KNN) runs above
+        # BEGIN IMMEDIATE so no model/scan cost sits inside the held write
+        # transaction.
         capture_started = time.perf_counter()
-        vec = embeddings.embed(f"{title}\n\n{body}")
-        candidates = heal.find_near_duplicates(
-            conn,
-            vec,
-            kind="decision",
-            threshold=heal.SIMILARITY_THRESHOLD,
+        vec, candidates = heal.decide_insert_candidates(
+            conn, kind="decision", title=title, body=body,
         )
         if conn.in_transaction:
             raise RuntimeError(
@@ -1984,87 +1982,20 @@ def kb_capture_decision(
             )
         conn.execute("BEGIN IMMEDIATE")
         try:
-            structural_events: list[dict] = []
-            new_id = db.insert_node_nc(
+            result, structural_events = heal.prepare_insert_with_heal(
                 conn,
                 kind="decision",
                 title=title,
                 body=body,
                 status="staging",
                 session_id=sid,
-                embedding=embeddings.to_blob(vec),
+                links=edges,
                 workstream_id=resolved_workstream_id,
+                embedding=vec,
+                candidates=candidates,
+                started_at=capture_started,
             )
-            for link in edges:
-                try:
-                    dst = int(link["dst"])
-                    relation = db.canonicalize_relation(str(link["relation"]))
-                    reconciliation_started = time.perf_counter()
-                    reconciliation_payload = None
-                    if relation in db.RECONCILIATION_RELATIONS:
-                        reconciliation_payload = db._capture_reconciliation_state(
-                            conn,
-                            new_id,
-                            dst,
-                            relation,
-                        )
-                    db.add_edge_nc(
-                        conn,
-                        src=new_id,
-                        dst=dst,
-                        relation=relation,
-                    )
-                    if reconciliation_payload is not None:
-                        structural_events.append({
-                            "stream": "reconciliation",
-                            "payload": reconciliation_payload,
-                            "started_at": reconciliation_started,
-                        })
-                except (KeyError, ValueError, TypeError):
-                    continue
-
-            matched_id = None
-            similarity = None
-            heal_state = "none"
-            if candidates:
-                top = candidates[0]
-                matched_id = int(top["id"])
-                similarity = float(top["similarity"])
-                db.add_edge_nc(
-                    conn,
-                    src=new_id,
-                    dst=matched_id,
-                    relation="related_to",
-                )
-                heal_state = "keep_both"
-                if top.get("workstream_id") != resolved_workstream_id:
-                    structural_events.append({
-                        "stream": "lifecycle",
-                        "payload": {
-                            "event": "cross_lane_duplicate",
-                            "substrate_version": (
-                                heal.lifecycle_signals.SUBSTRATE_VERSION
-                            ),
-                            "node_a": new_id,
-                            "node_b": matched_id,
-                            "ws_a": resolved_workstream_id,
-                            "ws_b": top.get("workstream_id"),
-                            "similarity": round(similarity, 6),
-                        },
-                    })
-                structural_events.append({
-                    "stream": "heal",
-                    "payload": {
-                        "inserted_node_id": new_id,
-                        "inserted_kind": "decision",
-                        "matched_id": matched_id,
-                        "matched_kind": top["kind"],
-                        "matched_status_before": top["status"],
-                        "similarity": similarity,
-                        "arbitrator_decision": "keep_both",
-                    },
-                    "started_at": capture_started,
-                })
+            new_id = result["id"]
 
             if ratification_action is not None:
                 db.insert_ratification_nc(
@@ -2078,45 +2009,19 @@ def kb_capture_decision(
             if ratification_action == "ratify":
                 db.update_node_nc(conn, new_id, status="canonical")
 
-            result = {
-                "id": new_id,
-                "heal": heal_state,
-                "matched_id": matched_id,
-                "similarity": similarity,
-                "arbitrator": None,
-                "plan_freshness_hint": heal.compute_plan_freshness_hint(
-                    conn, new_id, "decision",
-                ),
-                "orphan_hint": heal.compute_orphan_hint(
-                    conn, new_id, body, "decision",
-                ),
-                "ship_edge_hint": heal.compute_ship_edge_hint(
-                    conn, new_id, "decision",
-                ),
-            }
             conn.commit()
         except Exception:
             conn.rollback()
             raise
 
-        # The baseline capture path emitted these rows as its insert helper
-        # ran. Preparing their structural payloads in the transaction preserves
-        # the same point-in-time fields; emitting immediately after commit keeps
-        # rollback from leaving ghost telemetry and preserves ordering ahead of
-        # focus/write-contact bookkeeping.
-        for structural_event in structural_events:
-            payload = dict(structural_event["payload"])
-            started_at = structural_event.get("started_at")
-            if started_at is not None:
-                payload["elapsed_ms"] = int(
-                    (time.perf_counter() - float(started_at)) * 1000
-                )
-            heal.log_utils.emit_event(
-                structural_event["stream"],
-                payload,
-                project_path=_project_cwd(),
-                session_id=sid,
-            )
+        # Post-commit emission through the single shared emitter: a rollback
+        # emits nothing, and emission stays ahead of focus/write-contact
+        # bookkeeping.
+        heal.emit_prepared_events(
+            structural_events,
+            project_path=_project_cwd(),
+            session_id=sid,
+        )
 
         db.bump_focus_for_nodes(conn, [new_id])
         _record_write_events(conn, [new_id])
