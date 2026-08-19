@@ -349,6 +349,80 @@ def test_insert_with_heal_respects_kind_filter():
         _cleanup(tmp, conn)
 
 
+def test_arbitration_runs_before_any_write():
+    """DECIDE before PREPARE (5648 item 3): the LLM arbitration — whose model
+    subprocess can run up to ARBITRATE_TIMEOUT_S — must complete before
+    insert_with_heal's first DB write. With the wrapper holding one
+    transaction, arbitration below the first write would pin a RESERVED lock
+    30x past the 5000ms busy timeout."""
+    tmp, conn = _fresh_db()
+    other = db.connect(tmp)
+    observed = {}
+    original_arbitrate = heal.arbitrate
+
+    def _spy(new, old, sim, **kw):
+        observed["in_transaction"] = conn.in_transaction
+        observed["local_rows"] = conn.execute(
+            "SELECT COUNT(*) FROM nodes WHERE title = ?", ("arbitrated twin",)
+        ).fetchone()[0]
+        observed["visible_rows"] = other.execute(
+            "SELECT COUNT(*) FROM nodes WHERE title = ?", ("arbitrated twin",)
+        ).fetchone()[0]
+        return {"decision": "keep_both", "reason": "spy"}
+
+    heal.arbitrate = _spy
+    try:
+        heal.insert_with_heal(
+            conn, kind="fact", title="seed for arbitration",
+            body="docker compose up -d", use_llm=False,
+        )
+        out = heal.insert_with_heal(
+            conn, kind="fact", title="arbitrated twin",
+            body="docker compose up", use_llm=True, threshold=0.5,
+        )
+        _assert(out["heal"] == "keep_both", out)
+        _assert(observed, "arbitrator spy was never invoked")
+        _assert(observed["local_rows"] == 0 and observed["visible_rows"] == 0,
+                f"arbitration must run before the node insert, got {observed}")
+        _assert(observed["in_transaction"] is False,
+                f"the DECIDE phase must hold no transaction, got {observed}")
+    finally:
+        heal.arbitrate = original_arbitrate
+        other.close()
+        _cleanup(tmp, conn)
+    print("PASS arbitration_runs_before_any_write")
+
+
+def test_insert_with_heal_commits_for_non_transactional_callers():
+    """Pin for the committing-wrapper contract (5648 item 3, gate amendment
+    2483): driven exactly as compactor._apply_compaction and seed drive it —
+    use_llm=False, no caller transaction, no caller commit — the node must be
+    visible on an independent connection the moment the call returns, with no
+    transaction left open. This is the pin that catches the silent-data-loss
+    failure mode of a transaction-neutral insert_with_heal: the compactor
+    never commits at its own level (_run_compaction_locked ends
+    `finally: conn.close()`)."""
+    tmp, conn = _fresh_db()
+    other = db.connect(tmp)
+    try:
+        out = heal.insert_with_heal(
+            conn, kind="fact", title="compactor-shaped insert",
+            body="extracted by an offline maintenance pass", status="staging",
+            session_id="sess-compactor", use_llm=False,
+        )
+        _assert(not conn.in_transaction,
+                "insert_with_heal must commit before returning")
+        row = other.execute(
+            "SELECT status FROM nodes WHERE id = ?", (out["id"],)
+        ).fetchone()
+        _assert(row is not None and row["status"] == "staging",
+                f"independent connection must see the committed node: {row}")
+        print("PASS insert_with_heal_commits_for_non_transactional_callers")
+    finally:
+        other.close()
+        _cleanup(tmp, conn)
+
+
 # ---------- plan_freshness_hint ----------
 
 def test_plan_freshness_hint_fires_on_progress_with_plan_link():
@@ -1042,6 +1116,8 @@ if __name__ == "__main__":
     test_insert_with_heal_no_match()
     test_insert_with_heal_no_llm_keeps_both_on_match()
     test_insert_with_heal_respects_kind_filter()
+    test_arbitration_runs_before_any_write()
+    test_insert_with_heal_commits_for_non_transactional_callers()
     test_plan_freshness_hint_fires_on_progress_with_plan_link()
     test_plan_freshness_hint_empty_for_related_to_relation()
     test_plan_freshness_hint_empty_for_non_progress_source()

@@ -233,7 +233,7 @@ _CLASSIFIED_CANONICAL_SURFACES: dict[tuple[str, str, str, str], str] = {
         "node.get('status', 'canonical')",
     ): "fixture:offline-eval",
     (
-        "src/heal.py", "insert_with_heal", "db.insert_node", "status",
+        "src/heal.py", "prepare_insert_with_heal", "db.insert_node_nc", "status",
     ): "unattended:judgment-birth-refusal",
     (
         "src/mcp_server.py",
@@ -364,6 +364,26 @@ def test_machine_lifecycle_surfaces_are_explicitly_classified():
         "machine:workstream-repair",
         "machine:workstream-unmerge",
     } <= classifications
+
+
+def test_insert_with_heal_remains_a_registered_canonical_surface():
+    """Source-derived pin (5648 item 3): insert_with_heal must stay in the
+    AST-observed canonical-minting inventory — as a function whose body hits a
+    status writer, or as a tracked status-writer callee — so the committing
+    wrapper can never silently drop out of guard coverage. Deliberately reads
+    `_canonical_minting_surfaces()` (live source scan), not the frozen dict:
+    the weak form could be satisfied by editing the dict alone."""
+    observed = _canonical_minting_surfaces()
+    mentions = {
+        surface
+        for surface in observed
+        if surface[1] == "insert_with_heal"
+        or surface[2].rsplit(".", 1)[-1] == "insert_with_heal"
+    }
+    assert mentions, (
+        "insert_with_heal vanished from the source-derived canonical-minting "
+        "surface inventory"
+    )
 
 
 def test_exactly_two_public_ratification_writers_are_registered():
