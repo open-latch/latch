@@ -402,8 +402,11 @@ def test_exactly_two_public_ratification_writers_are_registered():
 
 
 # The private-pipeline calls kb_capture_decision._capture may never regrow
-# (5648 item 6). Leaf-name matching on purpose: an aliased import must not
-# slip past the ratchet.
+# (5648 item 6). Leaf-name matching catches attribute aliasing (e.g.
+# `import db as d2; d2.insert_node_nc`); a from-import rename or a helper
+# defined outside _capture is beyond any name-based ratchet — best-effort by
+# design, backed by the frozen canonical-minting registry and the two-writer
+# ratification pins.
 _CAPTURE_FORBIDDEN_PIPELINE_CALLS = frozenset({
     "embeddings.embed",
     "heal.find_near_duplicates",

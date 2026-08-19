@@ -206,10 +206,21 @@ def test_prepare_edge_is_transaction_neutral():
     stamps it at emission time)."""
     tmp, conn = _fresh_db()
     other = db.connect(tmp)
+    emitted = []
+    original_emit = log_utils.emit_event
     try:
         a = db.insert_node(conn, kind="fact", title="winner", body="w")
         b = db.insert_node(conn, kind="fact", title="loser", body="l")
-        events = heal._prepare_edge(conn, a, b, "supersedes")
+        log_utils.emit_event = lambda *args, **kwargs: emitted.append(args)
+        try:
+            events = heal._prepare_edge(conn, a, b, "supersedes")
+            _assert(heal._prepare_edge(conn, b, a, "related_to") == [],
+                    "related_to must prepare no reconciliation envelope")
+        finally:
+            log_utils.emit_event = original_emit
+        _assert(emitted == [],
+                f"prepare must emit nothing — emission belongs to the "
+                f"post-commit emitter, got {emitted}")
         _assert(conn.in_transaction,
                 "prepare must leave the caller's transaction open, not commit it")
         row = other.execute(
@@ -224,8 +235,6 @@ def test_prepare_edge_is_transaction_neutral():
         _assert("elapsed_ms" not in env["payload"],
                 f"envelope must not carry elapsed_ms pre-emission: {env['payload']}")
         _assert(env["payload"]["src_status_before"] == "staging", env["payload"])
-        _assert(heal._prepare_edge(conn, b, a, "related_to") == [],
-                "related_to must prepare no reconciliation envelope")
         conn.rollback()
         _assert(not heal.edge_exists_between(conn, a, b),
                 "rollback must discard the prepared edge")
