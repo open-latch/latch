@@ -1215,10 +1215,14 @@ def insert_with_heal(
             node via implements/advances/depends_on. The agent should follow
             up with kb_update on each listed linked_id. Empty list otherwise.
         "orphan_hint": [<{referenced_id, body_excerpt}>, ...]
-            — body `id=X` mentions with no active edge to/from the new node.
-            The agent should kb_link each (or drop the mention). Empty
-            otherwise. See compute_orphan_hint (id=1149 Part 2). Kind-scoped to
-            spec kinds (idea/open_question/decision) per id=1194 §1/§2.
+            — body `id=X` mentions with no active edge to/from the new node
+            at hint time. A PRE-HEAL diagnostic: computed before the
+            keep_both/supersede edge is applied, so the matched candidate can
+            appear here even though the heal edge exists on return (kb_link is
+            then an idempotent no-op). The agent should kb_link each (or drop
+            the mention). Empty otherwise. See compute_orphan_hint (id=1149
+            Part 2). Kind-scoped to spec kinds (idea/open_question/decision)
+            per id=1194 §1/§2.
         "ship_edge_hint": [<{linked_id, kind, title}>, ...]
             — non-empty when this is a `progress` node linking to a spec node
             (idea/open_question/decision) via `related_to`: a likely mis-typed

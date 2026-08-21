@@ -1229,11 +1229,16 @@ def kb_insert(
     "KB write hygiene" mandate. Empty list means no nudge applies.
 
     Also returns `orphan_hint`: a list of `{referenced_id, body_excerpt}`
-    entries for `id=X` mentions in the body that lack an active edge to/from
-    the new node. When non-empty, `latch_link` each (or drop the stale mention)
-    before moving on — see "Body-id mentions must be edges". (id=1149 Part 2.)
-    Kind-scoped to spec kinds (idea/open_question/decision) per id=1194 §1/§2,
-    so index/summary kinds (workstream/progress/fact/entity) no longer over-fire.
+    entries for `id=X` mentions in the body that lacked an active edge to/from
+    the new node when the hint was computed. It is a PRE-HEAL diagnostic:
+    hints are assembled before the on-insert heal edge is applied, so a
+    mention of the matched near-duplicate can surface even though the heal's
+    own related_to/supersedes edge exists by the time this returns —
+    `latch_link` on such an entry is an idempotent no-op. When non-empty,
+    `latch_link` each (or drop the stale mention) before moving on — see
+    "Body-id mentions must be edges". (id=1149 Part 2.) Kind-scoped to spec
+    kinds (idea/open_question/decision) per id=1194 §1/§2, so index/summary
+    kinds (workstream/progress/fact/entity) no longer over-fire.
 
     Also returns `ship_edge_hint`: non-empty when this is a `progress` node
     linking to a spec node (idea/open_question/decision) via `related_to` — a
