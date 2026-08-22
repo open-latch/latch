@@ -1233,8 +1233,11 @@ def kb_insert(
     the new node when the hint was computed. It is a PRE-HEAL diagnostic:
     hints are assembled before the on-insert heal edge is applied, so a
     mention of the matched near-duplicate can surface even though the heal's
-    own related_to/supersedes edge exists by the time this returns —
-    `latch_link` on such an entry is an idempotent no-op. When non-empty,
+    own related_to/supersedes edge exists by the time this returns. Such an
+    entry needs NO follow-up — the heal edge already satisfies the body-edge
+    invariant (an active edge in either direction, any relation, satisfies a
+    mention); do not re-link it, since `latch_link` with a different relation
+    adds a second edge rather than reusing the heal's. When non-empty,
     `latch_link` each (or drop the stale mention) before moving on — see
     "Body-id mentions must be edges". (id=1149 Part 2.) Kind-scoped to spec
     kinds (idea/open_question/decision) per id=1194 §1/§2, so index/summary

@@ -1218,9 +1218,11 @@ def insert_with_heal(
             — body `id=X` mentions with no active edge to/from the new node
             at hint time. A PRE-HEAL diagnostic: computed before the
             keep_both/supersede edge is applied, so the matched candidate can
-            appear here even though the heal edge exists on return (kb_link is
-            then an idempotent no-op). The agent should kb_link each (or drop
-            the mention). Empty otherwise. See compute_orphan_hint (id=1149
+            appear here even though the heal edge exists on return — that
+            entry needs no follow-up (the heal edge already satisfies the
+            mention; re-linking with a different relation would add a second
+            edge). The agent should kb_link each other entry (or drop the
+            mention). Empty otherwise. See compute_orphan_hint (id=1149
             Part 2). Kind-scoped to spec kinds (idea/open_question/decision)
             per id=1194 §1/§2.
         "ship_edge_hint": [<{linked_id, kind, title}>, ...]
