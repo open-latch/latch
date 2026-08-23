@@ -87,6 +87,14 @@ def _note_arbitrate_success() -> None:
 NIGHTLY_SIMILARITY_THRESHOLD = 0.70
 LOW_TIER_SIMILARITY_THRESHOLD = 0.50
 NIGHTLY_TOP_K = 5
+# Arbitration priority. Similarity says how alike two nodes are, not what an
+# unresolved disagreement costs: a pair nothing ever retrieves costs nothing,
+# while a contradiction between two hot nodes misleads every reader until it is
+# arbitrated. ref_count is the available proxy for that retrieval pressure.
+# Cross-workstream pairs are weighted up because no single lane's context
+# resolves them — that is precisely the case where a reader in lane B is misled
+# by lane A's node, and the sweep already detects it (cross_lane_contradiction).
+CROSS_LANE_PRIORITY_WEIGHT = 2.0
 RECENCY_AGE_DIFF_DAYS = 30
 RECENCY_FRESH_WINDOW_DAYS = 30
 REF_COUNT_RATIO_THRESHOLD = 3.0
@@ -506,6 +514,18 @@ def _pick_by_recency(a: dict, b: dict) -> dict | None:
         return None
     return {"winner": newer, "loser": older,
             "reason": f"newer by {diff}d and still fresh"}
+
+
+def _pair_priority(a: dict, b: dict) -> float:
+    """Expected cost of leaving this pair unarbitrated.
+
+    ``1 + max(ref_count)`` so a never-referenced pair still sorts above nothing
+    and stays ahead of a malformed row, scaled by the cross-lane weight. Used
+    only to order the queue; it never changes a verdict.
+    """
+    refs = max(int(a.get("ref_count") or 0), int(b.get("ref_count") or 0))
+    cross_lane = a.get("workstream_id") != b.get("workstream_id")
+    return (1 + refs) * (CROSS_LANE_PRIORITY_WEIGHT if cross_lane else 1.0)
 
 
 def _order_by_age(a: dict, b: dict) -> tuple[dict, dict]:
@@ -1427,6 +1447,13 @@ def nightly_heal(
         # the deterministic recency/ref_count supersede to be deferred to the LLM.
         "cross_scope_deferred": 0,
         "cross_lane_signals": 0,
+        # Priority mass (see _pair_priority) split by what the heal budget could
+        # actually reach this run. priority_llm / (priority_llm +
+        # priority_deferred) is the queue-aim metric: it answers "did the scarce
+        # LLM budget go to the contradictions that are actually being read?"
+        # independently of how many pairs the cap allowed.
+        "priority_llm": 0.0,
+        "priority_deferred": 0.0,
     }
 
     if integrity:
@@ -1434,6 +1461,7 @@ def nightly_heal(
         _debug(f"integrity pass: {summary['integrity']}")
 
     if not contradictions:
+        _log_run_summary(summary, project_path)
         return summary
 
     candidates = conn.execute(
@@ -1449,7 +1477,8 @@ def nightly_heal(
 
     # ---------- Discovery pass: build pair list across all candidates ----------
     seen_pairs: set[tuple[int, int]] = set()
-    pair_list: list[tuple[float, str, int, int]] = []  # (sim, tier, a_id, b_id)
+    # (sim, tier, a_id, b_id, priority)
+    pair_list: list[tuple[float, str, int, int, float]] = []
 
     for row in candidates:
         a_id = row["id"]
@@ -1502,11 +1531,12 @@ def nightly_heal(
             sim = cand["similarity"]
             tier = "high" if sim >= high_threshold else "low"
             summary["by_tier"][tier] += 1
-            pair_list.append((sim, tier, a_id, b_id))
+            pair_list.append((sim, tier, a_id, b_id, _pair_priority(a, b)))
 
     # ---------- Arbitration pass: high-tier first, then low-tier ----------
-    # Sort: high-tier pairs before low-tier; within a tier, higher sim first.
-    pair_list.sort(key=lambda p: (0 if p[1] == "high" else 1, -p[0]))
+    # Sort: high-tier pairs before low-tier (unchanged guarantee); within a
+    # tier, highest priority first, similarity as a deterministic tiebreak.
+    pair_list.sort(key=lambda p: (0 if p[1] == "high" else 1, -p[4], -p[0]))
 
     _debug(f"arbitration pass: {len(pair_list)} pairs queued "
            f"(high={summary['by_tier']['high']}, low={summary['by_tier']['low']})")
@@ -1516,7 +1546,7 @@ def nightly_heal(
     # node_artifact lookup happens at most once across the whole pass.
     scope_cache: dict = {}
 
-    for sim, tier, a_id, b_id in pair_list:
+    for sim, tier, a_id, b_id, priority in pair_list:
         # Re-fetch — an earlier arbitration in this pass may have marked one
         # of these stale, or added an edge between them, via cascade.
         a = db.get_node(conn, a_id)
@@ -1598,6 +1628,7 @@ def nightly_heal(
             summary["deferred"] += 1
             summary["deferred_by_tier"][tier] += 1
             summary["by_path"]["deferred"] += 1
+            summary["priority_deferred"] += priority
             pair_a, pair_b = sorted((a_id, b_id))
             log_utils.emit_event(
                 "heal_deferred",
@@ -1610,6 +1641,12 @@ def nightly_heal(
                     "budget_date": budget_state.get("date"),
                     "budget_count_heal": budget_state.get("count_heal"),
                     "retry_eligible": True,
+                    # Backlog is measurable from this stream alone: what the
+                    # queue left behind, and how costly leaving it was.
+                    "priority": round(float(priority), 6),
+                    "ref_count_max": max(int(a.get("ref_count") or 0),
+                                         int(b.get("ref_count") or 0)),
+                    "cross_lane": a.get("workstream_id") != b.get("workstream_id"),
                 },
                 project_path=project_path,
                 session_id=None,
@@ -1619,6 +1656,7 @@ def nightly_heal(
             continue
 
         summary["llm_invocations"] += 1
+        summary["priority_llm"] += priority
         _debug(f"    invoking LLM arbitrator (tier={tier})")
         verdict = three_pass_arbitrate(
             a, b, similarity=sim, use_llm=True, tier=tier,
@@ -1664,6 +1702,7 @@ def nightly_heal(
         summary["drift"] = {"error": str(e)}
 
     _debug(f"sweep complete: {summary}")
+    _log_run_summary(summary, project_path)
     return summary
 
 
@@ -1707,6 +1746,25 @@ def _log(msg: str) -> None:
             f.write(f"[{datetime.now().isoformat(timespec='seconds')}] {msg}\n")
     except Exception:
         pass
+
+
+def _log_run_summary(summary: dict, project_path: str | None) -> None:
+    """Emit one `heal_run` row per nightly sweep, success or failure.
+
+    heal.log's other writers are all error paths, so a stale or absent file
+    reads the same as a healer that silently stopped running. This row is the
+    positive heartbeat. It goes to the project-scoped daily stream rather than
+    KB_ROOT/heal.log because KB_ROOT is a module-level constant that test runs
+    do not isolate — writing run rows there would mix real sweeps with pytest
+    output. Counts only: no node text or titles.
+    """
+    fields = ("examined", "collisions", "superseded", "kept_both",
+              "reconciled", "deferred", "budget_blocked",
+              "priority_llm", "priority_deferred")
+    row = {k: summary.get(k, 0) for k in fields}
+    row["by_path"] = summary.get("by_path", {})
+    row["integrity"] = summary.get("integrity", {})
+    log_utils.emit_event("heal_run", row, project_path=project_path)
 
 
 def _debug(msg: str) -> None:

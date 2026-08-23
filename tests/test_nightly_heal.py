@@ -7,6 +7,7 @@ actually spawning a subprocess.
 """
 from __future__ import annotations
 
+import json
 import shutil
 import sys
 import tempfile
@@ -938,6 +939,168 @@ def test_nightly_heal_excludes_summary_nodes_from_contradiction_sweep():
         _cleanup(tmp, conn)
 
 
+
+def _read_run_rows(tmp):
+    path = log_utils.today_log_path("heal_run", tmp)
+    if not path.exists():
+        return []
+    return [json.loads(l) for l in path.read_text(encoding="utf-8").splitlines()
+            if l.strip()]
+
+
+def test_nightly_heal_emits_run_heartbeat():
+    """Every sweep leaves a heal_run row. heal.log is error-only, so without a
+    positive heartbeat a quiet log is indistinguishable from a healer that
+    silently stopped running."""
+    tmp, conn = _fresh_db()
+    try:
+        heal.nightly_heal(conn, project_path=tmp, use_llm=False)
+        rows = _read_run_rows(tmp)
+        _assert(len(rows) == 1, f"expected 1 heal_run row, got {len(rows)}")
+        for key in ("examined", "collisions", "superseded", "kept_both",
+                    "reconciled", "deferred", "budget_blocked", "by_path",
+                    "integrity"):
+            _assert(key in rows[0], f"heal_run row missing {key}")
+        print("PASS nightly_heal_emits_run_heartbeat")
+    finally:
+        _cleanup(tmp, conn)
+
+
+def test_nightly_heal_heartbeat_on_integrity_only_run():
+    """contradictions=False returns early; that path must still heartbeat."""
+    tmp, conn = _fresh_db()
+    try:
+        heal.nightly_heal(conn, project_path=tmp, use_llm=False,
+                          contradictions=False)
+        rows = _read_run_rows(tmp)
+        _assert(len(rows) == 1,
+                f"integrity-only run emitted {len(rows)} heal_run rows")
+        print("PASS nightly_heal_heartbeat_on_integrity_only_run")
+    finally:
+        _cleanup(tmp, conn)
+
+
+def _set_ws(conn, node_id, ws):
+    conn.execute("UPDATE nodes SET workstream_id = ? WHERE id = ?", (ws, node_id))
+    conn.commit()
+
+
+def _priority_probe(conn, tmp, pairs, *, refs, ws=None):
+    """Run a sweep with budget for exactly one LLM call over `pairs`.
+
+    Returns the (sorted) pair the arbitrator actually spent it on.
+    `pairs` is [(a, b, sim), ...]; `refs`/`ws` map node id -> value.
+    """
+    import budget
+    for node_id, n in refs.items():
+        _set_ref(conn, node_id, n)
+    for node_id, w in (ws or {}).items():
+        _set_ws(conn, node_id, w)
+    for a, b, _ in pairs:
+        _set_ts(conn, a, updated_at=_days_ago(5))
+        _set_ts(conn, b, updated_at=_days_ago(5))
+
+    by_a = {a: (b, sim) for a, b, sim in pairs}
+    original_find, original_arb = heal.find_near_duplicates, heal._arbitrate_nightly
+    calls: list[tuple[int, int]] = []
+
+    def fake_find(_conn, _vec, *, exclude_id=None, threshold=0.0, top_k=5, **_):
+        if exclude_id in by_a:
+            b, sim = by_a[exclude_id]
+            return [{"id": b, "similarity": sim, "kind": "fact",
+                     "status": "staging"}]
+        return []
+
+    def stub_arb(a_node, b_node, _sim, **kw):
+        calls.append((a_node["id"], b_node["id"]))
+        return {"decision": "keep_both", "reason": "test"}
+
+    heal.find_near_duplicates, heal._arbitrate_nightly = fake_find, stub_arb
+    cap = budget.DEFAULT_HEAL_DAILY_CAP
+    for _ in range(cap - 1):
+        budget.check_and_record(tmp, category="heal", cap=cap)
+    try:
+        result = heal.nightly_heal(conn, project_path=tmp, use_llm=True,
+                                   low_threshold=0.50, high_threshold=0.70)
+    finally:
+        heal.find_near_duplicates, heal._arbitrate_nightly = original_find, original_arb
+    _assert(len(calls) == 1, f"expected exactly 1 LLM call, got {calls}")
+    return tuple(sorted(calls[0])), result
+
+
+def test_nightly_heal_prioritizes_retrieved_pairs_over_more_similar_ones():
+    """Within a tier, the one available LLM call goes to the pair that is
+    actually being retrieved -- even though the cold pair is MORE similar.
+    Similarity measures likeness; ref_count measures what the contradiction
+    costs while it stays unresolved."""
+    tmp, conn = _fresh_db()
+    try:
+        hot_a = _mk(conn, kind="fact", title="hot a", body="hot pair content")
+        hot_b = _mk(conn, kind="fact", title="hot b", body="hot pair content")
+        cold_a = _mk(conn, kind="fact", title="cold a", body="cold pair content")
+        cold_b = _mk(conn, kind="fact", title="cold b", body="cold pair content")
+        called, result = _priority_probe(
+            conn, tmp,
+            # cold pair is the MORE similar one -- old sort would pick it.
+            [(hot_a, hot_b, 0.75), (cold_a, cold_b, 0.95)],
+            refs={hot_a: 10, hot_b: 10, cold_a: 0, cold_b: 0},
+        )
+        _assert(called == tuple(sorted((hot_a, hot_b))),
+                f"budget should go to the retrieved pair, got {called}")
+        _assert(result["priority_llm"] > result["priority_deferred"],
+                f"priority mass should favour what was arbitrated: {result}")
+        print("PASS nightly_heal_prioritizes_retrieved_pairs_over_more_similar_ones")
+    finally:
+        _cleanup(tmp, conn)
+
+
+def test_nightly_heal_cross_lane_outranks_same_lane_at_equal_refs():
+    """Equal retrieval pressure, and the same-lane pair is MORE similar: the
+    cross-workstream pair still wins, because no single lane's context
+    resolves it. Similarity alone would have picked the same-lane pair."""
+    tmp, conn = _fresh_db()
+    try:
+        # workstream_id is a FK to a kind='workstream' node; the sweep's seed
+        # query excludes that kind, so these never become candidates.
+        ws1 = _mk(conn, kind="workstream", title="lane one", body="lane one")
+        ws2 = _mk(conn, kind="workstream", title="lane two", body="lane two")
+        x_a = _mk(conn, kind="fact", title="x a", body="cross lane content")
+        x_b = _mk(conn, kind="fact", title="x b", body="cross lane content")
+        s_a = _mk(conn, kind="fact", title="s a", body="same lane content")
+        s_b = _mk(conn, kind="fact", title="s b", body="same lane content")
+        called, _ = _priority_probe(
+            conn, tmp,
+            [(x_a, x_b, 0.80), (s_a, s_b, 0.95)],
+            refs={x_a: 3, x_b: 3, s_a: 3, s_b: 3},
+            ws={x_a: ws1, x_b: ws2, s_a: ws1, s_b: ws1},
+        )
+        _assert(called == tuple(sorted((x_a, x_b))),
+                f"cross-lane pair should win the tiebreak, got {called}")
+        print("PASS nightly_heal_cross_lane_outranks_same_lane_at_equal_refs")
+    finally:
+        _cleanup(tmp, conn)
+
+
+def test_heal_deferred_row_carries_priority_fields():
+    """The deferred backlog must be measurable from its own log stream."""
+    tmp, conn = _fresh_db()
+    try:
+        a = _mk(conn, kind="fact", title="d a", body="deferred pair content")
+        b = _mk(conn, kind="fact", title="d b", body="deferred pair content")
+        c = _mk(conn, kind="fact", title="d c", body="other pair content")
+        d = _mk(conn, kind="fact", title="d d", body="other pair content")
+        _priority_probe(conn, tmp, [(a, b, 0.95), (c, d, 0.90)],
+                        refs={a: 9, b: 9, c: 1, d: 1})
+        path = log_utils.today_log_path("heal_deferred", tmp)
+        rows = [json.loads(l) for l in path.read_text(encoding="utf-8").splitlines()
+                if l.strip()]
+        _assert(rows, "expected at least one heal_deferred row")
+        for key in ("priority", "ref_count_max", "cross_lane"):
+            _assert(key in rows[0], f"heal_deferred row missing {key}")
+        print("PASS heal_deferred_row_carries_priority_fields")
+    finally:
+        _cleanup(tmp, conn)
+
 if __name__ == "__main__":
     test_recency_pass_picks_newer_when_diff_large_and_newer_fresh()
     test_recency_pass_skips_when_both_stale()
@@ -971,4 +1134,9 @@ if __name__ == "__main__":
     test_nightly_heal_runs_correlator()
     test_nightly_heal_correlator_failure_isolated()
     test_nightly_heal_excludes_summary_nodes_from_contradiction_sweep()
+    test_nightly_heal_emits_run_heartbeat()
+    test_nightly_heal_heartbeat_on_integrity_only_run()
+    test_nightly_heal_prioritizes_retrieved_pairs_over_more_similar_ones()
+    test_nightly_heal_cross_lane_outranks_same_lane_at_equal_refs()
+    test_heal_deferred_row_carries_priority_fields()
     print("\nAll nightly-heal tests pass.")
