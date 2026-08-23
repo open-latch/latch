@@ -659,9 +659,19 @@ def test_gate_log_omits_request_text_echoed_back_as_a_claim():
 def test_committed_public_artifacts_carry_no_request_text_field():
     """The proof packet and shipped receipts are the public-safe surface. They
     must not gain a request-text field from this mission."""
+    def iter_keys(value):
+        if isinstance(value, dict):
+            for key, item in value.items():
+                yield key
+                yield from iter_keys(item)
+        elif isinstance(value, list):
+            for item in value:
+                yield from iter_keys(item)
+
+    banned = {"request_text", "query_excerpt", "raw_request", "query_text"}
     for relative in ("proof/live_gate_receipt.json", "proof/results.json"):
-        blob = (_ROOT / relative).read_text(encoding="utf-8")
-        for banned in ("request_text", "query_excerpt", "raw_request", "query_text"):
-            _assert(banned not in blob,
-                    f"{relative} must not carry {banned!r}")
+        payload = json.loads((_ROOT / relative).read_text(encoding="utf-8"))
+        leaked_fields = sorted(banned.intersection(iter_keys(payload)))
+        _assert(not leaked_fields,
+                f"{relative} must not carry fields {leaked_fields!r}")
     print("PASS committed_public_artifacts_carry_no_request_text_field")
