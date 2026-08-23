@@ -14,14 +14,14 @@ This packet combines one observed live gate receipt with two small, deterministi
 
 ## Observed live gate
 
-Captured with the `codex` backend on commit `2b6d49e1d711d41c74110e80c9c5ec13aedf82f8`. This is a synthetic no-history fixture and used no personal conversation history.
+Captured with the `codex` backend on commit `7961a8042a4499a734118fcf205756048ce7316d`. This is a synthetic no-history fixture and used no personal conversation history.
 
 ```text
 Request: Add multi-user accounts by moving the datastore from local SQLite to a hosted Postgres service.
 Recommendation: DO_NOT_PROCEED
-Summary: The canonical decision (id=1) explicitly keeps the demo app local-first on SQLite and rejects moving to hosted Postgres for multi-user accounts or sync. The request directly contradicts that decision; the supported direction is local SQLite with explicit export/import if data must move between machines.
-Risk if proceed: The implementation would reverse the app's canonical local-first, no-hosted-database architecture.
-Better next action: Keep SQLite and implement an explicit export/import workflow with documented limitations; revisit multi-user accounts only through a new human-approved architectural decision.
+Summary: The request directly contradicts the canonical decision to keep the demo app local-first on embedded SQLite and avoid hosted databases (id=1). That decision specifically rejects moving to managed Postgres for multi-user accounts or synchronization; the approved direction is SQLite with explicit export/import when portability is needed.
+Risk if proceed: The implementation would overturn the app's canonical local-first architecture and introduce the explicitly excluded hosted-service dependency.
+Better next action: Keep SQLite and, if cross-machine data movement is required, implement an explicit export/import workflow and document its limitations; otherwise seek a new human decision explicitly superseding id=1 before adding multi-user accounts.
 Cited evidence:
 - id=1 decision status=canonical: Keep the demo app local-first on SQLite — no hosted database
 Worktree changed before/after gate: no
@@ -63,7 +63,7 @@ This deterministic fixture eval grades seed-report capture and filtering; it is 
 
 ## Reproduce
 
-The deterministic results were generated from commit `2b6d49e1d711d41c74110e80c9c5ec13aedf82f8`.
+The deterministic results were generated from commit `7961a8042a4499a734118fcf205756048ce7316d`.
 
 ```bash
 bash bin/latch_eval.sh
