@@ -15,6 +15,7 @@ import socket
 import sys
 import threading
 import atexit
+import time
 from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1228,11 +1229,19 @@ def kb_insert(
     "KB write hygiene" mandate. Empty list means no nudge applies.
 
     Also returns `orphan_hint`: a list of `{referenced_id, body_excerpt}`
-    entries for `id=X` mentions in the body that lack an active edge to/from
-    the new node. When non-empty, `latch_link` each (or drop the stale mention)
-    before moving on — see "Body-id mentions must be edges". (id=1149 Part 2.)
-    Kind-scoped to spec kinds (idea/open_question/decision) per id=1194 §1/§2,
-    so index/summary kinds (workstream/progress/fact/entity) no longer over-fire.
+    entries for `id=X` mentions in the body that lacked an active edge to/from
+    the new node when the hint was computed. It is a PRE-HEAL diagnostic:
+    hints are assembled before the on-insert heal edge is applied, so a
+    mention of the matched near-duplicate can surface even though the heal's
+    own related_to/supersedes edge exists by the time this returns. Such an
+    entry needs NO follow-up — the heal edge already satisfies the body-edge
+    invariant (an active edge in either direction, any relation, satisfies a
+    mention); do not re-link it, since `latch_link` with a different relation
+    adds a second edge rather than reusing the heal's. When non-empty,
+    `latch_link` each (or drop the stale mention) before moving on — see
+    "Body-id mentions must be edges". (id=1149 Part 2.) Kind-scoped to spec
+    kinds (idea/open_question/decision) per id=1194 §1/§2, so index/summary
+    kinds (workstream/progress/fact/entity) no longer over-fire.
 
     Also returns `ship_edge_hint`: non-empty when this is a `progress` node
     linking to a spec node (idea/open_question/decision) via `related_to` — a
@@ -1255,6 +1264,15 @@ def kb_insert(
             "error": (
                 "priority ordering and lifecycle are machine-owned; use "
                 "latch_priority_add"
+            ),
+        }
+    if kind in db.JUDGMENT_KINDS and status == "canonical":
+        return {
+            "ok": False,
+            "error": (
+                "generic latch_insert cannot mint canonical judgment; use "
+                "latch_capture_decision(human_action='approve') for immediate "
+                "ratification, or insert staging and promote with latch_update"
             ),
         }
 
@@ -1382,9 +1400,77 @@ def kb_update(
         old_kind = node["kind"]
         old_status = node["status"]
         old_embedding = node["embedding"]
-        if workstream_id is not None:
-            db.set_node_workstream_nc(conn, [node_id], resolved_workstream_id)
-        db.update_node(conn, node_id, title=title, body=body, status=status, embedding=new_blob)
+        judgment_promotion = (
+            old_kind in db.JUDGMENT_KINDS
+            and old_status == "staging"
+            and status == "canonical"
+        )
+        if (
+            old_kind in db.JUDGMENT_KINDS
+            and status == "canonical"
+            and old_status not in {"staging", "canonical"}
+        ):
+            return {
+                "id": node_id,
+                "ok": False,
+                "error": (
+                    "only an explicit staging-to-canonical latch_update may "
+                    "ratify a judgment node"
+                ),
+            }
+
+        if judgment_promotion:
+            ratifier = _project_session_id()
+            if not ratifier:
+                return {
+                    "id": node_id,
+                    "ok": False,
+                    "error": (
+                        "a verified session identity is required to ratify a "
+                        "judgment node"
+                    ),
+                }
+            if conn.in_transaction:
+                raise RuntimeError(
+                    "latch_update ratification requires a clean connection"
+                )
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                if workstream_id is not None:
+                    db.set_node_workstream_nc(
+                        conn, [node_id], resolved_workstream_id,
+                    )
+                db.insert_ratification_nc(
+                    conn,
+                    node_id,
+                    ratifier=ratifier,
+                    action="ratify",
+                    scope="node",
+                    source="latch_update",
+                )
+                db.update_node_nc(
+                    conn,
+                    node_id,
+                    title=title,
+                    body=body,
+                    status=status,
+                    embedding=new_blob,
+                )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+        else:
+            if workstream_id is not None:
+                db.set_node_workstream_nc(conn, [node_id], resolved_workstream_id)
+            db.update_node(
+                conn,
+                node_id,
+                title=title,
+                body=body,
+                status=status,
+                embedding=new_blob,
+            )
         db.bump_focus_for_nodes(conn, [node_id])
         effective_body = body if body is not None else old_body
         # Pass the node kind so the shared helper applies the same kind-scope
@@ -1802,9 +1888,10 @@ def kb_capture_decision(
 
     The Type-1 (explicit/confirmed) leg of the decision-capture pipeline
     (KB id=1279 / id=1350 / scope id=1784). Call this AFTER the user acts on a
-    gate verdict — approve / modify / reject / override — so the ratified
-    judgment becomes, in one atomic step, BOTH (a) a `kind="decision"` KB node
-    (the content the user ratified) AND (b) a structural `decision.log` RL row
+    gate verdict — approve / modify / reject / override. Only `approve`
+    ratifies and promotes the decision; `reject` records a structural rejection,
+    while `modify` and `override` remain staging. A capture produces both (a) a
+    `kind="decision"` KB node and (b) a structural `decision.log` RL row
     (content-free: ids, closed-set labels, a join hash).
 
     This honours the human-confirmed-mutation rule (id=1151): materialise only
@@ -1831,7 +1918,10 @@ def kb_capture_decision(
         cited_node_ids: gate evidence node ids to link (`related_to`) from the
             new decision — the KB context the decision was made against.
         was_confirmed: whether the user confirmed the node's wording (Type-1).
-        status / links / workstream_id / session_id: as `latch_insert`.
+        status: retained for API compatibility. Authority is determined solely
+            by `human_action`: approve becomes canonical; every other accepted
+            action remains staging.
+        links / workstream_id / session_id: as `latch_insert`.
 
     Returns the `latch_insert`-shaped result plus `decision_logged` (bool) and the
     echoed `human_action`. Validates the three closed-set labels first and
@@ -1859,6 +1949,10 @@ def kb_capture_decision(
         edges.extend(links)
 
     sid = session_id or _project_session_id()
+    ratification_action = {
+        "approve": "ratify",
+        "reject": "reject",
+    }.get(human_action)
 
     def _capture(conn) -> tuple[dict, dict | None] | dict:
         priority_error = _priority_edge_error(
@@ -1866,26 +1960,79 @@ def kb_capture_decision(
         )
         if priority_error is not None:
             return priority_error
+        if ratification_action is not None and not sid:
+            return {
+                "ok": False,
+                "error": (
+                    "a verified session identity is required to ratify or "
+                    "reject a decision"
+                ),
+            }
         resolved_workstream_id, workstream_resolution, scope_error = (
             _resolve_membership_for_mcp(conn, workstream_id)
         )
         if scope_error is not None:
             return scope_error
-        # Observation capture must not compete with foreground work for the
-        # daily budget: recording what the human decided is instrumentation,
-        # not judgment. use_llm=False takes the deterministic keep_both
-        # near-duplicate path (the same degrade already used on a cap hit)
-        # instead of spending a nonheal unit on arbitration. Raising the
-        # ceiling or auto-approving were both rejected (id=3654).
-        result = heal.insert_with_heal(
-            conn, kind="decision", title=title, body=body, status=status,
-            session_id=sid, links=edges or None, use_llm=False,
-            workstream_id=resolved_workstream_id, project_path=_project_cwd(),
+        # Capture first lands as staging, then the authority row is written,
+        # then an approval transitions the node to canonical. All three DB
+        # mutations share one transaction — which is why this path consumes
+        # heal's transaction-neutral PREPARE primitive rather than the
+        # committing insert_with_heal wrapper. DECIDE (embed + KNN) runs above
+        # BEGIN IMMEDIATE so no model/scan cost sits inside the held write
+        # transaction.
+        capture_started = time.perf_counter()
+        vec, candidates = heal.decide_insert_candidates(
+            conn, kind="decision", title=title, body=body,
         )
-        new_id = result.get("id")
-        if new_id is not None:
-            db.bump_focus_for_nodes(conn, [new_id])
-            _record_write_events(conn, [new_id])
+        if conn.in_transaction:
+            raise RuntimeError(
+                "latch_capture_decision ratification requires a clean connection"
+            )
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            result, structural_events = heal.prepare_insert_with_heal(
+                conn,
+                kind="decision",
+                title=title,
+                body=body,
+                status="staging",
+                session_id=sid,
+                links=edges,
+                workstream_id=resolved_workstream_id,
+                embedding=vec,
+                candidates=candidates,
+                started_at=capture_started,
+            )
+            new_id = result["id"]
+
+            if ratification_action is not None:
+                db.insert_ratification_nc(
+                    conn,
+                    new_id,
+                    ratifier=sid,
+                    action=ratification_action,
+                    scope="node",
+                    source="capture_decision",
+                )
+            if ratification_action == "ratify":
+                db.update_node_nc(conn, new_id, status="canonical")
+
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+
+        # Post-commit emission through the single shared emitter: a rollback
+        # emits nothing, and emission stays ahead of focus/write-contact
+        # bookkeeping.
+        heal.emit_prepared_events(
+            structural_events,
+            project_path=_project_cwd(),
+            session_id=sid,
+        )
+
+        db.bump_focus_for_nodes(conn, [new_id])
+        _record_write_events(conn, [new_id])
         return result, workstream_resolution
 
     locked_result = _run_public_kb_mutation(_capture)
@@ -1919,12 +2066,18 @@ def kb_capture_decision(
     if workstream_resolution is not None:
         result["workstream_resolution"] = workstream_resolution
     if new_id is not None:
+        captured_status = (
+            "canonical" if ratification_action == "ratify" else "staging"
+        )
         result["kb_activity"] = _kb_activity(
             action="write",
             tool="latch_capture_decision",
-            summary=f"Captured user-ratified KB decision id={new_id}: {title}.",
+            summary=f"Captured human-reviewed KB decision id={new_id}: {title}.",
             nodes=[_activity_node({
-                "id": new_id, "kind": "decision", "title": title, "status": status,
+                "id": new_id,
+                "kind": "decision",
+                "title": title,
+                "status": captured_status,
             })],
             hints=_activity_hints(result),
         )
@@ -2035,6 +2188,29 @@ def kb_correct_apply(
         )
         if scope_error is not None:
             return scope_error
+        bad = db.get_node(conn, bad_node_id)
+        direct_machine_boundary = (
+            kind in {"workstream", "priority"}
+            or (
+                bad is not None
+                and bad["kind"] in {"workstream", "priority"}
+            )
+        )
+        if (
+            bad is not None
+            and not direct_machine_boundary
+            and mode in verify.CORRECT_MODES
+            and kind in db.JUDGMENT_KINDS
+            and corrected_status == "canonical"
+        ):
+            return {
+                "ok": False,
+                "error": (
+                    "latch_correct_apply is not a ratification surface and cannot "
+                    "mint canonical judgment; write the correction as staging, "
+                    "then explicitly ratify it with latch_update"
+                ),
+            }
         result = verify.correct_apply(
             conn, bad_node_id,
             mode=mode, title=title, body=body, kind=kind,

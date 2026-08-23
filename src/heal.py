@@ -666,15 +666,72 @@ def edge_exists_between(conn, x: int, y: int) -> bool:
     return row is not None
 
 
+# ---------- prepared structural events (transaction-neutral write path) ----------
+#
+# The prepare/commit/emit contract (PR #93 P1 discharge, KB id=5648):
+# transaction-neutral helpers write via db.*_nc only and return prepared event
+# envelopes [{"stream", "payload", "started_at"?}, ...]; the caller owns the
+# transaction and calls emit_prepared_events AFTER its commit, so a rollback
+# emits nothing — mechanically, not by per-caller review.
+
+
+def _prepare_edge(conn, src: int, dst: int, relation: str) -> list[dict]:
+    """Add/reactivate an edge without committing or emitting.
+
+    Captures the reconciliation.log payload BEFORE the edge write (the KB
+    id=1097/id=1121 capture-before-mutation rule) and returns it as a prepared
+    envelope — empty list for non-reconciliation relations. The envelope
+    carries `started_at`, never `elapsed_ms`; the post-commit emitter stamps
+    the elapsed time at emission.
+    """
+    canonical = db.canonicalize_relation(str(relation))
+    started_at = time.perf_counter()
+    captured = None
+    if canonical in db.RECONCILIATION_RELATIONS:
+        captured = db._capture_reconciliation_state(conn, src, dst, canonical)
+    db.add_edge_nc(conn, src, dst, canonical)
+    if captured is None:
+        return []
+    return [{
+        "stream": "reconciliation",
+        "payload": captured,
+        "started_at": started_at,
+    }]
+
+
+def emit_prepared_events(
+    prepared_events: list[dict],
+    *,
+    project_path: str | None = None,
+    session_id: str | None = None,
+) -> None:
+    """The single post-commit emitter for prepared structural events.
+
+    Callers invoke this once, AFTER their transaction commits — never inside
+    it — so telemetry for rolled-back writes cannot exist. Envelopes carrying
+    `started_at` get `elapsed_ms` stamped at emission time.
+    """
+    for event in prepared_events:
+        payload = dict(event["payload"])
+        started_at = event.get("started_at")
+        if started_at is not None:
+            payload["elapsed_ms"] = int(
+                (time.perf_counter() - float(started_at)) * 1000
+            )
+        log_utils.emit_event(
+            event["stream"],
+            payload,
+            project_path=project_path,
+            session_id=session_id,
+        )
+
+
 # Supersede/replace lineage verbs: audit edges that must stay anchored on the
 # (now stale) loser. Everything else is structural and inherits to the winner.
 _LINEAGE_RELATIONS = {"supersedes", "replaces"}
 
 
-def _inherit_edges(
-    conn, winner_id: int, loser_id: int,
-    *, project_path: str | None = None, session_id: str | None = None,
-) -> int:
+def _inherit_edges(conn, winner_id: int, loser_id: int) -> tuple[int, list[dict]]:
     """Re-point the loser's structural edges onto the winner so a supersede
     doesn't orphan them on a node that drops out of default reads (KB id=1118).
 
@@ -684,11 +741,15 @@ def _inherit_edges(
     edges whose other endpoint is the winner are skipped (the just-added
     `supersedes` winner->loser edge is one such — and is lineage anyway).
 
-    Call AFTER the `supersedes` edge is recorded (so reconciliation.log captures
-    the supersede with the loser still non-stale) and BEFORE the loser is staled
-    — the capture-before-mutation order (KB id=1121). Returns the count migrated.
+    Transaction-neutral: writes via the shared edge preparer and
+    db.tombstone_edge_nc only. Call AFTER the `supersedes` edge is recorded (so
+    reconciliation.log captures the supersede with the loser still non-stale)
+    and BEFORE the loser is staled — the capture-before-mutation order (KB
+    id=1121). Returns (migrated_count, prepared_events) for the owning wrapper
+    to commit and emit.
     """
     migrated = 0
+    prepared: list[dict] = []
     for e in db.neighbors(conn, loser_id):
         rel = e["relation"]
         if rel in _LINEAGE_RELATIONS:
@@ -699,17 +760,31 @@ def _inherit_edges(
             # A loser<->winner non-lineage link or a loser self-loop: re-pointing
             # would self-loop on the winner, and it's redundant once the loser is
             # subsumed. Retire it rather than leave it active on a stale node.
-            db.tombstone_edge(conn, src=src, dst=dst, relation=rel)
+            db.tombstone_edge_nc(conn, src=src, dst=dst, relation=rel)
             continue
         new_src = winner_id if src == loser_id else src
         new_dst = winner_id if dst == loser_id else dst
-        db.add_edge(
-            conn, src=new_src, dst=new_dst, relation=rel,
-            project_path=project_path, session_id=session_id,
-        )
-        db.tombstone_edge(conn, src=src, dst=dst, relation=rel)
+        prepared.extend(_prepare_edge(conn, new_src, new_dst, rel))
+        db.tombstone_edge_nc(conn, src=src, dst=dst, relation=rel)
         migrated += 1
-    return migrated
+    return migrated, prepared
+
+
+def _apply_supersede_nc(conn, winner_id: int, loser_id: int) -> list[dict]:
+    """Transaction-neutral supersede lineage: supersedes edge winner -> loser,
+    structural edge inheritance, loser staled — in that order.
+
+    The supersedes capture runs BEFORE inheritance and the stale mutation so
+    reconciliation.log reflects the loser's pre-stale status (KB id=1097/
+    id=1121 capture-before-mutation rule); inheritance (KB id=1118) runs before
+    the stale so the loser's structural edges migrate rather than orphan.
+    Returns the prepared events for the owning wrapper to commit and emit.
+    """
+    prepared = _prepare_edge(conn, winner_id, loser_id, "supersedes")
+    _migrated, inherit_events = _inherit_edges(conn, winner_id, loser_id)
+    prepared.extend(inherit_events)
+    db.update_node_nc(conn, loser_id, status="stale")
+    return prepared
 
 
 def apply_nightly_supersede(
@@ -719,20 +794,21 @@ def apply_nightly_supersede(
     """Winner stays as-is; loser's structural edges inherit to the winner; loser
     marked stale; supersedes edge winner -> loser.
 
-    `add_edge` runs BEFORE `_inherit_edges` and `update_node` so reconciliation.log
-    captures the loser's pre-stale status (KB id=1097/id=1121 capture-before-
-    mutation rule). Edge inheritance (KB id=1118) runs before the stale mutation
-    so the loser's structural edges are migrated to the winner, not orphaned.
+    Thin commit+emit wrapper over `_apply_supersede_nc` — the nightly integrity
+    path still self-commits (priority 2483: internal integrity/maintenance
+    paths are out of the simplification surface). Kept separate from
+    `apply_supersede` deliberately: collapsing the two widens the blast radius
+    to every caller for no behavioral gain.
     """
-    db.add_edge(
-        conn, src=winner_id, dst=loser_id, relation="supersedes",
-        project_path=project_path, session_id=session_id,
+    try:
+        prepared = _apply_supersede_nc(conn, winner_id, loser_id)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    emit_prepared_events(
+        prepared, project_path=project_path, session_id=session_id,
     )
-    _inherit_edges(
-        conn, winner_id, loser_id,
-        project_path=project_path, session_id=session_id,
-    )
-    db.update_node(conn, loser_id, status="stale")
 
 
 def apply_nightly_reconciled_by(
@@ -760,24 +836,31 @@ def apply_supersede(
     """Mark old stale and add a supersedes edge new -> old. Audit trail kept.
     The old node's structural edges inherit to the new node (KB id=1118).
 
-    `add_edge` runs BEFORE `_inherit_edges` and `update_node` so reconciliation.log
-    captures the old node's pre-stale status (KB id=1097/id=1121 capture-before-
-    mutation rule).
+    Thin commit+emit wrapper over `_apply_supersede_nc`, which preserves the
+    capture-before-mutation ordering (KB id=1097/id=1121).
     """
-    db.add_edge(
-        conn, src=new_id, dst=old_id, relation="supersedes",
-        project_path=project_path, session_id=session_id,
+    try:
+        prepared = _apply_supersede_nc(conn, new_id, old_id)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    emit_prepared_events(
+        prepared, project_path=project_path, session_id=session_id,
     )
-    _inherit_edges(
-        conn, new_id, old_id,
-        project_path=project_path, session_id=session_id,
-    )
-    db.update_node(conn, old_id, status="stale")
 
 
 def apply_keep_both(conn, new_id: int, old_id: int) -> None:
-    """Add a related_to edge new -> old."""
-    db.add_edge(conn, src=new_id, dst=old_id, relation="related_to")
+    """Add a related_to edge new -> old. Commit+emit wrapper over the shared
+    edge preparer — related_to prepares no envelopes today, but the wrapper
+    keeps the prepare/commit/emit shape mechanical rather than special-cased."""
+    try:
+        prepared = _prepare_edge(conn, new_id, old_id, "related_to")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    emit_prepared_events(prepared)
 
 
 # ---------- plan-freshness hint ----------
@@ -958,6 +1041,143 @@ def _new_node_repo_scope(artifacts, project_path) -> frozenset:
     return frozenset(repos)
 
 
+def decide_insert_candidates(
+    conn,
+    *,
+    kind: str,
+    title: str,
+    body: str,
+    threshold: float = SIMILARITY_THRESHOLD,
+):
+    """DECIDE phase, read-only: embed the new node's text and scan for
+    near-duplicate candidates. Callers run this OUTSIDE any transaction so the
+    embed cost (cold ONNX session build measured at ~129ms) and the KNN scan
+    never sit inside a held write lock. Returns (vec, candidates)."""
+    vec = embeddings.embed(f"{title}\n\n{body}")
+    candidates = find_near_duplicates(conn, vec, kind=kind, threshold=threshold)
+    return vec, candidates
+
+
+def prepare_insert_with_heal(
+    conn,
+    *,
+    kind: str,
+    title: str,
+    body: str,
+    status: str = "staging",
+    session_id: str | None = None,
+    links: list[dict] | None = None,
+    workstream_id: int | None = None,
+    embedding,
+    candidates: list[dict],
+    decision: str = "keep_both",
+    arbitrator: str | None = None,
+    started_at: float | None = None,
+) -> tuple[dict, list[dict]]:
+    """PREPARE phase — the shared transaction-neutral insert/heal primitive
+    (PR #93 P1 discharge, KB id=5648). Writes via db.*_nc helpers only; never
+    begins, commits, or emits. Consumed by the committing `insert_with_heal`
+    wrapper and by `kb_capture_decision`'s ratification transaction.
+
+    `embedding` and `candidates` come precomputed from the caller's DECIDE
+    phase (`decide_insert_candidates`), so no embed/KNN cost lands inside a
+    held write transaction. `decision` is the already-resolved heal outcome
+    for the top candidate ("keep_both" | "supersede"); `arbitrator` is the
+    arbitrator's reason (None when the LLM was not consulted).
+
+    Returns (result, prepared_events): the 8-key insert result (see
+    `insert_with_heal`) and the structural event envelopes for
+    `emit_prepared_events` after the caller's commit.
+    """
+    if kind in db.JUDGMENT_KINDS and status == "canonical":
+        raise db.RatificationRequiredError(
+            "unattended heal cannot mint canonical judgment; insert staging "
+            "and use an explicit ratification surface"
+        )
+    t0 = started_at if started_at is not None else time.perf_counter()
+    prepared_events: list[dict] = []
+
+    new_id = db.insert_node_nc(
+        conn, kind=kind, title=title, body=body, status=status,
+        session_id=session_id, embedding=embeddings.to_blob(embedding),
+        workstream_id=workstream_id,
+    )
+    for link in links or []:
+        try:
+            prepared_events.extend(
+                _prepare_edge(conn, new_id, int(link["dst"]), str(link["relation"]))
+            )
+        except (KeyError, ValueError, TypeError):
+            continue
+
+    # Hints stay at their pre-apply position: computed before the heal edge so
+    # machine-authored keep_both/supersede/inherited edges can't flip them.
+    # Capture inherits this position — the one pinned observable change: its
+    # orphan_hint now fires on a matched-id mention exactly as insert does.
+    plan_hint = compute_plan_freshness_hint(conn, new_id, kind)
+    orphan_hint = compute_orphan_hint(conn, new_id, body, kind)
+    ship_edge_hint = compute_ship_edge_hint(conn, new_id, kind)
+
+    result = {
+        "id": new_id, "heal": "none", "matched_id": None,
+        "similarity": None, "arbitrator": None,
+        "plan_freshness_hint": plan_hint, "orphan_hint": orphan_hint,
+        "ship_edge_hint": ship_edge_hint,
+    }
+    if not candidates:
+        # No heal envelope — heal did not fire (KB id=1095).
+        return result, prepared_events
+
+    top = candidates[0]
+    top_sim = float(top["similarity"])
+    # POINT-IN-TIME capture (KB id=1091 §4 + id=1095 capture-before-mutation
+    # rule). The supersede branch mutates top's status -> 'stale', so we MUST
+    # snapshot the pre-apply status before either branch runs.
+    matched_status_before = top["status"]
+    matched_kind = top["kind"]
+    matched_id = int(top["id"])
+
+    if top.get("workstream_id") != workstream_id:
+        prepared_events.append({
+            "stream": "lifecycle",
+            "payload": {
+                "event": "cross_lane_duplicate",
+                "substrate_version": lifecycle_signals.SUBSTRATE_VERSION,
+                "node_a": new_id,
+                "node_b": matched_id,
+                "ws_a": workstream_id,
+                "ws_b": top.get("workstream_id"),
+                "similarity": round(top_sim, 6),
+            },
+        })
+
+    if decision == "supersede":
+        prepared_events.extend(_apply_supersede_nc(conn, new_id, matched_id))
+        heal_state = "supersede"
+    else:
+        prepared_events.extend(_prepare_edge(conn, new_id, matched_id, "related_to"))
+        heal_state = "keep_both"
+
+    prepared_events.append({
+        "stream": "heal",
+        "payload": {
+            "inserted_node_id": new_id,
+            "inserted_kind": kind,
+            "matched_id": matched_id,
+            "matched_kind": matched_kind,
+            "matched_status_before": matched_status_before,
+            "similarity": top_sim,
+            "arbitrator_decision": heal_state,
+        },
+        "started_at": t0,
+    })
+    result.update({
+        "heal": heal_state, "matched_id": matched_id,
+        "similarity": top_sim, "arbitrator": arbitrator,
+    })
+    return result, prepared_events
+
+
 def insert_with_heal(
     conn,
     *,
@@ -975,6 +1195,14 @@ def insert_with_heal(
 ) -> dict:
     """Insert a new node, running the on-insert heal against near-duplicates.
 
+    Committing wrapper over the three-phase pipeline (KB id=5648): DECIDE
+    (read-only, no transaction: embed, KNN, budget gate, arbitration) →
+    PREPARE (`prepare_insert_with_heal`, transaction-neutral) → commit → EMIT
+    (`emit_prepared_events`). The wrapper owns the transaction and its
+    rollback: non-transactional callers (compactor, seed) rely on the node
+    being committed when this returns, and a failure rolls the whole insert
+    back — an FK-invalid link no longer strands a committed node.
+
     Returns:
       {
         "id": <new node id>,
@@ -987,10 +1215,16 @@ def insert_with_heal(
             node via implements/advances/depends_on. The agent should follow
             up with kb_update on each listed linked_id. Empty list otherwise.
         "orphan_hint": [<{referenced_id, body_excerpt}>, ...]
-            — body `id=X` mentions with no active edge to/from the new node.
-            The agent should kb_link each (or drop the mention). Empty
-            otherwise. See compute_orphan_hint (id=1149 Part 2). Kind-scoped to
-            spec kinds (idea/open_question/decision) per id=1194 §1/§2.
+            — body `id=X` mentions with no active edge to/from the new node
+            at hint time. A PRE-HEAL diagnostic: computed before the
+            keep_both/supersede edge is applied, so the matched candidate can
+            appear here even though the heal edge exists on return — that
+            entry needs no follow-up (the heal edge already satisfies the
+            mention; re-linking with a different relation would add a second
+            edge). The agent should kb_link each other entry (or drop the
+            mention). Empty otherwise. See compute_orphan_hint (id=1149
+            Part 2). Kind-scoped to spec kinds (idea/open_question/decision)
+            per id=1194 §1/§2.
         "ship_edge_hint": [<{linked_id, kind, title}>, ...]
             — non-empty when this is a `progress` node linking to a spec node
             (idea/open_question/decision) via `related_to`: a likely mis-typed
@@ -998,138 +1232,75 @@ def insert_with_heal(
             plan-freshness can track it. See compute_ship_edge_hint (id=1194 §4).
       }
     """
+    if kind in db.JUDGMENT_KINDS and status == "canonical":
+        raise db.RatificationRequiredError(
+            "unattended heal cannot mint canonical judgment; insert staging "
+            "and use an explicit ratification surface"
+        )
+
+    # DECIDE: read-only, outside any transaction. Arbitration can hold a model
+    # subprocess open for up to ARBITRATE_TIMEOUT_S (150s); below the first
+    # write it would hold a RESERVED lock 30x past the 5000ms busy timeout.
     t0 = time.perf_counter()
-    vec = embeddings.embed(f"{title}\n\n{body}")
-
-    candidates = find_near_duplicates(
-        conn, vec, kind=kind, threshold=threshold,
+    vec, candidates = decide_insert_candidates(
+        conn, kind=kind, title=title, body=body, threshold=threshold,
     )
 
-    new_id = db.insert_node(
-        conn, kind=kind, title=title, body=body, status=status,
-        session_id=session_id, embedding=embeddings.to_blob(vec),
-        workstream_id=workstream_id,
-    )
-    for link in links or []:
-        try:
-            db.add_edge(
-                conn, src=new_id, dst=int(link["dst"]),
-                relation=str(link["relation"]),
-                project_path=project_path, session_id=session_id,
+    decision = "keep_both"
+    arbitrator = None
+    if candidates and use_llm:
+        # Budget gate for the on-insert LLM arbitrator. Charged to the
+        # non-heal bucket — kb_insert is user-driven and shouldn't compete
+        # with the nightly heal fan-out cap. project_path=None skips the gate
+        # (tests, back-compat).
+        allowed = True
+        if project_path is not None:
+            try:
+                allowed, _ = budget.check_and_record(
+                    project_path, category="nonheal",
+                )
+            except OSError as exc:
+                # Unreadable budget state means no arbitrator spend; fall back
+                # to the same safe keep_both deferral as a cap hit.
+                allowed = False
+                arbitrator = f"budget state unavailable ({exc}); deferred to nightly"
+            else:
+                if not allowed:
+                    arbitrator = "budget cap hit (non-heal); deferred to nightly"
+        if allowed:
+            top = candidates[0]
+            # Evidence contract: give the arbitrator the new + matched repo
+            # scopes so it treats provenance as evidence (prefer keep_both/
+            # reconciled across disjoint worlds). Computed BEFORE the call —
+            # the new node's provenance is attached by the caller only after
+            # this returns, so we derive it from the intended artifacts/
+            # project_path here.
+            new_repos = _new_node_repo_scope(artifacts, project_path)
+            old_repos = artifact_store.node_repo_scope(conn, top["id"])
+            verdict = arbitrate(
+                {"kind": kind, "title": title, "body": body}, top,
+                top["similarity"], new_repos=new_repos, old_repos=old_repos,
             )
-        except (KeyError, ValueError, TypeError):
-            continue
+            decision = verdict["decision"]
+            arbitrator = verdict["reason"]
 
-    plan_hint = compute_plan_freshness_hint(conn, new_id, kind)
-    orphan_hint = compute_orphan_hint(conn, new_id, body, kind)
-    ship_edge_hint = compute_ship_edge_hint(conn, new_id, kind)
-
-    if not candidates:
-        # No emission — heal did not fire (KB id=1095).
-        return {"id": new_id, "heal": "none", "matched_id": None,
-                "similarity": None, "arbitrator": None,
-                "plan_freshness_hint": plan_hint, "orphan_hint": orphan_hint, "ship_edge_hint": ship_edge_hint}
-
-    top = candidates[0]
-    top_sim = top["similarity"]
-    # POINT-IN-TIME capture (KB id=1091 §4 + id=1095 capture-before-mutation
-    # rule). apply_supersede mutates top.status -> 'stale', so we MUST snapshot
-    # the pre-arbitration status before any of the apply_* branches runs.
-    matched_status_before = top["status"]
-    matched_kind = top["kind"]
-    matched_id = top["id"]
-
-    if top.get("workstream_id") != workstream_id:
-        log_utils.emit_event(
-            "lifecycle",
-            {
-                "event": "cross_lane_duplicate",
-                "substrate_version": lifecycle_signals.SUBSTRATE_VERSION,
-                "node_a": new_id,
-                "node_b": matched_id,
-                "ws_a": workstream_id,
-                "ws_b": top.get("workstream_id"),
-                "similarity": round(float(top_sim), 6),
-            },
-            project_path=project_path,
-            session_id=session_id,
+    # PREPARE + commit: a failure rolls back the whole insert, links included.
+    try:
+        result, prepared_events = prepare_insert_with_heal(
+            conn, kind=kind, title=title, body=body, status=status,
+            session_id=session_id, links=links, workstream_id=workstream_id,
+            embedding=vec, candidates=candidates,
+            decision=decision, arbitrator=arbitrator, started_at=t0,
         )
-
-    def _emit(decision: str) -> None:
-        log_utils.emit_event(
-            "heal",
-            {
-                "inserted_node_id": new_id,
-                "inserted_kind": kind,
-                "matched_id": matched_id,
-                "matched_kind": matched_kind,
-                "matched_status_before": matched_status_before,
-                "similarity": top_sim,
-                "arbitrator_decision": decision,
-                "elapsed_ms": int((time.perf_counter() - t0) * 1000),
-            },
-            project_path=project_path,
-            session_id=session_id,
-        )
-
-    if not use_llm:
-        # Conservative path (compactor, offline ingest): don't pay a second
-        # LLM call; just link and defer to nightly heal.
-        apply_keep_both(conn, new_id, matched_id)
-        _emit("keep_both")
-        return {"id": new_id, "heal": "keep_both", "matched_id": matched_id,
-                "similarity": top_sim, "arbitrator": None,
-                "plan_freshness_hint": plan_hint, "orphan_hint": orphan_hint, "ship_edge_hint": ship_edge_hint}
-
-    # Budget gate for the on-insert LLM arbitrator. Charged to the non-heal
-    # bucket — kb_insert is user-driven and shouldn't compete with the nightly
-    # heal fan-out cap. project_path=None skips the gate (tests, back-compat).
-    if project_path is not None:
-        try:
-            allowed, _ = budget.check_and_record(project_path, category="nonheal")
-        except OSError as exc:
-            # Unreadable budget state means no arbitrator spend; fall back to
-            # the same safe keep_both deferral as a cap hit.
-            apply_keep_both(conn, new_id, matched_id)
-            _emit("keep_both")
-            return {"id": new_id, "heal": "keep_both", "matched_id": matched_id,
-                    "similarity": top_sim,
-                    "arbitrator": f"budget state unavailable ({exc}); deferred to nightly",
-                    "plan_freshness_hint": plan_hint, "orphan_hint": orphan_hint, "ship_edge_hint": ship_edge_hint}
-        if not allowed:
-            apply_keep_both(conn, new_id, matched_id)
-            _emit("keep_both")
-            return {"id": new_id, "heal": "keep_both", "matched_id": matched_id,
-                    "similarity": top_sim,
-                    "arbitrator": "budget cap hit (non-heal); deferred to nightly",
-                    "plan_freshness_hint": plan_hint, "orphan_hint": orphan_hint, "ship_edge_hint": ship_edge_hint}
-
-    # Evidence contract: give the arbitrator the new + matched repo scopes so it
-    # treats provenance as evidence (prefer keep_both/reconciled across disjoint
-    # worlds). Computed BEFORE the call — the new node's provenance is attached by
-    # the caller only after this returns, so we derive it from the intended
-    # artifacts/project_path here.
-    new_repos = _new_node_repo_scope(artifacts, project_path)
-    old_repos = artifact_store.node_repo_scope(conn, matched_id)
-    verdict = arbitrate(
-        {"kind": kind, "title": title, "body": body}, top, top_sim,
-        new_repos=new_repos, old_repos=old_repos,
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    # EMIT: post-commit only, so a rollback emits nothing.
+    emit_prepared_events(
+        prepared_events, project_path=project_path, session_id=session_id,
     )
-    if verdict["decision"] == "supersede":
-        apply_supersede(
-            conn, new_id, matched_id,
-            project_path=project_path, session_id=session_id,
-        )
-        _emit("supersede")
-        return {"id": new_id, "heal": "supersede", "matched_id": matched_id,
-                "similarity": top_sim, "arbitrator": verdict["reason"],
-                "plan_freshness_hint": plan_hint, "orphan_hint": orphan_hint, "ship_edge_hint": ship_edge_hint}
-
-    apply_keep_both(conn, new_id, matched_id)
-    _emit("keep_both")
-    return {"id": new_id, "heal": "keep_both", "matched_id": matched_id,
-            "similarity": top_sim, "arbitrator": verdict["reason"],
-            "plan_freshness_hint": plan_hint, "orphan_hint": orphan_hint, "ship_edge_hint": ship_edge_hint}
+    return result
 
 
 # ---------- nightly integrity pass ----------

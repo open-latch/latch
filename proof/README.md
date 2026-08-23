@@ -14,14 +14,14 @@ This packet combines one observed live gate receipt with two small, deterministi
 
 ## Observed live gate
 
-Captured with the `codex` backend on commit `67bb93b508eae3849040e236e856c2b13e1563ff`. This is a synthetic no-history fixture and used no personal conversation history.
+Captured with the `codex` backend on commit `2b6d49e1d711d41c74110e80c9c5ec13aedf82f8`. This is a synthetic no-history fixture and used no personal conversation history.
 
 ```text
 Request: Add multi-user accounts by moving the datastore from local SQLite to a hosted Postgres service.
 Recommendation: DO_NOT_PROCEED
-Summary: The canonical datastore decision (id=1) explicitly keeps the demo app local-first on embedded SQLite and rejects moving to hosted Postgres for multi-user accounts or sync. The request directly contradicts that decision; the allowed direction is SQLite with explicit export/import for cross-machine data movement.
-Risk if proceed: The app would cease to be a local-first, no-hosted-database demo and would directly unwind the canonical datastore decision.
-Better next action: Keep SQLite and, if cross-machine data movement is required, implement an explicit export/import workflow with documented limitations.
+Summary: The canonical decision (id=1) explicitly keeps the demo app local-first on SQLite and rejects moving to hosted Postgres for multi-user accounts or sync. The request directly contradicts that decision; the supported direction is local SQLite with explicit export/import if data must move between machines.
+Risk if proceed: The implementation would reverse the app's canonical local-first, no-hosted-database architecture.
+Better next action: Keep SQLite and implement an explicit export/import workflow with documented limitations; revisit multi-user accounts only through a new human-approved architectural decision.
 Cited evidence:
 - id=1 decision status=canonical: Keep the demo app local-first on SQLite — no hosted database
 Worktree changed before/after gate: no
@@ -63,7 +63,7 @@ This deterministic fixture eval grades seed-report capture and filtering; it is 
 
 ## Reproduce
 
-The deterministic results were generated from commit `67bb93b508eae3849040e236e856c2b13e1563ff`.
+The deterministic results were generated from commit `2b6d49e1d711d41c74110e80c9c5ec13aedf82f8`.
 
 ```bash
 bash bin/latch_eval.sh
