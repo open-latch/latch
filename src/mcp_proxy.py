@@ -29,6 +29,7 @@ from typing import Any
 import codex_session
 import mcp_broker
 import mcp_runtime
+import request_text_store
 
 
 _WINDOWS_EXECVE_UNSAFE = os.name == "nt"
@@ -836,6 +837,13 @@ def _exec_legacy_server() -> ProxyResult:
 
 
 def main() -> int | ProxyResult:
+    # The proxy is the last process on the standard MCP path that still holds
+    # the operator's own environment: `mcp_broker._daemon_environment` builds
+    # the daemon's from an allowlist, so a retired-flag notice emitted deeper
+    # in would read an environment the operator never wrote to. Emitted before
+    # anything else so it survives every branch below, and on stderr only —
+    # stdout is the JSON-RPC channel and is not touched.
+    request_text_store.notice_retired_capture_flag()
     if os.environ.get("LATCH_MCP_FORCE_LEGACY"):
         mcp_broker.emit_lifecycle("legacy_fallback", reason="forced_by_env")
         outcome = _exec_legacy_server()

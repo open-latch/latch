@@ -25,9 +25,15 @@ So the text gets its own home, deliberately outside the structural log:
   that an opt-out also reaches a long-lived shared MCP runtime (Latch 5300).
 
 Cleartext prompts are acceptable here on the same footing as the outcome-audit
-lineage checkpoint: the artifact never leaves the vault (ruling 4562). Nothing
-in this module is readable by the public-safe surface, and callers must keep it
-that way — this is the one place raw request text is allowed to land.
+lineage checkpoint: the artifact is never uploaded and never read by the
+public-safe surface (ruling 4562), and callers must keep it that way — this is
+the one place raw request text is allowed to land. Staying vault-local is
+enforced at the one boundary a caller does not control: the store path itself
+is opened ``O_NOFOLLOW``, so a symlink planted at that name cannot redirect a
+prompt to a regular file elsewhere on the disk, however private that file's
+own mode looks. What is NOT enforced, and is therefore not claimed: the vault
+directory's own location. An operator who symlinks the vault has moved the
+store deliberately, and this module does not second-guess that.
 
 That footing is weaker on Windows, and the weakness is inherited rather than
 introduced: POSIX mode bits are not a permission model there, so the 0600 this
@@ -54,17 +60,20 @@ filesystem path, a prompt, or exception prose — so the absence is
 self-reporting instead of only detectable by joining against gate.log. And the
 store no longer grows without bound: ``maintain_retention`` applies the
 structural logs' 30-day/1-year clock, with every artifact it produces created
-owner-only and, where mode bits are a permission model, verified so before a
-byte of compressed prompt text lands in it; on Windows the paragraph above
+at its source's own owner bits — owner-only, and never a bit wider than the
+file it replaces — and, where mode bits are a permission model, verified so
+before a byte of compressed prompt text lands in it; on Windows the paragraph above
 governs the archives exactly as it governs the store (Latch 5300).
 """
 from __future__ import annotations
 
+import errno
 import gzip
 import json
 import os
 import re
 import stat
+import sys
 import uuid
 import zlib
 from datetime import date, datetime, timezone
@@ -102,6 +111,63 @@ SETTINGS_KEY = "request_text_capture"
 
 _CAPTURE_SETTINGS_CACHE: dict[str, tuple[int, int, int, int, bool]] = {}
 
+# The gate.log opt-in this store replaced (see `gate.py`, and Latch 5227). It
+# is inert, but silently inert is operator-hostile: someone who still exports
+# it believes they are logging request text somewhere they are not (Latch 5300
+# item 5).
+RETIRED_CAPTURE_ENV = "CLAUDE_KB_LOG_RAW_QUERY"
+
+RETIRED_CAPTURE_NOTICE = (
+    f"[latch] {RETIRED_CAPTURE_ENV} is retired and ignored: gate.log never "
+    "carries request text. Verbatim capture lives in the private request-text "
+    f"store (opt out with {CAPTURE_ENV}=0 for one process, or the "
+    f'"{SETTINGS_KEY}" key in the vault runtime_settings.json).'
+)
+
+_retired_notice_emitted = False
+
+
+def notice_retired_capture_flag(stream=None) -> bool:
+    """Warn once per process, on stderr, if the retired flag is set.
+
+    Returns whether it wrote, purely so a regression can pin the once-only
+    behaviour. Never raises.
+
+    WHERE this is called from is the whole point, and it is not obvious. The
+    notice has to run in a process that can actually SEE the operator's
+    environment, which rules out the one place it belongs thematically: under
+    the standard shared MCP runtime the gate executes inside the long-lived
+    daemon, and `mcp_broker._daemon_environment` builds that process's
+    environment from a strict allowlist that has never included this name. A
+    daemon-side `os.environ` read therefore returns None no matter what the
+    operator exported, and daemon stderr is redirected to `mcp-daemon.log`
+    besides. So the live call sites are the ones that inherit the operator's
+    own environment and write where the operator looks: `mcp_proxy.main`
+    (stderr, which the MCP host surfaces as server output) and `doctor`
+    (a WARN row, which the operator reads directly). `gate` keeps its call for
+    direct CLI invocations, where the environment does reach it.
+
+    stdout is never touched: it is the MCP JSON-RPC channel, and one stray
+    byte there desynchronizes the host's parser.
+    """
+    global _retired_notice_emitted
+    if _retired_notice_emitted:
+        return False
+    if os.environ.get(RETIRED_CAPTURE_ENV) is None:
+        return False
+    _retired_notice_emitted = True
+    try:
+        target = sys.stderr if stream is None else stream
+        if target is None:
+            return False
+        target.write(RETIRED_CAPTURE_NOTICE + "\n")
+        flush = getattr(target, "flush", None)
+        if callable(flush):
+            flush()
+        return True
+    except Exception:
+        return False
+
 # Structural suppression signal (Latch 5300 item 4). A refused write emits one
 # row on this stream: a closed-set reason, a count, and the (gate_call_id,
 # query_hash, ts) join keys its gate.log row already carries — never a path,
@@ -114,6 +180,7 @@ SUPPRESSION_STREAM = "request_text_suppression"
 SUPPRESSION_REASONS = (
     "non_regular_target",
     "non_private_mode",
+    "symlinked_target",
     "open_failed",
     "write_failed",
     "unexpected_error",
@@ -239,6 +306,18 @@ def _mkdir_private(directory: Path) -> None:
             continue
 
 
+# Refusing to follow a symlink at the store path is what keeps a planted
+# link from redirecting cleartext prompts to a regular file outside the vault:
+# the target could be a perfectly private 0600 file of the attacker's choosing,
+# so the mode assertion alone never catches it. The kernel refuses the follow
+# atomically where the flag exists; `_append_private` carries a racy lstat
+# backstop for the platforms where it does not (Windows).
+_O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+
+# ELOOP is the POSIX answer to O_NOFOLLOW on a symlink; some BSDs answer EMLINK.
+_SYMLINK_ERRNOS = frozenset({errno.ELOOP, errno.EMLINK})
+
+
 def _append_private(path: Path, line: str) -> None:
     """Append one line to a 0600 file, creating it privately if absent.
 
@@ -256,10 +335,36 @@ def _append_private(path: Path, line: str) -> None:
     # path, where "logging must never break the caller" has to mean never
     # stalling it either — an exception is swallowed, an indefinite block is
     # not. On a regular file the flag is inert.
-    flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NONBLOCK", 0)
+    #
+    # O_NOFOLLOW so the store name cannot be aimed somewhere else: a symlink
+    # here would send the prompt to whatever it points at, and pointing it at
+    # a 0600 file the attacker owns satisfies every check below.
+    flags = (
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_APPEND
+        | getattr(os, "O_NONBLOCK", 0)
+        | _O_NOFOLLOW
+    )
+    if not _O_NOFOLLOW:
+        # No kernel-side refusal available. This lstat is racy by construction
+        # — check and open are two syscalls — so it is a backstop for those
+        # platforms, never the guarantee the POSIX claim rests on.
+        try:
+            planted = path.is_symlink()
+        except OSError:
+            planted = False
+        if planted:
+            raise _WriteRefused(
+                "symlinked_target", "request-text store path is a symlink"
+            )
     try:
         descriptor = os.open(path, flags, 0o600)
     except OSError as exc:
+        if getattr(exc, "errno", None) in _SYMLINK_ERRNOS:
+            raise _WriteRefused(
+                "symlinked_target", "request-text store path is a symlink"
+            ) from exc
         raise _WriteRefused("open_failed", "store could not be opened") from exc
     try:
         # O_CREAT's mode applies only on creation and is masked by the umask,
@@ -291,8 +396,16 @@ def _append_private(path: Path, line: str) -> None:
 _POSIX_MODE_SEMANTICS = os.name == "posix"
 
 
-def _assert_private(descriptor: int) -> None:
+def _assert_private(descriptor: int, *, expected_mode: int = 0o600) -> None:
     """Raise unless the open descriptor is a regular file only the owner can read.
+
+    ``expected_mode`` is the exact mode the caller intends the artifact to
+    carry. It defaults to 0600 — the live store's mode — and the retention
+    sweep passes the source file's own owner bits instead, so a store an
+    operator has tightened to 0400 does not come back from compression with
+    owner-write restored. Any value that would let a group or another user
+    read is refused outright rather than proved, so no caller can weaken this
+    check by choosing its own argument.
 
     Asserting the mode is not the same as achieving it: `fchmod` can fail
     outright (unsupported filesystem, foreign ownership) and a store created
@@ -315,6 +428,12 @@ def _assert_private(descriptor: int) -> None:
     enough on Windows; it declines to convert an unenforceable assertion into
     a silent, total loss of capture on a supported platform (id=5241).
     """
+    if expected_mode & 0o077:
+        raise _WriteRefused(
+            "non_private_mode",
+            "refusing to write request text at a mode readable beyond the "
+            f"owner (mode {oct(expected_mode)})",
+        )
     info = os.fstat(descriptor)
     if not stat.S_ISREG(info.st_mode):
         raise _WriteRefused(
@@ -322,7 +441,7 @@ def _assert_private(descriptor: int) -> None:
         )
     if not _POSIX_MODE_SEMANTICS:
         return
-    if stat.S_IMODE(info.st_mode) != 0o600:
+    if stat.S_IMODE(info.st_mode) != expected_mode:
         raise _WriteRefused(
             "non_private_mode",
             "refusing to write request text to a non-private store "
@@ -484,8 +603,9 @@ def maintain_retention(
 
     Deliberately NOT ``log_utils.maintain_log_retention``: that sweep creates
     its gzip archives with the ambient umask, which would republish cleartext
-    prompts as a world-readable file. This sweep writes each archive on a
-    descriptor opened 0600 and verifies it private with the same check the
+    prompts as a world-readable file. This sweep opens each archive at the
+    source file's own owner bits — never wider, and never wider than 0600 even
+    if the source is — and verifies that exact mode with the same check the
     live write path trusts (``_assert_private`` — a mode proof on POSIX, a
     regular-file proof where mode bits are not a permission model) before a
     byte of compressed prompt text lands in it. A file whose archive cannot
@@ -563,11 +683,17 @@ def maintain_retention(
 def _compress_private(entry: Path) -> None:
     """Gzip ``entry`` in place without ever widening its mode.
 
-    The archive is created 0600 under a temporary name, re-asserted on the
-    held descriptor (umask cannot ADD bits to 0600, but ``fchmod`` repairs a
-    stray restrictive mask and ``_assert_private`` proves the result), filled,
-    fsynced, and atomically renamed over the final ``.gz`` name. Only then is
-    the plaintext original removed.
+    "Never widen" is stricter than "always 0600": a store an operator has
+    tightened to 0400 must not come back from the sweep with owner-write
+    restored, so the archive inherits the SOURCE's own owner bits rather than
+    a fixed constant. Those bits are read from the open source descriptor —
+    not from the name, which could be swapped between a stat and an open — and
+    intersected with 0600, so an already-wide source is narrowed rather than
+    copied. The archive is created at that mode under a temporary name,
+    re-asserted on the held descriptor (``fchmod`` repairs a stray mask,
+    ``_assert_private`` proves the result), filled, fsynced, and atomically
+    renamed over the final ``.gz`` name. Only then is the plaintext original
+    removed.
     """
     final = entry.with_name(entry.name + ".gz")
     # No leading dot (the gitignore pattern must keep covering the name) and a
@@ -576,27 +702,51 @@ def _compress_private(entry: Path) -> None:
     temporary = entry.with_name(
         f"{entry.name}.{os.getpid()}.{uuid.uuid4().hex}.gz.tmp"
     )
-    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    # O_NOFOLLOW for the same reason the append path uses it: the caller's
+    # is_symlink() screen and this open are two syscalls apart.
+    source_fd = os.open(entry, os.O_RDONLY | _O_NOFOLLOW)
+    descriptor = -1
     try:
+        source_info = os.fstat(source_fd)
+        if not stat.S_ISREG(source_info.st_mode):
+            raise _WriteRefused(
+                "non_regular_target", "request-text store is not a regular file"
+            )
+        archive_mode = (
+            stat.S_IMODE(source_info.st_mode) & 0o600
+            if _POSIX_MODE_SEMANTICS
+            else 0o600
+        )
+        descriptor = os.open(
+            temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, archive_mode
+        )
         if hasattr(os, "fchmod"):
             try:
-                os.fchmod(descriptor, 0o600)
+                os.fchmod(descriptor, archive_mode)
             except OSError:
                 pass
-        _assert_private(descriptor)
-        with entry.open("rb") as source, os.fdopen(descriptor, "wb") as raw:
+        _assert_private(descriptor, expected_mode=archive_mode)
+        # Hand each descriptor to exactly one owner, so the finally clause
+        # below can never double-close one the file object already owns.
+        source = os.fdopen(source_fd, "rb")
+        source_fd = -1
+        with source:
+            raw = os.fdopen(descriptor, "wb")
             descriptor = -1
-            with gzip.GzipFile(fileobj=raw, mode="wb") as archive:
-                while True:
-                    chunk = source.read(1 << 16)
-                    if not chunk:
-                        break
-                    archive.write(chunk)
-            raw.flush()
-            os.fsync(raw.fileno())
+            with raw:
+                with gzip.GzipFile(fileobj=raw, mode="wb") as archive:
+                    while True:
+                        chunk = source.read(1 << 16)
+                        if not chunk:
+                            break
+                        archive.write(chunk)
+                raw.flush()
+                os.fsync(raw.fileno())
         os.replace(temporary, final)
         entry.unlink()
     finally:
+        if source_fd >= 0:
+            os.close(source_fd)
         if descriptor >= 0:
             os.close(descriptor)
         try:

@@ -24,6 +24,22 @@ for repair by handoff 5300 and pinned here BEFORE its repair (4543):
 
 Item 1 (the founder's Windows-parity ruling) is documentation-verified; this
 suite pins only its testable edges (the README's documented controls).
+
+Review round 1 (Latch 5845) then failed criteria 1, 2, and 5 on boundaries
+none of the above reached. The round-2 repairs are pinned at the bottom of
+this file:
+
+- criterion 1 — the append path followed a symlink at the store name to a
+  regular 0600 file OUTSIDE the vault, which every mode check happily
+  approved; and the README described the two opt-out controls as peers when
+  the environment variable in fact overrides the vault key absolutely.
+- criterion 2 — compression forced every archive to 0600 without reading the
+  source, so a 0400 store came back with owner-write ADDED. The item-2 test
+  above only ever started from 0600, which is why it passed.
+- criterion 5 — the notice read ``os.environ`` inside the shared daemon, whose
+  environment ``mcp_broker`` builds from an allowlist that has never carried
+  the flag, and whose stderr is redirected to a log file. It could not reach a
+  standard MCP operator at all.
 """
 from __future__ import annotations
 
@@ -639,7 +655,7 @@ def test_setting_the_retired_raw_query_flag_notices_once_on_stderr():
     real_stderr = sys.stderr
     try:
         os.environ[RETIRED_ENV] = "1"
-        gate._raw_query_notice_emitted = False
+        request_text_store._retired_notice_emitted = False
         buffer = io.StringIO()
         sys.stderr = buffer
         _run(conn, tmp, SENTINEL)
@@ -656,7 +672,7 @@ def test_setting_the_retired_raw_query_flag_notices_once_on_stderr():
 
         # Unset, the notice never fires.
         os.environ.pop(RETIRED_ENV, None)
-        gate._raw_query_notice_emitted = False
+        request_text_store._retired_notice_emitted = False
         buffer = io.StringIO()
         sys.stderr = buffer
         _run(conn, tmp, SENTINEL + " third call")
@@ -669,7 +685,7 @@ def test_setting_the_retired_raw_query_flag_notices_once_on_stderr():
         os.environ.pop(RETIRED_ENV, None)
         if prev_env is not None:
             os.environ[RETIRED_ENV] = prev_env
-        gate._raw_query_notice_emitted = False
+        request_text_store._retired_notice_emitted = False
         _cleanup(tmp, conn)
 
 
@@ -692,3 +708,244 @@ def test_readme_documents_both_controls_and_the_retention_policy():
     _assert("30 days" in window and "one year" in window,
             "the retention policy must be stated next to the capture paragraph")
     print("PASS readme_documents_both_controls_and_the_retention_policy")
+
+
+# ---------- review round 2 (Latch 5845): criteria 1, 2, and 5 ----------
+
+def test_append_refuses_a_symlink_pointing_outside_the_vault():
+    """Criterion-1 repair. A symlink planted at the store name redirects the
+    prompt to whatever it points at, and pointing it at a private regular file
+    the attacker owns satisfies every check the store had: regular file, 0600,
+    owner-readable. Containment therefore cannot rest on the mode assertion —
+    the open itself must refuse to follow. The refusal is a real refusal, so
+    it also has to show up on the suppression stream."""
+    if os.name != "posix":
+        print("SKIP append_refuses_a_symlink_pointing_outside_the_vault (POSIX symlinks)")
+        return
+    tmp, conn = _fresh_db()
+    outside_root = tempfile.mkdtemp(prefix="kb_reqtext_outside_")
+    try:
+        paths.ensure_project_dir(tmp)
+        # A perfectly private regular file — just not in the vault.
+        outside = Path(outside_root) / "harvested.jsonl"
+        descriptor = os.open(outside, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        os.close(descriptor)
+
+        target = request_text_store.store_path(tmp)
+        if target.exists():
+            target.unlink()
+        os.symlink(outside, target)
+
+        _run(conn, tmp, SENTINEL)
+
+        _assert(outside.read_bytes() == b"",
+                "the prompt must never be written through the symlink")
+        _assert(target.is_symlink(),
+                "the store path must be left as found, not replaced")
+        rows = _suppression_rows(tmp)
+        _assert(len(rows) == 1, f"one refusal must be reported: {rows}")
+        _assert(rows[0].get("reason") == "symlinked_target",
+                f"the refusal reason must name the symlink: {rows[0]}")
+        _assert(rows[0]["reason"] in request_text_store.SUPPRESSION_REASONS,
+                "the reason must stay inside the closed set")
+        blob = json.dumps(rows[0])
+        _assert(SENTINEL[:40] not in blob, "no prompt text on the suppression row")
+        _assert(str(outside) not in blob and outside.name not in blob,
+                "no filesystem path on the suppression row")
+        _assert(len(_gate_rows(tmp)) == 1,
+                "the structural gate row still lands")
+        print("PASS append_refuses_a_symlink_pointing_outside_the_vault")
+    finally:
+        shutil.rmtree(outside_root, ignore_errors=True)
+        _cleanup(tmp, conn)
+
+
+def test_retention_never_widens_a_tightened_source_mode():
+    """Criterion-2 repair. 'Never widen' is stricter than 'always 0600': an
+    operator who tightened the store to 0400 must not get owner-write back
+    from the sweep. Every artifact is compared against the mode of the file it
+    replaced, not against a constant — which is the assertion the round-1
+    suite was missing."""
+    if os.name != "posix":
+        print("SKIP retention_never_widens_a_tightened_source_mode (POSIX modes)")
+        return
+    tmp, conn = _fresh_db()
+    try:
+        now = datetime.now(timezone.utc)
+        aged_day = (now - timedelta(days=60)).date()
+        aged = _store_day(tmp, aged_day, SENTINEL)
+        os.chmod(aged, 0o400)
+        source_mode = stat.S_IMODE(aged.stat().st_mode)
+        _assert(source_mode == 0o400, f"fixture must be 0400, got {oct(source_mode)}")
+
+        result = request_text_store.maintain_retention(tmp)
+        _assert(result.get("gzipped") == 1, f"the aged file must compress: {result}")
+
+        archive = Path(str(aged) + ".gz")
+        _assert(archive.exists(), "the archive must exist")
+        archive_mode = stat.S_IMODE(archive.stat().st_mode)
+        _assert(archive_mode == source_mode,
+                f"archive must inherit 0400, got {oct(archive_mode)}")
+        _assert(archive_mode & ~source_mode == 0,
+                f"the sweep must never ADD a bit: {oct(archive_mode)} vs {oct(source_mode)}")
+        with gzip.open(archive, "rt", encoding="utf-8") as f:
+            _assert(SENTINEL in f.read(), "compression must still preserve content")
+
+        # Nothing else the sweep left behind may be wider than owner-only.
+        vault = paths.project_dir(tmp)
+        for produced in vault.iterdir():
+            if not produced.name.startswith(request_text_store.STREAM):
+                continue
+            if not produced.is_file():
+                continue
+            mode = stat.S_IMODE(produced.stat().st_mode)
+            _assert(mode & 0o077 == 0,
+                    f"{produced.name} must not be group/other readable: {oct(mode)}")
+        print("PASS retention_never_widens_a_tightened_source_mode")
+    finally:
+        _cleanup(tmp, conn)
+
+
+def test_retention_narrows_an_already_wide_source():
+    """The other direction of the same rule: inheriting the source's bits must
+    not turn into COPYING them. A store that is somehow 0644 gets a 0600
+    archive — narrowing is always allowed, widening never is."""
+    if os.name != "posix":
+        print("SKIP retention_narrows_an_already_wide_source (POSIX modes)")
+        return
+    tmp, conn = _fresh_db()
+    try:
+        aged_day = (datetime.now(timezone.utc) - timedelta(days=60)).date()
+        aged = _store_day(tmp, aged_day, SENTINEL)
+        os.chmod(aged, 0o644)
+
+        result = request_text_store.maintain_retention(tmp)
+        _assert(result.get("gzipped") == 1, f"the aged file must compress: {result}")
+        archive = Path(str(aged) + ".gz")
+        mode = stat.S_IMODE(archive.stat().st_mode)
+        _assert(mode == 0o600,
+                f"a wide source must yield an owner-only archive, got {oct(mode)}")
+        print("PASS retention_narrows_an_already_wide_source")
+    finally:
+        _cleanup(tmp, conn)
+
+
+def test_the_shared_daemon_can_never_see_the_retired_flag():
+    """Criterion-5 repair, first boundary. The reason the old notice could not
+    work is structural, not incidental: `mcp_broker` builds the long-lived
+    daemon's environment from an allowlist, so the flag an operator exports
+    never arrives. Pinning that here keeps a future refactor from quietly
+    moving the notice back inside the daemon."""
+    import mcp_broker      # noqa: PLC0415
+    import mcp_runtime     # noqa: PLC0415
+
+    allowlisted = (
+        mcp_broker.DAEMON_OS_ENV_VARS
+        + mcp_broker.DAEMON_OWNER_ENV_VARS
+        + mcp_broker.DAEMON_HELPER_ENV_VARS
+        + mcp_runtime.PROCESS_OS_ENV_VARS
+    )
+    _assert(RETIRED_ENV not in allowlisted,
+            "the retired flag must not be donated to the daemon")
+
+    built = mcp_broker._daemon_environment(
+        source={RETIRED_ENV: "1", "PATH": os.environ.get("PATH", "")},
+        for_helper=True,
+    )
+    _assert(RETIRED_ENV not in built,
+            f"the daemon environment must not carry the flag: {sorted(built)}")
+    print("PASS the_shared_daemon_can_never_see_the_retired_flag")
+
+
+def test_the_mcp_proxy_emits_the_retired_flag_notice():
+    """Criterion-5 repair, second boundary. The proxy is the last process on
+    the standard MCP path that still holds the operator's environment, so the
+    notice fires there — before any branch that could exit early, and on
+    stderr only. `connection_metadata` is made to fail so `main` returns
+    immediately without starting a daemon."""
+    import mcp_proxy       # noqa: PLC0415
+
+    prev_env = os.environ.pop(RETIRED_ENV, None)
+    prev_legacy = os.environ.pop("LATCH_MCP_FORCE_LEGACY", None)
+    real_metadata = mcp_proxy.connection_metadata
+    real_stderr, real_stdout = sys.stderr, sys.stdout
+    try:
+        os.environ[RETIRED_ENV] = "1"
+        request_text_store._retired_notice_emitted = False
+
+        def _refuse():
+            raise ValueError("probe: no daemon in this test")
+
+        mcp_proxy.connection_metadata = _refuse
+        err, out = io.StringIO(), io.StringIO()
+        sys.stderr, sys.stdout = err, out
+        code = mcp_proxy.main()
+        sys.stderr, sys.stdout = real_stderr, real_stdout
+
+        _assert(code == 2, f"the probe must short-circuit main(), got {code}")
+        notice = err.getvalue()
+        _assert(RETIRED_ENV in notice,
+                f"the proxy must warn about the retired flag: {notice!r}")
+        _assert("retired" in notice, f"the notice must say retired: {notice!r}")
+        _assert(request_text_store.CAPTURE_ENV in notice,
+                "the notice must point at the live opt-out")
+        _assert(RETIRED_ENV not in out.getvalue(),
+                "stdout is the JSON-RPC channel and must stay clean")
+        print("PASS the_mcp_proxy_emits_the_retired_flag_notice")
+    finally:
+        sys.stderr, sys.stdout = real_stderr, real_stdout
+        mcp_proxy.connection_metadata = real_metadata
+        os.environ.pop(RETIRED_ENV, None)
+        if prev_env is not None:
+            os.environ[RETIRED_ENV] = prev_env
+        if prev_legacy is not None:
+            os.environ["LATCH_MCP_FORCE_LEGACY"] = prev_legacy
+        request_text_store._retired_notice_emitted = False
+
+
+def test_doctor_reports_the_retired_flag():
+    """Criterion-5 repair, third boundary. Stderr is only operator-visible if
+    the host shows it; doctor is the surface an operator opens on purpose, and
+    it runs in their own environment rather than the daemon's."""
+    import doctor          # noqa: PLC0415
+
+    prev_env = os.environ.pop(RETIRED_ENV, None)
+    try:
+        name, level, detail = doctor.check_retired_env_flags()
+        _assert(level == doctor.OK, f"unset flag must be clean: {level} {detail}")
+
+        os.environ[RETIRED_ENV] = "1"
+        name, level, detail = doctor.check_retired_env_flags()
+        _assert(level == doctor.WARN,
+                f"a set retired flag must WARN, not FAIL: {level}")
+        _assert(RETIRED_ENV in detail and "retired" in detail,
+                f"the row must name the flag and its status: {detail!r}")
+        _assert(request_text_store.CAPTURE_ENV in detail
+                and request_text_store.SETTINGS_KEY in detail,
+                f"the row must point at both live controls: {detail!r}")
+        print("PASS doctor_reports_the_retired_flag")
+    finally:
+        os.environ.pop(RETIRED_ENV, None)
+        if prev_env is not None:
+            os.environ[RETIRED_ENV] = prev_env
+
+
+def test_readme_states_env_precedence_over_the_vault_key():
+    """Criterion-1 repair, documentation half. The README called the two
+    controls interchangeable; they are not. A user who sets the vault key to
+    false and leaves LATCH_REQUEST_TEXT_CAPTURE=1 exported is still captured,
+    and the README has to say so."""
+    readme = (_ROOT / "README.md").read_text(encoding="utf-8")
+    anchor = readme.find("gate-request-text-")
+    _assert(anchor != -1, "the capture paragraph must name the store file")
+    window = readme[anchor:anchor + 2600]
+    _assert("Either control suppresses the text while\nleaving the structural "
+            "records untouched." not in window,
+            "the bare 'either control' claim must not stand alone")
+    _assert("precedence" in window or "not consulted" in window,
+            f"the README must state the precedence: {window!r}")
+    _assert("LATCH_REQUEST_TEXT_CAPTURE=1" in window,
+            "the README must name the case where the env var overrides the key")
+    _assert("symbolic links" in window or "symlink" in window,
+            "the README must state that the store is opened without following links")
+    print("PASS readme_states_env_precedence_over_the_vault_key")
