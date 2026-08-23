@@ -495,6 +495,24 @@ def test_correct_apply_cannot_mint_canonical_judgment(
     assert _ratifications(mcp_vault) == []
 
 
+def test_insert_link_fk_failure_leaves_no_node(mcp_vault: Path) -> None:
+    """Pinned behavior change (5648 item 5b): a links.dst that violates the
+    edges FK must roll the whole latch_insert back — no node may survive the
+    failed transaction. Red against e7194b4, where insert_with_heal committed
+    the node before the edge insert failed."""
+    before = _node_count(mcp_vault)
+
+    with pytest.raises(sqlite3.IntegrityError):
+        mcp_server.kb_insert(
+            kind="fact",
+            title="FK-invalid link",
+            body="A dangling links.dst must not strand a committed node.",
+            links=[{"dst": 999999, "relation": "related_to"}],
+        )
+
+    assert _node_count(mcp_vault) == before
+
+
 @pytest.mark.parametrize("kind", sorted(db.JUDGMENT_KINDS))
 def test_heal_cannot_mint_canonical_judgment(
     mcp_vault: Path,

@@ -227,6 +227,36 @@ def test_capture_cross_workstream_duplicate_restores_lifecycle_signal(
     }
 
 
+def test_capture_candidate_search_runs_outside_the_write_transaction(
+    capture_vault: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The KNN candidate scan must run above BEGIN IMMEDIATE (5648 item 4):
+    a UserPromptSubmit hook writes with a 50ms busy timeout and no writer-lock
+    coverage, and the cold embed costs ~129ms — neither may sit inside the
+    capture write transaction. Green today; red on a naive consolidation that
+    lets the shared primitive do its own candidate scan inside the
+    transaction."""
+    observed: list[bool] = []
+
+    def _spy(conn, *args, **kwargs):
+        observed.append(bool(conn.in_transaction))
+        return []
+
+    monkeypatch.setattr(heal, "find_near_duplicates", _spy)
+
+    result = mcp_server.kb_capture_decision(
+        title="Candidate search stays outside the transaction",
+        body="The KNN candidate scan must not run under BEGIN IMMEDIATE.",
+        gate_request="Capture this human decision",
+        human_action="modify",
+        session_id="telemetry-session",
+    )
+
+    assert result["id"] is not None
+    assert observed == [False]
+
+
 def test_capture_rollback_cannot_emit_ghost_structural_events(
     capture_vault: Path,
     monkeypatch: pytest.MonkeyPatch,

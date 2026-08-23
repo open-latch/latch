@@ -233,7 +233,7 @@ _CLASSIFIED_CANONICAL_SURFACES: dict[tuple[str, str, str, str], str] = {
         "node.get('status', 'canonical')",
     ): "fixture:offline-eval",
     (
-        "src/heal.py", "insert_with_heal", "db.insert_node", "status",
+        "src/heal.py", "prepare_insert_with_heal", "db.insert_node_nc", "status",
     ): "unattended:judgment-birth-refusal",
     (
         "src/mcp_server.py",
@@ -366,6 +366,26 @@ def test_machine_lifecycle_surfaces_are_explicitly_classified():
     } <= classifications
 
 
+def test_insert_with_heal_remains_a_registered_canonical_surface():
+    """Source-derived pin (5648 item 3): insert_with_heal must stay in the
+    AST-observed canonical-minting inventory — as a function whose body hits a
+    status writer, or as a tracked status-writer callee — so the committing
+    wrapper can never silently drop out of guard coverage. Deliberately reads
+    `_canonical_minting_surfaces()` (live source scan), not the frozen dict:
+    the weak form could be satisfied by editing the dict alone."""
+    observed = _canonical_minting_surfaces()
+    mentions = {
+        surface
+        for surface in observed
+        if surface[1] == "insert_with_heal"
+        or surface[2].rsplit(".", 1)[-1] == "insert_with_heal"
+    }
+    assert mentions, (
+        "insert_with_heal vanished from the source-derived canonical-minting "
+        "surface inventory"
+    )
+
+
 def test_exactly_two_public_ratification_writers_are_registered():
     assert _ratification_writer_surfaces() == frozenset({
         (
@@ -379,6 +399,61 @@ def test_exactly_two_public_ratification_writers_are_registered():
             "db.insert_ratification_nc",
         ),
     })
+
+
+# The private-pipeline calls kb_capture_decision._capture may never regrow
+# (5648 item 6). Leaf-name matching catches attribute aliasing (e.g.
+# `import db as d2; d2.insert_node_nc`); a from-import rename or a helper
+# defined outside _capture is beyond any name-based ratchet — best-effort by
+# design, backed by the frozen canonical-minting registry and the two-writer
+# ratification pins.
+_CAPTURE_FORBIDDEN_PIPELINE_CALLS = frozenset({
+    "embeddings.embed",
+    "heal.find_near_duplicates",
+    "db.insert_node_nc",
+    "db.add_edge_nc",
+    "db._capture_reconciliation_state",
+})
+
+
+def test_capture_decision_has_no_private_insert_pipeline():
+    """Anti-drift ratchet (5648 item 6): kb_capture_decision._capture must
+    consume heal's shared DECIDE/PREPARE phases and may never regrow a private
+    copy of the insert pipeline. Red against e7194b4, where _capture called
+    every one of the forbidden functions directly."""
+    tree = ast.parse(
+        (SRC / "mcp_server.py").read_text(encoding="utf-8"),
+        filename="src/mcp_server.py",
+    )
+    capture_fn = None
+    for outer in ast.walk(tree):
+        if (
+            isinstance(outer, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and outer.name == "kb_capture_decision"
+        ):
+            for inner in ast.walk(outer):
+                if isinstance(inner, ast.FunctionDef) and inner.name == "_capture":
+                    capture_fn = inner
+                    break
+    assert capture_fn is not None, "kb_capture_decision._capture not found"
+
+    called = {
+        _dotted_name(node.func)
+        for node in ast.walk(capture_fn)
+        if isinstance(node, ast.Call)
+    }
+    forbidden_leaves = {
+        name.rsplit(".", 1)[-1] for name in _CAPTURE_FORBIDDEN_PIPELINE_CALLS
+    }
+    leaked = {
+        name for name in called
+        if name in _CAPTURE_FORBIDDEN_PIPELINE_CALLS
+        or name.rsplit(".", 1)[-1] in forbidden_leaves
+    }
+    assert leaked == set(), (
+        "kb_capture_decision._capture regrew a private insert pipeline; "
+        f"forbidden calls: {sorted(leaked)}"
+    )
 
 
 def test_ratification_kind_mapping_is_exact():

@@ -327,6 +327,73 @@ def test_insert_with_heal_linked_mention_is_clean():
         _cleanup(tmp, conn)
 
 
+def test_capture_and_insert_agree_on_matched_id_mention():
+    """Pinned behavior change (5648 item 5a): with identical inputs — a body
+    that mentions the matched near-duplicate's id — kb_capture_decision and
+    insert_with_heal must surface the SAME orphan_hint. Red against e7194b4:
+    capture computed hints after its keep_both edge, so the mention looked
+    edged and capture returned an empty list while insert_with_heal fired."""
+    import mcp_server
+
+    tmp, conn = _fresh_db()
+    saved = {}
+    try:
+        matched = db.insert_node(
+            conn, kind="decision", title="matched decision",
+            body="the near-duplicate node the id mention points at",
+        )
+        body = f"constrains the scope of id={matched} without replacing it"
+
+        def _fixed_candidates(c, vec, **kw):
+            node = db.get_node(c, matched)
+            return [{**node, "similarity": 0.93}]
+
+        saved["find"] = heal.find_near_duplicates
+        heal.find_near_duplicates = _fixed_candidates
+
+        insert_res = heal.insert_with_heal(
+            conn, kind="decision", title="insert path twin",
+            body=body, use_llm=False,
+        )
+
+        saved["conn"] = mcp_server._conn
+        saved["cwd"] = mcp_server._project_cwd
+        saved["sid"] = mcp_server._project_session_id
+        saved["unlatched"] = mcp_server.paths.is_unlatched_mode
+        saved["decision_event"] = mcp_server.capture_streams.emit_decision_event
+        mcp_server._conn = lambda: db.connect(tmp)
+        mcp_server._project_cwd = lambda: tmp
+        mcp_server._project_session_id = lambda: "orphan-hint-session"
+        mcp_server.paths.is_unlatched_mode = lambda: False
+        mcp_server.capture_streams.emit_decision_event = lambda **_kw: None
+
+        capture_res = mcp_server.kb_capture_decision(
+            title="capture path twin",
+            body=body,
+            gate_request="Capture this human decision",
+            human_action="modify",
+        )
+
+        _assert(_ids(insert_res["orphan_hint"]) == [matched],
+                f"insert_with_heal must surface the matched-id mention, got "
+                f"{insert_res['orphan_hint']}")
+        _assert(_ids(capture_res["orphan_hint"]) == _ids(insert_res["orphan_hint"]),
+                f"capture and insert must agree on the matched-id mention: "
+                f"capture={capture_res['orphan_hint']} "
+                f"insert={insert_res['orphan_hint']}")
+        print("PASS capture_and_insert_agree_on_matched_id_mention")
+    finally:
+        heal.find_near_duplicates = saved.get("find", heal.find_near_duplicates)
+        if "conn" in saved:
+            import mcp_server
+            mcp_server._conn = saved["conn"]
+            mcp_server._project_cwd = saved["cwd"]
+            mcp_server._project_session_id = saved["sid"]
+            mcp_server.paths.is_unlatched_mode = saved["unlatched"]
+            mcp_server.capture_streams.emit_decision_event = saved["decision_event"]
+        _cleanup(tmp, conn)
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
