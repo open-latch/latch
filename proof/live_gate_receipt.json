@@ -1,8 +1,8 @@
 {
   "backend": "codex",
-  "better_next_action": "Keep SQLite and, if cross-machine data movement is required, implement an explicit export/import workflow and document its limitations; otherwise seek a new human decision explicitly superseding id=1 before adding multi-user accounts.",
+  "better_next_action": "Keep SQLite and implement an explicit export/import workflow with documented limitations; if multi-user accounts are now essential, ask the human to formally revisit and supersede decision id=1 first.",
   "capture_command": "bash bin/latch_proof_packet.sh --capture-live --backend codex",
-  "captured_at_utc": "2026-08-23T15:01:52Z",
+  "captured_at_utc": "2026-08-23T15:08:06Z",
   "demo_kind": "synthetic_no_history_fixture",
   "evidence_nodes": [
     {
@@ -30,10 +30,10 @@
   "observed": true,
   "recommendation": "DO_NOT_PROCEED",
   "request": "Add multi-user accounts by moving the datastore from local SQLite to a hosted Postgres service.",
-  "risk_if_proceed": "The implementation would overturn the app's canonical local-first architecture and introduce the explicitly excluded hosted-service dependency.",
+  "risk_if_proceed": "The hosted Postgres migration would violate the canonical local-first architecture and introduce the rejected multi-user/sync direction.",
   "schema_version": 2,
-  "source_commit": "7961a8042a4499a734118fcf205756048ce7316d",
-  "summary": "The request directly contradicts the canonical decision to keep the demo app local-first on embedded SQLite and avoid hosted databases (id=1). That decision specifically rejects moving to managed Postgres for multi-user accounts or synchronization; the approved direction is SQLite with explicit export/import when portability is needed.",
+  "source_commit": "679a92b03f6c3423a7a5f755c2179aa1070dd31b",
+  "summary": "The request directly revives the datastore migration explicitly ruled out by decision id=1: the demo must remain local-first on a single embedded SQLite file, without a hosted database. Multi-machine movement, if needed, must use explicit export/import rather than hosted Postgres.",
   "tested_runtime_git_blobs": {
     ".gitattributes": "dfdb8b771ce07609491fa2e83698969fd917a135",
     "KB_SCHEMA_VERSION": "00750edc07d6415dcc07ae0351e9397b0222b7ba",

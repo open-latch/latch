@@ -1,8 +1,8 @@
 {
   "live_demo": {
     "backend": "codex",
-    "better_next_action": "Keep SQLite and, if cross-machine data movement is required, implement an explicit export/import workflow and document its limitations; otherwise seek a new human decision explicitly superseding id=1 before adding multi-user accounts.",
-    "captured_at_utc": "2026-08-23T15:01:52Z",
+    "better_next_action": "Keep SQLite and implement an explicit export/import workflow with documented limitations; if multi-user accounts are now essential, ask the human to formally revisit and supersede decision id=1 first.",
+    "captured_at_utc": "2026-08-23T15:08:06Z",
     "demo_kind": "synthetic_no_history_fixture",
     "evidence_nodes": [
       {
@@ -30,9 +30,9 @@
     "observed": true,
     "recommendation": "DO_NOT_PROCEED",
     "request": "Add multi-user accounts by moving the datastore from local SQLite to a hosted Postgres service.",
-    "risk_if_proceed": "The implementation would overturn the app's canonical local-first architecture and introduce the explicitly excluded hosted-service dependency.",
-    "source_commit": "7961a8042a4499a734118fcf205756048ce7316d",
-    "summary": "The request directly contradicts the canonical decision to keep the demo app local-first on embedded SQLite and avoid hosted databases (id=1). That decision specifically rejects moving to managed Postgres for multi-user accounts or synchronization; the approved direction is SQLite with explicit export/import when portability is needed."
+    "risk_if_proceed": "The hosted Postgres migration would violate the canonical local-first architecture and introduce the rejected multi-user/sync direction.",
+    "source_commit": "679a92b03f6c3423a7a5f755c2179aa1070dd31b",
+    "summary": "The request directly revives the datastore migration explicitly ruled out by decision id=1: the demo must remain local-first on a single embedded SQLite file, without a hosted database. Multi-machine movement, if needed, must use explicit export/import rather than hosted Postgres."
   },
   "reproduction": {
     "check_packet": "bash bin/latch_proof_packet.sh --check",
@@ -64,7 +64,7 @@
       "filtered": 4
     }
   },
-  "source_commit": "7961a8042a4499a734118fcf205756048ce7316d",
+  "source_commit": "679a92b03f6c3423a7a5f755c2179aa1070dd31b",
   "tested_runtime_manifest_sha256": "aab984177aaa0ccd46a93ea5815fcf7b7b78f3db234178c20145488712adccca",
   "thesis": "Latch preserves project judgment and can surface a rejected path before an agent changes files.",
   "wedge_v1": {
