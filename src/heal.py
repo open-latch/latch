@@ -543,6 +543,23 @@ def _pick_by_ref_count(a: dict, b: dict) -> dict | None:
             "reason": f"ref_count dominance {hi} vs {lo}"}
 
 
+def _deterministic_supersede(a: dict, b: dict) -> dict | None:
+    """Return the high-tier deterministic verdict, preserving pass order."""
+    for path, picker in (("recency", _pick_by_recency),
+                         ("ref_count", _pick_by_ref_count)):
+        pick = picker(a, b)
+        if pick is not None:
+            return {
+                "decision": "supersede",
+                "winner_id": pick["winner"]["id"],
+                "loser_id": pick["loser"]["id"],
+                "older_id": None, "newer_id": None,
+                "path": path, "tier": "high",
+                "reason": pick["reason"],
+            }
+    return None
+
+
 def three_pass_arbitrate(
     a: dict, b: dict, *, similarity: float = 0.0, use_llm: bool = True,
     tier: str = "high", a_repos=frozenset(), b_repos=frozenset(),
@@ -582,26 +599,9 @@ def three_pass_arbitrate(
     # don't intersect → treat deterministic supersede as unsafe, defer to LLM.
     cross_scope_disjoint = bool(a_repos and b_repos and not (a_repos & b_repos))
     if tier == "high" and not cross_scope_disjoint:
-        pick = _pick_by_recency(a, b)
-        if pick is not None:
-            return {
-                "decision": "supersede",
-                "winner_id": pick["winner"]["id"],
-                "loser_id": pick["loser"]["id"],
-                "older_id": None, "newer_id": None,
-                "path": "recency", "tier": "high",
-                "reason": pick["reason"],
-            }
-        pick = _pick_by_ref_count(a, b)
-        if pick is not None:
-            return {
-                "decision": "supersede",
-                "winner_id": pick["winner"]["id"],
-                "loser_id": pick["loser"]["id"],
-                "older_id": None, "newer_id": None,
-                "path": "ref_count", "tier": "high",
-                "reason": pick["reason"],
-            }
+        deterministic = _deterministic_supersede(a, b)
+        if deterministic is not None:
+            return deterministic
 
     if not use_llm:
         return {
@@ -778,6 +778,83 @@ def apply_supersede(
 def apply_keep_both(conn, new_id: int, old_id: int) -> None:
     """Add a related_to edge new -> old."""
     db.add_edge(conn, src=new_id, dst=old_id, relation="related_to")
+
+
+def _ratified_judgment_ids(conn, *node_ids: int) -> list[int]:
+    ratified: list[int] = []
+    for node_id in dict.fromkeys(int(node_id) for node_id in node_ids):
+        node = db.get_node(conn, node_id)
+        if (
+            node is not None
+            and node["kind"] in db.JUDGMENT_KINDS
+            and db.node_is_ratified(conn, node_id)
+        ):
+            ratified.append(node_id)
+    return ratified
+
+
+def _route_ratified_pair_to_human(
+    conn,
+    left_id: int,
+    right_id: int,
+    *,
+    trigger: str,
+    project_path: str | None = None,
+    session_id: str | None = None,
+) -> tuple[int, bool]:
+    """Park one ratified contradiction and surface one deduplicated referral."""
+    node_a_id, node_b_id = sorted((int(left_id), int(right_id)))
+    ratified_ids = _ratified_judgment_ids(conn, node_a_id, node_b_id)
+    if not ratified_ids:
+        raise ValueError("human referral requires a ratified judgment node")
+
+    # This active pair edge makes later nightly passes hit edge_exists_between
+    # and leave the unresolved contradiction parked for explicit human review.
+    apply_keep_both(conn, node_a_id, node_b_id)
+
+    title = f"Human review required: ratified contradiction {node_a_id}/{node_b_id}"
+    row = conn.execute(
+        "SELECT id FROM nodes "
+        "WHERE kind = 'open_question' AND title = ? "
+        "ORDER BY id LIMIT 1",
+        (title,),
+    ).fetchone()
+    created = row is None
+    if created:
+        referral_id = db.insert_node(
+            conn,
+            kind="open_question",
+            title=title,
+            body=(
+                "Unattended heal found a contradiction involving a ratified "
+                f"judgment. Human review is required before node {node_a_id} "
+                f"or node {node_b_id} is superseded."
+            ),
+            status="staging",
+        )
+    else:
+        referral_id = int(row["id"])
+
+    # Re-adding is idempotent and repairs either half of a partially-linked
+    # referral without creating another open_question.
+    db.add_edge(conn, src=referral_id, dst=node_a_id, relation="related_to")
+    db.add_edge(conn, src=referral_id, dst=node_b_id, relation="related_to")
+
+    if created:
+        log_utils.emit_event(
+            "heal_human_referral",
+            {
+                "referral_id": referral_id,
+                "node_a_id": node_a_id,
+                "node_b_id": node_b_id,
+                "ratified_node_ids": sorted(ratified_ids),
+                "trigger": trigger,
+                "reason": "unattended supersede touched a ratified judgment",
+            },
+            project_path=project_path,
+            session_id=session_id,
+        )
+    return referral_id, created
 
 
 # ---------- plan-freshness hint ----------
@@ -1122,6 +1199,19 @@ def insert_with_heal(
         new_repos=new_repos, old_repos=old_repos,
     )
     if verdict["decision"] == "supersede":
+        if _ratified_judgment_ids(conn, new_id, matched_id):
+            _route_ratified_pair_to_human(
+                conn,
+                new_id,
+                matched_id,
+                trigger="llm",
+                project_path=project_path,
+                session_id=session_id,
+            )
+            _emit("keep_both")
+            return {"id": new_id, "heal": "keep_both", "matched_id": matched_id,
+                    "similarity": top_sim, "arbitrator": verdict["reason"],
+                    "plan_freshness_hint": plan_hint, "orphan_hint": orphan_hint, "ship_edge_hint": ship_edge_hint}
         apply_supersede(
             conn, new_id, matched_id,
             project_path=project_path, session_id=session_id,
@@ -1262,6 +1352,7 @@ def nightly_heal(
         # the deterministic recency/ref_count supersede to be deferred to the LLM.
         "cross_scope_deferred": 0,
         "cross_lane_signals": 0,
+        "human_referrals": 0,
     }
 
     if integrity:
@@ -1387,6 +1478,23 @@ def nightly_heal(
         # before. Evidence, not law: discovery already collided this pair.
         a_repos = artifact_store.node_repo_scope(conn, a_id, cache=scope_cache)
         b_repos = artifact_store.node_repo_scope(conn, b_id, cache=scope_cache)
+
+        # Ratified judgments cannot participate in unattended deterministic
+        # supersession on either side. Preserve the pass that discovered the
+        # conflict for telemetry, but route it directly to the human surface.
+        if tier == "high" and _ratified_judgment_ids(conn, a_id, b_id):
+            ratified_tentative = _deterministic_supersede(a, b)
+            if ratified_tentative is not None:
+                _apply_verdict(
+                    conn,
+                    summary,
+                    ratified_tentative,
+                    a_id,
+                    b_id,
+                    project_path=project_path,
+                )
+                continue
+
         if (tier == "high" and a_repos and b_repos and not (a_repos & b_repos)
                 and (_pick_by_recency(a, b) is not None
                      or _pick_by_ref_count(a, b) is not None)):
@@ -1459,7 +1567,9 @@ def nightly_heal(
             a, b, similarity=sim, use_llm=True, tier=tier,
             a_repos=a_repos, b_repos=b_repos,
         )
-        _apply_verdict(conn, summary, verdict, a_id, b_id)
+        _apply_verdict(
+            conn, summary, verdict, a_id, b_id, project_path=project_path,
+        )
 
     try:
         summary["log_retention"] = log_utils.maintain_log_retention(project_path)
@@ -1497,6 +1607,24 @@ def _apply_verdict(
     """Apply the verdict's DB mutation and bump the matching counters."""
     summary["by_path"][verdict["path"]] = summary["by_path"].get(verdict["path"], 0) + 1
     if verdict["decision"] == "supersede":
+        if _ratified_judgment_ids(
+            conn, verdict["winner_id"], verdict["loser_id"]
+        ):
+            referral_id, _created = _route_ratified_pair_to_human(
+                conn,
+                a_id,
+                b_id,
+                trigger=verdict["path"],
+                project_path=project_path,
+            )
+            summary["kept_both"] += 1
+            summary["human_referrals"] = summary.get("human_referrals", 0) + 1
+            _debug(
+                f"    -> human referral via {verdict['path']} "
+                f"(tier={verdict.get('tier')}): referral={referral_id} "
+                f"pair=({min(a_id, b_id)},{max(a_id, b_id)})"
+            )
+            return
         apply_nightly_supersede(
             conn, verdict["winner_id"], verdict["loser_id"],
             project_path=project_path,
