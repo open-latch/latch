@@ -624,7 +624,7 @@ def test_emitted_rows_contain_no_forbidden_fields():
         rows = _read_outcome_rows(tmp)
         forbidden = {
             "title", "body", "node_title", "src_title", "dst_title",
-            "query_text", "query_excerpt", "raw_request",
+            "query_text", "query_excerpt", "raw_request", "request_text",
             "description", "reason",
         }
         for r in rows:

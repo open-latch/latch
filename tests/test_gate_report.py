@@ -210,6 +210,7 @@ def test_gate_report_ignores_raw_query_debug_fields():
             {
                 "query_hash": "aaa111bbb222",
                 "query_excerpt": "SECRET RAW PROMPT",
+                "request_text": "SECRET VERBATIM REQUEST",
                 "uncovered_claim_texts": ["SECRET CLAIM"],
                 "recommendation": "PROCEED",
                 "evidence_ids": [node],
@@ -221,6 +222,7 @@ def test_gate_report_ignores_raw_query_debug_fields():
         encoded = json.dumps(report)
         text = gate_report.format_text(report)
         _assert("SECRET RAW PROMPT" not in encoded + text, encoded + text)
+        _assert("SECRET VERBATIM REQUEST" not in encoded + text, encoded + text)
         _assert("SECRET CLAIM" not in encoded + text, encoded + text)
         _assert("Secret body" not in encoded + text, encoded + text)
         _assert("Safe visible title" in text, text)

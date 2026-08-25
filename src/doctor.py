@@ -75,6 +75,7 @@ from pathlib import Path
 
 import install_engine
 import paths
+import request_text_store
 import versioning
 
 MIN_PY = (3, 11)
@@ -473,6 +474,33 @@ def check_claude_md_contract() -> tuple[str, str, str]:
 # --------------------------------------------------------------------------- #
 # KB-directory pin / split-KB detection (id=1556)
 # --------------------------------------------------------------------------- #
+def check_retired_env_flags() -> tuple[str, str, str]:
+    """Surface retired latch environment flags the operator still exports.
+
+    A retired flag is inert, not harmless: someone exporting
+    ``CLAUDE_KB_LOG_RAW_QUERY`` believes request text is being logged in a
+    place it no longer goes. The stderr notice that fires in-process reaches
+    direct CLI runs and the MCP proxy, but an operator whose host swallows
+    server stderr would still never see it — doctor is the surface they read
+    on purpose, and it runs in their own environment rather than the shared
+    daemon's allowlisted one.
+
+    WARN, never FAIL, like the other wiring checks: nothing here stops latch
+    from working.
+    """
+    name = "retired environment flags"
+    if os.environ.get(request_text_store.RETIRED_CAPTURE_ENV) is None:
+        return name, OK, "none set"
+    return name, WARN, (
+        f"{request_text_store.RETIRED_CAPTURE_ENV} is set but retired and "
+        "ignored — gate.log never carries request text. Verbatim capture "
+        "lives in the private request-text store; opt out with "
+        f"{request_text_store.CAPTURE_ENV}=0 for one process, or the "
+        f'"{request_text_store.SETTINGS_KEY}" key in the vault '
+        "runtime_settings.json. Unset the retired flag to clear this."
+    )
+
+
 def _kb_home() -> Path:
     """The latch install root (holds projects/ and kb_location.json).
 
@@ -807,6 +835,7 @@ def run_all(skip_embed: bool, no_arch: bool, allow_old_py: bool,
     else:
         results.append(check_commands_installed())
     results.append(check_claude_md_contract())
+    results.append(check_retired_env_flags())
     if no_pin:
         results.append(("KB directory pin", SKIP, "skipped (--no-pin)"))
     else:

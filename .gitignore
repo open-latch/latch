@@ -24,6 +24,11 @@ latch_settings.json
 # raw source coordinates (ruling 4562) — never committed, nor its writer lock.
 **/outcome-lineage.json
 **/outcome-lineage.json.lock
+# verbatim gate request text: the same vault-local private class (ruling 4562,
+# id=5141). Cleartext prompts, 0600, never committed. The trailing wildcard
+# also covers the retention sweep's .jsonl.gz archives and its in-flight
+# .gz.tmp files, which carry the same prompts compressed (id=5300 item 2).
+**/gate-request-text-*.jsonl*
 
 # DB files and dumps (data layer — never committed under any path)
 *.db

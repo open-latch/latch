@@ -1632,6 +1632,18 @@ def nightly_heal(
         _debug(f"log_retention failed: {e}")
         summary["log_retention"] = {"error": str(e)}
 
+    # The request-text store needs its own sweep: the structural sweep above
+    # gzips with the ambient umask, which must never touch cleartext prompts.
+    # Lazy import keeps heal's import graph unchanged (id=5300 item 2).
+    try:
+        import request_text_store
+        summary["request_text_retention"] = request_text_store.maintain_retention(
+            project_path
+        )
+    except Exception as e:
+        _debug(f"request-text retention failed: {e}")
+        summary["request_text_retention"] = {"error": str(e)}
+
     try:
         today = datetime.now(timezone.utc).date()
         summary["correlator"] = correlator.correlate(

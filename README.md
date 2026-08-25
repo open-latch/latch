@@ -326,6 +326,35 @@ For the standard shared MCP runtime, opt out by setting `"outcome_events": false
 `runtime_settings.json` vault-policy file printed by quickstart, preserving its other keys. Direct
 CLI processes can instead set the `LATCH_OUTCOME_EVENTS` environment variable to `0`.
 
+**Local request text.** Separately from those structural records, latch writes the verbatim text of
+each gate request to `gate-request-text-YYYY-MM-DD.jsonl` in the same local vault, so a prompt can
+still be read back after the fact — the structural logs keep only a hash. The file holds your prompt
+text in the clear; latch never uploads it and nothing on the public-safe surface reads it. To turn it off for the standard
+shared MCP runtime, set `"request_text_capture": false` in the same `runtime_settings.json`
+vault-policy file, preserving its other keys; direct CLI processes can instead set the
+`LATCH_REQUEST_TEXT_CAPTURE` environment variable to `0`. Either control suppresses the text while
+leaving the structural records untouched, but they are not peers: the environment variable, whenever
+it is set to anything at all, decides on its own for that process and the vault-policy key is not
+consulted — so a process started with `LATCH_REQUEST_TEXT_CAPTURE=1` keeps capturing even where the
+vault key says `false`. Leave the variable unset for the vault-policy key to govern, which is what
+you want for the shared MCP runtime. (This is the same precedence `LATCH_OUTCOME_EVENTS` has over
+`"outcome_events"`.) Nightly maintenance retires these files on the same clock
+as the structural logs — compressed after 30 days, deleted after one year, today's file never
+touched — but through a dedicated sweep whose archives are created owner-only rather than with the
+ambient umask, and never wider than the file they replace; if that maintenance is disabled, the files remain local until removed. If a write is
+ever refused (for example, the file cannot be kept private), latch records a small structural
+entry — a reason code and identifiers, never the prompt — in `request_text_suppression-YYYY-MM-DD.log`
+so the gap is visible.
+
+On macOS and Linux the file is owner-only (mode `0600`), and latch refuses to write prompt text to
+anything it cannot verify private; a compressed archive is created at the owner bits of the file it
+replaces, so maintenance never hands back a wider file than it took. latch also opens the store
+without following symbolic links, so a link left at that filename cannot redirect your prompts to a
+file elsewhere on the disk. Where the vault directory itself lives is your choice and latch does not
+override it. On Windows, file modes are not a permission model — latch requests the same restriction,
+but the file's confidentiality rests on the permissions of the vault directory itself, so put your
+vault somewhere only you can read.
+
 **Overhead.** The per-prompt retrieval hook runs locally against the KB —
 roughly 120–150 ms on an Apple Silicon reference machine, inside a 250 ms
 budget — and injects at most five compact KB pointers. A healthy session start
