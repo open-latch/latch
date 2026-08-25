@@ -2018,7 +2018,12 @@ def finish_seed_import(
 # ---------- nodes ----------
 
 
-def _has_ratifying_row(conn: sqlite3.Connection, node_id: int) -> bool:
+def node_is_ratified(conn: sqlite3.Connection, node_id: int) -> bool:
+    """Return whether the node's latest authority outcome is ``ratify``.
+
+    Ratification history is append-only, so authority follows the newest row:
+    a later explicit ``reject`` strips immunity until another human ratifies.
+    """
     row = conn.execute(
         "SELECT action FROM ratification WHERE node_id = ? "
         "ORDER BY id DESC LIMIT 1",
@@ -2102,7 +2107,7 @@ def update_node_nc(
             current is not None
             and current["kind"] in JUDGMENT_KINDS
             and current["status"] != "canonical"
-            and not _has_ratifying_row(conn, node_id)
+            and not node_is_ratified(conn, node_id)
         ):
             raise RatificationRequiredError(
                 f"{current['kind']} node {int(node_id)} requires ratification "
