@@ -807,39 +807,52 @@ def _route_ratified_pair_to_human(
     ratified_ids = _ratified_judgment_ids(conn, node_a_id, node_b_id)
     if not ratified_ids:
         raise ValueError("human referral requires a ratified judgment node")
-
-    # This active pair edge makes later nightly passes hit edge_exists_between
-    # and leave the unresolved contradiction parked for explicit human review.
-    apply_keep_both(conn, node_a_id, node_b_id)
+    if conn.in_transaction:
+        raise RuntimeError("human referral requires a clean connection")
 
     title = f"Human review required: ratified contradiction {node_a_id}/{node_b_id}"
-    row = conn.execute(
-        "SELECT id FROM nodes "
-        "WHERE kind = 'open_question' AND title = ? "
-        "ORDER BY id LIMIT 1",
-        (title,),
-    ).fetchone()
-    created = row is None
-    if created:
-        referral_id = db.insert_node(
-            conn,
-            kind="open_question",
-            title=title,
-            body=(
-                "Unattended heal found a contradiction involving a ratified "
-                f"judgment. Human review is required before node {node_a_id} "
-                f"or node {node_b_id} is superseded."
-            ),
-            status="staging",
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT id FROM nodes "
+            "WHERE kind = 'open_question' AND title = ? "
+            "ORDER BY id LIMIT 1",
+            (title,),
+        ).fetchone()
+        created = row is None
+        if created:
+            referral_id = db.insert_node_nc(
+                conn,
+                kind="open_question",
+                title=title,
+                body=(
+                    "Unattended heal found a contradiction involving a ratified "
+                    f"judgment. Human review is required before node {node_a_id} "
+                    f"or node {node_b_id} is superseded."
+                ),
+                status="staging",
+            )
+        else:
+            referral_id = int(row["id"])
+
+        # The referral, both of its links, and the pair edge are one durable
+        # unit. A partial referral must never park the pair behind
+        # edge_exists_between and make the contradiction ineligible for retry.
+        db.add_edge_nc(
+            conn, src=referral_id, dst=node_a_id, relation="related_to"
         )
-    else:
-        referral_id = int(row["id"])
+        db.add_edge_nc(
+            conn, src=referral_id, dst=node_b_id, relation="related_to"
+        )
+        db.add_edge_nc(
+            conn, src=node_a_id, dst=node_b_id, relation="related_to"
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
 
-    # Re-adding is idempotent and repairs either half of a partially-linked
-    # referral without creating another open_question.
-    db.add_edge(conn, src=referral_id, dst=node_a_id, relation="related_to")
-    db.add_edge(conn, src=referral_id, dst=node_b_id, relation="related_to")
-
+    # Emit only after the complete referral and parking edge are durable.
     if created:
         log_utils.emit_event(
             "heal_human_referral",

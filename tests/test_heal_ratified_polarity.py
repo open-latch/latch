@@ -1,6 +1,7 @@
 """Acceptance regressions for unattended heal's ratified-node immunity."""
 from __future__ import annotations
 
+import sqlite3
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -143,6 +144,59 @@ def _referral_events(
         if event_type == "heal_human_referral"
         and [row.get("node_a_id"), row.get("node_b_id")] == pair
     ]
+
+
+def test_ratified_referral_failure_leaves_pair_retryable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn = db.connect(str(tmp_path / "vault"))
+    try:
+        ratified = _decision(conn, "Founder-ratified atomic referral target")
+        challenger = _decision(conn, "Contradiction awaiting atomic referral")
+        _ratify(conn, ratified)
+        events = _capture_events(monkeypatch)
+
+        original_add_edge_nc = db.add_edge_nc
+        calls = 0
+
+        def fail_during_referral(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise sqlite3.OperationalError("injected referral-link failure")
+            return original_add_edge_nc(*args, **kwargs)
+
+        monkeypatch.setattr(heal.db, "add_edge_nc", fail_during_referral)
+        with pytest.raises(
+            sqlite3.OperationalError, match="injected referral-link failure"
+        ):
+            heal._route_ratified_pair_to_human(
+                conn,
+                ratified,
+                challenger,
+                trigger="recency",
+                project_path=str(tmp_path),
+            )
+
+        assert not heal.edge_exists_between(conn, ratified, challenger)
+        assert _referral_ids(conn, ratified, challenger) == []
+        assert _referral_events(events, ratified, challenger) == []
+
+        monkeypatch.setattr(heal.db, "add_edge_nc", original_add_edge_nc)
+        referral_id, created = heal._route_ratified_pair_to_human(
+            conn,
+            ratified,
+            challenger,
+            trigger="recency",
+            project_path=str(tmp_path),
+        )
+
+        assert created is True
+        assert _referral_ids(conn, ratified, challenger) == [referral_id]
+        assert heal.edge_exists_between(conn, ratified, challenger)
+        assert len(_referral_events(events, ratified, challenger)) == 1
+    finally:
+        conn.close()
 
 
 def test_ratified_loser_never_picked_by_recency(

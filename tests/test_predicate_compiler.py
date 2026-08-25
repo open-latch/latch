@@ -164,3 +164,36 @@ def test_verdict_shape_and_matching():
     _assert_verdict_shape(unsupported_only)
     assert unsupported_only["decision"] == "pass"
     assert unsupported_only["matches"] == []
+
+
+def test_file_directory_matches_absolute_path_by_components():
+    predicate = _predicate_module()
+    check = predicate.compile_predicate(_row("file:src", row_id=73))
+
+    verdict = predicate.evaluate(
+        [check],
+        predicate.ToolCallContext(file_paths=("/repo/src/pkg/mod.py",)),
+    )
+
+    assert verdict == {
+        "engine": "predicate-v1",
+        "decision": "block",
+        "llm_calls": 0,
+        "matches": [
+            {
+                "rejected_path_id": 73,
+                "node_id": 773,
+                "option": "synthetic rejected option 73",
+                "predicate": "file:src",
+                "reason": "synthetic rejection reason 73",
+                "source": "declared",
+            }
+        ],
+    }
+
+    component_false_positive = predicate.evaluate(
+        [check],
+        predicate.ToolCallContext(file_paths=("/repo/srcish/pkg/mod.py",)),
+    )
+    assert component_false_positive["decision"] == "pass"
+    assert component_false_positive["matches"] == []
