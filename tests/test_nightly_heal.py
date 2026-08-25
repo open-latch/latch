@@ -1145,6 +1145,72 @@ def test_priority_does_not_change_deterministic_topology():
         _cleanup(tmp, conn)
 
 
+def test_priority_planning_preserves_mixed_shared_node_precedence():
+    """A higher-similarity LLM pair must mutate before a lower-similarity
+    deterministic pair that shares its node. Priority selects the LLM slot;
+    it must not let the deterministic pair jump ahead and stale that node."""
+    import budget
+
+    tmp, conn = _fresh_db()
+    try:
+        ws1 = _mk(conn, kind="workstream", title="lane one", body="lane one")
+        ws2 = _mk(conn, kind="workstream", title="lane two", body="lane two")
+        a = _mk(conn, title="shared a", body="the shared claim")
+        b = _mk(conn, title="llm b", body="the shared claim llm")
+        c = _mk(conn, title="deterministic c", body="the shared claim newer")
+        _set_ws(conn, a, ws1); _set_ws(conn, b, ws2); _set_ws(conn, c, ws1)
+        for node_id in (a, b, c):
+            _set_ref(conn, node_id, 1)
+        _set_ts(conn, a, updated_at=_days_ago(60))
+        _set_ts(conn, b, updated_at=_days_ago(60))
+        _set_ts(conn, c, updated_at=_days_ago(5))
+
+        original_find = heal.find_near_duplicates
+        original_arb = heal._arbitrate_nightly
+        calls: list[tuple[int, int]] = []
+
+        def fake_find(_conn, _vec, *, exclude_id=None, threshold=0.0,
+                      top_k=5, **_):
+            if exclude_id == a:
+                return [
+                    {"id": b, "similarity": 0.95, "kind": "fact",
+                     "status": "staging"},
+                    {"id": c, "similarity": 0.75, "kind": "fact",
+                     "status": "staging"},
+                ]
+            return []
+
+        def stub_arb(older, newer, _sim, **_):
+            calls.append((older["id"], newer["id"]))
+            return {"decision": "supersede_b", "reason": "test"}
+
+        try:
+            heal.find_near_duplicates = fake_find
+            heal._arbitrate_nightly = stub_arb
+            cap = budget.DEFAULT_HEAL_DAILY_CAP
+            for _ in range(cap - 1):
+                budget.check_and_record(tmp, category="heal", cap=cap)
+            result = heal.nightly_heal(
+                conn, project_path=tmp, use_llm=True,
+                low_threshold=0.50, high_threshold=0.70,
+            )
+        finally:
+            heal.find_near_duplicates = original_find
+            heal._arbitrate_nightly = original_arb
+
+        _assert(calls == [(a, b)], f"expected A/B LLM arbitration, got {calls}")
+        edges = [(row["src"], row["dst"]) for row in conn.execute(
+            "SELECT src, dst FROM edges WHERE relation = 'supersedes'"
+        )]
+        _assert(edges == [(b, a)],
+                f"expected B supersedes A before A/C could mutate, got {edges}")
+        _assert(result["llm_invocations"] == 1,
+                f"expected one selected LLM call: {result}")
+        print("PASS priority_planning_preserves_mixed_shared_node_precedence")
+    finally:
+        _cleanup(tmp, conn)
+
+
 def test_nightly_heal_heartbeat_on_failure():
     """A crashing sweep must still leave a heal_run row, marked not-ok."""
     tmp, conn = _fresh_db()
@@ -1213,5 +1279,6 @@ if __name__ == "__main__":
     test_nightly_heal_cross_lane_outranks_same_lane_at_equal_refs()
     test_heal_deferred_row_carries_priority_fields()
     test_priority_does_not_change_deterministic_topology()
+    test_priority_planning_preserves_mixed_shared_node_precedence()
     test_nightly_heal_heartbeat_on_failure()
     print("\nAll nightly-heal tests pass.")

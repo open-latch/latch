@@ -521,7 +521,8 @@ def _pair_priority(a: dict, b: dict) -> float:
 
     ``1 + max(ref_count)`` so a never-referenced pair still sorts above nothing
     and stays ahead of a malformed row, scaled by the cross-lane weight. Used
-    only to order the queue; it never changes a verdict.
+    only to select LLM-bound work for the available budget; it never changes a
+    verdict or mutation order.
     """
     refs = max(int(a.get("ref_count") or 0), int(b.get("ref_count") or 0))
     cross_lane = a.get("workstream_id") != b.get("workstream_id")
@@ -1572,7 +1573,7 @@ def _nightly_heal_sweep(
     # Deterministic arbitration MUST stay in this order: it commits supersedes
     # that cascade (a stale node skips its other pairs), so reordering here
     # would change persisted topology, not just budget allocation. Priority
-    # orders only the LLM-bound remainder, below.
+    # selects LLM-bound work for the available budget, below.
     pair_list.sort(key=lambda p: (0 if p[1] == "high" else 1, -p[0]))
 
     _debug(f"arbitration pass: {len(pair_list)} pairs queued "
@@ -1583,11 +1584,55 @@ def _nightly_heal_sweep(
     # node_artifact lookup happens at most once across the whole pass.
     scope_cache: dict = {}
 
+    # Planning is read-only: identify the pairs that would need an LLM, then
+    # select the available slots by priority. Mutations still happen only in
+    # pair_list's original tier/similarity order below, so a shared-node pair
+    # has exactly the same cascade precedence as it did before prioritization.
+    llm_candidates: list[tuple[float, str, int, int, float]] = []
+    if use_llm:
+        for sim, tier, a_id, b_id, priority in pair_list:
+            a = db.get_node(conn, a_id)
+            b = db.get_node(conn, b_id)
+            if (not a or a["status"] == "stale"
+                    or not b or b["status"] == "stale"):
+                continue
+            if (a["kind"] in {"summary", "workstream"}
+                    or b["kind"] in {"summary", "workstream"}
+                    or edge_exists_between(conn, a_id, b_id)):
+                continue
+            a_repos = artifact_store.node_repo_scope(conn, a_id, cache=scope_cache)
+            b_repos = artifact_store.node_repo_scope(conn, b_id, cache=scope_cache)
+            if tier == "low" or three_pass_arbitrate(
+                a, b, similarity=sim, use_llm=False, tier="high",
+                a_repos=a_repos, b_repos=b_repos,
+            )["path"] == "skip":
+                llm_candidates.append((sim, tier, a_id, b_id, priority))
+
+    llm_candidates.sort(
+        key=lambda p: (0 if p[1] == "high" else 1, -p[4], -p[0])
+    )
+    selected_llm_pairs: set[tuple[int, int]] = set()
+    budget_plan_state: dict = {}
+    if llm_candidates:
+        budget_status = budget.status(project_path)
+        remaining = budget_status["heal"]["remaining"]
+        selected = llm_candidates if remaining is None else llm_candidates[:remaining]
+        selected_llm_pairs = {
+            (min(a_id, b_id), max(a_id, b_id))
+            for _, _, a_id, b_id, _ in selected
+        }
+        budget_plan_state = {
+            "date": budget_status.get("date"),
+            "count_heal": budget_status["heal"].get("count"),
+        }
+        _debug(f"LLM budget plan: selected={len(selected_llm_pairs)} "
+               f"candidates={len(llm_candidates)} remaining={remaining}")
+
     def admit(a_id, b_id, sim, tier):
         """Re-check pair admission against current state; None = skip (counted).
 
-        Run before BOTH phases: a verdict applied earlier in this sweep may have
-        marked a node stale or added an edge via cascade.
+        A verdict applied earlier in the similarity-ordered loop may have marked
+        a node stale or added an edge via cascade.
         """
         a = db.get_node(conn, a_id)
         b = db.get_node(conn, b_id)
@@ -1614,8 +1659,7 @@ def _nightly_heal_sweep(
             return None
         return a, b
 
-    # ---------- Phase 1 (similarity order): deterministic verdicts only ----------
-    llm_queue: list[tuple[float, str, int, int, float]] = []
+    # ---------- Mutation pass: original tier/similarity order ----------
     for sim, tier, a_id, b_id, priority in pair_list:
         admitted = admit(a_id, b_id, sim, tier)
         if admitted is None:
@@ -1652,24 +1696,8 @@ def _nightly_heal_sweep(
                 _apply_verdict(conn, summary, tentative, a_id, b_id, project_path=project_path)
                 continue
 
-        # Inconclusive (or low-tier, which is LLM-only): defer to phase 2.
-        llm_queue.append((sim, tier, a_id, b_id, priority))
-
-    # ---------- Phase 2: the LLM-bound remainder, ordered by priority ----------
-    # Every deterministic verdict is already committed, so this ordering cannot
-    # change which supersedes execute — it only decides which pairs the scarce
-    # LLM budget reaches. A useful consequence: deterministic outcomes no longer
-    # depend on whether the budget was exhausted partway through the sweep.
-    llm_queue.sort(key=lambda p: (0 if p[1] == "high" else 1, -p[4], -p[0]))
-
-    for sim, tier, a_id, b_id, priority in llm_queue:
-        admitted = admit(a_id, b_id, sim, tier)
-        if admitted is None:
-            continue
-        a, b = admitted
-        a_repos = artifact_store.node_repo_scope(conn, a_id, cache=scope_cache)
-        b_repos = artifact_store.node_repo_scope(conn, b_id, cache=scope_cache)
-
+        # LLM path: high-tier inconclusive OR low-tier (always). Priority chose
+        # which pairs may spend budget, but never changes this mutation order.
         if not use_llm:
             verdict = {
                 "decision": "keep_both",
@@ -1681,13 +1709,18 @@ def _nightly_heal_sweep(
             _apply_verdict(conn, summary, verdict, a_id, b_id, project_path=project_path)
             continue
 
-        try:
-            allowed, budget_state = budget.check_and_record(
-                project_path, category="heal",
-            )
-        except OSError as exc:
+        pair_key = (min(a_id, b_id), max(a_id, b_id))
+        if pair_key not in selected_llm_pairs:
             allowed = False
-            budget_state = {"error": str(exc)}
+            budget_state = budget_plan_state
+        else:
+            try:
+                allowed, budget_state = budget.check_and_record(
+                    project_path, category="heal",
+                )
+            except OSError as exc:
+                allowed = False
+                budget_state = {"error": str(exc)}
         if not allowed:
             summary["budget_blocked"] += 1
             summary["budget_blocked_by_tier"][tier] += 1
