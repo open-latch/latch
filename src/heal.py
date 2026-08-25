@@ -915,7 +915,6 @@ def _prepare_ratified_referral(
     ratified_ids = _ratified_judgment_ids(conn, node_a_id, node_b_id)
     if not ratified_ids:
         raise ValueError("human referral requires a ratified judgment node")
-
     title = f"Human review required: ratified contradiction {node_a_id}/{node_b_id}"
     row = conn.execute(
         "SELECT id FROM nodes "
@@ -954,6 +953,8 @@ def _prepare_ratified_referral(
         _prepare_edge(conn, node_a_id, node_b_id, "related_to")
     )
 
+    # The caller emits this only after the complete referral and parking edge
+    # are durable.
     if created:
         prepared_events.append({
             "stream": "heal_human_referral",

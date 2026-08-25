@@ -267,18 +267,15 @@ def _path_parts(value: str) -> tuple[str, ...]:
 def _file_matches(expected: str, candidate: str) -> bool:
     expected_parts = _path_parts(expected)
     candidate_parts = _path_parts(candidate)
-    if not expected_parts or not candidate_parts:
+    if not expected_parts or len(candidate_parts) < len(expected_parts):
         return False
-    if candidate_parts == expected_parts:
-        return True
-    # A directory predicate contains descendants, and a repo-relative file
-    # predicate equals the suffix of an absolute tool path.
-    return (
-        len(candidate_parts) > len(expected_parts)
-        and (
-            candidate_parts[: len(expected_parts)] == expected_parts
-            or candidate_parts[-len(expected_parts) :] == expected_parts
-        )
+    # A repo-relative directory can occur inside an absolute tool path.  Match
+    # whole contiguous components so ``file:src`` contains ``/repo/src/x.py``
+    # but never the substring-adjacent ``/repo/srcish/x.py``.
+    width = len(expected_parts)
+    return any(
+        candidate_parts[index : index + width] == expected_parts
+        for index in range(len(candidate_parts) - width + 1)
     )
 
 
