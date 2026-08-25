@@ -1579,61 +1579,60 @@ def _nightly_heal_sweep(
     _debug(f"arbitration pass: {len(pair_list)} pairs queued "
            f"(high={summary['by_tier']['high']}, low={summary['by_tier']['low']})")
 
+    # Priority may reorder only node-disjoint work. Candidate pairs sharing a
+    # node form a conflict component; each component advances strictly in the
+    # original tier/similarity order and stops at its first live LLM-bound pair.
+    # Its frontier competes for budget with the frontiers of other (therefore
+    # commuting) components. This keeps deterministic/LLM cascade precedence
+    # intact while letting an invalidated frontier release its slot to the best
+    # surviving candidate, even when that fallback appeared earlier globally.
+    records = [
+        {
+            "index": index,
+            "similarity": sim,
+            "tier": tier,
+            "a_id": a_id,
+            "b_id": b_id,
+            "priority": priority,
+        }
+        for index, (sim, tier, a_id, b_id, priority) in enumerate(pair_list)
+    ]
+
+    components: dict[int, list[dict]] = {}
+    if use_llm:
+        parent: dict[int, int] = {}
+
+        def component_root(node_id: int) -> int:
+            parent.setdefault(node_id, node_id)
+            while parent[node_id] != node_id:
+                parent[node_id] = parent[parent[node_id]]
+                node_id = parent[node_id]
+            return node_id
+
+        def union_components(a_id: int, b_id: int) -> None:
+            a_root = component_root(a_id)
+            b_root = component_root(b_id)
+            if a_root != b_root:
+                parent[b_root] = a_root
+
+        for record in records:
+            union_components(record["a_id"], record["b_id"])
+        for record in records:
+            root = component_root(record["a_id"])
+            components.setdefault(root, []).append(record)
+    positions = {root: 0 for root in components}
+
     # Per-node repo-scope memo for the evidence-contract guard. Plain dict,
     # populated lazily by artifact_store.node_repo_scope so each node's
     # node_artifact lookup happens at most once across the whole pass.
     scope_cache: dict = {}
 
-    # Planning is read-only: identify the pairs that would need an LLM, then
-    # select the available slots by priority. Mutations still happen only in
-    # pair_list's original tier/similarity order below, so a shared-node pair
-    # has exactly the same cascade precedence as it did before prioritization.
-    llm_candidates: list[tuple[float, str, int, int, float]] = []
-    if use_llm:
-        for sim, tier, a_id, b_id, priority in pair_list:
-            a = db.get_node(conn, a_id)
-            b = db.get_node(conn, b_id)
-            if (not a or a["status"] == "stale"
-                    or not b or b["status"] == "stale"):
-                continue
-            if (a["kind"] in {"summary", "workstream"}
-                    or b["kind"] in {"summary", "workstream"}
-                    or edge_exists_between(conn, a_id, b_id)):
-                continue
-            a_repos = artifact_store.node_repo_scope(conn, a_id, cache=scope_cache)
-            b_repos = artifact_store.node_repo_scope(conn, b_id, cache=scope_cache)
-            if tier == "low" or three_pass_arbitrate(
-                a, b, similarity=sim, use_llm=False, tier="high",
-                a_repos=a_repos, b_repos=b_repos,
-            )["path"] == "skip":
-                llm_candidates.append((sim, tier, a_id, b_id, priority))
-
-    llm_candidates.sort(
-        key=lambda p: (0 if p[1] == "high" else 1, -p[4], -p[0])
-    )
-    selected_llm_pairs: set[tuple[int, int]] = set()
-    budget_plan_state: dict = {}
-    if llm_candidates:
-        budget_status = budget.status(project_path)
-        remaining = budget_status["heal"]["remaining"]
-        selected = llm_candidates if remaining is None else llm_candidates[:remaining]
-        selected_llm_pairs = {
-            (min(a_id, b_id), max(a_id, b_id))
-            for _, _, a_id, b_id, _ in selected
-        }
-        budget_plan_state = {
-            "date": budget_status.get("date"),
-            "count_heal": budget_status["heal"].get("count"),
-        }
-        _debug(f"LLM budget plan: selected={len(selected_llm_pairs)} "
-               f"candidates={len(llm_candidates)} remaining={remaining}")
-
-    def admit(a_id, b_id, sim, tier):
-        """Re-check pair admission against current state; None = skip (counted).
-
-        A verdict applied earlier in the similarity-ordered loop may have marked
-        a node stale or added an edge via cascade.
-        """
+    def admit(record):
+        """Re-check current state and account for an invalidated pair once."""
+        sim = record["similarity"]
+        tier = record["tier"]
+        a_id = record["a_id"]
+        b_id = record["b_id"]
         a = db.get_node(conn, a_id)
         b = db.get_node(conn, b_id)
         if not a or a["status"] == "stale" or not b or b["status"] == "stale":
@@ -1641,13 +1640,11 @@ def _nightly_heal_sweep(
             _debug(f"  pair ({a_id},{b_id}) sim={sim:.3f} tier={tier} "
                    f"SKIP: became stale during arbitration")
             return None
-        # Load-bearing rail (id=1699/id=1797): a tree summary is a near-duplicate
-        # of its own members by construction, so it collides at the sweep
-        # threshold and the recency pass would let the fresh summary supersede the
-        # older source node. Summaries are tree-managed, never contradiction
-        # candidates. The seed query excludes summaries as `a`; this catches a
-        # summary returned as `b` by find_near_duplicates(kind=None).
-        if a["kind"] in {"summary", "workstream"} or b["kind"] in {"summary", "workstream"}:
+        # Load-bearing rail (id=1699/id=1797): summaries are tree-managed and
+        # never contradiction candidates. The seed query excludes them as `a`;
+        # this catches one returned as `b` by find_near_duplicates(kind=None).
+        if (a["kind"] in {"summary", "workstream"}
+                or b["kind"] in {"summary", "workstream"}):
             summary["skipped_summary"] += 1
             _debug(f"  pair ({a_id},{b_id}) sim={sim:.3f} tier={tier} "
                    f"SKIP: summary node not eligible for contradiction arbitration")
@@ -1659,13 +1656,17 @@ def _nightly_heal_sweep(
             return None
         return a, b
 
-    # ---------- Mutation pass: original tier/similarity order ----------
-    for sim, tier, a_id, b_id, priority in pair_list:
-        admitted = admit(a_id, b_id, sim, tier)
+    def classify(record):
+        """Classify the component's current pair against current DB state."""
+        admitted = admit(record)
         if admitted is None:
-            continue
+            return None
         a, b = admitted
-
+        record["priority"] = _pair_priority(a, b)
+        sim = record["similarity"]
+        tier = record["tier"]
+        a_id = record["a_id"]
+        b_id = record["b_id"]
         _debug(f"  pair ({a_id},{b_id}) sim={sim:.3f} tier={tier} "
                f"a=({a['kind']!r} {a['title']!r} ref={a.get('ref_count',0)}) "
                f"b=({b['kind']!r} {b['title']!r} ref={b.get('ref_count',0)})")
@@ -1675,93 +1676,301 @@ def _nightly_heal_sweep(
         # before. Evidence, not law: discovery already collided this pair.
         a_repos = artifact_store.node_repo_scope(conn, a_id, cache=scope_cache)
         b_repos = artifact_store.node_repo_scope(conn, b_id, cache=scope_cache)
-        if (tier == "high" and a_repos and b_repos and not (a_repos & b_repos)
-                and (_pick_by_recency(a, b) is not None
-                     or _pick_by_ref_count(a, b) is not None)):
-            # Count only ACTUAL deferrals: a deterministic recency/ref_count
-            # supersede that the disjoint-scope guard suppressed (→ LLM/keep_both).
-            # Without the would-supersede check this over-counts every disjoint
-            # high-tier pair, most of which the deterministic passes skip anyway.
-            summary["cross_scope_deferred"] += 1
-            _debug(f"    cross-scope disjoint {sorted(a_repos)} vs {sorted(b_repos)}"
-                   f" — deferring deterministic supersede to LLM")
+        cross_scope_deferred = (
+            tier == "high" and a_repos and b_repos and not (a_repos & b_repos)
+            and (_pick_by_recency(a, b) is not None
+                 or _pick_by_ref_count(a, b) is not None)
+        )
 
-        # High tier: try deterministic passes first (cheap, no LLM cost).
-        if tier == "high":
-            tentative = three_pass_arbitrate(
-                a, b, similarity=sim, use_llm=False, tier="high",
-                a_repos=a_repos, b_repos=b_repos,
-            )
-            if tentative["path"] != "skip":
-                _apply_verdict(conn, summary, tentative, a_id, b_id, project_path=project_path)
-                continue
-
-        # LLM path: high-tier inconclusive OR low-tier (always). Priority chose
-        # which pairs may spend budget, but never changes this mutation order.
-        if not use_llm:
-            verdict = {
-                "decision": "keep_both",
-                "winner_id": None, "loser_id": None,
-                "older_id": None, "newer_id": None,
-                "path": "skip", "tier": tier,
-                "reason": "LLM disabled",
-            }
-            _apply_verdict(conn, summary, verdict, a_id, b_id, project_path=project_path)
-            continue
-
-        pair_key = (min(a_id, b_id), max(a_id, b_id))
-        if pair_key not in selected_llm_pairs:
-            allowed = False
-            budget_state = budget_plan_state
-        else:
-            try:
-                allowed, budget_state = budget.check_and_record(
-                    project_path, category="heal",
-                )
-            except OSError as exc:
-                allowed = False
-                budget_state = {"error": str(exc)}
-        if not allowed:
-            summary["budget_blocked"] += 1
-            summary["budget_blocked_by_tier"][tier] += 1
-            summary["deferred"] += 1
-            summary["deferred_by_tier"][tier] += 1
-            summary["by_path"]["deferred"] += 1
-            summary["priority_deferred"] += priority
-            pair_a, pair_b = sorted((a_id, b_id))
-            log_utils.emit_event(
-                "heal_deferred",
-                {
-                    "node_a_id": pair_a,
-                    "node_b_id": pair_b,
-                    "similarity": round(float(sim), 6),
-                    "tier": tier,
-                    "reason": "budget_cap",
-                    "budget_date": budget_state.get("date"),
-                    "budget_count_heal": budget_state.get("count_heal"),
-                    "retry_eligible": True,
-                    # Backlog is measurable from this stream alone: what the
-                    # queue left behind, and how costly leaving it was.
-                    "priority": round(float(priority), 6),
-                    "ref_count_max": max(int(a.get("ref_count") or 0),
-                                         int(b.get("ref_count") or 0)),
-                    "cross_lane": a.get("workstream_id") != b.get("workstream_id"),
-                },
-                project_path=project_path,
-                session_id=None,
-            )
-            _debug(f"    -> deferred without edge (heal budget cap hit, "
-                   f"tier={tier})")
-            continue
-
-        summary["llm_invocations"] += 1
-        summary["priority_llm"] += priority
-        _debug(f"    invoking LLM arbitrator (tier={tier})")
-        verdict = three_pass_arbitrate(
-            a, b, similarity=sim, use_llm=True, tier=tier,
+        tentative = three_pass_arbitrate(
+            a, b, similarity=sim, use_llm=False, tier=tier,
             a_repos=a_repos, b_repos=b_repos,
         )
-        _apply_verdict(conn, summary, verdict, a_id, b_id)
+        return {
+            "record": record,
+            "a": a,
+            "b": b,
+            "a_repos": a_repos,
+            "b_repos": b_repos,
+            "tentative": tentative,
+            "cross_scope_deferred": cross_scope_deferred,
+        }
+
+    def account_cross_scope(classified) -> None:
+        if not classified["cross_scope_deferred"]:
+            return
+        summary["cross_scope_deferred"] += 1
+        _debug(
+            f"    cross-scope disjoint {sorted(classified['a_repos'])} vs "
+            f"{sorted(classified['b_repos'])}"
+            f" — deferring deterministic supersede to LLM"
+        )
+
+    # With no model work there is no budget allocation to reorder. Retain the
+    # exact original loop, including commit and event order.
+    if not use_llm:
+        for record in records:
+            classified = classify(record)
+            if classified is None:
+                continue
+            account_cross_scope(classified)
+            _apply_verdict(
+                conn, summary, classified["tentative"],
+                record["a_id"], record["b_id"],
+                project_path=project_path,
+            )
+
+    # One cached live LLM-bound pair per component. A component never moves
+    # past this frontier until it is invoked or finally deferred.
+    frontiers: dict[int, dict] = {}
+
+    def advance_component(root: int) -> None:
+        frontiers.pop(root, None)
+        component = components[root]
+        while positions[root] < len(component):
+            classified = classify(component[positions[root]])
+            if classified is None:
+                positions[root] += 1
+                continue
+            record = classified["record"]
+            tentative = classified["tentative"]
+            if tentative["path"] != "skip":
+                _apply_verdict(
+                    conn, summary, tentative, record["a_id"], record["b_id"],
+                    project_path=project_path,
+                )
+                positions[root] += 1
+                continue
+            frontiers[root] = classified
+            return
+
+    for root in sorted(components, key=lambda value: components[value][0]["index"]):
+        advance_component(root)
+
+    def frontier_priority(item):
+        _root, classified = item
+        record = classified["record"]
+        return (
+            0 if record["tier"] == "high" else 1,
+            -record["priority"],
+            -record["similarity"],
+            record["index"],
+        )
+
+    def defer_pair(classified, *, reason: str, budget_state: dict) -> None:
+        record = classified["record"]
+        a = classified["a"]
+        b = classified["b"]
+        tier = record["tier"]
+        priority = record["priority"]
+        account_cross_scope(classified)
+        summary["budget_blocked"] += 1
+        summary["budget_blocked_by_tier"][tier] += 1
+        summary["deferred"] += 1
+        summary["deferred_by_tier"][tier] += 1
+        summary["by_path"]["deferred"] += 1
+        summary["priority_deferred"] += priority
+        pair_a, pair_b = sorted((record["a_id"], record["b_id"]))
+        log_utils.emit_event(
+            "heal_deferred",
+            {
+                "node_a_id": pair_a,
+                "node_b_id": pair_b,
+                "similarity": round(float(record["similarity"]), 6),
+                "tier": tier,
+                "reason": reason,
+                "budget_date": budget_state.get("date"),
+                "budget_count_heal": budget_state.get("count_heal"),
+                "retry_eligible": True,
+                "priority": round(float(priority), 6),
+                "ref_count_max": max(int(a.get("ref_count") or 0),
+                                     int(b.get("ref_count") or 0)),
+                "cross_lane": a.get("workstream_id") != b.get("workstream_id"),
+            },
+            project_path=project_path,
+            session_id=None,
+        )
+        _debug(f"    -> deferred without edge ({reason}, tier={tier})")
+
+    def refresh_frontiers() -> None:
+        """Refresh every frontier immediately before selection."""
+        for root in tuple(frontiers):
+            advance_component(root)
+
+    # Reserve the currently available selection width atomically. Reserved
+    # slots are generic: after each verdict exposes a new component frontier,
+    # it can enter the remaining top-K. Calls within that authoritative window
+    # still execute by original index, preserving the timeout breaker's order
+    # whenever budget covers the queue.
+    budget_stop_reason: str | None = None
+    budget_stop_state: dict = {}
+    reserved_slots = 0
+    reservation_date: str | None = None
+    reservation_approved: bool | None = None
+
+    def reset_expired_budget_plan() -> bool:
+        nonlocal reserved_slots, reservation_date, reservation_approved
+        nonlocal budget_stop_reason, budget_stop_state
+        state_date = (
+            reservation_date if reserved_slots
+            else budget_stop_state.get("date")
+        )
+        if (not (reserved_slots or budget_stop_reason == "budget_cap")
+                or state_date is None
+                or state_date == budget.current_date()):
+            return False
+        reserved_slots = 0
+        reservation_date = None
+        reservation_approved = None
+        if budget_stop_reason != "budget_state_error":
+            budget_stop_reason = None
+            budget_stop_state = {}
+        return True
+
+    try:
+        while frontiers:
+            refresh_frontiers()
+            if not frontiers:
+                break
+
+            # A daily reservation cannot authorize a next-day invocation.
+            # Drop the old local width and plan against the new UTC epoch; its
+            # pre-charge disappeared with budget.py's lazy rollover.
+            reset_expired_budget_plan()
+
+            if (reserved_slots < len(frontiers)
+                    and (budget_stop_reason is None
+                         or (budget_stop_reason == "budget_cap"
+                             and reserved_slots == 0))):
+                requested = len(frontiers) - reserved_slots
+                try:
+                    granted, state = budget.reserve_available(
+                        project_path,
+                        category="heal",
+                        requested=requested,
+                    )
+                except OSError as exc:
+                    budget_stop_reason = "budget_state_error"
+                    budget_stop_state = {"error": type(exc).__name__}
+                    _debug(f"LLM budget state unavailable: {type(exc).__name__}")
+                else:
+                    approved = budget.current_date() in state.get("approved_dates", [])
+                    epoch_changed = (
+                        reserved_slots
+                        and reservation_date is not None
+                        and state.get("date") != reservation_date
+                    )
+                    approval_changed = (
+                        reserved_slots
+                        and reservation_approved is not None
+                        and approved != reservation_approved
+                    )
+                    if epoch_changed or approval_changed:
+                        # Rollover/approval reset the counters that held the old
+                        # local width. Only this fresh grant is pre-charged.
+                        reserved_slots = granted
+                    else:
+                        reserved_slots += granted
+                    budget_stop_state = state
+                    if granted:
+                        reservation_date = state.get("date")
+                        reservation_approved = approved
+                    budget_stop_reason = (
+                        "budget_cap" if granted < requested else None
+                    )
+
+            if reset_expired_budget_plan():
+                continue
+
+            if reserved_slots == 0:
+                break
+            candidates = list(frontiers.items())
+            if reserved_slots < len(candidates):
+                candidates = sorted(candidates, key=frontier_priority)[:reserved_slots]
+            root, classified = min(
+                candidates,
+                key=lambda item: item[1]["record"]["index"],
+            )
+            record = classified["record"]
+            selected_index = record["index"]
+            selected_priority = record["priority"]
+            # Budget locking can wait for another process. Re-admit the chosen
+            # pair after that boundary so a concurrent stale/edge/deterministic
+            # change transfers this generic slot instead of consuming it.
+            scope_cache.pop(record["a_id"], None)
+            scope_cache.pop(record["b_id"], None)
+            advance_component(root)
+            classified = frontiers.get(root)
+            if (classified is None
+                    or classified["record"]["index"] != selected_index
+                    or classified["record"]["priority"] != selected_priority):
+                continue
+            record = classified["record"]
+            reserved_slots -= 1
+            account_cross_scope(classified)
+            summary["llm_invocations"] += 1
+            summary["priority_llm"] += record["priority"]
+            _debug(f"    invoking LLM arbitrator (tier={record['tier']})")
+            verdict = three_pass_arbitrate(
+                classified["a"], classified["b"],
+                similarity=record["similarity"], use_llm=True, tier=record["tier"],
+                a_repos=classified["a_repos"], b_repos=classified["b_repos"],
+            )
+            _apply_verdict(
+                conn, summary, verdict, record["a_id"], record["b_id"],
+            )
+            positions[root] += 1
+            frontiers.pop(root, None)
+            advance_component(root)
+    finally:
+        if reserved_slots:
+            try:
+                released, _state = budget.release_reserved(
+                    project_path,
+                    category="heal",
+                    count=reserved_slots,
+                    expected_date=reservation_date,
+                    expected_approved=reservation_approved,
+                )
+                reserved_slots -= released
+            except Exception as exc:
+                # Never mask the arbitration/apply failure that caused unwind.
+                _debug(f"LLM budget reservation release failed: {type(exc).__name__}")
+
+    if budget_stop_reason is not None:
+        # The first denied atomic reservation is authoritative for the rest of
+        # this sweep. Merge component cursors by original index so deterministic
+        # work and final deferrals retain the former mutation/telemetry order.
+        while True:
+            remaining_roots = [
+                root for root, component in components.items()
+                if positions[root] < len(component)
+            ]
+            if not remaining_roots:
+                break
+            root = min(
+                remaining_roots,
+                key=lambda value: components[value][positions[value]]["index"],
+            )
+            record = components[root][positions[root]]
+            frontiers.pop(root, None)
+            classified = classify(record)
+            if classified is None:
+                positions[root] += 1
+                continue
+            tentative = classified["tentative"]
+            if tentative["path"] != "skip":
+                _apply_verdict(
+                    conn, summary, tentative, record["a_id"], record["b_id"],
+                    project_path=project_path,
+                )
+            else:
+                defer_pair(
+                    classified,
+                    reason=budget_stop_reason,
+                    budget_state=budget_stop_state,
+                )
+            positions[root] += 1
 
     try:
         summary["log_retention"] = log_utils.maintain_log_retention(project_path)

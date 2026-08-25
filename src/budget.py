@@ -68,6 +68,11 @@ def _today_iso() -> str:
     return datetime.now(timezone.utc).date().isoformat()
 
 
+def current_date() -> str:
+    """Return the UTC budget epoch used by reservation callers."""
+    return _today_iso()
+
+
 def _state_path(project_path: str | None) -> Path:
     return paths.project_dir(project_path) / "budget.json"
 
@@ -254,6 +259,65 @@ def check_and_record(
         return True, state
 
 
+def reserve_available(
+    project_path: str | None,
+    *,
+    category: Category = "nonheal",
+    requested: int,
+    cap: int | None = None,
+) -> tuple[int, dict]:
+    """Atomically reserve up to ``requested`` model-backed attempts.
+
+    A grant is pre-charged to the existing category counter, so concurrent
+    callers cannot consume the same slots. Call ``release_reserved`` for any
+    granted slots that do not reach a model attempt during this process.
+    """
+    if (isinstance(requested, bool)
+            or not isinstance(requested, int)
+            or requested < 0):
+        raise ValueError("requested must be a non-negative integer")
+    with _state_lock(project_path):
+        state = _load_state(project_path, fail_closed=True)
+        if requested == 0:
+            return 0, state
+        approved = _today_iso() in state["approved_dates"]
+        field = _count_field(category)
+        if cap is None:
+            cap = _default_cap(category)
+        available = requested if approved else max(0, cap - state.get(field, 0))
+        granted = min(requested, available)
+        if granted:
+            state[field] = state.get(field, 0) + granted
+            _save_state(project_path, state)
+        return granted, state
+
+
+def release_reserved(
+    project_path: str | None,
+    *,
+    category: Category = "nonheal",
+    count: int,
+    expected_date: str | None = None,
+    expected_approved: bool | None = None,
+) -> tuple[int, dict]:
+    """Return unused pre-charged slots without crossing a UTC rollover."""
+    if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+        raise ValueError("count must be a non-negative integer")
+    with _state_lock(project_path):
+        state = _load_state(project_path, fail_closed=True)
+        if expected_date is not None and state["date"] != expected_date:
+            return 0, state
+        approved = _today_iso() in state["approved_dates"]
+        if expected_approved is not None and approved != expected_approved:
+            return 0, state
+        field = _count_field(category)
+        released = min(count, state[field])
+        state[field] = max(0, state[field] - released)
+        if released:
+            _save_state(project_path, state)
+        return released, state
+
+
 def approve_today(project_path: str | None) -> dict:
     """Add today to the approved list and reset BOTH counters to 0. Idempotent.
     Approving mid-day when either cap is spent immediately unlocks all further
@@ -263,8 +327,8 @@ def approve_today(project_path: str | None) -> dict:
         today = _today_iso()
         if today not in state["approved_dates"]:
             state["approved_dates"].append(today)
-        state["count_nonheal"] = 0
-        state["count_heal"] = 0
+            state["count_nonheal"] = 0
+            state["count_heal"] = 0
         _save_state(project_path, state)
         return state
 
