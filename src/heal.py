@@ -1456,12 +1456,46 @@ def nightly_heal(
         "priority_deferred": 0.0,
     }
 
+    # One heartbeat per sweep on every exit path. A crashing healer that wrote
+    # nothing is indistinguishable from a scheduler that never fired, which is
+    # the failure this row exists to rule out.
+    completed = False
+    error: str | None = None
+    try:
+        result = _nightly_heal_sweep(
+            conn, summary, project_path,
+            use_llm=use_llm, integrity=integrity, contradictions=contradictions,
+            high_threshold=high_threshold, low_threshold=low_threshold,
+            top_k=top_k,
+        )
+        completed = True
+        return result
+    except BaseException as exc:
+        error = type(exc).__name__
+        raise
+    finally:
+        _log_run_summary(summary, project_path, ok=completed, error=error)
+
+
+def _nightly_heal_sweep(
+    conn,
+    summary: dict,
+    project_path: str | None,
+    *,
+    use_llm: bool,
+    integrity: bool,
+    contradictions: bool,
+    high_threshold: float,
+    low_threshold: float,
+    top_k: int,
+) -> dict:
+    """The sweep body. Split out so `nightly_heal` owns one heartbeat boundary
+    covering every exit path, including exceptions."""
     if integrity:
         summary["integrity"] = run_integrity_pass(conn)
         _debug(f"integrity pass: {summary['integrity']}")
 
     if not contradictions:
-        _log_run_summary(summary, project_path)
         return summary
 
     candidates = conn.execute(
@@ -1534,9 +1568,12 @@ def nightly_heal(
             pair_list.append((sim, tier, a_id, b_id, _pair_priority(a, b)))
 
     # ---------- Arbitration pass: high-tier first, then low-tier ----------
-    # Sort: high-tier pairs before low-tier (unchanged guarantee); within a
-    # tier, highest priority first, similarity as a deterministic tiebreak.
-    pair_list.sort(key=lambda p: (0 if p[1] == "high" else 1, -p[4], -p[0]))
+    # Sort: high-tier pairs before low-tier; within a tier, higher sim first.
+    # Deterministic arbitration MUST stay in this order: it commits supersedes
+    # that cascade (a stale node skips its other pairs), so reordering here
+    # would change persisted topology, not just budget allocation. Priority
+    # orders only the LLM-bound remainder, below.
+    pair_list.sort(key=lambda p: (0 if p[1] == "high" else 1, -p[0]))
 
     _debug(f"arbitration pass: {len(pair_list)} pairs queued "
            f"(high={summary['by_tier']['high']}, low={summary['by_tier']['low']})")
@@ -1546,16 +1583,19 @@ def nightly_heal(
     # node_artifact lookup happens at most once across the whole pass.
     scope_cache: dict = {}
 
-    for sim, tier, a_id, b_id, priority in pair_list:
-        # Re-fetch — an earlier arbitration in this pass may have marked one
-        # of these stale, or added an edge between them, via cascade.
+    def admit(a_id, b_id, sim, tier):
+        """Re-check pair admission against current state; None = skip (counted).
+
+        Run before BOTH phases: a verdict applied earlier in this sweep may have
+        marked a node stale or added an edge via cascade.
+        """
         a = db.get_node(conn, a_id)
         b = db.get_node(conn, b_id)
         if not a or a["status"] == "stale" or not b or b["status"] == "stale":
             summary["skipped_stale"] += 1
             _debug(f"  pair ({a_id},{b_id}) sim={sim:.3f} tier={tier} "
                    f"SKIP: became stale during arbitration")
-            continue
+            return None
         # Load-bearing rail (id=1699/id=1797): a tree summary is a near-duplicate
         # of its own members by construction, so it collides at the sweep
         # threshold and the recency pass would let the fresh summary supersede the
@@ -1566,12 +1606,21 @@ def nightly_heal(
             summary["skipped_summary"] += 1
             _debug(f"  pair ({a_id},{b_id}) sim={sim:.3f} tier={tier} "
                    f"SKIP: summary node not eligible for contradiction arbitration")
-            continue
+            return None
         if edge_exists_between(conn, a_id, b_id):
             summary["skipped_edge_exists"] += 1
             _debug(f"  pair ({a_id},{b_id}) sim={sim:.3f} tier={tier} "
                    f"SKIP: edge added during arbitration")
+            return None
+        return a, b
+
+    # ---------- Phase 1 (similarity order): deterministic verdicts only ----------
+    llm_queue: list[tuple[float, str, int, int, float]] = []
+    for sim, tier, a_id, b_id, priority in pair_list:
+        admitted = admit(a_id, b_id, sim, tier)
+        if admitted is None:
             continue
+        a, b = admitted
 
         _debug(f"  pair ({a_id},{b_id}) sim={sim:.3f} tier={tier} "
                f"a=({a['kind']!r} {a['title']!r} ref={a.get('ref_count',0)}) "
@@ -1603,7 +1652,24 @@ def nightly_heal(
                 _apply_verdict(conn, summary, tentative, a_id, b_id, project_path=project_path)
                 continue
 
-        # LLM path: high-tier inconclusive OR low-tier (always).
+        # Inconclusive (or low-tier, which is LLM-only): defer to phase 2.
+        llm_queue.append((sim, tier, a_id, b_id, priority))
+
+    # ---------- Phase 2: the LLM-bound remainder, ordered by priority ----------
+    # Every deterministic verdict is already committed, so this ordering cannot
+    # change which supersedes execute — it only decides which pairs the scarce
+    # LLM budget reaches. A useful consequence: deterministic outcomes no longer
+    # depend on whether the budget was exhausted partway through the sweep.
+    llm_queue.sort(key=lambda p: (0 if p[1] == "high" else 1, -p[4], -p[0]))
+
+    for sim, tier, a_id, b_id, priority in llm_queue:
+        admitted = admit(a_id, b_id, sim, tier)
+        if admitted is None:
+            continue
+        a, b = admitted
+        a_repos = artifact_store.node_repo_scope(conn, a_id, cache=scope_cache)
+        b_repos = artifact_store.node_repo_scope(conn, b_id, cache=scope_cache)
+
         if not use_llm:
             verdict = {
                 "decision": "keep_both",
@@ -1702,7 +1768,6 @@ def nightly_heal(
         summary["drift"] = {"error": str(e)}
 
     _debug(f"sweep complete: {summary}")
-    _log_run_summary(summary, project_path)
     return summary
 
 
@@ -1748,7 +1813,8 @@ def _log(msg: str) -> None:
         pass
 
 
-def _log_run_summary(summary: dict, project_path: str | None) -> None:
+def _log_run_summary(summary: dict, project_path: str | None, *,
+                     ok: bool, error: str | None = None) -> None:
     """Emit one `heal_run` row per nightly sweep, success or failure.
 
     heal.log's other writers are all error paths, so a stale or absent file
@@ -1764,6 +1830,9 @@ def _log_run_summary(summary: dict, project_path: str | None) -> None:
     row = {k: summary.get(k, 0) for k in fields}
     row["by_path"] = summary.get("by_path", {})
     row["integrity"] = summary.get("integrity", {})
+    row["ok"] = ok
+    # Structural only — an exception message can carry local node text.
+    row["error"] = error
     log_utils.emit_event("heal_run", row, project_path=project_path)
 
 

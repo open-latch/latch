@@ -1015,11 +1015,13 @@ def _priority_probe(conn, tmp, pairs, *, refs, ws=None):
         calls.append((a_node["id"], b_node["id"]))
         return {"decision": "keep_both", "reason": "test"}
 
-    heal.find_near_duplicates, heal._arbitrate_nightly = fake_find, stub_arb
-    cap = budget.DEFAULT_HEAL_DAILY_CAP
-    for _ in range(cap - 1):
-        budget.check_and_record(tmp, category="heal", cap=cap)
+    # Patch INSIDE the guard: the budget pre-fill below can raise, and a leaked
+    # module global would corrupt every later test in the session.
     try:
+        heal.find_near_duplicates, heal._arbitrate_nightly = fake_find, stub_arb
+        cap = budget.DEFAULT_HEAL_DAILY_CAP
+        for _ in range(cap - 1):
+            budget.check_and_record(tmp, category="heal", cap=cap)
         result = heal.nightly_heal(conn, project_path=tmp, use_llm=True,
                                    low_threshold=0.50, high_threshold=0.70)
     finally:
@@ -1101,6 +1103,77 @@ def test_heal_deferred_row_carries_priority_fields():
     finally:
         _cleanup(tmp, conn)
 
+
+def test_priority_does_not_change_deterministic_topology():
+    """Priority must allocate the LLM budget WITHOUT changing which supersedes
+    execute. Two pairs share node A: the more-similar pair (A,C) and the
+    higher-priority pair (A,B). With the LLM disabled, every verdict here is
+    deterministic, so the persisted supersedes edge must be the one similarity
+    order produces -- priority must not reach it."""
+    tmp, conn = _fresh_db()
+    try:
+        a = _mk(conn, kind="fact", title="shared", body="the shared claim")
+        b = _mk(conn, kind="fact", title="hot", body="the shared claim hot")
+        c = _mk(conn, kind="fact", title="cold", body="the shared claim cold")
+        _set_ref(conn, a, 1); _set_ref(conn, b, 10); _set_ref(conn, c, 5)
+        for n in (a, b, c):
+            _set_ts(conn, n, updated_at=_days_ago(5))
+
+        original_find = heal.find_near_duplicates
+
+        def fake_find(_conn, _vec, *, exclude_id=None, threshold=0.0, top_k=5, **_):
+            if exclude_id == a:
+                return [{"id": c, "similarity": 0.95, "kind": "fact",
+                         "status": "staging"},
+                        {"id": b, "similarity": 0.75, "kind": "fact",
+                         "status": "staging"}]
+            return []
+
+        try:
+            heal.find_near_duplicates = fake_find
+            heal.nightly_heal(conn, project_path=tmp, use_llm=False,
+                              low_threshold=0.50, high_threshold=0.70)
+        finally:
+            heal.find_near_duplicates = original_find
+
+        winners = [r["src"] for r in conn.execute(
+            "SELECT src FROM edges WHERE relation = 'supersedes'")]
+        _assert(winners == [c], f"expected the more-similar pair to resolve "
+                               f"first (winner {c}), got {winners}")
+        print("PASS priority_does_not_change_deterministic_topology")
+    finally:
+        _cleanup(tmp, conn)
+
+
+def test_nightly_heal_heartbeat_on_failure():
+    """A crashing sweep must still leave a heal_run row, marked not-ok."""
+    tmp, conn = _fresh_db()
+    original = heal.run_integrity_pass
+    try:
+        def boom(*_a, **_k):
+            raise RuntimeError("integrity exploded")
+
+        heal.run_integrity_pass = boom
+        raised = False
+        try:
+            heal.nightly_heal(conn, project_path=tmp, use_llm=False)
+        except RuntimeError:
+            raised = True
+        finally:
+            heal.run_integrity_pass = original
+        _assert(raised, "the exception must still propagate to the caller")
+
+        rows = _read_run_rows(tmp)
+        _assert(len(rows) == 1, f"a failed sweep must emit one heal_run row, "
+                               f"got {len(rows)}")
+        _assert(rows[0]["ok"] is False, f"row must be marked not-ok: {rows[0]}")
+        _assert(rows[0]["error"] == "RuntimeError",
+                f"row must carry the structural error type: {rows[0]}")
+        print("PASS nightly_heal_heartbeat_on_failure")
+    finally:
+        heal.run_integrity_pass = original
+        _cleanup(tmp, conn)
+
 if __name__ == "__main__":
     test_recency_pass_picks_newer_when_diff_large_and_newer_fresh()
     test_recency_pass_skips_when_both_stale()
@@ -1139,4 +1212,6 @@ if __name__ == "__main__":
     test_nightly_heal_prioritizes_retrieved_pairs_over_more_similar_ones()
     test_nightly_heal_cross_lane_outranks_same_lane_at_equal_refs()
     test_heal_deferred_row_carries_priority_fields()
+    test_priority_does_not_change_deterministic_topology()
+    test_nightly_heal_heartbeat_on_failure()
     print("\nAll nightly-heal tests pass.")
