@@ -32,9 +32,8 @@ trimmed value.
 | `import:` | Exact/submodule match over `import_names` and Python import statements in `command_text`. |
 | `api:` | Token-bounded API-identifier match over command text, tool name, and import names. |
 
-`feature:`, the observed bare `positioning`, `process`, `distribution`,
-`roadmap`, and `architecture` values, unknown prefixes, malformed values,
-empty strings, and `NULL` compile to `UncompilableCheck` with an explicit
+`feature:`, the observed bare category values, unknown prefixes, malformed
+values, empty strings, and `NULL` compile to `UncompilableCheck` with an explicit
 `uncompilable_reason`. An uncompilable check never matches and is never silently
 dropped.
 
