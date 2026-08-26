@@ -1,7 +1,7 @@
 """Unit tests for the budget gate.
 
 Covers two-category split (nonheal=100/day, heal default 33/day, env-overridable):
-  * initial state, record_invocation per category, check_and_record gating
+  * initial state, record_invocation, single and batch atomic admission
   * approve_today resets BOTH counters and unlocks both
   * date rollover, corrupt-JSON fallback
   * legacy state migration: `{count}` -> `{count_nonheal}` on first load
@@ -139,6 +139,116 @@ def test_check_and_record_is_atomic_across_concurrent_callers():
         _cleanup(tmp)
 
 
+def test_reserve_available_grants_only_the_live_capacity():
+    tmp = _tmp_project()
+    try:
+        cap = 5
+        for _ in range(2):
+            budget.check_and_record(tmp, category="heal", cap=cap)
+        granted, state = budget.reserve_available(
+            tmp, category="heal", requested=8, cap=cap,
+        )
+        _assert(granted == 3 and state["count_heal"] == cap,
+                f"batch grant must stop exactly at cap: {(granted, state)}")
+        granted, state = budget.reserve_available(
+            tmp, category="heal", requested=1, cap=cap,
+        )
+        _assert(granted == 0 and state["count_heal"] == cap,
+                f"exhausted batch must not bump the counter: {(granted, state)}")
+        released, state = budget.release_reserved(
+            tmp, category="heal", count=2, expected_date=state["date"],
+        )
+        _assert(released == 2 and state["count_heal"] == 3,
+                f"unused reservations must return to capacity: {(released, state)}")
+        print("PASS reserve_available_grants_only_the_live_capacity")
+    finally:
+        _cleanup(tmp)
+
+
+def test_reserve_available_is_atomic_across_concurrent_callers():
+    tmp = _tmp_project()
+    original_save = budget._save_state
+
+    def delayed_save(project_path, state):
+        time.sleep(0.05)
+        original_save(project_path, state)
+
+    budget._save_state = delayed_save
+    try:
+        ready = threading.Barrier(2)
+
+        def reserve():
+            ready.wait(timeout=5)
+            return budget.reserve_available(
+                tmp, category="heal", requested=3, cap=3,
+            )[0]
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            grants = list(pool.map(lambda _index: reserve(), range(2)))
+
+        _assert(sorted(grants) == [0, 3],
+                f"concurrent batches must not over-grant: {grants}")
+        _assert(budget.status(tmp, heal_cap=3)["heal"]["count"] == 3,
+                "atomic batch grant must persist exactly the cap")
+        print("PASS reserve_available_is_atomic_across_concurrent_callers")
+    finally:
+        budget._save_state = original_save
+        _cleanup(tmp)
+
+
+def test_release_reserved_does_not_cross_utc_rollover():
+    tmp = _tmp_project()
+    original_today = budget._today_iso
+    day = {"value": "2026-08-25"}
+    try:
+        budget._today_iso = lambda: day["value"]
+        granted, state = budget.reserve_available(
+            tmp, category="heal", requested=2, cap=2,
+        )
+        _assert(granted == 2 and state["date"] == day["value"], state)
+
+        old_date = state["date"]
+        day["value"] = "2026-08-26"
+        allowed, _ = budget.check_and_record(tmp, category="heal", cap=2)
+        _assert(allowed, "new-day control invocation should be charged")
+        released, state = budget.release_reserved(
+            tmp, category="heal", count=2, expected_date=old_date,
+        )
+        _assert(released == 0 and state["date"] == day["value"],
+                f"old-day slots must not decrement the new-day count: {state}")
+        _assert(state["count_heal"] == 1,
+                f"old-day release subtracted a new-day invocation: {state}")
+        print("PASS release_reserved_does_not_cross_utc_rollover")
+    finally:
+        budget._today_iso = original_today
+        _cleanup(tmp)
+
+
+def test_release_reserved_does_not_cross_approval_reset():
+    tmp = _tmp_project()
+    try:
+        granted, state = budget.reserve_available(
+            tmp, category="heal", requested=2, cap=2,
+        )
+        _assert(granted == 2, state)
+        reserved_date = state["date"]
+
+        budget.approve_today(tmp)
+        budget.record_invocation(tmp, category="heal")
+        released, state = budget.release_reserved(
+            tmp,
+            category="heal",
+            count=2,
+            expected_date=reserved_date,
+            expected_approved=False,
+        )
+        _assert(released == 0 and state["count_heal"] == 1,
+                f"old reservation erased post-approval usage: {state}")
+        print("PASS release_reserved_does_not_cross_approval_reset")
+    finally:
+        _cleanup(tmp)
+
+
 def test_categories_are_independent():
     """Exhausting one category must NOT block the other — the whole point of the split."""
     tmp = _tmp_project()
@@ -194,9 +304,12 @@ def test_approve_today_is_idempotent():
     tmp = _tmp_project()
     try:
         s1 = budget.approve_today(tmp)
+        budget.record_invocation(tmp, category="heal")
         s2 = budget.approve_today(tmp)
         _assert(s2["approved_dates"] == s1["approved_dates"],
                 f"approved_dates duplicated: {s2['approved_dates']}")
+        _assert(s2["count_heal"] == 1,
+                f"repeated approval must not erase later usage: {s2}")
         print("PASS approve_today_is_idempotent")
     finally:
         _cleanup(tmp)
@@ -276,6 +389,12 @@ def test_corrupt_json_fails_closed_for_budget_consumers():
                 lambda: budget.check_and_record(tmp, category="nonheal", cap=1),
             ),
             (
+                "reserve_available",
+                lambda: budget.reserve_available(
+                    tmp, category="nonheal", requested=1, cap=1,
+                ),
+            ),
+            (
                 "record_invocation",
                 lambda: budget.record_invocation(tmp, category="nonheal"),
             ),
@@ -349,6 +468,10 @@ if __name__ == "__main__":
     test_record_invocation_increments_per_category()
     test_check_and_record_gates_at_cap_per_category()
     test_check_and_record_is_atomic_across_concurrent_callers()
+    test_reserve_available_grants_only_the_live_capacity()
+    test_reserve_available_is_atomic_across_concurrent_callers()
+    test_release_reserved_does_not_cross_utc_rollover()
+    test_release_reserved_does_not_cross_approval_reset()
     test_categories_are_independent()
     test_approve_today_resets_both_and_unlocks()
     test_approve_today_is_idempotent()

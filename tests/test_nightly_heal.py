@@ -7,6 +7,7 @@ actually spawning a subprocess.
 """
 from __future__ import annotations
 
+import json
 import shutil
 import sys
 import tempfile
@@ -518,7 +519,7 @@ def test_nightly_heal_budget_blocked_defers_without_edge_and_retries():
         _set_ref(conn, a, 2)
         _set_ref(conn, b, 2)
 
-        # Pre-fill the heal budget so the next check_and_record returns False.
+        # Pre-fill the heal budget so the sweep's next reservation grants zero.
         import budget
         cap = budget.DEFAULT_HEAL_DAILY_CAP
         for _ in range(cap):
@@ -591,6 +592,582 @@ def test_nightly_heal_budget_blocked_defers_without_edge_and_retries():
               f"(budget_blocked={result['budget_blocked']}, "
               f"retried_calls={retried['llm_invocations']})")
     finally:
+        _cleanup(tmp, conn)
+
+
+def test_nightly_heal_budget_status_error_defers_and_runs_maintenance():
+    """A budget-state I/O failure must fail closed for LLM work while allowing
+    deterministic arbitration and every trailing maintenance stage."""
+    import budget
+
+    tmp, conn = _fresh_db()
+    try:
+        a = _mk(conn, title="budget error a", body="shared budget error claim")
+        b = _mk(conn, title="budget error b", body="shared budget error claim")
+        for node_id in (a, b):
+            _set_ts(conn, node_id, updated_at=_days_ago(5))
+            _set_ref(conn, node_id, 2)
+
+        original_find = heal.find_near_duplicates
+        original_status = budget.status
+        original_check = budget.check_and_record
+        original_reserve = budget.reserve_available
+        status_calls = 0
+        check_calls = 0
+        reserve_calls = 0
+
+        def fake_find(_conn, _vec, *, exclude_id=None, **_):
+            if exclude_id == a:
+                return [{"id": b, "similarity": 0.60, "kind": "fact",
+                         "status": "staging"}]
+            return []
+
+        def status_error(*_args, **_kwargs):
+            nonlocal status_calls
+            status_calls += 1
+            raise OSError("budget state locked")
+
+        def check_error(*_args, **_kwargs):
+            nonlocal check_calls
+            check_calls += 1
+            raise OSError("budget state locked")
+
+        def reserve_error(*_args, **_kwargs):
+            nonlocal reserve_calls
+            reserve_calls += 1
+            raise OSError("budget state locked")
+
+        try:
+            heal.find_near_duplicates = fake_find
+            budget.status = status_error
+            budget.check_and_record = check_error
+            budget.reserve_available = reserve_error
+            result = heal.nightly_heal(
+                conn, project_path=tmp, use_llm=True,
+                low_threshold=0.50, high_threshold=0.70,
+            )
+        finally:
+            heal.find_near_duplicates = original_find
+            budget.status = original_status
+            budget.check_and_record = original_check
+            budget.reserve_available = original_reserve
+
+        _assert(result["ok"] is True and result["llm_invocations"] == 0,
+                f"budget status failure must not abort the sweep: {result}")
+        _assert(result["deferred"] == 1 and result["budget_blocked"] == 1,
+                f"LLM pair should be safely deferred: {result}")
+        _assert(status_calls == 0,
+                f"heal must not depend on an advisory status read: {status_calls}")
+        _assert(check_calls == 0,
+                f"heal should use atomic batch admission: {check_calls}")
+        _assert(reserve_calls == 1,
+                f"atomic budget reservation should be attempted once: {reserve_calls}")
+        _assert(not heal.edge_exists_between(conn, a, b),
+                "budget-state failure must leave the pair retryable")
+        _assert(db.get_node(conn, a)["status"] != "stale"
+                and db.get_node(conn, b)["status"] != "stale",
+                "budget-state failure must leave both nodes live")
+        for key in ("log_retention", "request_text_retention", "correlator", "drift"):
+            _assert(key in result, f"trailing maintenance did not reach {key}: {result}")
+
+        today = datetime.now(timezone.utc).date()
+        rows = list(log_utils.read_log_range("heal_deferred", today, today, tmp))
+        matching = [row for row in rows
+                    if (row.get("node_a_id"), row.get("node_b_id"))
+                    == tuple(sorted((a, b)))]
+        _assert(matching and matching[-1]["reason"] == "budget_state_error",
+                f"budget I/O deferral needs an accurate reason: {matching}")
+        print("PASS nightly_heal_budget_status_error_defers_and_runs_maintenance")
+    finally:
+        _cleanup(tmp, conn)
+
+
+def test_nightly_heal_releases_unused_batch_after_apply_failure():
+    """An unexpected early failure consumes only the attempt that started;
+    every later slot from the atomic batch must be returned for the next run."""
+    import budget
+
+    tmp, conn = _fresh_db()
+    original_find = heal.find_near_duplicates
+    original_arb = heal._arbitrate_nightly
+    original_apply = heal._apply_verdict
+    try:
+        pairs = []
+        for label in ("first", "second", "third"):
+            a = _mk(conn, title=f"{label} a", body=f"{label} failure pair")
+            b = _mk(conn, title=f"{label} b", body=f"{label} failure pair")
+            pairs.append((a, b))
+            for node_id in (a, b):
+                _set_ref(conn, node_id, 1)
+                _set_ts(conn, node_id, updated_at=_days_ago(5))
+        by_seed = {
+            pairs[0][0]: (pairs[0][1], 0.99),
+            pairs[1][0]: (pairs[1][1], 0.95),
+            pairs[2][0]: (pairs[2][1], 0.90),
+        }
+        calls: list[tuple[int, int]] = []
+
+        def fake_find(_conn, _vec, *, exclude_id=None, **_):
+            if exclude_id not in by_seed:
+                return []
+            other, similarity = by_seed[exclude_id]
+            return [{"id": other, "similarity": similarity, "kind": "fact",
+                     "status": "staging"}]
+
+        def stub_arb(older, newer, _sim, **_):
+            calls.append(tuple(sorted((older["id"], newer["id"]))))
+            return {"decision": "keep_both", "reason": "test"}
+
+        def fail_apply(*_args, **_kwargs):
+            raise RuntimeError("apply failed")
+
+        budget.approve_today(tmp)
+        heal.find_near_duplicates = fake_find
+        heal._arbitrate_nightly = stub_arb
+        heal._apply_verdict = fail_apply
+        raised = False
+        try:
+            heal.nightly_heal(
+                conn, project_path=tmp, use_llm=True,
+                low_threshold=0.50, high_threshold=0.70,
+            )
+        except RuntimeError:
+            raised = True
+
+        _assert(raised and calls == [tuple(sorted(pairs[0]))],
+                f"fixture must fail after one attempted arbitration: {calls}")
+        state = budget.status(tmp)
+        _assert(state["heal"]["count"] == 1,
+                f"unused batch slots leaked after failure: {state}")
+        print("PASS nightly_heal_releases_unused_batch_after_apply_failure")
+    finally:
+        heal.find_near_duplicates = original_find
+        heal._arbitrate_nightly = original_arb
+        heal._apply_verdict = original_apply
+        _cleanup(tmp, conn)
+
+
+def test_nightly_heal_replans_batch_across_utc_rollover():
+    """A pre-charged slot from yesterday cannot authorize today's call; the
+    live pair must be atomically reserved again without a false deferral."""
+    import budget
+
+    tmp, conn = _fresh_db()
+    original_find = heal.find_near_duplicates
+    original_arb = heal._arbitrate_nightly
+    original_reserve = budget.reserve_available
+    original_today = budget._today_iso
+    try:
+        a = _mk(conn, title="rollover a", body="rollover reservation pair")
+        b = _mk(conn, title="rollover b", body="rollover reservation pair")
+        for node_id in (a, b):
+            _set_ref(conn, node_id, 1)
+            _set_ts(conn, node_id, updated_at=_days_ago(5))
+
+        day = {"value": "2026-08-25"}
+        reserve_calls = 0
+        calls: list[tuple[int, int]] = []
+
+        def fake_find(_conn, _vec, *, exclude_id=None, **_):
+            if exclude_id == a:
+                return [{"id": b, "similarity": 0.90, "kind": "fact",
+                         "status": "staging"}]
+            return []
+
+        def rollover_reserve(*args, **kwargs):
+            nonlocal reserve_calls
+            result = original_reserve(*args, **kwargs)
+            reserve_calls += 1
+            if reserve_calls == 1:
+                day["value"] = "2026-08-26"
+            return result
+
+        def stub_arb(older, newer, _sim, **_):
+            calls.append(tuple(sorted((older["id"], newer["id"]))))
+            return {"decision": "keep_both", "reason": "test"}
+
+        budget._today_iso = lambda: day["value"]
+        budget.reserve_available = rollover_reserve
+        heal.find_near_duplicates = fake_find
+        heal._arbitrate_nightly = stub_arb
+        result = heal.nightly_heal(
+            conn, project_path=tmp, use_llm=True,
+            low_threshold=0.50, high_threshold=0.70,
+        )
+
+        _assert(reserve_calls == 2,
+                f"rollover must discard and reacquire the old slot: {reserve_calls}")
+        _assert(calls == [tuple(sorted((a, b)))],
+                f"pair should be invoked exactly once after replanning: {calls}")
+        _assert(result["llm_invocations"] == 1
+                and result["deferred"] == 0
+                and result["budget_blocked"] == 0,
+                f"rollover caused a false budget deferral: {result}")
+        state = budget.status(tmp)
+        _assert(state["date"] == day["value"] and state["heal"]["count"] == 1,
+                f"invocation must be charged to the new UTC day: {state}")
+        print("PASS nightly_heal_replans_batch_across_utc_rollover")
+    finally:
+        budget._today_iso = original_today
+        budget.reserve_available = original_reserve
+        heal.find_near_duplicates = original_find
+        heal._arbitrate_nightly = original_arb
+        _cleanup(tmp, conn)
+
+
+def test_nightly_heal_never_merges_reservations_across_utc_days():
+    """If midnight falls inside an expansion reservation, old generic slots
+    must not widen the new day's priority window."""
+    import budget
+
+    tmp, conn = _fresh_db()
+    original_find = heal.find_near_duplicates
+    original_arb = heal._arbitrate_nightly
+    original_reserve = budget.reserve_available
+    original_today = budget._today_iso
+    original_cap = budget.DEFAULT_HEAL_DAILY_CAP
+    try:
+        a = _mk(conn, title="epoch a", body="epoch chain claim")
+        b = _mk(conn, title="epoch b", body="epoch chain claim")
+        e = _mk(conn, title="epoch hot", body="epoch chain claim")
+        c = _mk(conn, title="epoch cold c", body="epoch cold claim")
+        d = _mk(conn, title="epoch cold d", body="epoch cold claim")
+        for node_id, refs in {a: 20, b: 20, e: 20, c: 1, d: 1}.items():
+            _set_ref(conn, node_id, refs)
+            _set_ts(conn, node_id, updated_at=_days_ago(5))
+        hot_priority = heal._pair_priority(db.get_node(conn, a), db.get_node(conn, e))
+        cold_priority = heal._pair_priority(db.get_node(conn, c), db.get_node(conn, d))
+        _assert(hot_priority > cold_priority,
+                f"fixture must rank the downstream pair first: {(hot_priority, cold_priority)}")
+
+        day = {"value": "2026-08-25"}
+        reserve_calls = 0
+        calls: list[tuple[int, int]] = []
+
+        def fake_find(_conn, _vec, *, exclude_id=None, **_):
+            if exclude_id == a:
+                return [
+                    {"id": b, "similarity": 0.99, "kind": "fact",
+                     "status": "staging"},
+                    {"id": e, "similarity": 0.80, "kind": "fact",
+                     "status": "staging"},
+                ]
+            if exclude_id == c:
+                return [{"id": d, "similarity": 0.90, "kind": "fact",
+                         "status": "staging"}]
+            return []
+
+        def rollover_on_expansion(*args, **kwargs):
+            nonlocal reserve_calls
+            reserve_calls += 1
+            if reserve_calls == 2:
+                day["value"] = "2026-08-26"
+            return original_reserve(*args, **kwargs)
+
+        def stub_arb(older, newer, _sim, **_):
+            calls.append(tuple(sorted((older["id"], newer["id"]))))
+            return {"decision": "keep_both", "reason": "test"}
+
+        budget._today_iso = lambda: day["value"]
+        budget.approve_today(tmp)  # Day one is unlimited; day two has cap=1.
+        budget.DEFAULT_HEAL_DAILY_CAP = 1
+        budget.reserve_available = rollover_on_expansion
+        heal.find_near_duplicates = fake_find
+        heal._arbitrate_nightly = stub_arb
+        result = heal.nightly_heal(
+            conn, project_path=tmp, use_llm=True,
+            low_threshold=0.50, high_threshold=0.70,
+        )
+
+        expected = [tuple(sorted((a, b))), tuple(sorted((a, e)))]
+        _assert(calls == expected,
+                f"old-day width leaked into the new priority window: {calls}")
+        _assert(result["llm_invocations"] == 2
+                and result["deferred"] == 1
+                and result["budget_blocked"] == 1,
+                f"new-day cap was not enforced exactly: {result}")
+        state = budget.status(tmp, heal_cap=1)
+        _assert(state["date"] == day["value"]
+                and state["heal"]["count"] == 1
+                and state["heal"]["remaining"] == 0,
+                f"new-day invocation accounting drifted: {state}")
+        today = datetime.now(timezone.utc).date()
+        rows = list(log_utils.read_log_range("heal_deferred", today, today, tmp))
+        capped_pairs = {
+            (row.get("node_a_id"), row.get("node_b_id"))
+            for row in rows if row.get("reason") == "budget_cap"
+        }
+        _assert(capped_pairs == {tuple(sorted((c, d)))},
+                f"only the lower-priority new-day pair may defer: {rows}")
+        print("PASS nightly_heal_never_merges_reservations_across_utc_days")
+    finally:
+        budget._today_iso = original_today
+        budget.DEFAULT_HEAL_DAILY_CAP = original_cap
+        budget.reserve_available = original_reserve
+        heal.find_near_duplicates = original_find
+        heal._arbitrate_nightly = original_arb
+        _cleanup(tmp, conn)
+
+
+def test_nightly_heal_transfers_reserved_slot_after_live_invalidation():
+    """A pair invalidated while another model call runs must not consume its
+    reserved token; the token transfers to the highest-priority live fallback."""
+    import budget
+
+    tmp, conn = _fresh_db()
+    original_find = heal.find_near_duplicates
+    original_arb = heal._arbitrate_nightly
+    original_cap = budget.DEFAULT_HEAL_DAILY_CAP
+    try:
+        first = (
+            _mk(conn, title="first a", body="first transfer pair"),
+            _mk(conn, title="first b", body="first transfer pair"),
+        )
+        invalidated = (
+            _mk(conn, title="invalidated a", body="invalidated transfer pair"),
+            _mk(conn, title="invalidated b", body="invalidated transfer pair"),
+        )
+        fallback = (
+            _mk(conn, title="fallback a", body="fallback transfer pair"),
+            _mk(conn, title="fallback b", body="fallback transfer pair"),
+        )
+        for pair, refs in ((first, 20), (invalidated, 10), (fallback, 1)):
+            for node_id in pair:
+                _set_ref(conn, node_id, refs)
+                _set_ts(conn, node_id, updated_at=_days_ago(5))
+        priorities = [
+            heal._pair_priority(db.get_node(conn, *pair[:1]), db.get_node(conn, pair[1]))
+            for pair in (first, invalidated, fallback)
+        ]
+        _assert(priorities[0] > priorities[1] > priorities[2],
+                f"fixture priority order changed: {priorities}")
+
+        by_seed = {
+            first[0]: (first[1], 0.99),
+            invalidated[0]: (invalidated[1], 0.95),
+            fallback[0]: (fallback[1], 0.90),
+        }
+        calls: list[tuple[int, int]] = []
+
+        def fake_find(_conn, _vec, *, exclude_id=None, **_):
+            if exclude_id not in by_seed:
+                return []
+            other, similarity = by_seed[exclude_id]
+            return [{"id": other, "similarity": similarity, "kind": "fact",
+                     "status": "staging"}]
+
+        def stub_arb(older, newer, _sim, **_):
+            pair = tuple(sorted((older["id"], newer["id"])))
+            calls.append(pair)
+            if pair == tuple(sorted(first)):
+                conn.execute(
+                    "UPDATE nodes SET status = 'stale' WHERE id = ?",
+                    (invalidated[0],),
+                )
+                conn.commit()
+            return {"decision": "keep_both", "reason": "test"}
+
+        budget.DEFAULT_HEAL_DAILY_CAP = 2
+        heal.find_near_duplicates = fake_find
+        heal._arbitrate_nightly = stub_arb
+        result = heal.nightly_heal(
+            conn, project_path=tmp, use_llm=True,
+            low_threshold=0.50, high_threshold=0.70,
+        )
+
+        _assert(calls == [tuple(sorted(first)), tuple(sorted(fallback))],
+                f"reserved slot did not transfer to the live fallback: {calls}")
+        _assert(not heal.edge_exists_between(conn, *invalidated),
+                "invalidated pair must remain unmutated")
+        _assert(heal.edge_exists_between(conn, *fallback),
+                "transferred fallback verdict was not persisted")
+        _assert(result["llm_invocations"] == 2
+                and result["deferred"] == 0
+                and result["budget_blocked"] == 0,
+                f"invalidated reservation was falsely deferred: {result}")
+        _assert(budget.status(tmp, heal_cap=2)["heal"]["remaining"] == 0,
+                "both authoritative reservations should be consumed")
+        print("PASS nightly_heal_transfers_reserved_slot_after_live_invalidation")
+    finally:
+        budget.DEFAULT_HEAL_DAILY_CAP = original_cap
+        heal.find_near_duplicates = original_find
+        heal._arbitrate_nightly = original_arb
+        _cleanup(tmp, conn)
+
+
+def test_nightly_heal_revalidates_after_budget_reservation():
+    """A candidate invalidated while budget I/O is in flight cannot consume
+    the returned slot; the highest-priority live fallback receives it."""
+    import budget
+
+    tmp, conn = _fresh_db()
+    original_find = heal.find_near_duplicates
+    original_arb = heal._arbitrate_nightly
+    original_reserve = budget.reserve_available
+    original_cap = budget.DEFAULT_HEAL_DAILY_CAP
+    try:
+        selected = (
+            _mk(conn, title="selected a", body="reservation race pair"),
+            _mk(conn, title="selected b", body="reservation race pair"),
+        )
+        fallback = (
+            _mk(conn, title="fallback a", body="reservation fallback pair"),
+            _mk(conn, title="fallback b", body="reservation fallback pair"),
+        )
+        for pair, refs in ((selected, 10), (fallback, 1)):
+            for node_id in pair:
+                _set_ref(conn, node_id, refs)
+                _set_ts(conn, node_id, updated_at=_days_ago(5))
+        selected_priority = heal._pair_priority(
+            db.get_node(conn, selected[0]), db.get_node(conn, selected[1]),
+        )
+        fallback_priority = heal._pair_priority(
+            db.get_node(conn, fallback[0]), db.get_node(conn, fallback[1]),
+        )
+        _assert(selected_priority > fallback_priority,
+                f"fixture must select the invalidated pair first: "
+                f"{(selected_priority, fallback_priority)}")
+
+        by_seed = {
+            selected[0]: (selected[1], 0.99),
+            fallback[0]: (fallback[1], 0.90),
+        }
+        reserve_calls = 0
+        calls: list[tuple[int, int]] = []
+
+        def fake_find(_conn, _vec, *, exclude_id=None, **_):
+            if exclude_id not in by_seed:
+                return []
+            other, similarity = by_seed[exclude_id]
+            return [{"id": other, "similarity": similarity, "kind": "fact",
+                     "status": "staging"}]
+
+        def invalidating_reserve(*args, **kwargs):
+            nonlocal reserve_calls
+            result = original_reserve(*args, **kwargs)
+            reserve_calls += 1
+            if reserve_calls == 1:
+                conn.execute(
+                    "UPDATE nodes SET status = 'stale' WHERE id = ?",
+                    (selected[0],),
+                )
+                conn.commit()
+            return result
+
+        def stub_arb(older, newer, _sim, **_):
+            calls.append(tuple(sorted((older["id"], newer["id"]))))
+            return {"decision": "keep_both", "reason": "test"}
+
+        budget.DEFAULT_HEAL_DAILY_CAP = 1
+        budget.reserve_available = invalidating_reserve
+        heal.find_near_duplicates = fake_find
+        heal._arbitrate_nightly = stub_arb
+        result = heal.nightly_heal(
+            conn, project_path=tmp, use_llm=True,
+            low_threshold=0.50, high_threshold=0.70,
+        )
+
+        _assert(calls == [tuple(sorted(fallback))],
+                f"stale selected pair consumed the generic slot: {calls}")
+        _assert(not heal.edge_exists_between(conn, *selected),
+                "invalidated selected pair must remain unmutated")
+        _assert(heal.edge_exists_between(conn, *fallback),
+                "fallback did not receive the transferred slot")
+        _assert(result["llm_invocations"] == 1
+                and result["deferred"] == 0
+                and result["budget_blocked"] == 0,
+                f"reservation race caused a false deferral: {result}")
+        _assert(budget.status(tmp, heal_cap=1)["heal"]["remaining"] == 0,
+                "the transferred slot should be consumed exactly once")
+        print("PASS nightly_heal_revalidates_after_budget_reservation")
+    finally:
+        budget.DEFAULT_HEAL_DAILY_CAP = original_cap
+        budget.reserve_available = original_reserve
+        heal.find_near_duplicates = original_find
+        heal._arbitrate_nightly = original_arb
+        _cleanup(tmp, conn)
+
+
+def test_nightly_heal_keeps_generic_slots_for_downstream_frontiers():
+    """Invalidated frontiers do not prove their generic slots are surplus: a
+    surviving component can expose more live LLM work after its next verdict."""
+    import budget
+
+    tmp, conn = _fresh_db()
+    original_find = heal.find_near_duplicates
+    original_arb = heal._arbitrate_nightly
+    original_cap = budget.DEFAULT_HEAL_DAILY_CAP
+    try:
+        a = _mk(conn, title="chain a", body="shared downstream chain")
+        b = _mk(conn, title="chain b", body="shared downstream chain")
+        c = _mk(conn, title="chain c", body="shared downstream chain")
+        h = _mk(conn, title="chain h", body="shared downstream chain")
+        d = _mk(conn, title="invalid d", body="invalidated independent pair")
+        e = _mk(conn, title="invalid e", body="invalidated independent pair")
+        f = _mk(conn, title="invalid f", body="other invalidated pair")
+        g = _mk(conn, title="invalid g", body="other invalidated pair")
+        i = _mk(conn, title="invalid i", body="third invalidated pair")
+        j = _mk(conn, title="invalid j", body="third invalidated pair")
+        for node_id in (a, b, c, h, d, e, f, g, i, j):
+            _set_ref(conn, node_id, 1)
+            _set_ts(conn, node_id, updated_at=_days_ago(5))
+
+        by_seed = {
+            a: [(b, 0.99), (c, 0.85), (h, 0.80)],
+            d: [(e, 0.95)],
+            f: [(g, 0.90)],
+            i: [(j, 0.88)],
+        }
+        calls: list[tuple[int, int]] = []
+
+        def fake_find(_conn, _vec, *, exclude_id=None, **_):
+            return [
+                {"id": other, "similarity": similarity, "kind": "fact",
+                 "status": "staging"}
+                for other, similarity in by_seed.get(exclude_id, [])
+            ]
+
+        def stub_arb(older, newer, _sim, **_):
+            pair = tuple(sorted((older["id"], newer["id"])))
+            calls.append(pair)
+            if pair == tuple(sorted((a, b))):
+                conn.execute(
+                    "UPDATE nodes SET status = 'stale' WHERE id IN (?, ?, ?)",
+                    (d, f, i),
+                )
+                conn.commit()
+            return {"decision": "keep_both", "reason": "test"}
+
+        budget.DEFAULT_HEAL_DAILY_CAP = 3
+        heal.find_near_duplicates = fake_find
+        heal._arbitrate_nightly = stub_arb
+        result = heal.nightly_heal(
+            conn, project_path=tmp, use_llm=True,
+            low_threshold=0.50, high_threshold=0.70,
+        )
+
+        expected = [
+            tuple(sorted((a, b))),
+            tuple(sorted((a, c))),
+            tuple(sorted((a, h))),
+        ]
+        _assert(calls == expected,
+                f"generic slots did not reach downstream frontiers: {calls}")
+        _assert(result["llm_invocations"] == 3
+                and result["deferred"] == 0
+                and result["budget_blocked"] == 0,
+                f"downstream live work was falsely capped: {result}")
+        _assert(budget.status(tmp, heal_cap=3)["heal"]["remaining"] == 0,
+                "all three authoritative slots should be consumed")
+        today = datetime.now(timezone.utc).date()
+        deferred = list(log_utils.read_log_range("heal_deferred", today, today, tmp))
+        _assert(not [row for row in deferred if row.get("reason") == "budget_cap"],
+                f"no live downstream pair should be budget-deferred: {deferred}")
+        print("PASS nightly_heal_keeps_generic_slots_for_downstream_frontiers")
+    finally:
+        budget.DEFAULT_HEAL_DAILY_CAP = original_cap
+        heal.find_near_duplicates = original_find
+        heal._arbitrate_nightly = original_arb
         _cleanup(tmp, conn)
 
 
@@ -938,6 +1515,604 @@ def test_nightly_heal_excludes_summary_nodes_from_contradiction_sweep():
         _cleanup(tmp, conn)
 
 
+
+def _read_run_rows(tmp):
+    path = log_utils.today_log_path("heal_run", tmp)
+    if not path.exists():
+        return []
+    return [json.loads(l) for l in path.read_text(encoding="utf-8").splitlines()
+            if l.strip()]
+
+
+def test_nightly_heal_emits_run_heartbeat():
+    """Every sweep leaves a heal_run row. heal.log is error-only, so without a
+    positive heartbeat a quiet log is indistinguishable from a healer that
+    silently stopped running."""
+    tmp, conn = _fresh_db()
+    try:
+        heal.nightly_heal(conn, project_path=tmp, use_llm=False)
+        rows = _read_run_rows(tmp)
+        _assert(len(rows) == 1, f"expected 1 heal_run row, got {len(rows)}")
+        for key in ("examined", "collisions", "superseded", "kept_both",
+                    "reconciled", "deferred", "budget_blocked", "by_path",
+                    "integrity"):
+            _assert(key in rows[0], f"heal_run row missing {key}")
+        print("PASS nightly_heal_emits_run_heartbeat")
+    finally:
+        _cleanup(tmp, conn)
+
+
+def test_nightly_heal_heartbeat_on_integrity_only_run():
+    """contradictions=False returns early; that path must still heartbeat."""
+    tmp, conn = _fresh_db()
+    try:
+        heal.nightly_heal(conn, project_path=tmp, use_llm=False,
+                          contradictions=False)
+        rows = _read_run_rows(tmp)
+        _assert(len(rows) == 1,
+                f"integrity-only run emitted {len(rows)} heal_run rows")
+        print("PASS nightly_heal_heartbeat_on_integrity_only_run")
+    finally:
+        _cleanup(tmp, conn)
+
+
+def _set_ws(conn, node_id, ws):
+    conn.execute("UPDATE nodes SET workstream_id = ? WHERE id = ?", (ws, node_id))
+    conn.commit()
+
+
+def _priority_probe(conn, tmp, pairs, *, refs, ws=None):
+    """Run a sweep with budget for exactly one LLM call over `pairs`.
+
+    Returns the (sorted) pair the arbitrator actually spent it on.
+    `pairs` is [(a, b, sim), ...]; `refs`/`ws` map node id -> value.
+    """
+    import budget
+    for node_id, n in refs.items():
+        _set_ref(conn, node_id, n)
+    for node_id, w in (ws or {}).items():
+        _set_ws(conn, node_id, w)
+    for a, b, _ in pairs:
+        _set_ts(conn, a, updated_at=_days_ago(5))
+        _set_ts(conn, b, updated_at=_days_ago(5))
+
+    by_a = {a: (b, sim) for a, b, sim in pairs}
+    original_find, original_arb = heal.find_near_duplicates, heal._arbitrate_nightly
+    calls: list[tuple[int, int]] = []
+
+    def fake_find(_conn, _vec, *, exclude_id=None, threshold=0.0, top_k=5, **_):
+        if exclude_id in by_a:
+            b, sim = by_a[exclude_id]
+            return [{"id": b, "similarity": sim, "kind": "fact",
+                     "status": "staging"}]
+        return []
+
+    def stub_arb(a_node, b_node, _sim, **kw):
+        calls.append((a_node["id"], b_node["id"]))
+        return {"decision": "keep_both", "reason": "test"}
+
+    # Patch INSIDE the guard: the budget pre-fill below can raise, and a leaked
+    # module global would corrupt every later test in the session.
+    try:
+        heal.find_near_duplicates, heal._arbitrate_nightly = fake_find, stub_arb
+        cap = budget.DEFAULT_HEAL_DAILY_CAP
+        for _ in range(cap - 1):
+            budget.check_and_record(tmp, category="heal", cap=cap)
+        result = heal.nightly_heal(conn, project_path=tmp, use_llm=True,
+                                   low_threshold=0.50, high_threshold=0.70)
+    finally:
+        heal.find_near_duplicates, heal._arbitrate_nightly = original_find, original_arb
+    _assert(len(calls) == 1, f"expected exactly 1 LLM call, got {calls}")
+    return tuple(sorted(calls[0])), result
+
+
+def test_nightly_heal_prioritizes_retrieved_pairs_over_more_similar_ones():
+    """Within a tier, the one available LLM call goes to the pair that is
+    actually being retrieved -- even though the cold pair is MORE similar.
+    Similarity measures likeness; ref_count measures what the contradiction
+    costs while it stays unresolved."""
+    tmp, conn = _fresh_db()
+    try:
+        hot_a = _mk(conn, kind="fact", title="hot a", body="hot pair content")
+        hot_b = _mk(conn, kind="fact", title="hot b", body="hot pair content")
+        cold_a = _mk(conn, kind="fact", title="cold a", body="cold pair content")
+        cold_b = _mk(conn, kind="fact", title="cold b", body="cold pair content")
+        called, result = _priority_probe(
+            conn, tmp,
+            # cold pair is the MORE similar one -- old sort would pick it.
+            [(hot_a, hot_b, 0.75), (cold_a, cold_b, 0.95)],
+            refs={hot_a: 10, hot_b: 10, cold_a: 0, cold_b: 0},
+        )
+        _assert(called == tuple(sorted((hot_a, hot_b))),
+                f"budget should go to the retrieved pair, got {called}")
+        _assert(result["priority_llm"] > result["priority_deferred"],
+                f"priority mass should favour what was arbitrated: {result}")
+        print("PASS nightly_heal_prioritizes_retrieved_pairs_over_more_similar_ones")
+    finally:
+        _cleanup(tmp, conn)
+
+
+def test_nightly_heal_cross_lane_outranks_same_lane_at_equal_refs():
+    """Equal retrieval pressure, and the same-lane pair is MORE similar: the
+    cross-workstream pair still wins, because no single lane's context
+    resolves it. Similarity alone would have picked the same-lane pair."""
+    tmp, conn = _fresh_db()
+    try:
+        # workstream_id is a FK to a kind='workstream' node; the sweep's seed
+        # query excludes that kind, so these never become candidates.
+        ws1 = _mk(conn, kind="workstream", title="lane one", body="lane one")
+        ws2 = _mk(conn, kind="workstream", title="lane two", body="lane two")
+        x_a = _mk(conn, kind="fact", title="x a", body="cross lane content")
+        x_b = _mk(conn, kind="fact", title="x b", body="cross lane content")
+        s_a = _mk(conn, kind="fact", title="s a", body="same lane content")
+        s_b = _mk(conn, kind="fact", title="s b", body="same lane content")
+        called, _ = _priority_probe(
+            conn, tmp,
+            [(x_a, x_b, 0.80), (s_a, s_b, 0.95)],
+            refs={x_a: 3, x_b: 3, s_a: 3, s_b: 3},
+            ws={x_a: ws1, x_b: ws2, s_a: ws1, s_b: ws1},
+        )
+        _assert(called == tuple(sorted((x_a, x_b))),
+                f"cross-lane pair should win the tiebreak, got {called}")
+        print("PASS nightly_heal_cross_lane_outranks_same_lane_at_equal_refs")
+    finally:
+        _cleanup(tmp, conn)
+
+
+def test_priority_preserves_similarity_order_when_budget_covers_queue():
+    """Priority is a scarce-budget selector, not a general invocation reorder.
+    With room for the full queue, LLM calls retain similarity order so the
+    process-global timeout breaker cannot change persisted topology."""
+    import budget
+
+    tmp, conn = _fresh_db()
+    original_find = heal.find_near_duplicates
+    original_invoke = heal.model_backends.invoke_prompt
+    original_timeouts = heal._consecutive_arbitrate_timeouts
+    try:
+        cold_a = _mk(conn, title="cold a", body="cold full-budget pair")
+        cold_b = _mk(conn, title="cold b", body="cold full-budget pair")
+        warm_a = _mk(conn, title="warm a", body="warm full-budget pair")
+        warm_b = _mk(conn, title="warm b", body="warm full-budget pair")
+        hot_a = _mk(conn, title="hot a", body="hot full-budget pair")
+        hot_b = _mk(conn, title="hot b", body="hot full-budget pair")
+        for node_id, refs in {
+            cold_a: 0, cold_b: 0,
+            warm_a: 5, warm_b: 5,
+            hot_a: 20, hot_b: 20,
+        }.items():
+            _set_ref(conn, node_id, refs)
+            _set_ts(conn, node_id, updated_at=_days_ago(5))
+        priorities = [
+            heal._pair_priority(db.get_node(conn, hot_a), db.get_node(conn, hot_b)),
+            heal._pair_priority(db.get_node(conn, warm_a), db.get_node(conn, warm_b)),
+            heal._pair_priority(db.get_node(conn, cold_a), db.get_node(conn, cold_b)),
+        ]
+        _assert(priorities[0] > priorities[1] > priorities[2],
+                f"fixture must oppose priority and similarity order: {priorities}")
+        budget.approve_today(tmp)
+
+        calls: list[str] = []
+
+        def fake_find(_conn, _vec, *, exclude_id=None, **_):
+            pairs = {
+                cold_a: (cold_b, 0.99),
+                warm_a: (warm_b, 0.90),
+                hot_a: (hot_b, 0.80),
+            }
+            if exclude_id not in pairs:
+                return []
+            other, similarity = pairs[exclude_id]
+            return [{"id": other, "similarity": similarity, "kind": "fact",
+                     "status": "staging"}]
+
+        def fake_invoke(prompt, **_):
+            if "cold full-budget pair" in prompt:
+                calls.append("cold")
+                return heal.model_backends.ModelCallResult(
+                    '{"decision":"supersede_b","reason":"cold succeeds"}',
+                    None, False, "test",
+                )
+            if "warm full-budget pair" in prompt:
+                calls.append("warm")
+            elif "hot full-budget pair" in prompt:
+                calls.append("hot")
+            else:
+                raise AssertionError("unexpected arbitration prompt")
+            return heal.model_backends.ModelCallResult(
+                None, "test timeout", True, "test",
+            )
+
+        try:
+            heal.find_near_duplicates = fake_find
+            heal.model_backends.invoke_prompt = fake_invoke
+            heal._consecutive_arbitrate_timeouts = 0
+            result = heal.nightly_heal(
+                conn, project_path=tmp, use_llm=True,
+                low_threshold=0.50, high_threshold=0.70,
+            )
+        finally:
+            heal.find_near_duplicates = original_find
+            heal.model_backends.invoke_prompt = original_invoke
+            heal._consecutive_arbitrate_timeouts = original_timeouts
+
+        _assert(calls == ["cold", "warm", "hot"],
+                f"full-budget calls must retain similarity order: {calls}")
+        supersedes = [(row["src"], row["dst"]) for row in conn.execute(
+            "SELECT src, dst FROM edges WHERE relation = 'supersedes'"
+        )]
+        _assert(supersedes == [(cold_b, cold_a)],
+                f"timeout breaker changed the cold-pair topology: {supersedes}")
+        _assert(result["llm_invocations"] == 3
+                and result["budget_blocked"] == 0,
+                f"full queue should be arbitrated: {result}")
+        print("PASS priority_preserves_similarity_order_when_budget_covers_queue")
+    finally:
+        heal.find_near_duplicates = original_find
+        heal.model_backends.invoke_prompt = original_invoke
+        heal._consecutive_arbitrate_timeouts = original_timeouts
+        _cleanup(tmp, conn)
+
+
+def test_heal_deferred_row_carries_priority_fields():
+    """The deferred backlog must be measurable from its own log stream."""
+    tmp, conn = _fresh_db()
+    try:
+        a = _mk(conn, kind="fact", title="d a", body="deferred pair content")
+        b = _mk(conn, kind="fact", title="d b", body="deferred pair content")
+        c = _mk(conn, kind="fact", title="d c", body="other pair content")
+        d = _mk(conn, kind="fact", title="d d", body="other pair content")
+        _priority_probe(conn, tmp, [(a, b, 0.95), (c, d, 0.90)],
+                        refs={a: 9, b: 9, c: 1, d: 1})
+        path = log_utils.today_log_path("heal_deferred", tmp)
+        rows = [json.loads(l) for l in path.read_text(encoding="utf-8").splitlines()
+                if l.strip()]
+        _assert(rows, "expected at least one heal_deferred row")
+        for key in ("priority", "ref_count_max", "cross_lane"):
+            _assert(key in rows[0], f"heal_deferred row missing {key}")
+        print("PASS heal_deferred_row_carries_priority_fields")
+    finally:
+        _cleanup(tmp, conn)
+
+
+def test_priority_does_not_change_deterministic_topology():
+    """Priority must allocate the LLM budget WITHOUT changing which supersedes
+    execute. Two pairs share node A: the more-similar pair (A,C) and the
+    higher-priority pair (A,B). With the LLM disabled, every verdict here is
+    deterministic, so the persisted supersedes edge must be the one similarity
+    order produces -- priority must not reach it."""
+    tmp, conn = _fresh_db()
+    try:
+        a = _mk(conn, kind="fact", title="shared", body="the shared claim")
+        b = _mk(conn, kind="fact", title="hot", body="the shared claim hot")
+        c = _mk(conn, kind="fact", title="cold", body="the shared claim cold")
+        _set_ref(conn, a, 1); _set_ref(conn, b, 10); _set_ref(conn, c, 5)
+        for n in (a, b, c):
+            _set_ts(conn, n, updated_at=_days_ago(5))
+
+        original_find = heal.find_near_duplicates
+
+        def fake_find(_conn, _vec, *, exclude_id=None, threshold=0.0, top_k=5, **_):
+            if exclude_id == a:
+                return [{"id": c, "similarity": 0.95, "kind": "fact",
+                         "status": "staging"},
+                        {"id": b, "similarity": 0.75, "kind": "fact",
+                         "status": "staging"}]
+            return []
+
+        try:
+            heal.find_near_duplicates = fake_find
+            heal.nightly_heal(conn, project_path=tmp, use_llm=False,
+                              low_threshold=0.50, high_threshold=0.70)
+        finally:
+            heal.find_near_duplicates = original_find
+
+        winners = [r["src"] for r in conn.execute(
+            "SELECT src FROM edges WHERE relation = 'supersedes'")]
+        _assert(winners == [c], f"expected the more-similar pair to resolve "
+                               f"first (winner {c}), got {winners}")
+        print("PASS priority_does_not_change_deterministic_topology")
+    finally:
+        _cleanup(tmp, conn)
+
+
+def test_priority_planning_preserves_mixed_shared_node_precedence():
+    """A higher-similarity LLM pair must mutate before a lower-similarity
+    deterministic pair that shares its node. Priority selects the LLM slot;
+    it must not let the deterministic pair jump ahead and stale that node."""
+    import budget
+
+    tmp, conn = _fresh_db()
+    try:
+        ws1 = _mk(conn, kind="workstream", title="lane one", body="lane one")
+        ws2 = _mk(conn, kind="workstream", title="lane two", body="lane two")
+        a = _mk(conn, title="shared a", body="the shared claim")
+        b = _mk(conn, title="llm b", body="the shared claim llm")
+        c = _mk(conn, title="deterministic c", body="the shared claim newer")
+        _set_ws(conn, a, ws1); _set_ws(conn, b, ws2); _set_ws(conn, c, ws1)
+        for node_id in (a, b, c):
+            _set_ref(conn, node_id, 1)
+        _set_ts(conn, a, updated_at=_days_ago(60))
+        _set_ts(conn, b, updated_at=_days_ago(60))
+        _set_ts(conn, c, updated_at=_days_ago(5))
+
+        original_find = heal.find_near_duplicates
+        original_arb = heal._arbitrate_nightly
+        calls: list[tuple[int, int]] = []
+
+        def fake_find(_conn, _vec, *, exclude_id=None, threshold=0.0,
+                      top_k=5, **_):
+            if exclude_id == a:
+                return [
+                    {"id": b, "similarity": 0.95, "kind": "fact",
+                     "status": "staging"},
+                    {"id": c, "similarity": 0.75, "kind": "fact",
+                     "status": "staging"},
+                ]
+            return []
+
+        def stub_arb(older, newer, _sim, **_):
+            calls.append((older["id"], newer["id"]))
+            return {"decision": "supersede_b", "reason": "test"}
+
+        try:
+            heal.find_near_duplicates = fake_find
+            heal._arbitrate_nightly = stub_arb
+            cap = budget.DEFAULT_HEAL_DAILY_CAP
+            for _ in range(cap - 1):
+                budget.check_and_record(tmp, category="heal", cap=cap)
+            result = heal.nightly_heal(
+                conn, project_path=tmp, use_llm=True,
+                low_threshold=0.50, high_threshold=0.70,
+            )
+        finally:
+            heal.find_near_duplicates = original_find
+            heal._arbitrate_nightly = original_arb
+
+        _assert(calls == [(a, b)], f"expected A/B LLM arbitration, got {calls}")
+        edges = [(row["src"], row["dst"]) for row in conn.execute(
+            "SELECT src, dst FROM edges WHERE relation = 'supersedes'"
+        )]
+        _assert(edges == [(b, a)],
+                f"expected B supersedes A before A/C could mutate, got {edges}")
+        _assert(result["llm_invocations"] == 1,
+                f"expected one selected LLM call: {result}")
+        print("PASS priority_planning_preserves_mixed_shared_node_precedence")
+    finally:
+        _cleanup(tmp, conn)
+
+
+def test_priority_reclaims_invalidated_slot_for_later_fallback():
+    """A deterministic cascade can invalidate the initially highest-priority
+    LLM pair before its turn. The sole live fallback must consume that slot,
+    even though it appears later in similarity order."""
+    import budget
+
+    tmp, conn = _fresh_db()
+    try:
+        a = _mk(conn, title="shared a", body="later fallback shared claim")
+        b = _mk(conn, title="selected b", body="later fallback shared claim")
+        c = _mk(conn, title="newer c", body="later fallback shared claim")
+        d = _mk(conn, title="fallback d", body="later live fallback claim")
+        e = _mk(conn, title="fallback e", body="later live fallback claim")
+        for node_id, refs in {a: 10, b: 10, c: 1, d: 1, e: 1}.items():
+            _set_ref(conn, node_id, refs)
+        _set_ts(conn, a, updated_at=_days_ago(60))
+        _set_ts(conn, b, updated_at=_days_ago(60))
+        _set_ts(conn, c, updated_at=_days_ago(5))
+        _set_ts(conn, d, updated_at=_days_ago(60))
+        _set_ts(conn, e, updated_at=_days_ago(60))
+        selected_priority = heal._pair_priority(
+            db.get_node(conn, a), db.get_node(conn, b),
+        )
+        fallback_priority = heal._pair_priority(
+            db.get_node(conn, d), db.get_node(conn, e),
+        )
+        _assert(selected_priority > fallback_priority,
+                f"fixture no longer selects A/B first: "
+                f"{(selected_priority, fallback_priority)}")
+
+        original_find = heal.find_near_duplicates
+        original_arb = heal._arbitrate_nightly
+        calls: list[tuple[int, int]] = []
+
+        def fake_find(_conn, _vec, *, exclude_id=None, **_):
+            if exclude_id == a:
+                return [
+                    {"id": c, "similarity": 0.99, "kind": "fact",
+                     "status": "staging"},
+                    {"id": b, "similarity": 0.95, "kind": "fact",
+                     "status": "staging"},
+                ]
+            if exclude_id == d:
+                return [{"id": e, "similarity": 0.90, "kind": "fact",
+                         "status": "staging"}]
+            return []
+
+        def stub_arb(older, newer, _sim, **_):
+            calls.append(tuple(sorted((older["id"], newer["id"]))))
+            return {"decision": "keep_both", "reason": "test"}
+
+        try:
+            heal.find_near_duplicates = fake_find
+            heal._arbitrate_nightly = stub_arb
+            cap = budget.DEFAULT_HEAL_DAILY_CAP
+            for _ in range(cap - 1):
+                budget.check_and_record(tmp, category="heal", cap=cap)
+            result = heal.nightly_heal(
+                conn, project_path=tmp, use_llm=True,
+                low_threshold=0.50, high_threshold=0.70,
+            )
+        finally:
+            heal.find_near_duplicates = original_find
+            heal._arbitrate_nightly = original_arb
+
+        fallback = tuple(sorted((d, e)))
+        _assert(calls == [fallback],
+                f"released slot should reach the sole live fallback: {calls}")
+        supersedes = [(row["src"], row["dst"]) for row in conn.execute(
+            "SELECT src, dst FROM edges WHERE relation = 'supersedes'"
+        )]
+        _assert(supersedes == [(c, a)],
+                f"deterministic topology changed: {supersedes}")
+        _assert(heal.edge_exists_between(conn, d, e),
+                "fallback verdict was not persisted")
+        _assert(result["llm_invocations"] == 1
+                and result["deferred"] == 0
+                and result["budget_blocked"] == 0,
+                f"live fallback was falsely deferred: {result}")
+        _assert(budget.status(tmp)["heal"]["remaining"] == 0,
+                "released slot was not consumed")
+
+        today = datetime.now(timezone.utc).date()
+        rows = list(log_utils.read_log_range("heal_deferred", today, today, tmp))
+        _assert(not [row for row in rows if row.get("reason") == "budget_cap"],
+                f"no live pair should be logged budget_cap: {rows}")
+        print("PASS priority_reclaims_invalidated_slot_for_later_fallback")
+    finally:
+        _cleanup(tmp, conn)
+
+
+def test_priority_reclaims_invalidated_slot_for_highest_ranked_fallback():
+    """If a deterministic cascade invalidates the selected LLM pair, its
+    unspent slot goes to the highest-priority surviving fallback -- not merely
+    the next fallback encountered in similarity order. The winning fallback is
+    deliberately earlier than the invalidating mutation in global order."""
+    import budget
+
+    tmp, conn = _fresh_db()
+    try:
+        ws1 = _mk(conn, kind="workstream", title="lane one", body="lane one")
+        ws2 = _mk(conn, kind="workstream", title="lane two", body="lane two")
+        a = _mk(conn, title="shared a", body="shared invalidation claim")
+        b = _mk(conn, title="selected b", body="shared invalidation claim")
+        c = _mk(conn, title="newer c", body="shared invalidation claim")
+        d = _mk(conn, title="near fallback d", body="near fallback claim")
+        e = _mk(conn, title="near fallback e", body="near fallback claim")
+        f = _mk(conn, title="priority fallback f", body="priority fallback claim")
+        g = _mk(conn, title="priority fallback g", body="priority fallback claim")
+
+        for node_id, ws in {
+            a: ws1, b: ws2, c: ws1, d: ws1, e: ws1, f: ws1, g: ws2,
+        }.items():
+            _set_ws(conn, node_id, ws)
+        for node_id, refs in {
+            a: 10, b: 10, c: 10, d: 2, e: 2, f: 7, g: 7,
+        }.items():
+            _set_ref(conn, node_id, refs)
+        _set_ts(conn, a, updated_at=_days_ago(60))
+        _set_ts(conn, b, updated_at=_days_ago(60))
+        _set_ts(conn, c, updated_at=_days_ago(5))
+        for node_id in (d, e, f, g):
+            _set_ts(conn, node_id, updated_at=_days_ago(5))
+        priorities = {
+            "selected": heal._pair_priority(db.get_node(conn, a), db.get_node(conn, b)),
+            "earlier": heal._pair_priority(db.get_node(conn, f), db.get_node(conn, g)),
+            "later": heal._pair_priority(db.get_node(conn, d), db.get_node(conn, e)),
+        }
+        _assert(priorities["selected"] > priorities["earlier"] > priorities["later"],
+                f"fixture no longer exercises ranked fallback: {priorities}")
+
+        original_find = heal.find_near_duplicates
+        original_arb = heal._arbitrate_nightly
+        calls: list[tuple[int, int]] = []
+
+        def fake_find(_conn, _vec, *, exclude_id=None, **_):
+            if exclude_id == a:
+                return [
+                    {"id": c, "similarity": 0.99, "kind": "fact",
+                     "status": "staging"},
+                    {"id": b, "similarity": 0.95, "kind": "fact",
+                     "status": "staging"},
+                ]
+            if exclude_id == d:
+                return [{"id": e, "similarity": 0.90, "kind": "fact",
+                         "status": "staging"}]
+            if exclude_id == f:
+                return [{"id": g, "similarity": 0.995, "kind": "fact",
+                         "status": "staging"}]
+            return []
+
+        def stub_arb(older, newer, _sim, **_):
+            calls.append(tuple(sorted((older["id"], newer["id"]))))
+            return {"decision": "keep_both", "reason": "test"}
+
+        try:
+            heal.find_near_duplicates = fake_find
+            heal._arbitrate_nightly = stub_arb
+            cap = budget.DEFAULT_HEAL_DAILY_CAP
+            for _ in range(cap - 1):
+                budget.check_and_record(tmp, category="heal", cap=cap)
+            result = heal.nightly_heal(
+                conn, project_path=tmp, use_llm=True,
+                low_threshold=0.50, high_threshold=0.70,
+            )
+        finally:
+            heal.find_near_duplicates = original_find
+            heal._arbitrate_nightly = original_arb
+
+        expected_priority_fallback = tuple(sorted((f, g)))
+        _assert(calls == [expected_priority_fallback],
+                f"slot should go to ranked surviving fallback, got {calls}")
+        supersedes = [(row["src"], row["dst"]) for row in conn.execute(
+            "SELECT src, dst FROM edges WHERE relation = 'supersedes'"
+        )]
+        _assert(supersedes == [(c, a)],
+                f"similarity-ordered deterministic topology changed: {supersedes}")
+        _assert(heal.edge_exists_between(conn, f, g),
+                "selected fallback verdict was not persisted")
+        _assert(not heal.edge_exists_between(conn, d, e),
+                "lower-priority fallback should remain retryable")
+        _assert(result["llm_invocations"] == 1
+                and result["budget_blocked"] == 1
+                and result["deferred"] == 1,
+                f"one fallback should spend and one should defer: {result}")
+        _assert(budget.status(tmp)["heal"]["remaining"] == 0,
+                "reclaimed slot was not consumed")
+
+        today = datetime.now(timezone.utc).date()
+        rows = list(log_utils.read_log_range("heal_deferred", today, today, tmp))
+        deferred = [row for row in rows if row.get("reason") == "budget_cap"]
+        deferred_pairs = {
+            (row.get("node_a_id"), row.get("node_b_id")) for row in deferred
+        }
+        _assert(len(deferred) == 1
+                and deferred_pairs == {tuple(sorted((d, e)))},
+                f"only the lower-priority live fallback may defer: {rows}")
+        print("PASS priority_reclaims_invalidated_slot_for_highest_ranked_fallback")
+    finally:
+        _cleanup(tmp, conn)
+
+
+def test_nightly_heal_heartbeat_on_failure():
+    """A crashing sweep must still leave a heal_run row, marked not-ok."""
+    tmp, conn = _fresh_db()
+    original = heal.run_integrity_pass
+    try:
+        def boom(*_a, **_k):
+            raise RuntimeError("integrity exploded")
+
+        heal.run_integrity_pass = boom
+        raised = False
+        try:
+            heal.nightly_heal(conn, project_path=tmp, use_llm=False)
+        except RuntimeError:
+            raised = True
+        finally:
+            heal.run_integrity_pass = original
+        _assert(raised, "the exception must still propagate to the caller")
+
+        rows = _read_run_rows(tmp)
+        _assert(len(rows) == 1, f"a failed sweep must emit one heal_run row, "
+                               f"got {len(rows)}")
+        _assert(rows[0]["ok"] is False, f"row must be marked not-ok: {rows[0]}")
+        _assert(rows[0]["error"] == "RuntimeError",
+                f"row must carry the structural error type: {rows[0]}")
+        print("PASS nightly_heal_heartbeat_on_failure")
+    finally:
+        heal.run_integrity_pass = original
+        _cleanup(tmp, conn)
+
 if __name__ == "__main__":
     test_recency_pass_picks_newer_when_diff_large_and_newer_fresh()
     test_recency_pass_skips_when_both_stale()
@@ -965,10 +2140,28 @@ if __name__ == "__main__":
     test_nightly_heal_low_tier_keeps_both_when_use_llm_false()
     test_nightly_heal_applies_reconciled_by_when_llm_returns_it()
     test_nightly_heal_budget_blocked_defers_without_edge_and_retries()
+    test_nightly_heal_budget_status_error_defers_and_runs_maintenance()
+    test_nightly_heal_releases_unused_batch_after_apply_failure()
+    test_nightly_heal_replans_batch_across_utc_rollover()
+    test_nightly_heal_never_merges_reservations_across_utc_days()
+    test_nightly_heal_transfers_reserved_slot_after_live_invalidation()
+    test_nightly_heal_revalidates_after_budget_reservation()
+    test_nightly_heal_keeps_generic_slots_for_downstream_frontiers()
     test_nightly_heal_high_tier_arbitrated_before_low_tier_under_budget_pressure()
     test_nightly_heal_runs_log_retention()
     test_nightly_heal_log_retention_failure_isolated()
     test_nightly_heal_runs_correlator()
     test_nightly_heal_correlator_failure_isolated()
     test_nightly_heal_excludes_summary_nodes_from_contradiction_sweep()
+    test_nightly_heal_emits_run_heartbeat()
+    test_nightly_heal_heartbeat_on_integrity_only_run()
+    test_nightly_heal_prioritizes_retrieved_pairs_over_more_similar_ones()
+    test_nightly_heal_cross_lane_outranks_same_lane_at_equal_refs()
+    test_priority_preserves_similarity_order_when_budget_covers_queue()
+    test_heal_deferred_row_carries_priority_fields()
+    test_priority_does_not_change_deterministic_topology()
+    test_priority_planning_preserves_mixed_shared_node_precedence()
+    test_priority_reclaims_invalidated_slot_for_later_fallback()
+    test_priority_reclaims_invalidated_slot_for_highest_ranked_fallback()
+    test_nightly_heal_heartbeat_on_failure()
     print("\nAll nightly-heal tests pass.")
