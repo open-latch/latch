@@ -1,6 +1,7 @@
 """Backend-selection tests for heal/tree maintenance model calls."""
 from __future__ import annotations
 
+import ast
 import os
 import shutil
 import sys
@@ -24,6 +25,10 @@ BACKEND_ENV = (
     "LATCH_MODEL_BACKEND",
     "LATCH_GATE_BACKEND",
     "CLAUDE_KB_GATE_BACKEND",
+    "LATCH_CLAUDE_MODEL",
+    "LATCH_MAINTENANCE_CLAUDE_MODEL",
+    "LATCH_HEAL_CLAUDE_MODEL",
+    "LATCH_TREE_CLAUDE_MODEL",
     "FAKE_MODEL_RESPONSE",
     "FAKE_MODEL_ARGS",
     "CLAUDE_KB_IN_COMPACT",
@@ -121,7 +126,13 @@ def test_heal_defaults_to_claude_backend():
         _assert(out["decision"] == "keep_both", out)
         _assert(out["backend"] == "claude", out)
         args = args_file.read_text(encoding="utf-8").splitlines()
-        _assert(args == ["-p", "--no-session-persistence", "--output-format", "json"], args)
+        _assert(
+            args == [
+                "-p", "--no-session-persistence", "--output-format", "json",
+                "--model", "sonnet",
+            ],
+            args,
+        )
     finally:
         _restore_env(env)
         _restore_bins(bins)
@@ -272,6 +283,125 @@ def test_connection_maintenance_backend_outranks_daemon_environment():
     print("PASS connection_maintenance_backend_outranks_daemon_environment")
 
 
+def test_claude_model_resolution_prefers_purpose_then_maintenance_then_generic(monkeypatch):
+    for name in (
+        "LATCH_HEAL_CLAUDE_MODEL",
+        "LATCH_MAINTENANCE_CLAUDE_MODEL",
+        "LATCH_CLAUDE_MODEL",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    _assert(model_backends.DEFAULT_CLAUDE_MODEL == "sonnet", "public default drifted")
+    _assert(
+        model_backends.resolve_claude_model() == "sonnet",
+        "unset resolution must use the Latch-owned default",
+    )
+
+    monkeypatch.setenv("LATCH_CLAUDE_MODEL", "generic-opus")
+    _assert(model_backends.resolve_claude_model() == "generic-opus", "generic lost")
+
+    monkeypatch.setenv("LATCH_MAINTENANCE_CLAUDE_MODEL", "maintenance-opus")
+    _assert(
+        model_backends.resolve_claude_model() == "maintenance-opus",
+        "maintenance override must outrank generic",
+    )
+
+    monkeypatch.setenv("LATCH_HEAL_CLAUDE_MODEL", "heal-opus")
+    _assert(
+        model_backends.resolve_claude_model(("LATCH_HEAL_CLAUDE_MODEL",))
+        == "heal-opus",
+        "purpose override must outrank the generic chain",
+    )
+
+
+def test_tree_claude_model_override_reaches_argv(monkeypatch, tmp_path):
+    captured = {}
+
+    def fake_run(args, **kwargs):
+        captured["args"] = args
+        return SimpleNamespace(
+            returncode=0,
+            stdout=TREE_JSON,
+            stderr="",
+        )
+
+    monkeypatch.setenv("LATCH_TREE_CLAUDE_MODEL", "tree-opus")
+    monkeypatch.setattr(model_backends.subprocess, "run", fake_run)
+    result = model_backends.invoke_prompt(
+        "summarize",
+        backend="claude",
+        timeout_s=1,
+        purpose="tree_summary",
+        claude_bin=str(tmp_path / "claude"),
+        claude_model_env=("LATCH_TREE_CLAUDE_MODEL",),
+    )
+
+    _assert(result.error is None, result)
+    _assert(result.model == "tree-opus", result)
+    _assert(captured["args"][-2:] == ["--model", "tree-opus"], captured)
+
+
+def test_invalid_claude_model_fails_structured_without_launch(monkeypatch):
+    monkeypatch.setenv("LATCH_CLAUDE_MODEL", "   ")
+    monkeypatch.setattr(
+        model_backends.subprocess,
+        "run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("invalid model must fail before subprocess launch")
+        ),
+    )
+
+    result = model_backends.invoke_prompt(
+        "summarize",
+        backend="claude",
+        timeout_s=1,
+        purpose="maintenance",
+    )
+
+    _assert(result.text is None and result.timed_out is False, result)
+    _assert(result.backend == "claude" and result.model is None, result)
+    _assert("empty" in str(result.error).lower(), result)
+
+
+def test_all_claude_model_selectors_are_allowlisted_but_not_sensitive():
+    expected = {
+        "LATCH_GATE_CLAUDE_MODEL",
+        "LATCH_COMPACTOR_CLAUDE_MODEL",
+        "LATCH_HEAL_CLAUDE_MODEL",
+        "LATCH_TREE_CLAUDE_MODEL",
+        "LATCH_MAINTENANCE_CLAUDE_MODEL",
+        "LATCH_CLAUDE_MODEL",
+    }
+    _assert(set(mcp_runtime.CLAUDE_MODEL_ENV_VARS) == expected, "selector set drifted")
+    _assert(
+        expected <= set(mcp_runtime.CONNECTION_CHILD_BACKEND_ENV_VARS["claude"]),
+        "shared connections would silently drop a Claude model override",
+    )
+    _assert(
+        expected.isdisjoint(mcp_runtime.SENSITIVE_CHILD_ENV_VARS),
+        "model selectors must not be treated as credentials",
+    )
+
+
+def test_no_claude_subprocess_invocation_omits_model_flag():
+    root = Path(__file__).resolve().parent.parent / "src"
+    offenders = []
+    for path in sorted(root.glob("*.py")):
+        tree_ast = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree_ast):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            constants = {
+                value.value
+                for value in ast.walk(node)
+                if isinstance(value, ast.Constant) and isinstance(value.value, str)
+            }
+            if "-p" in constants and "subprocess" in ast.unparse(node):
+                if "--model" not in constants:
+                    offenders.append(f"{path.name}:{node.name}")
+    _assert(not offenders, f"Claude subprocesses without --model: {offenders}")
+
+
 def test_codex_maintenance_permission_error_is_structured(monkeypatch):
     def deny_launch(*_args, **_kwargs):
         raise PermissionError(
@@ -325,6 +455,7 @@ def test_private_claude_environment_is_backend_scoped_and_redacted(monkeypatch):
         "CLAUDE_BIN": "/claude/bin/claude",
         "ANTHROPIC_API_KEY": "anthropic-sentinel-secret",
         "OPENAI_API_KEY": "openai-sentinel-secret",
+        "LATCH_MAINTENANCE_CLAUDE_MODEL": "shared-opus",
     })
     monkeypatch.setattr(model_backends.subprocess, "run", fake_run)
     with mcp_runtime.bind_connection(context, child_environment=private):
@@ -332,10 +463,17 @@ def test_private_claude_environment_is_backend_scoped_and_redacted(monkeypatch):
             "prompt", timeout_s=2, purpose="test"
         )
     _assert(result.text == "<redacted>", result)
+    _assert(result.model == "shared-opus", result)
     _assert(captured["args"][0] == "/claude/bin/claude", captured)
+    _assert(captured["args"][-2:] == ["--model", "shared-opus"], captured)
     env = captured["kwargs"]["env"]
     _assert(env["ANTHROPIC_API_KEY"] == "anthropic-sentinel-secret", env)
+    _assert(env["LATCH_MAINTENANCE_CLAUDE_MODEL"] == "shared-opus", env)
     _assert("OPENAI_API_KEY" not in env, env)
+    _assert(
+        "LATCH_MAINTENANCE_CLAUDE_MODEL" not in mcp_runtime.SENSITIVE_CHILD_ENV_VARS,
+        "model selectors are observability metadata, not credentials",
+    )
 
 
 if __name__ == "__main__":

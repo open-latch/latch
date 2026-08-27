@@ -103,8 +103,15 @@ def test_claude_backend_remains_supported():
         )
         _assert(out["recommendation"] == "PROCEED", out)
         _assert(out["backend"] == "claude", out)
+        _assert(out["model"] == "sonnet", out)
         args = args_file.read_text(encoding="utf-8").splitlines()
-        _assert(args == ["-p", "--no-session-persistence", "--output-format", "json"], args)
+        _assert(
+            args == [
+                "-p", "--no-session-persistence", "--output-format", "json",
+                "--model", "sonnet",
+            ],
+            args,
+        )
     finally:
         gate.CLAUDE_BIN = old_claude
         _restore_env("FAKE_GATE_RESPONSE", old_response)
@@ -344,6 +351,43 @@ def test_connection_gate_policy_and_private_codex_environment(monkeypatch):
     env = captured["kwargs"]["env"]
     _assert(env["OPENAI_API_KEY"] == "openai-sentinel-secret", env)
     _assert("ANTHROPIC_API_KEY" not in env, env)
+
+
+def test_connection_private_claude_gate_model_reaches_argv(monkeypatch):
+    captured = {}
+
+    def fake_run(args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return SimpleNamespace(returncode=0, stdout=CLASSIFIER_JSON, stderr="")
+
+    context = mcp_runtime.ConnectionContext(
+        connection_id="claude-model-private",
+        project_cwd="/tmp/project",
+        session_id=None,
+        session_source="test",
+        proxy_pid=123,
+        proxy_started_at="now",
+        runtime_key="test",
+        gate_backend="claude",
+        maintenance_backend="claude",
+    )
+    private = mcp_runtime.validate_child_environment({
+        "PATH": "/client/bin",
+        "CLAUDE_BIN": "/client/bin/claude",
+        "LATCH_GATE_CLAUDE_MODEL": "gate-opus",
+    })
+    monkeypatch.setattr(gate.subprocess, "run", fake_run)
+
+    with mcp_runtime.bind_connection(context, child_environment=private):
+        raw, error, timed_out = gate._invoke_claude_classifier_once(
+            "classify", timeout_s=17,
+        )
+
+    _assert(error is None and timed_out is False, error)
+    _assert(raw == CLASSIFIER_JSON, raw)
+    _assert(captured["args"][-2:] == ["--model", "gate-opus"], captured)
+    _assert(captured["kwargs"]["env"]["LATCH_GATE_CLAUDE_MODEL"] == "gate-opus", captured)
 
 
 def test_shared_gate_missing_absolute_binary_fails_closed(monkeypatch):
