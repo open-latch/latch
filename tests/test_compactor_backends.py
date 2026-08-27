@@ -62,6 +62,7 @@ def test_invoke_claude_once_disallows_action_tools():
     d = _tmp()
     old_response = os.environ.get("FAKE_CLAUDE_RESPONSE")
     old_args = os.environ.get("FAKE_CLAUDE_ARGS")
+    old_model = os.environ.get("LATCH_COMPACTOR_CLAUDE_MODEL")
     try:
         args_file = d / "args.txt"
         fake = _fake_claude(d / "claude")
@@ -69,6 +70,7 @@ def test_invoke_claude_once_disallows_action_tools():
             '{"type":"result","result":"' + COMPACTION_JSON.replace('"', '\\"') + '"}'
         )
         os.environ["FAKE_CLAUDE_ARGS"] = str(args_file)
+        os.environ["LATCH_COMPACTOR_CLAUDE_MODEL"] = "compact-opus"
         raw, err = compactor._invoke_claude_once(
             "summarize this", claude_bin=str(fake), timeout_s=1,
         )
@@ -79,6 +81,7 @@ def test_invoke_claude_once_disallows_action_tools():
             args[:4] == ["-p", "--no-session-persistence", "--output-format", "json"],
             args,
         )
+        _assert(args[-2:] == ["--model", "compact-opus"], args)
         _assert("--disallowedTools" in args, args)
         denied = args[args.index("--disallowedTools") + 1]
         _assert(denied == compactor.CLAUDE_COMPACTOR_DISALLOWED_TOOLS, args)
@@ -93,6 +96,10 @@ def test_invoke_claude_once_disallows_action_tools():
             os.environ.pop("FAKE_CLAUDE_ARGS", None)
         else:
             os.environ["FAKE_CLAUDE_ARGS"] = old_args
+        if old_model is None:
+            os.environ.pop("LATCH_COMPACTOR_CLAUDE_MODEL", None)
+        else:
+            os.environ["LATCH_COMPACTOR_CLAUDE_MODEL"] = old_model
         shutil.rmtree(d, ignore_errors=True)
     print("PASS invoke_claude_once_disallows_action_tools")
 

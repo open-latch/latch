@@ -207,7 +207,10 @@ the vault's explicit backend, absolute executable, stable home, and
 cwd-independent absolute-entry `PATH` from `runtime_settings.json`. This also
 keeps script interpreters and helper commands used by CLI shims independent of
 the proxy that spawned the owner. Detached work never receives that
-connection's credentials, backend choice, config roots, or model selectors.
+connection's credentials, backend choice, or config roots. It may receive only
+the exact allowlisted, non-secret Claude model selectors so purpose-specific
+model policy survives the detached boundary; no wildcard environment family is
+admitted.
 Missing or stale autonomous configuration fails maintenance closed without
 taking down MCP. Legacy stdio retains its contextless startup check.
 

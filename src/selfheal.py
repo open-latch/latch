@@ -211,6 +211,13 @@ def spawn_detached(project_path: str | None) -> None:
         )
         env["LATCH_MAINTENANCE_BACKEND"] = backend
         env[paths.MAINTENANCE_EXECUTABLE_ENV[backend]] = executable
+        if backend == "claude":
+            # Model selectors are policy, not credentials. Preserve them across
+            # the detached boundary while continuing to exclude private auth.
+            for name in mcp_runtime.CLAUDE_MODEL_ENV_VARS:
+                value = mcp_runtime.connection_env_value(name)
+                if value is not None:
+                    env[name] = value
         env["HOME"] = maintenance_home
         env["PATH"] = maintenance_path
         if sys.platform == "win32":

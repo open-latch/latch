@@ -77,6 +77,7 @@ TREE_CODEX_MODEL_ENV = (
     "LATCH_MAINTENANCE_CODEX_MODEL",
     "CODEX_MAINTENANCE_MODEL",
 )
+TREE_CLAUDE_MODEL_ENV = ("LATCH_TREE_CLAUDE_MODEL",)
 
 SUMMARY_PROMPT = """You are writing a one-paragraph summary of a group of related knowledge-base nodes.
 
@@ -236,6 +237,7 @@ def _invoke_summary(members: list[dict]) -> dict | None:
         env_names=model_backends.MAINTENANCE_BACKEND_ENV,
         timeout_s=SUMMARY_TIMEOUT_S,
         purpose="tree_summary",
+        claude_model_env=TREE_CLAUDE_MODEL_ENV,
         codex_model_env=TREE_CODEX_MODEL_ENV,
     )
     if result.error is not None or result.text is None:
@@ -402,8 +404,28 @@ def build_tree(
     if paths.is_disabled():
         return {"ok": False, "reason": "disabled"}
 
+    resolved_backend = _summary_backend()
+    if resolved_backend == "claude":
+        try:
+            resolved_model = model_backends.resolve_claude_model(
+                TREE_CLAUDE_MODEL_ENV,
+            )
+        except ValueError as exc:
+            return {
+                "ok": False,
+                "reason": "invalid_claude_model",
+                "error": str(exc),
+                "backend": resolved_backend,
+                "model": None,
+            }
+    elif resolved_backend == "codex":
+        resolved_model = model_backends.first_env_value(TREE_CODEX_MODEL_ENV)
+    else:
+        resolved_model = None
+
     result: dict = {
         "ok": True, "leaves": 0, "landmarks": 0, "clusters": 0,
+        "backend": resolved_backend, "model": resolved_model,
         "linkage": linkage,
         "largest_cluster": 0, "p95_cluster_size": 0,
         "summaries_generated": 0, "summaries_reused": 0,

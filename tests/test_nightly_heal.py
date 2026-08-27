@@ -1525,9 +1525,8 @@ def _read_run_rows(tmp):
 
 
 def test_nightly_heal_emits_run_heartbeat():
-    """Every sweep leaves a heal_run row. heal.log is error-only, so without a
-    positive heartbeat a quiet log is indistinguishable from a healer that
-    silently stopped running."""
+    """Every sweep leaves a heal_run row. Per-arbitration diagnostics do not
+    prove that an entire pass completed, so the positive heartbeat is required."""
     tmp, conn = _fresh_db()
     try:
         heal.nightly_heal(conn, project_path=tmp, use_llm=False)
@@ -1535,8 +1534,10 @@ def test_nightly_heal_emits_run_heartbeat():
         _assert(len(rows) == 1, f"expected 1 heal_run row, got {len(rows)}")
         for key in ("examined", "collisions", "superseded", "kept_both",
                     "reconciled", "deferred", "budget_blocked", "by_path",
-                    "integrity"):
+                    "integrity", "backend", "model"):
             _assert(key in rows[0], f"heal_run row missing {key}")
+        _assert(rows[0]["backend"] == "claude", rows[0])
+        _assert(rows[0]["model"] == "sonnet", rows[0])
         print("PASS nightly_heal_emits_run_heartbeat")
     finally:
         _cleanup(tmp, conn)

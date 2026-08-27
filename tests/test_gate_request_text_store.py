@@ -322,9 +322,9 @@ def test_store_write_failure_cannot_break_the_gate():
 
 # ---------- item 2: structural surfaces unchanged ----------
 
-# The gate.log row shape for a default (use_llm=False) call, pinned so this
-# mission cannot widen it. Sourced from the shipped writer, not from the new
-# code — a change here is a change to the correlator's input format.
+# The gate.log row shape for a default (use_llm=False) call, including the
+# approved structural ``model`` observability field. A change here is a change
+# to the correlator's input format and must stay explicit.
 GATE_LOG_KEYS = frozenset({
     "ts", "project", "session_id", "event_type",
     "gate_call_id",
@@ -336,15 +336,14 @@ GATE_LOG_KEYS = frozenset({
     "evidence_ids", "decision_chain", "abandoned_paths", "active_constraints",
     "current_direction", "surfaced_rejected_paths", "cited_rejected_paths",
     "seed_count", "seed_ids", "seeds", "chain_lane_contacts",
-    "reachable_count", "prompt_chars", "backend", "timed_out", "elapsed_ms",
+    "reachable_count", "prompt_chars", "backend", "model", "timed_out", "elapsed_ms",
     "budget_count", "load_bearing_claim_count", "uncovered_claim_count",
     "evidence_type_counts", "gap_type_counts",
 })
 
 
-def test_gate_log_schema_is_unchanged():
-    """Item-2 acceptance: the structural record schema is exactly what it was.
-    No request-text field, and no new field, leaks into the correlator's input."""
+def test_gate_log_schema_is_documented_and_structural_only():
+    """The record schema is exact and contains no request-text field."""
     tmp, conn = _fresh_db()
     try:
         _ins(conn, "decision", "Redis session cache", "Redis session cache body")
