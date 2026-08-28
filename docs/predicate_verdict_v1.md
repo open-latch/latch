@@ -1,45 +1,7 @@
 # Predicate verdict v1
 
-`predicate-v1` is the deterministic, zero-LLM verdict contract for compiled
-`rejected_path.scope_predicate` checks. It is a skeleton for later policy-hook
-integration; it does not query Latch, call a model, consult a budget, or use the
-network.
-
-## Input context
-
-`ToolCallContext` has five optional fields:
-
-| Field | Type | Meaning |
-| --- | --- | --- |
-| `tool_name` | string or null | Name of the proposed tool. |
-| `file_paths` | sequence of strings or null | Files named by the tool call. |
-| `command_text` | string or null | Command or source text available at the tool boundary. |
-| `diff_paths` | sequence of strings or null | Files changed by an available diff. |
-| `import_names` | sequence of strings or null | Parsed or caller-supplied module names. |
-
-Missing fields are empty evidence. They never become a match by inference.
-
-## Compilation
-
-Predicates are parsed once at the first `:` into a lower-case type and a
-trimmed value.
-
-| Prefix | Deterministic check |
-| --- | --- |
-| `file:` | Component-aware path equality or containment over `file_paths` and `diff_paths`. |
-| `glob:` | Case-sensitive `fnmatch` over slash-normalized file and diff paths. |
-| `package:` | Package/module-component match over `import_names` and module-shaped paths. |
-| `import:` | Exact/submodule match over `import_names` and Python import statements in `command_text`. |
-| `api:` | Token-bounded API-identifier match over command text, tool name, and import names. |
-
-`feature:`, the observed bare category values, unknown prefixes, malformed
-values, empty strings, and `NULL` compile to `UncompilableCheck` with an explicit
-`uncompilable_reason`. An uncompilable check never matches and is never silently
-dropped.
-
-## Output
-
-Every evaluation returns exactly this JSON-compatible shape:
+`predicate-v1` is the exact deterministic verdict produced by the private A2
+compiled-policy evaluator. The four top-level keys are stable:
 
 ```json
 {
@@ -59,15 +21,90 @@ Every evaluation returns exactly this JSON-compatible shape:
 }
 ```
 
-The allowed `decision` values are `block`, `flag`, and `pass`:
+The core verdict is private. A match can contain policy text, so callers must
+not write the complete verdict to logs, CI output, or JSON stdout. The policy
+consumer returns a separate `predicate-policy-receipt-v1` projection for those
+surfaces. The receipt retains structural ids, counts, digests, and reason codes
+without option, reason, predicate, action text, or path values.
 
-- `block`: one or more compiled predicates match. `matches` contains only the
-  matching rows, in evaluation order.
-- `pass`: no compiled predicate matches. `matches` is empty; an uncompilable
-  predicate alone does not become a speculative match.
-- `flag`: reserved for the later policy-integration layer. The v1 deterministic
-  skeleton does not emit it by guessing that an uncompilable predicate applies.
+## Canonical action envelope
 
-Every match carries both `rejected_path_id` and `node_id`, so a PreToolUse
-consumer can act on a verdict without a Latch read in the enforcement loop.
-`llm_calls` is always the integer `0`.
+The policy consumer constructs `ToolCallContext` from structured host-neutral
+evidence:
+
+| Field | Meaning |
+| --- | --- |
+| `policy_domain_id` | Explicit opaque project-policy domain. It is never inferred from cwd or repository text. |
+| `project_root` | Absolute lexical project root for path containment. |
+| `cwd` | Absolute cwd inside that root. |
+| `tool_name` | Name of the proposed operation. |
+| `proposed_file_paths` | Complete proposed path footprint. |
+| `diff_paths` | Complete changed-path evidence when relevant. |
+| `staged_paths` | Complete staged-path evidence when relevant. |
+| `import_names` | Structured module/import identifiers. |
+| `api_names` | Structured API identifiers. |
+| `evidence_complete` | Explicit completeness attestation. |
+| `evidence_provenance` | Non-empty structural provenance supplied by the host adapter. |
+| `command_text` | Optional opaque local detail; never parsed as import, package, or API evidence. |
+
+`file_paths` remains a low-level compatibility alias for the earlier skeleton.
+A canonical policy action uses `proposed_file_paths`; conflicting values flag.
+The five path/name collections must each be present as sequences; an empty
+sequence is valid evidence. `evidence_complete` must be literal `true`.
+Missing, malformed, foreign-root, traversal-bearing, conflicting, or incomplete
+evidence produces aggregate-safe reason codes and prevents a compiled-policy
+pass. Even with `evidence_complete: true`, an entirely empty mutation footprint
+flags as `mutation_footprint_missing`; opaque command text is not a substitute
+for structured evidence.
+
+## Deterministic checks
+
+| Prefix | Canonical check |
+| --- | --- |
+| `file:` | Exact project-relative path or directory-segment containment over proposed, diff, and staged paths. |
+| `glob:` | Project-relative segment glob. `*` never crosses `/`; `**` is recursive and must occupy a whole path segment. |
+| `package:` | Exact package or submodule match over structured `import_names` only. |
+| `import:` | Exact import or submodule match over structured `import_names` only. |
+| `api:` | Exact API identifier or member-prefix match over structured `api_names` only. |
+
+Paths are normalized lexically against the explicit root. POSIX matching is
+case-sensitive. Windows drive and UNC roots use Windows lexical containment
+and case-insensitive comparison. Windows action segments ending in an ASCII
+period or space, or containing an NTFS alternate-data-stream colon, flag as
+noncanonical instead of being compared under a misleading lexical spelling.
+Absolute predicates and predicates containing `..`, `.`, or empty path
+segments do not compile; `file:.` is explicitly uncompilable rather than an
+implicit whole-project rule. Dot-prefixed names such as `.config` remain
+valid. Comments, quoted strings, shell text, filenames, and other prose never
+supply package/import/API evidence.
+
+Glob patterns are limited to 4,096 characters and 256 path segments. Action
+paths, roots, and working directories are limited to 4,096 characters. An
+over-limit predicate is uncompilable; over-limit action evidence flags. Glob
+matching uses iterative segment state and never a backtracking regular
+expression.
+
+Unsupported or malformed predicates compile to `UncompilableCheck` with an
+explicit private explanation. They remain accounted for but never match.
+
+## Decisions
+
+- `block` means at least one current, domain-bound, binding compiled rule
+  matched. `matches` contains the private matching rows in policy order.
+- `pass` means the policy domain, fresh snapshot, and action footprint are
+  complete and no binding compiled rule matched. It is a compiled-policy pass,
+  not proof that advisory or uncompilable rulings permit the action.
+- `flag` means the evidence is indeterminate or unsafe to claim pass/block.
+  Missing or stale policy state and malformed/incomplete action evidence flag.
+
+A valid binding match still blocks when some additional evidence is incomplete;
+an issue changes a no-match from pass to flag. Advisory and uncompilable
+residuals do not create a global flag storm. Their aggregate counts and reason
+codes appear separately in the redacted receipt.
+
+`llm_calls` is always the integer `0`; the policy import path has no model,
+budget, semantic-search, gate, SQLite, or network dependency.
+
+The module retains the old five-field construction surface for skeleton-level
+unit compatibility. That low-level mode must not be used as an authoritative
+policy decision. The complete consumer always supplies the canonical envelope.

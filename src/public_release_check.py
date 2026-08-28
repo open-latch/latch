@@ -22,6 +22,7 @@ DOCS_MARKDOWN_ALLOW = {
     "docs/agent-contract-reference.md",
     "docs/first_run_mission.md",
     "docs/mcp_resource_architecture.md",
+    "docs/predicate_policy_snapshot_v1.md",
     "docs/predicate_verdict_v1.md",
     "docs/v2_rejection_rubric.md",
     "docs/v4_citation_metric.md",
