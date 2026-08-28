@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import sqlite3
 import time
 from datetime import datetime, timedelta, timezone
@@ -31,6 +32,7 @@ EVIDENCE_PROMOTION_KINDS = frozenset({"fact", "progress"})
 RATIFICATION_ACTIONS = frozenset({"ratify", "reject"})
 RATIFICATION_SCOPES = frozenset({"node"})
 RATIFICATION_SOURCES = frozenset({"capture_decision", "latch_update"})
+_SAFE_POLICY_DOMAIN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$")
 
 # Closed, privacy-safe outcomes for the seed import ledgers.  Store the code,
 # never raw exception text (which can contain transcript excerpts or secrets).
@@ -694,6 +696,9 @@ def _migrate_rejected_path(conn: sqlite3.Connection) -> None:
             ratifier        TEXT,
             decided_at      TEXT,
             scope_predicate TEXT,
+            policy_domain_id TEXT CHECK (
+                policy_domain_id IS NULL OR length(trim(policy_domain_id)) > 0
+            ),
             source          TEXT    NOT NULL DEFAULT 'declared'
                                     CHECK (source IN ('declared', 'backfill')),
             created_at      TEXT    NOT NULL DEFAULT (datetime('now')),
@@ -703,6 +708,20 @@ def _migrate_rejected_path(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_rejected_path_node ON rejected_path(node_id);
         CREATE INDEX IF NOT EXISTS idx_rejected_path_source ON rejected_path(source);
         """
+    )
+    rejected_path_cols = {
+        row["name"]
+        for row in conn.execute("PRAGMA table_info(rejected_path)").fetchall()
+    }
+    if "policy_domain_id" not in rejected_path_cols:
+        conn.execute(
+            "ALTER TABLE rejected_path ADD COLUMN policy_domain_id TEXT "
+            "CHECK (policy_domain_id IS NULL "
+            "OR length(trim(policy_domain_id)) > 0)"
+        )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_rejected_path_policy_domain "
+        "ON rejected_path(policy_domain_id, id)"
     )
     conn.commit()
     _migrate_ratification(conn)
@@ -2332,6 +2351,7 @@ def insert_rejected_path_nc(
     decided_at: str | None = None,
     scope_predicate: str | None = None,
     source: str = "declared",
+    policy_domain_id: str | None = None,
 ) -> int | None:
     """Record one rejected option against the node that documents it (id=3948 V2).
 
@@ -2348,11 +2368,21 @@ def insert_rejected_path_nc(
         raise ValueError("rejected_path.reason must be non-empty")
     if source not in ("declared", "backfill"):
         raise ValueError(f"rejected_path.source must be declared|backfill, got {source!r}")
+    if policy_domain_id is not None:
+        if (
+            not isinstance(policy_domain_id, str)
+            or _SAFE_POLICY_DOMAIN_ID_RE.fullmatch(policy_domain_id) is None
+        ):
+            raise ValueError(
+                "rejected_path.policy_domain_id must be a 1-256 character "
+                "ASCII token using letters, digits, '.', '_', ':', or '-'"
+            )
     cur = conn.execute(
         """
         INSERT OR IGNORE INTO rejected_path
-            (node_id, option, reason, ratifier, decided_at, scope_predicate, source)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+            (node_id, option, reason, ratifier, decided_at, scope_predicate,
+             source, policy_domain_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             node_id,
@@ -2362,6 +2392,7 @@ def insert_rejected_path_nc(
             decided_at,
             scope_predicate,
             source,
+            policy_domain_id,
         ),
     )
     return cur.lastrowid if cur.rowcount else None
