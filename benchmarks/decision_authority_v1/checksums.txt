@@ -1,0 +1,6 @@
+# SHA-256 commitments
+# The first three files remain private; their hashes bind this packet to the frozen inputs and scored artifact.
+a2d374b5825f8fa74c0a2bd8586cf3bb4cbe1478f4757a85a417ccf52f1d09d7  private-frozen-cohort.jsonl
+cd8a3b75dba804aa21166b9fe2eb2c243fe415b235d7a788bec72d2fbc625a7f  private-frozen-probes.jsonl
+b4b1cafb6cacc71ada07dacb3597dfc379cb441a136bf79bd4650474060a5c6f  private-scored-artifact.json
+899a158a0bc28c1c210838747a24b04ab51861f1df0be75071da9d2cd2d5873d  results.csv

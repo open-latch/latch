@@ -1,5 +1,15 @@
 # Latch Benchmarks
 
+## Decision-authority adherence evaluation
+
+The first scored internal comparison of a same-text instruction-file baseline
+against Latch is published in
+[`decision_authority_v1`](decision_authority_v1/README.md). The packet includes
+the full method, raw and amended result treatments, a 750-row anonymized
+ledger, SHA-256 commitments, and standard-library code that recomputes every
+reported count. Read its claim boundary and post-result amendments before
+citing the numbers.
+
 Latch's public benchmark surface is aimed at the wedge against generic memory:
 agents do not merely need remembered text, they need current project judgment.
 
