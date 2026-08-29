@@ -373,24 +373,8 @@ ask), and a nightly background *heal* that reconciles contradictions. Per-day ca
 background work (defaults: 100 foreground calls, 33 nightly heal), so a fresh install can't run up a
 surprise; `bin/latch_gate_report.sh` shows recent activity without spending anything.
 
-**Background Claude model.** When the selected backend is Claude, latch always passes an explicit
-`--model`; it never silently inherits the Claude CLI's user default. The public default is `sonnet`
-for every background purpose. Set these environment variables on the latch host/adapter to override
-it, in precedence order:
-
-| Purpose | Purpose-specific override |
-| --- | --- |
-| gate classifier and adversary | `LATCH_GATE_CLAUDE_MODEL` |
-| compaction | `LATCH_COMPACTOR_CLAUDE_MODEL` |
-| heal arbitration | `LATCH_HEAL_CLAUDE_MODEL` |
-| tree summaries | `LATCH_TREE_CLAUDE_MODEL` |
-
-Each purpose then falls back to `LATCH_MAINTENANCE_CLAUDE_MODEL`, then
-`LATCH_CLAUDE_MODEL`, then `sonnet`. For example, `LATCH_CLAUDE_MODEL=opus` selects Opus for every
-Claude-backed background call, while `LATCH_TREE_CLAUDE_MODEL=haiku` changes only tree summaries.
-Detached maintenance carries these non-secret selectors across its autonomous boundary but never
-connection credentials. Structural gate and heal records use the stable field name `model`;
-compaction status uses `summarizer_model`, and the text maintenance logs include `model=...`.
+**Background model.** Latch always passes an explicit model (`sonnet` for Claude; `gpt-5` for Codex/Cursor); override it with `LATCH_CLAUDE_MODEL`, `LATCH_CODEX_MODEL`, or `LATCH_CURSOR_MODEL`.
+See the [technical model-policy reference](docs/model-policy.md) for purpose-specific selectors, precedence, detached propagation, failure behavior, and telemetry fields.
 
 **Kill switch.** Stop latch hooks without uninstalling:
 

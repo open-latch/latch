@@ -1537,7 +1537,7 @@ def test_nightly_heal_emits_run_heartbeat():
                     "integrity", "backend", "model"):
             _assert(key in rows[0], f"heal_run row missing {key}")
         _assert(rows[0]["backend"] == "claude", rows[0])
-        _assert(rows[0]["model"] == "sonnet", rows[0])
+        _assert(rows[0]["model"] is None, rows[0])
         print("PASS nightly_heal_emits_run_heartbeat")
     finally:
         _cleanup(tmp, conn)
@@ -2114,6 +2114,70 @@ def test_nightly_heal_heartbeat_on_failure():
         heal.run_integrity_pass = original
         _cleanup(tmp, conn)
 
+
+def test_invalid_model_does_not_suppress_deterministic_heal(monkeypatch):
+    """Model policy is irrelevant until the sweep actually needs an LLM."""
+    tmp, conn = _fresh_db()
+    called = []
+
+    def deterministic_sweep(_conn, summary, _project_path, **kwargs):
+        called.append(kwargs)
+        summary["integrity"] = {"orphan_edges_deleted": 7}
+        return summary
+
+    try:
+        monkeypatch.setenv("LATCH_CLAUDE_MODEL", "   ")
+        monkeypatch.setattr(heal, "_nightly_heal_sweep", deterministic_sweep)
+
+        result = heal.nightly_heal(
+            conn,
+            project_path=tmp,
+            use_llm=False,
+            integrity=True,
+            contradictions=True,
+        )
+
+        _assert(len(called) == 1, "invalid model selector suppressed the sweep")
+        _assert(called[0]["use_llm"] is False, called)
+        _assert(result["ok"] is True, result)
+        _assert(result["integrity"] == {"orphan_edges_deleted": 7}, result)
+        _assert(result["model"] is None, result)
+    finally:
+        _cleanup(tmp, conn)
+
+
+def test_invalid_model_at_llm_boundary_defers_pair_and_surfaces_failure(monkeypatch):
+    import budget
+
+    tmp, conn = _fresh_db()
+    try:
+        a = _mk(conn, title="invalid model a", body="shared invalid model claim")
+        b = _mk(conn, title="invalid model b", body="shared invalid model claim")
+        for node_id in (a, b):
+            _set_ts(conn, node_id, updated_at=_days_ago(5))
+            _set_ref(conn, node_id, 2)
+        monkeypatch.setenv("LATCH_CLAUDE_MODEL", "   ")
+
+        result = heal.nightly_heal(
+            conn,
+            project_path=tmp,
+            use_llm=True,
+            low_threshold=0.30,
+            high_threshold=0.95,
+        )
+
+        _assert(result["ok"] is False and result["reason"] == "invalid_model", result)
+        _assert(result["integrity"] is not None, result)
+        _assert(result["llm_invocations"] == 0, result)
+        _assert(result["deferred"] >= 1, result)
+        _assert(not heal.edge_exists_between(conn, a, b), result)
+        _assert(
+            budget.status(tmp)["heal"]["count"] == 0,
+            "validation failure consumed a model-call reservation",
+        )
+    finally:
+        _cleanup(tmp, conn)
+
 if __name__ == "__main__":
     test_recency_pass_picks_newer_when_diff_large_and_newer_fresh()
     test_recency_pass_skips_when_both_stale()
@@ -2165,4 +2229,5 @@ if __name__ == "__main__":
     test_priority_reclaims_invalidated_slot_for_later_fallback()
     test_priority_reclaims_invalidated_slot_for_highest_ranked_fallback()
     test_nightly_heal_heartbeat_on_failure()
+    # pytest-only monkeypatch fixture covers invalid-model preflight timing.
     print("\nAll nightly-heal tests pass.")

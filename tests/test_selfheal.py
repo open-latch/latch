@@ -476,6 +476,37 @@ def test_raising_op_does_not_advance_its_stamp():
         shutil.rmtree(proj, ignore_errors=True)
 
 
+def test_unsuccessful_heal_result_does_not_advance_its_stamp():
+    proj = _fresh_project()
+    orig_heal = selfheal.maintenance.run_nightly_heal
+    orig_weekly = selfheal.maintenance.run_weekly_maintenance
+    orig_tree = selfheal.maintenance.run_tree_rebuild
+    try:
+        _seed_db(proj)
+        now = datetime.now(timezone.utc)
+        selfheal._save_state(proj, {
+            "last_backup_at": _iso(now),
+            "last_weekly_at": _iso(now),
+            "last_workstream_shadow_at": _iso(now),
+        })
+        selfheal.maintenance.run_nightly_heal = lambda _p, **_k: {
+            "ok": False,
+            "reason": "invalid_model",
+        }
+        selfheal.maintenance.run_weekly_maintenance = lambda _p: None
+        selfheal.maintenance.run_tree_rebuild = lambda _p: None
+
+        result = selfheal.run_selfheal(proj)
+
+        _assert("heal" not in result["ran"], result)
+        _assert("last_heal_at" not in selfheal._load_state(proj), result)
+    finally:
+        selfheal.maintenance.run_nightly_heal = orig_heal
+        selfheal.maintenance.run_weekly_maintenance = orig_weekly
+        selfheal.maintenance.run_tree_rebuild = orig_tree
+        shutil.rmtree(proj, ignore_errors=True)
+
+
 def test_workstream_governance_runs_after_shared_lock_release():
     proj = _fresh_project()
     orig_shadow = selfheal.maintenance.run_workstream_shadow
@@ -671,6 +702,72 @@ def test_claude_model_override_crosses_autonomous_boundary_without_credentials(m
         _assert("ANTHROPIC_API_KEY" not in env, env)
     finally:
         shutil.rmtree(proj, ignore_errors=True)
+
+
+def test_codex_and_cursor_model_policy_crosses_autonomous_boundary(monkeypatch):
+    expected = {
+        "codex": {
+            "LATCH_CODEX_MODEL": "gpt-local",
+            "LATCH_MAINTENANCE_CODEX_MODEL": "gpt-maintenance",
+            "LATCH_TREE_CODEX_MODEL": "gpt-tree",
+        },
+        "cursor": {
+            "LATCH_CURSOR_MODEL": "cursor-local",
+            "LATCH_MAINTENANCE_CURSOR_MODEL": "cursor-maintenance",
+            "LATCH_TREE_CURSOR_MODEL": "cursor-tree",
+        },
+    }
+
+    for backend, selectors in expected.items():
+        proj = _fresh_project()
+        captured = {}
+
+        class _FakePopen:
+            def __init__(self, _args, **kwargs):
+                captured.update(kwargs)
+
+        context = mcp_runtime.ConnectionContext(
+            connection_id=f"{backend}-maintenance-model",
+            project_cwd=proj,
+            session_id=None,
+            session_source="test",
+            proxy_pid=123,
+            proxy_started_at="now",
+            runtime_key="test",
+            gate_backend=backend,
+            maintenance_backend=backend,
+        )
+        private = mcp_runtime.validate_child_environment({
+            "PATH": os.environ.get("PATH", ""),
+            selfheal.paths.MAINTENANCE_EXECUTABLE_ENV[backend]: sys.executable,
+            **selectors,
+            "OPENAI_API_KEY": "codex-secret",
+            "CURSOR_API_KEY": "cursor-secret",
+        })
+        try:
+            monkeypatch.setattr(selfheal.subprocess, "Popen", _FakePopen)
+            monkeypatch.setattr(
+                selfheal.paths,
+                "configured_maintenance_runner",
+                lambda **_kwargs: (
+                    backend,
+                    sys.executable,
+                    str(Path(proj).parent),
+                    os.pathsep.join(("/vault/bin", "/usr/bin")),
+                ),
+            )
+            with mcp_runtime.bind_connection(context, child_environment=private):
+                selfheal.spawn_detached(proj)
+
+            env = captured["env"]
+            _assert(
+                {name: env.get(name) for name in selectors} == selectors,
+                (backend, env),
+            )
+            _assert("OPENAI_API_KEY" not in env, env)
+            _assert("CURSOR_API_KEY" not in env, env)
+        finally:
+            shutil.rmtree(proj, ignore_errors=True)
 
 
 def test_windows_shared_spawn_preserves_broker_owned_site_packages(

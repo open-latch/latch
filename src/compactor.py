@@ -42,6 +42,14 @@ CLAUDE_BIN = os.environ.get("CLAUDE_BIN") or shutil.which("claude") or "claude"
 CODEX_BIN = os.environ.get("CODEX_BIN") or shutil.which("codex") or "codex"
 CLAUDE_COMPACTOR_DISALLOWED_TOOLS = "Bash,Edit,Write,NotebookEdit"
 COMPACTOR_CLAUDE_MODEL_ENV = ("LATCH_COMPACTOR_CLAUDE_MODEL",)
+COMPACTOR_CODEX_MODEL_ENV = (
+    "LATCH_COMPACTOR_CODEX_MODEL",
+    "CODEX_COMPACTOR_MODEL",
+)
+COMPACTOR_CURSOR_MODEL_ENV = (
+    "LATCH_COMPACTOR_CURSOR_MODEL",
+    "CURSOR_COMPACTOR_MODEL",
+)
 # CREATE_NO_WINDOW: don't flash a console window per claude.cmd call when the
 # parent has no console. 0 on POSIX (no-op). See heal.py for the full rationale.
 CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
@@ -732,16 +740,14 @@ def _summarizer_backend(name: str | None, *, default: str = "claude") -> str:
 
 
 def _summarizer_model(backend: str) -> str | None:
-    if backend == "claude":
-        return model_backends.resolve_claude_model(COMPACTOR_CLAUDE_MODEL_ENV)
-    if backend == "codex":
-        return os.environ.get("CODEX_COMPACTOR_MODEL")
-    if backend == "cursor":
-        return (
-            os.environ.get("LATCH_COMPACTOR_CURSOR_MODEL")
-            or os.environ.get("CURSOR_COMPACTOR_MODEL")
-        )
-    return None
+    return model_backends.resolve_model(
+        backend,
+        {
+            "claude": COMPACTOR_CLAUDE_MODEL_ENV,
+            "codex": COMPACTOR_CODEX_MODEL_ENV,
+            "cursor": COMPACTOR_CURSOR_MODEL_ENV,
+        }.get(backend, ()),
+    )
 
 
 def _invoke_claude(payload: dict) -> dict | None:
@@ -942,7 +948,10 @@ def _invoke_codex_once(
     bin_path = codex_bin or CODEX_BIN
     env = os.environ.copy()
     env["CLAUDE_KB_IN_COMPACT"] = "1"
-    model = os.environ.get("CODEX_COMPACTOR_MODEL")
+    try:
+        model = model_backends.resolve_codex_model(COMPACTOR_CODEX_MODEL_ENV)
+    except ValueError as e:
+        return None, str(e)
     try:
         with tempfile.TemporaryDirectory(prefix="latch-codex-compact-") as tmp:
             out_path = Path(tmp) / "last_message.txt"
@@ -956,8 +965,7 @@ def _invoke_codex_once(
                 "--sandbox", "read-only",
                 "--output-last-message", str(out_path),
             ]
-            if model:
-                args.extend(["--model", model])
+            args.extend(["--model", model])
             args.append("-")
             proc = subprocess.run(
                 args,
@@ -989,7 +997,10 @@ def _invoke_cursor_once(
     cursor_bin: str | None = None,
 ) -> tuple[str | None, str | None]:
     """Run Cursor Agent in an isolated Ask-mode headless invocation."""
-    model = os.environ.get("LATCH_COMPACTOR_CURSOR_MODEL") or os.environ.get("CURSOR_COMPACTOR_MODEL")
+    try:
+        model = model_backends.resolve_cursor_model(COMPACTOR_CURSOR_MODEL_ENV)
+    except ValueError as e:
+        return None, str(e)
     text, error, _timed_out = cursor_backend.invoke_prompt(
         user_msg,
         timeout_s=timeout_s,

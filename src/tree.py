@@ -78,6 +78,10 @@ TREE_CODEX_MODEL_ENV = (
     "CODEX_MAINTENANCE_MODEL",
 )
 TREE_CLAUDE_MODEL_ENV = ("LATCH_TREE_CLAUDE_MODEL",)
+TREE_CURSOR_MODEL_ENV = (
+    "LATCH_TREE_CURSOR_MODEL",
+    "CURSOR_TREE_MODEL",
+)
 
 SUMMARY_PROMPT = """You are writing a one-paragraph summary of a group of related knowledge-base nodes.
 
@@ -239,6 +243,7 @@ def _invoke_summary(members: list[dict]) -> dict | None:
         purpose="tree_summary",
         claude_model_env=TREE_CLAUDE_MODEL_ENV,
         codex_model_env=TREE_CODEX_MODEL_ENV,
+        cursor_model_env=TREE_CURSOR_MODEL_ENV,
     )
     if result.error is not None or result.text is None:
         _log(f"summary {result.backend} subprocess failed: {result.error}")
@@ -405,23 +410,23 @@ def build_tree(
         return {"ok": False, "reason": "disabled"}
 
     resolved_backend = _summary_backend()
-    if resolved_backend == "claude":
-        try:
-            resolved_model = model_backends.resolve_claude_model(
-                TREE_CLAUDE_MODEL_ENV,
-            )
-        except ValueError as exc:
-            return {
-                "ok": False,
-                "reason": "invalid_claude_model",
-                "error": str(exc),
-                "backend": resolved_backend,
-                "model": None,
-            }
-    elif resolved_backend == "codex":
-        resolved_model = model_backends.first_env_value(TREE_CODEX_MODEL_ENV)
-    else:
-        resolved_model = None
+    try:
+        resolved_model = model_backends.resolve_model(
+            resolved_backend,
+            {
+                "claude": TREE_CLAUDE_MODEL_ENV,
+                "codex": TREE_CODEX_MODEL_ENV,
+                "cursor": TREE_CURSOR_MODEL_ENV,
+            }.get(resolved_backend, ()),
+        )
+    except ValueError as exc:
+        return {
+            "ok": False,
+            "reason": "invalid_model",
+            "error": str(exc),
+            "backend": resolved_backend,
+            "model": None,
+        }
 
     result: dict = {
         "ok": True, "leaves": 0, "landmarks": 0, "clusters": 0,

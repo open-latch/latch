@@ -954,6 +954,14 @@ CLASSIFIER_TIMEOUT_S = _env_int_any(
 CLAUDE_BIN = os.environ.get("CLAUDE_BIN") or shutil.which("claude") or "claude"
 CODEX_BIN = os.environ.get("CODEX_BIN") or shutil.which("codex") or "codex"
 GATE_CLAUDE_MODEL_ENV = ("LATCH_GATE_CLAUDE_MODEL",)
+GATE_CODEX_MODEL_ENV = (
+    "LATCH_GATE_CODEX_MODEL",
+    "CODEX_GATE_MODEL",
+)
+GATE_CURSOR_MODEL_ENV = (
+    "LATCH_GATE_CURSOR_MODEL",
+    "CURSOR_GATE_MODEL",
+)
 SUPPORTED_CLASSIFIER_BACKENDS = {"claude", "codex", "cursor"}
 # CREATE_NO_WINDOW: don't flash a console window per claude.cmd call when the
 # parent has no console. 0 on POSIX (no-op). See heal.py for the full rationale.
@@ -1696,19 +1704,14 @@ def _connection_binary(
 
 
 def _classifier_model(backend: str) -> str | None:
-    if backend == "claude":
-        return model_backends.resolve_claude_model(GATE_CLAUDE_MODEL_ENV)
-    if backend == "codex":
-        return (
-            mcp_runtime.connection_env_value("LATCH_GATE_CODEX_MODEL")
-            or mcp_runtime.connection_env_value("CODEX_GATE_MODEL")
-        )
-    if backend == "cursor":
-        return (
-            mcp_runtime.connection_env_value("LATCH_GATE_CURSOR_MODEL")
-            or mcp_runtime.connection_env_value("CURSOR_GATE_MODEL")
-        )
-    return None
+    return model_backends.resolve_model(
+        backend,
+        {
+            "claude": GATE_CLAUDE_MODEL_ENV,
+            "codex": GATE_CODEX_MODEL_ENV,
+            "cursor": GATE_CURSOR_MODEL_ENV,
+        }.get(backend, ()),
+    )
 
 
 def _invoke_classifier_backend_once(
@@ -1802,10 +1805,10 @@ def _invoke_codex_classifier_once(
     """
     env = mcp_runtime.connection_subprocess_environment("codex")
     env["CLAUDE_KB_IN_COMPACT"] = "1"
-    model = (
-        mcp_runtime.connection_env_value("LATCH_GATE_CODEX_MODEL")
-        or mcp_runtime.connection_env_value("CODEX_GATE_MODEL")
-    )
+    try:
+        model = model_backends.resolve_codex_model(GATE_CODEX_MODEL_ENV)
+    except ValueError as e:
+        return None, str(e), False
     try:
         bin_path = codex_bin or _connection_binary(
             "CODEX_BIN",
@@ -1824,8 +1827,7 @@ def _invoke_codex_classifier_once(
                 "--sandbox", "read-only",
                 "--output-last-message", str(out_path),
             ]
-            if model:
-                args.extend(["--model", model])
+            args.extend(["--model", model])
             args.append("-")
             proc = subprocess.run(
                 args,
@@ -1864,10 +1866,10 @@ def _invoke_cursor_classifier_once(
     purpose: str = "classifier",
 ) -> tuple[str | None, str | None, bool]:
     """Run Cursor Agent headlessly in isolated read-only Ask mode."""
-    model = (
-        mcp_runtime.connection_env_value("LATCH_GATE_CURSOR_MODEL")
-        or mcp_runtime.connection_env_value("CURSOR_GATE_MODEL")
-    )
+    try:
+        model = model_backends.resolve_cursor_model(GATE_CURSOR_MODEL_ENV)
+    except ValueError as e:
+        return None, str(e), False
     return cursor_backend.invoke_prompt(
         prompt,
         timeout_s=timeout_s,
