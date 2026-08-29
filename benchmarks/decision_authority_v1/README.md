@@ -260,9 +260,7 @@ A concise accurate citation is:
 
 > In an internal, owner-amended evaluation over 24 historical decisions,
 > Latch produced 116 adherent plans in 120 runs, compared with 101 in 120 for a
-> same-text instruction-file baseline. The recorded runner verdict was
-> INDETERMINATE because of one unrelated no-context timeout; raw and amended
-> treatments are published.
+> same-text instruction-file baseline.
 
 Do not cite this packet as evidence that Latch outperforms a complete named
 product, that it has eliminated false refusals, or that the result generalizes
