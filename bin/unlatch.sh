@@ -43,7 +43,7 @@ run_instruction_mask() {
     fi
     return 1
   fi
-  "$py" "${KB_HOME}/src/unlatch.py" "$action" --project "$project_dir"
+  "$py" "${KB_HOME}/src/latch/install/unlatch.py" "$action" --project "$project_dir"
 }
 
 is_unlatched() {

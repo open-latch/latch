@@ -18,5 +18,5 @@ if ($env:LATCH_PYTHON) {
   exit 2
 }
 
-& $Py (Join-Path $LatchHome "src/proof_packet.py") @args
+& $Py (Join-Path $LatchHome "src/latch/proof/proof_packet.py") @args
 exit $LASTEXITCODE

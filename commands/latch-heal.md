@@ -31,7 +31,7 @@ Run the nightly heal against the per-project knowledge base under
 Run with the Bash tool:
 
 ```bash
-python "<KB_HOME>/src/maintenance.py" nightly "$(pwd)"
+python "<KB_HOME>/src/latch/pipeline/maintenance.py" nightly "$(pwd)"
 ```
 
 Report the JSON summary: `examined`, `collisions`, `superseded`, `kept_both`,

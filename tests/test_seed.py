@@ -10,10 +10,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-import seed  # noqa: E402
-import cursor_session  # noqa: E402
-import cursor_transcript  # noqa: E402
-import paths  # noqa: E402
+from latch.pipeline import seed  # noqa: E402
+from latch.hosts import cursor_session  # noqa: E402
+from latch.hosts import cursor_transcript  # noqa: E402
+from latch.store import paths  # noqa: E402
 
 
 def _assert(cond, msg):

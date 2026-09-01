@@ -12,9 +12,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-import agents_md_sync as ams  # noqa: E402
-import claude_md_sync as cms  # noqa: E402
-import unlatch  # noqa: E402
+from latch.hosts import agents_md_sync as ams  # noqa: E402
+from latch.hosts import claude_md_sync as cms  # noqa: E402
+from latch.install import unlatch  # noqa: E402
 
 
 def _assert(cond, msg):
@@ -69,7 +69,7 @@ def _run_hook_unlatched(script: str, home: Path, cwd: Path) -> str:
     env["LATCH_HOME"] = str(home)
     env.pop("CLAUDE_KB_HOME", None)
     proc = subprocess.run(
-        [sys.executable, str(ROOT / "src" / "hooks" / script)],
+        [sys.executable, str(ROOT / "src" / "latch" / "hooks" / script)],
         cwd=cwd,
         env=env,
         text=True,
@@ -88,7 +88,7 @@ def _run_instruction_mask(home: Path, cwd: Path, action: str) -> str:
     proc = subprocess.run(
         [
             sys.executable,
-            str(ROOT / "src" / "unlatch.py"),
+            str(ROOT / "src" / "latch" / "install" / "unlatch.py"),
             action,
             "--project",
             str(cwd),
@@ -600,7 +600,7 @@ def test_unlatched_gate_cli_fast_fails_without_opening_kb():
         proc = subprocess.run(
             [
                 sys.executable,
-                str(ROOT / "src" / "kb_gate_cli.py"),
+                str(ROOT / "src" / "latch" / "gate" / "kb_gate_cli.py"),
                 str(project),
                 "change the app",
             ],

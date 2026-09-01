@@ -15,10 +15,10 @@ import pytest
 SRC = Path(__file__).resolve().parents[1] / "src"
 sys.path.insert(0, str(SRC))
 
-import artifacts  # noqa: E402
-import db  # noqa: E402
-import outcome_evidence  # noqa: E402
-import outcome_measurement as om  # noqa: E402
+from latch.store import artifacts  # noqa: E402
+from latch.store import db  # noqa: E402
+from latch.evals import outcome_evidence  # noqa: E402
+from latch.evals import outcome_measurement as om  # noqa: E402
 
 
 UTC = timezone.utc

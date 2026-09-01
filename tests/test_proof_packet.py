@@ -11,7 +11,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-import proof_packet  # noqa: E402
+from latch.proof import proof_packet  # noqa: E402
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -157,12 +157,12 @@ def test_runtime_manifest_covers_authoritative_bundle():
         "WIRING_VERSION",
         "bin/latch_eval.sh",
         "bin/latch_seed_report_eval.sh",
-        "src/codex_transcript.py",
-        "src/budget.py",
-        "src/priorities.py",
-        "src/profiles.py",
-        "src/schema.sql",
-        "src/proof_packet.py",
+        "src/latch/hosts/codex_transcript.py",
+        "src/latch/gate/budget.py",
+        "src/latch/store/priorities.py",
+        "src/latch/store/profiles.py",
+        "src/latch/store/schema.sql",
+        "src/latch/proof/proof_packet.py",
         "vendor/config.json",
         "vendor/model.onnx",
         "vendor/special_tokens_map.json",
@@ -734,7 +734,7 @@ def test_wrapper_uses_configured_python():
 def test_powershell_wrapper_forwards_interpreter_and_args():
     wrapper = (ROOT / "bin" / "latch_proof_packet.ps1").read_text(encoding="utf-8")
     _assert("$env:LATCH_PYTHON" in wrapper, wrapper)
-    _assert('"src/proof_packet.py"' in wrapper, wrapper)
+    _assert('"src/latch/proof/proof_packet.py"' in wrapper, wrapper)
     _assert("@args" in wrapper, wrapper)
     print("PASS powershell_wrapper_forwards_interpreter_and_args")
 

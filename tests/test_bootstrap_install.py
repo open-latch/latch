@@ -25,7 +25,7 @@ RELEASE_WORKFLOW = ROOT / ".github" / "workflows" / "public-release-hygiene.yml"
 
 sys.path.insert(0, str(ROOT / "src"))
 
-from versioning import LATCH_VERSION  # noqa: E402
+from latch.install.versioning import LATCH_VERSION  # noqa: E402
 
 
 def run(*args: str, cwd: Path | None = None, env: dict[str, str] | None = None):
@@ -54,8 +54,9 @@ def make_origin(tmp_path: Path) -> Path:
         assert run("git", "-C", str(origin), "checkout", "-b", "main").returncode == 0
     git(origin, "config", "user.email", "latch-tests@example.invalid")
     git(origin, "config", "user.name", "Latch Tests")
-    (origin / "src").mkdir()
-    (origin / "src" / "quickstart.py").write_text(
+    install_src = origin / "src" / "latch" / "install"
+    install_src.mkdir(parents=True)
+    (install_src / "quickstart.py").write_text(
         """#!/usr/bin/env python3
 import json
 import os
@@ -78,7 +79,7 @@ raise SystemExit(int(os.environ.get("FAKE_QUICKSTART_FAIL", "0")))
 """,
         encoding="utf-8",
     )
-    (origin / "src" / "doctor.py").write_text(
+    (install_src / "doctor.py").write_text(
         """import os
 from pathlib import Path
 
@@ -91,7 +92,8 @@ def _run_probe(code, ok_token, timeout, arch_hint):
     assert ok_token == "VEC_OK"
     assert timeout == 30
     assert arch_hint is True
-    installed_version = (Path(__file__).resolve().parents[1] / "VERSION").read_text().strip()
+    root = next(p for p in Path(__file__).resolve().parents if p.name == "src").parent
+    installed_version = (root / "VERSION").read_text().strip()
     if (
         os.environ.get("FAKE_VEC_PROBE_FAIL")
         or os.environ.get("FAKE_VEC_PROBE_FAIL_VERSION") == installed_version
@@ -631,7 +633,7 @@ def test_bootstrap_script_contracts_and_syntax():
         assert "https://astral.sh/uv/" in text
         assert "0.11.28" in text
         assert "quickstart.py" in text
-        assert "from doctor import OK, _VEC_PROBE, _run_probe" in text
+        assert "from latch.install.doctor import OK, _VEC_PROBE, _run_probe" in text
         assert "upgrade refused because the install checkout is dirty" in text
         assert "production KB" in text
         assert "requirements.lock" in text

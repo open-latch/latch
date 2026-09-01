@@ -17,9 +17,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import numpy as np  # noqa: E402
 
-import db  # noqa: E402
-import embeddings  # noqa: E402
-import tree  # noqa: E402
+from latch.store import db  # noqa: E402
+from latch.retrieval import embeddings  # noqa: E402
+from latch.retrieval import tree  # noqa: E402
 
 
 def _assert(cond, msg):

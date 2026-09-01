@@ -25,10 +25,10 @@ from pathlib import Path
 _SRC = Path(__file__).resolve().parent.parent / "src"
 sys.path.insert(0, str(_SRC))
 
-import db          # noqa: E402
-import embeddings  # noqa: E402
-import gate        # noqa: E402
-import log_utils   # noqa: E402
+from latch.store import db          # noqa: E402
+from latch.retrieval import embeddings  # noqa: E402
+from latch.gate import gate        # noqa: E402
+from latch.common import log_utils   # noqa: E402
 
 # Stop the default-ON adversary from firing a second real backend call
 # (same module-level convention as test_gate_classify.py).

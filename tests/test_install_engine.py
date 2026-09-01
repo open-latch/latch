@@ -23,7 +23,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-import install_engine as ie  # noqa: E402
+from latch.install import install_engine as ie  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -671,7 +671,7 @@ def test_seed_command_args_use_llm_apply_and_project():
         source="codex",
         backend="codex",
     )
-    _assert(args[:2] == ["/py", str(ie.KB_HOME / "src" / "seed.py")],
+    _assert(args[:2] == ["/py", str(ie.KB_HOME / "src" / "latch" / "pipeline" / "seed.py")],
             f"seed command should run seed.py with chosen python: {args}")
     _assert("--project" in args and str(project) in args,
             f"seed command should target the project path: {args}")

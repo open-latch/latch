@@ -10,7 +10,7 @@ Phase V item V4 (decision 3948) verbatim:
 This document is the pre-registered, mechanically-evaluable reading of that
 sentence, adopted under the V4 build handoff (KB id=4626 item 1) as the
 NARROWEST reading the gate's persisted logging supports. It is implemented,
-byte-for-byte in field names, by `src/v4_citation_rate.py` and evaluated over
+byte-for-byte in field names, by `src/latch/evals/v4_citation_rate.py` and evaluated over
 gate.log rows only — no prose judgment, no transcript reads, no second model
 call.
 

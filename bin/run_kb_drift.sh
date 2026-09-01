@@ -10,4 +10,4 @@ set -euo pipefail
 
 KB_HOME="${LATCH_HOME:-${CLAUDE_KB_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}}"
 
-exec python "${KB_HOME}/src/drift_cli.py" "$@"
+exec python "${KB_HOME}/src/latch/pipeline/drift_cli.py" "$@"

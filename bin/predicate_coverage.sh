@@ -6,4 +6,4 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-exec python3 "${SCRIPT_DIR}/../src/predicate_coverage.py" "$@"
+exec python3 "${SCRIPT_DIR}/../src/latch/gate/predicate_coverage.py" "$@"

@@ -13,10 +13,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-import db          # noqa: E402
-import embeddings  # noqa: E402
-import mcp_server  # noqa: E402
-import rolling     # noqa: E402
+from latch.store import db          # noqa: E402
+from latch.retrieval import embeddings  # noqa: E402
+from latch.mcp import mcp_server  # noqa: E402
+from latch.store import rolling     # noqa: E402
 
 
 def _assert(cond, msg):

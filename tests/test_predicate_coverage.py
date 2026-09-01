@@ -22,7 +22,7 @@ _SRC = _ROOT / "src"
 def _coverage_module():
     sys.path.insert(0, str(_SRC))
     try:
-        return importlib.import_module("predicate_coverage")
+        return importlib.import_module("latch.gate.predicate_coverage")
     finally:
         sys.path.remove(str(_SRC))
 

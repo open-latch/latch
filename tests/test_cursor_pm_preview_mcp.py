@@ -7,8 +7,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
-import cursor_gate_state as cgs  # noqa: E402
-import mcp_server  # noqa: E402
+from latch.hosts import cursor_gate_state as cgs  # noqa: E402
+from latch.mcp import mcp_server  # noqa: E402
 
 
 def test_pm_preview_mcp_tool_returns_canonical_nonwriting_receipt():

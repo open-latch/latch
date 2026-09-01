@@ -15,4 +15,4 @@ else
   PYTHON_BIN="python"
 fi
 
-exec "$PYTHON_BIN" "${LATCH_ROOT}/src/outcome_measurement_cli.py" "$@"
+exec "$PYTHON_BIN" "${LATCH_ROOT}/src/latch/evals/outcome_measurement_cli.py" "$@"

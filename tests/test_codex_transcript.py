@@ -10,8 +10,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-import codex_transcript as ct  # noqa: E402
-import compactor  # noqa: E402
+from latch.hosts import codex_transcript as ct  # noqa: E402
+from latch.pipeline import compactor  # noqa: E402
 
 SID = "019eb721-73b7-7302-8e74-357047339414"
 

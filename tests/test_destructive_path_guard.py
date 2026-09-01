@@ -80,6 +80,6 @@ def test_tests_never_recursively_delete_resolved_kb_paths():
 
 
 def test_uninstall_has_no_production_data_delete_primitive():
-    source = (ROOT / "src" / "uninstall_engine.py").read_text(encoding="utf-8")
+    source = (ROOT / "src" / "latch" / "install" / "uninstall_engine.py").read_text(encoding="utf-8")
     assert "shutil.rmtree(projects" not in source
     assert "--purge to delete" not in source

@@ -11,10 +11,10 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "src" / "hooks"))
 
-import _common as hook_common  # noqa: E402
-import cursor_pre_tool_use  # noqa: E402
-import cursor_post_tool_use  # noqa: E402
-import cursor_before_submit  # noqa: E402
+from latch.hooks import _common as hook_common  # noqa: E402
+from latch.hooks import cursor_pre_tool_use  # noqa: E402
+from latch.hooks import cursor_post_tool_use  # noqa: E402
+from latch.hooks import cursor_before_submit  # noqa: E402
 import pytest  # noqa: E402
 
 
@@ -65,7 +65,11 @@ def test_read_hook_input_propagates_invalid_utf8_to_fail_closed_hooks(monkeypatc
         hook_common.read_hook_input()
 
 
-@pytest.mark.parametrize("hook", [cursor_before_submit, cursor_pre_tool_use])
+@pytest.mark.parametrize(
+    "hook",
+    [cursor_before_submit, cursor_pre_tool_use],
+    ids=("cursor_before_submit", "cursor_pre_tool_use"),
+)
 def test_cursor_fail_closed_hooks_propagate_invalid_utf8(monkeypatch, hook):
     monkeypatch.setattr(sys, "stdin", _windows_stdin(b"\xff\xfe{"))
     if hook is cursor_pre_tool_use:

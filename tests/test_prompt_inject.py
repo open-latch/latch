@@ -16,9 +16,9 @@ _SRC = Path(__file__).resolve().parent.parent / "src"
 sys.path.insert(0, str(_SRC))
 sys.path.insert(0, str(_SRC / "hooks"))
 
-import db  # noqa: E402
-import embeddings  # noqa: E402
-import user_prompt_submit as ups  # noqa: E402
+from latch.store import db  # noqa: E402
+from latch.retrieval import embeddings  # noqa: E402
+from latch.hooks import user_prompt_submit as ups  # noqa: E402
 
 
 def _assert(cond, msg):
@@ -293,7 +293,7 @@ def test_log_writes_jsonl():
         conn.close()
         ups._write_log(tmp, {"hello": "world", "n": 1})
         ups._write_log(tmp, {"hello": "again", "n": 2})
-        import log_utils
+        from latch.common import log_utils
         path = log_utils.today_log_path(ups.LOG_STREAM, tmp)
         _assert(path.exists(), f"log file missing: {path}")
         lines = path.read_text(encoding="utf-8").strip().splitlines()

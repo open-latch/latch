@@ -9,9 +9,9 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parent.parent
-INSTALL = ROOT / "src" / "install_cursor.py"
-DOCTOR = ROOT / "src" / "cursor_doctor.py"
-UNINSTALL = ROOT / "src" / "uninstall_engine.py"
+INSTALL = ROOT / "src" / "latch" / "install" / "install_cursor.py"
+DOCTOR = ROOT / "src" / "latch" / "hosts" / "cursor_doctor.py"
+UNINSTALL = ROOT / "src" / "latch" / "install" / "uninstall_engine.py"
 
 
 def _run(args: list[str], *, cwd: Path, env: dict[str, str]) -> subprocess.CompletedProcess[str]:

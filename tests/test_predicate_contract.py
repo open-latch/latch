@@ -17,7 +17,7 @@ _CONSUMER = _ROOT / "bin" / "predicate_consumer.py"
 def _module(name: str):
     sys.path.insert(0, str(_SRC))
     try:
-        return importlib.import_module(name)
+        return importlib.import_module(f"latch.gate.{name}")
     finally:
         sys.path.remove(str(_SRC))
 
@@ -158,8 +158,8 @@ def test_reference_consumer_matches_library_and_golden_contract(tmp_path):
 
 def test_public_tree_contains_no_policy_artifact_vault_text_or_private_path():
     public_surfaces = (
-        _SRC / "predicate_snapshot.py",
-        _SRC / "predicate_consumer.py",
+        _SRC / "latch" / "gate" / "predicate_snapshot.py",
+        _SRC / "latch" / "gate" / "predicate_consumer.py",
         _CONSUMER,
         _ROOT / "docs" / "predicate_verdict_v1.md",
         _ROOT / "docs" / "predicate_policy_snapshot_v1.md",

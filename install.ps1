@@ -99,7 +99,7 @@ function Validate-Checkout([string]$App) {
   if ((Normalize-Repository $actual) -ne (Normalize-Repository $Repository)) {
     Fail("existing checkout origin is $actual, expected $Repository; refusing overwrite")
   }
-  foreach ($relative in @("VERSION", "requirements.txt", "src\quickstart.py")) {
+  foreach ($relative in @("VERSION", "requirements.txt", "src\latch\install\quickstart.py")) {
     if (-not (Test-Path -LiteralPath (Join-Path $App $relative) -PathType Leaf)) {
       Fail("checkout is missing required Latch file: $relative")
     }
@@ -165,7 +165,7 @@ function Test-SqliteVecCapability([string]$App, [string]$Python) {
   $probe = @'
 import sys
 sys.path.insert(0, sys.argv[1])
-from doctor import OK, _VEC_PROBE, _run_probe
+from latch.install.doctor import OK, _VEC_PROBE, _run_probe
 level, _ = _run_probe(_VEC_PROBE, 'VEC_OK', 30, arch_hint=True)
 if level != OK:
     raise SystemExit(1)
@@ -346,7 +346,7 @@ try {
   $env:LATCH_PYTHON = $PythonPath
   $effectiveQuickstartArgs = @()
   $effectiveQuickstartArgs += $QuickstartArgs
-  & $PythonPath (Join-Path $InstallDir "src\quickstart.py") --project $Project @effectiveQuickstartArgs
+  & $PythonPath (Join-Path $InstallDir "src\latch\install\quickstart.py") --project $Project @effectiveQuickstartArgs
   $quickstartRc = $LASTEXITCODE
 } finally {
   if ($hadLatchHome) {

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# install_engine.sh — thin wrapper around src/install_engine.py, the engine
+# install_engine.sh — thin wrapper around src/latch/install/install_engine.py, the engine
 # half of the latch install. Wires the KB engine into Claude Code:
 #   1. registers the MCP server via `claude mcp add --scope user` (the store
 #      Claude Code actually reads — NOT settings.json mcpServers, which it
@@ -11,7 +11,7 @@
 #      rules so every latch_* tool is auto-approved (no per-tool prompts).
 # Also removes dead latch-owned mcpServers blocks left by older installs.
 #
-# All logic lives in src/install_engine.py (stdlib-only; shared by this CLI and
+# All logic lives in src/latch/install/install_engine.py (stdlib-only; shared by this CLI and
 # the PowerShell wrapper). Idempotent and non-destructive (settings.json is
 # backed up to settings.json.latchbak).
 #
@@ -40,4 +40,4 @@ else
   echo "install_engine: no Python found (set LATCH_PYTHON (legacy: CLAUDE_KB_PYTHON) to your interpreter)." >&2
   exit 2
 fi
-exec "$PY" "${KB_HOME}/src/install_engine.py" "$@"
+exec "$PY" "${KB_HOME}/src/latch/install/install_engine.py" "$@"

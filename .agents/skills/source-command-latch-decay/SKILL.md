@@ -29,15 +29,19 @@ if [ -z "$latch_home" ]; then
 fi
 if [ -z "$latch_home" ]; then
   candidate="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
-  if [ -f "$candidate/src/mcp_server.py" ] && [ -d "$candidate/commands" ]; then
+  if { [ -f "$candidate/src/latch/mcp/mcp_server.py" ] || [ -f "$candidate/src/mcp_server.py" ]; } && [ -d "$candidate/commands" ]; then
     latch_home="$candidate"
   fi
 fi
-if [ -z "$latch_home" ] || [ ! -f "$latch_home/src/mcp_server.py" ]; then
+if [ -z "$latch_home" ] || { [ ! -f "$latch_home/src/latch/mcp/mcp_server.py" ] && [ ! -f "$latch_home/src/mcp_server.py" ]; }; then
   echo "Could not find latch checkout; set LATCH_HOME to your latch install." >&2
   exit 1
 fi
-python "$latch_home/src/maintenance.py" weekly "$(pwd)"
+maintenance_script="$latch_home/src/latch/pipeline/maintenance.py"
+if [ ! -f "$maintenance_script" ]; then
+  maintenance_script="$latch_home/src/maintenance.py"
+fi
+python "$maintenance_script" weekly "$(pwd)"
 ```
 
 Report the JSON summary, especially `decayed_rows`, `promoted_count`, and

@@ -10,12 +10,12 @@ import pytest
 SRC = Path(__file__).resolve().parent.parent / "src"
 sys.path.insert(0, str(SRC))
 
-import db  # noqa: E402
-import feeders  # noqa: E402
-import lifecycle_receipts  # noqa: E402
-import priorities  # noqa: E402
-import rolling  # noqa: E402
-import workstreams  # noqa: E402
+from latch.store import db  # noqa: E402
+from latch.retrieval import feeders  # noqa: E402
+from latch.store import lifecycle_receipts  # noqa: E402
+from latch.store import priorities  # noqa: E402
+from latch.store import rolling  # noqa: E402
+from latch.store import workstreams  # noqa: E402
 
 
 @pytest.fixture

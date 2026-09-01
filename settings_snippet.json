@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "{{PYTHON_PATH}} {{CLAUDE_KB_HOME}}/src/hooks/session_start.py"
+            "command": "{{PYTHON_PATH}} {{CLAUDE_KB_HOME}}/src/latch/hooks/session_start.py"
           }
         ]
       }
@@ -28,7 +28,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "{{PYTHON_PATH}} {{CLAUDE_KB_HOME}}/src/hooks/user_prompt_submit.py"
+            "command": "{{PYTHON_PATH}} {{CLAUDE_KB_HOME}}/src/latch/hooks/user_prompt_submit.py"
           }
         ]
       }
@@ -39,7 +39,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "{{PYTHON_PATH}} {{CLAUDE_KB_HOME}}/src/hooks/stop.py"
+            "command": "{{PYTHON_PATH}} {{CLAUDE_KB_HOME}}/src/latch/hooks/stop.py"
           }
         ]
       }
@@ -50,7 +50,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "{{PYTHON_PATH}} {{CLAUDE_KB_HOME}}/src/hooks/session_end.py"
+            "command": "{{PYTHON_PATH}} {{CLAUDE_KB_HOME}}/src/latch/hooks/session_end.py"
           }
         ]
       }
@@ -62,7 +62,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "{{PYTHON_PATH}} {{CLAUDE_KB_HOME}}/src/hooks/post_tool_use.py"
+            "command": "{{PYTHON_PATH}} {{CLAUDE_KB_HOME}}/src/latch/hooks/post_tool_use.py"
           }
         ]
       },
@@ -72,7 +72,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "{{PYTHON_PATH}} {{CLAUDE_KB_HOME}}/src/hooks/post_tool_use.py"
+            "command": "{{PYTHON_PATH}} {{CLAUDE_KB_HOME}}/src/latch/hooks/post_tool_use.py"
           }
         ]
       }

@@ -23,5 +23,5 @@ fi
 
 PROJECT_DIR=$(pwd -W 2>/dev/null || pwd)
 
-exec "$PY" "${KB_HOME}/src/gate_report.py" \
+exec "$PY" "${KB_HOME}/src/latch/gate/gate_report.py" \
   --project "${PROJECT_DIR}" "$@"

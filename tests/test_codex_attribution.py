@@ -27,12 +27,12 @@ import pytest
 _SRC = Path(__file__).resolve().parent.parent / "src"
 sys.path.insert(0, str(_SRC))
 
-import codex_attribution  # noqa: E402
-import correlator         # noqa: E402
-import db                 # noqa: E402
-import gate               # noqa: E402
-import paths              # noqa: E402
-import project_proof      # noqa: E402
+from latch.hosts import codex_attribution  # noqa: E402
+from latch.proof import correlator         # noqa: E402
+from latch.store import db                 # noqa: E402
+from latch.gate import gate               # noqa: E402
+from latch.store import paths              # noqa: E402
+from latch.proof import project_proof      # noqa: E402
 
 
 def _assert(cond, msg):
@@ -1368,7 +1368,7 @@ def test_file_touches_accepts_a_supplied_transcript_path():
 def test_coverage_splits_labeled_rows_by_identity_source():
     """A blended coverage number hides that some identity was recovered rather
     than host-supplied. The split must be reportable."""
-    import gate_report
+    from latch.gate import gate_report
     gates = [
         {"session_id": "a", "ts": "2026-07-30T05:00:00.000Z"},
         {"session_id": None, "ts": "2026-07-30T05:01:00.000Z"},
@@ -1782,7 +1782,7 @@ def test_coverage_never_counts_a_recovered_row_as_unlabelable():
     """PR #73 review P1. Recovered rows stayed in the unlabelable bucket, so the
     labelable denominator could drop below the labeled count and print an
     impossible rate."""
-    import gate_report
+    from latch.gate import gate_report
     gates = [
         {"session_id": None, "ts": "2026-07-30T05:00:00.000Z",
          "query_hash": "h1", "gate_call_id": "aaaaaaaaaaaa"},
@@ -2903,7 +2903,7 @@ def test_coverage_buckets_are_disjoint():
     """Regression I introduced while fixing coverage: a row that is BOTH
     skipped and session-less was subtracted twice, driving labelable negative
     and rendering rates above 100% in the honesty block itself."""
-    import gate_report
+    from latch.gate import gate_report
     gates = [{"session_id": None, "skipped": True,
               "ts": f"2026-07-30T05:0{i}:00.000Z", "query_hash": f"h{i}"}
              for i in range(5)]
@@ -2921,7 +2921,7 @@ def test_coverage_buckets_are_disjoint():
 def test_unknown_provenance_is_not_reported_as_recovered():
     """A vault where recovery never ran reported itself as 100% recovered,
     because rows written before session_source existed render as UNKNOWN."""
-    import gate_report
+    from latch.gate import gate_report
     gates = [{"session_id": "a", "ts": "2026-07-30T05:00:00.000Z"}]
     outcomes = [{"outcome_category": "ACCEPTED"}]  # legacy row, no session_source
     cov = gate_report._coverage(gates, outcomes)

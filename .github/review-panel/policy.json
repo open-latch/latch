@@ -46,21 +46,21 @@
     "bin/**",
     "claude_md_snippet.md",
     "cursor_rule_snippet.mdc",
-    "src/quickstart.py",
-    "src/seed.py",
-    "src/doctor.py",
-    "src/mcp_server.py",
-    "src/*_sync.py",
-    "src/install_*.py",
-    "src/uninstall*.py",
+    "src/latch/install/quickstart.py",
+    "src/latch/pipeline/seed.py",
+    "src/latch/install/doctor.py",
+    "src/latch/mcp/mcp_server.py",
+    "src/latch/hosts/*_sync.py",
+    "src/latch/install/install_*.py",
+    "src/latch/install/uninstall*.py",
     "tests/seed_report_review_fixtures.py"
   ],
   "artifact_recipes": [
     {
       "id": "seed-report",
       "paths": [
-        "src/seed.py",
-        "src/seed_report_evals.py",
+        "src/latch/pipeline/seed.py",
+        "src/latch/evals/seed_report_evals.py",
         "tests/seed_report_review_fixtures.py",
         "tests/test_seed*.py"
       ],
@@ -78,10 +78,10 @@
       "paths": [
         "claude_md_snippet.md",
         "cursor_rule_snippet.mdc",
-        "src/agents_md_sync.py",
-        "src/claude_md_sync.py",
-        "src/cursor_rules_sync.py",
-        "src/managed_doc_sync.py"
+        "src/latch/hosts/agents_md_sync.py",
+        "src/latch/hosts/claude_md_sync.py",
+        "src/latch/hosts/cursor_rules_sync.py",
+        "src/latch/hosts/managed_doc_sync.py"
       ],
       "command": [
         "python",

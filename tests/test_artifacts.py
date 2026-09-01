@@ -17,9 +17,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import _isolation  # noqa: F401,E402  (hermetic on a pinned KB for direct runs; see conftest)
-import artifacts  # noqa: E402
-import db          # noqa: E402
-import search      # noqa: E402
+from latch.store import artifacts  # noqa: E402
+from latch.store import db          # noqa: E402
+from latch.retrieval import search      # noqa: E402
 
 
 def _assert(cond, msg):

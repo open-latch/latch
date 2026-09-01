@@ -18,5 +18,5 @@ if ($env:LATCH_PYTHON) {
   exit 2
 }
 
-& $Py (Join-Path $KBHome "src/public_release_check.py") @args
+& $Py (Join-Path $KBHome "src/latch/proof/public_release_check.py") @args
 exit $LASTEXITCODE

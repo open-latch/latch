@@ -10,7 +10,7 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
-import update_latch  # noqa: E402
+from latch.install import update_latch  # noqa: E402
 
 
 def _git(path: Path, *args: str) -> str:

@@ -14,11 +14,11 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
-import mcp_broker  # noqa: E402
-import mcp_daemon  # noqa: E402
-import mcp_launcher_win  # noqa: E402
-import mcp_proxy  # noqa: E402
-import mcp_runtime  # noqa: E402
+from latch.mcp import mcp_broker  # noqa: E402
+from latch.mcp import mcp_daemon  # noqa: E402
+from latch.mcp import mcp_launcher_win  # noqa: E402
+from latch.mcp import mcp_proxy  # noqa: E402
+from latch.mcp import mcp_runtime  # noqa: E402
 
 
 def test_windows_daemon_creation_flags_suppress_console_without_detaching():
@@ -189,7 +189,7 @@ def test_windows_daemon_processes_private_venv_pth_before_anyio(
     )
     assert activated == [str(site_packages)]
 
-    source = (ROOT / "src" / "mcp_daemon.py").read_text(encoding="utf-8")
+    source = (ROOT / "src" / "latch" / "mcp" / "mcp_daemon.py").read_text(encoding="utf-8")
     windows_main = source.index(
         'if os.name == "nt" and __name__ == "__main__":'
     )
@@ -197,7 +197,7 @@ def test_windows_daemon_processes_private_venv_pth_before_anyio(
         "        _activate_windows_venv_site_packages()", windows_main
     )
     assert windows_main < activation_call < source.index("import anyio")
-    legacy_source = (ROOT / "src" / "mcp_server.py").read_text(encoding="utf-8")
+    legacy_source = (ROOT / "src" / "latch" / "mcp" / "mcp_server.py").read_text(encoding="utf-8")
     legacy_guard = legacy_source.index('    if os.name == "nt":')
     legacy_call = legacy_source.index(
         "mcp_runtime.activate_windows_venv_site_packages", legacy_guard
@@ -268,7 +268,7 @@ def test_windows_plain_daemon_import_ignores_stale_handoff(tmp_path):
         tmp_path / "missing-site-packages"
     )
     proc = subprocess.run(
-        [sys.executable, "-c", "import mcp_daemon"],
+        [sys.executable, "-c", "from latch.mcp import mcp_daemon"],
         cwd=str(ROOT / "src"),
         env=env,
         capture_output=True,
@@ -308,7 +308,7 @@ def test_windows_daemon_execution_publishes_invalid_handoff(tmp_path):
 
     started = time.monotonic()
     proc = subprocess.run(
-        [str(base_python), str(ROOT / "src" / "mcp_daemon.py")],
+        [str(base_python), str(ROOT / "src" / "latch" / "mcp" / "mcp_daemon.py")],
         cwd=str(ROOT / "src"),
         env=env,
         capture_output=True,
@@ -701,7 +701,7 @@ def test_windows_daemon_creation_flags_are_defense_in_depth():
 
 
 def test_windows_launcher_diagnostic_records_process_lineage():
-    source = (ROOT / "src" / "mcp_launcher_win.py").read_text(encoding="utf-8")
+    source = (ROOT / "src" / "latch" / "mcp" / "mcp_launcher_win.py").read_text(encoding="utf-8")
     for field in ("parent_pid=", "executable=", "argv=", "launching child="):
         assert field in source
 
@@ -742,7 +742,7 @@ def test_daemon_owner_fence_survives_broker_death_and_releases_with_owner(
             sys.executable,
             "-c",
             (
-                "import mcp_broker,time; "
+                "from latch.mcp import mcp_broker; import time; "
                 "h=mcp_broker.acquire_owner_fence(); "
                 "print('held' if h else 'failed', flush=True); time.sleep(30)"
             ),
@@ -760,7 +760,7 @@ def test_daemon_owner_fence_survives_broker_death_and_releases_with_owner(
         )
         assert mcp_broker._acquire_start_lock() is True
         contender = subprocess.run(
-            [sys.executable, str(ROOT / "src" / "mcp_daemon.py")],
+            [sys.executable, str(ROOT / "src" / "latch" / "mcp" / "mcp_daemon.py")],
             env=env,
             capture_output=True,
             timeout=5,
@@ -804,7 +804,7 @@ def test_incompatible_upgrade_fails_before_owner_fence_and_heavy_imports(
         "PYTHONPATH": os.pathsep.join((str(site_dir), str(ROOT / "src"))),
     })
     result = subprocess.run(
-        [sys.executable, str(ROOT / "src" / "mcp_daemon.py")],
+        [sys.executable, str(ROOT / "src" / "latch" / "mcp" / "mcp_daemon.py")],
         env=env,
         capture_output=True,
         text=True,
@@ -1603,7 +1603,7 @@ def test_posix_legacy_transition_preserves_execve(monkeypatch):
 
 
 def test_mcp_entrypoint_falls_through_for_windows_legacy_transition(monkeypatch):
-    import mcp_server
+    from latch.mcp import mcp_server
 
     # Register the key with monkeypatch before production control flow mutates
     # os.environ so teardown cannot leak legacy mode into later subprocesses.
@@ -1690,7 +1690,7 @@ def test_windows_explicit_fallback_returns_before_failure_signal(
 
 
 def test_fastmcp_private_boundary_is_pinned_and_available():
-    import mcp_server
+    from latch.mcp import mcp_server
 
     server = getattr(mcp_server.mcp, "_mcp_server", None)
     assert callable(getattr(server, "run", None))

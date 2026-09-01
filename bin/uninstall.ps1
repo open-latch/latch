@@ -4,7 +4,7 @@
   bin/uninstall.sh; the strict inverse of install_engine.ps1.
 
 .DESCRIPTION
-  All logic lives in src/uninstall_engine.py (stdlib-only, shared with the bash
+  All logic lives in src/latch/install/uninstall_engine.py (stdlib-only, shared with the bash
   wrapper). It:
     1. deregisters latch-owned MCP servers via `claude mcp remove`;
     2. removes the SessionStart/UserPromptSubmit/Stop/SessionEnd hooks + the
@@ -36,5 +36,5 @@ $KbHome = if ($env:LATCH_HOME) { $env:LATCH_HOME } `
           elseif ($env:CLAUDE_KB_HOME) { $env:CLAUDE_KB_HOME } `
           else { (Resolve-Path (Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) "..")).Path }
 $Py = if ($env:LATCH_PYTHON) { $env:LATCH_PYTHON } elseif ($env:CLAUDE_KB_PYTHON) { $env:CLAUDE_KB_PYTHON } else { "python" }
-& $Py (Join-Path $KbHome "src/uninstall_engine.py") @args
+& $Py (Join-Path $KbHome "src/latch/install/uninstall_engine.py") @args
 exit $LASTEXITCODE
