@@ -16,11 +16,11 @@ import pytest
 _SRC = Path(__file__).resolve().parent.parent / "src"
 sys.path.insert(0, str(_SRC))
 
-import capture_streams  # noqa: E402
-import gate             # noqa: E402
-import log_utils        # noqa: E402
-import mcp_broker       # noqa: E402
-import paths            # noqa: E402
+from latch.gate import capture_streams  # noqa: E402
+from latch.gate import gate             # noqa: E402
+from latch.common import log_utils        # noqa: E402
+from latch.mcp import mcp_broker       # noqa: E402
+from latch.store import paths            # noqa: E402
 
 
 _HEADER = {"ts", "project", "session_id", "event_type"}
@@ -853,7 +853,12 @@ def test_outcome_runtime_modules_change_the_shared_runtime_key(
     filename: str,
 ) -> None:
     baseline = mcp_broker._runtime_key()
-    target = Path(mcp_broker.__file__).resolve().parent / filename
+    targets = [
+        path for path in mcp_broker._runtime_content_files()
+        if path.name == filename
+    ]
+    assert len(targets) == 1
+    target = targets[0].resolve()
     original_open = Path.open
 
     def changed_open(self: Path, *args, **kwargs):

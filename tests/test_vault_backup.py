@@ -13,10 +13,10 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
-import db  # noqa: E402
-import paths  # noqa: E402
-import vault_backup  # noqa: E402
-import vault_identity  # noqa: E402
+from latch.store import db  # noqa: E402
+from latch.store import paths  # noqa: E402
+from latch.store import vault_backup  # noqa: E402
+from latch.store import vault_identity  # noqa: E402
 
 
 UTC = timezone.utc
@@ -275,7 +275,7 @@ def test_production_classified_legacy_copy_still_backs_up_inside_test_root(tmp_p
     vault.mkdir(parents=True)
     legacy = sqlite3.connect(vault / "kb.db")
     try:
-        legacy.executescript((ROOT / "src" / "schema.sql").read_text(encoding="utf-8"))
+        legacy.executescript((ROOT / "src" / "latch" / "store" / "schema.sql").read_text(encoding="utf-8"))
         legacy.execute(
             "INSERT INTO nodes(kind,title,body,status) "
             "VALUES('decision','legacy production copy','safe','canonical')"
@@ -299,7 +299,7 @@ def test_real_restore_recreates_missing_production_registry(tmp_path, monkeypatc
     vault.mkdir(parents=True)
     legacy = sqlite3.connect(vault / "kb.db")
     try:
-        legacy.executescript((ROOT / "src" / "schema.sql").read_text(encoding="utf-8"))
+        legacy.executescript((ROOT / "src" / "latch" / "store" / "schema.sql").read_text(encoding="utf-8"))
         legacy.execute(
             "INSERT INTO nodes(kind,title,body,status) "
             "VALUES('decision','recoverable','survives restore','canonical')"

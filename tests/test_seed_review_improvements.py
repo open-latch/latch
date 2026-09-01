@@ -12,11 +12,11 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-import budget  # noqa: E402
-import db  # noqa: E402
-import model_backends  # noqa: E402
-import paths  # noqa: E402
-import seed  # noqa: E402
+from latch.gate import budget  # noqa: E402
+from latch.store import db  # noqa: E402
+from latch.pipeline import model_backends  # noqa: E402
+from latch.store import paths  # noqa: E402
+from latch.pipeline import seed  # noqa: E402
 
 
 def _source(

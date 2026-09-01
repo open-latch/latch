@@ -11,10 +11,10 @@ from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-import heal  # noqa: E402
-import mcp_runtime  # noqa: E402
-import model_backends  # noqa: E402
-import tree  # noqa: E402
+from latch.pipeline import heal  # noqa: E402
+from latch.mcp import mcp_runtime  # noqa: E402
+from latch.pipeline import model_backends  # noqa: E402
+from latch.retrieval import tree  # noqa: E402
 
 
 HEAL_JSON = '{"decision":"keep_both","reason":"distinct enough"}'

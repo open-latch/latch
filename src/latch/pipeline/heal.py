@@ -1,0 +1,2291 @@
+"""Heal — on-insert dedup + nightly integrity/contradiction sweep.
+
+On-insert entry point: `insert_with_heal(conn, kind, title, body, ...)`.
+Nightly entry point: `nightly_heal(conn, project_path, ...)`.
+
+Supersede semantics (per healing invariants, applies to both paths):
+  * winner stays; loser marked status='stale' (never deleted — audit trail)
+  * a `supersedes` edge is added from winner -> loser
+
+Keep_both semantics (both paths): both stay; a `related_to` edge is added.
+
+Three-pass arbitration (nightly only — on-insert just does pass C when use_llm):
+  * Pass A: recency — if age_diff > 30d AND newer is still fresh, newer wins.
+  * Pass B: ref_count — if dominant side has ref_count ratio >= 3 AND both are
+    referenced (min >= 1), dominant wins.
+  * Pass C: LLM arbitrator — use the selected model backend for a
+    supersede/keep_both call.
+"""
+from __future__ import annotations
+
+import json
+import os
+import re
+import sys
+import time
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+
+from latch.store import artifacts as artifact_store  # noqa: E402
+from latch.gate import budget  # noqa: E402
+from latch.proof import correlator  # noqa: E402
+from latch.store import db  # noqa: E402
+from latch.retrieval import embeddings  # noqa: E402
+from latch.store import lifecycle_signals  # noqa: E402
+from latch.common import log_utils  # noqa: E402
+from latch.pipeline import model_backends  # noqa: E402
+from latch.store import paths  # noqa: E402
+
+
+# ≥0.85 triggers heal at insert time; 0.70-0.85 is deferred to nightly (Step 7).
+SIMILARITY_THRESHOLD = 0.85
+NEAR_DUP_TOP_K = 5
+# was 60; raised to 150 (id=1570) — model CLI cold-start routinely exceeds 60s
+# on slower boxes, so arbitration spuriously timed out (matches the kb_gate
+# 90->150 bump; the compactor uses 180). Both arbitrate() and
+# _arbitrate_nightly() share this.
+ARBITRATE_TIMEOUT_S = 150
+# Arbitrator circuit breaker (id=1570). A nightly pass attempts up to ~50 LLM
+# arbitrations; if the selected model backend hangs, each burns the full
+# ARBITRATE_TIMEOUT_S while the shared project lock is held — turning a slow pass into a tens-of-
+# minutes stuck lock that blocks compaction and MCP writes (observed 2026-06-11:
+# selfheal held the lock 11+ min). After this many consecutive backend
+# timeouts, the arbitrator short-circuits to the safe keep_both default without
+# spawning the subprocess. Any successful call resets the counter. Per-process
+# (selfheal spawns a fresh process per pass), so each pass starts clean.
+ARBITRATE_TIMEOUT_BREAKER = 2
+_consecutive_arbitrate_timeouts = 0
+
+
+def _arbitrator_circuit_open() -> bool:
+    """True once ARBITRATE_TIMEOUT_BREAKER consecutive backend timeouts have
+    accumulated — callers should skip the subprocess and return keep_both."""
+    return _consecutive_arbitrate_timeouts >= ARBITRATE_TIMEOUT_BREAKER
+
+
+def _note_arbitrate_timeout() -> None:
+    global _consecutive_arbitrate_timeouts
+    _consecutive_arbitrate_timeouts += 1
+
+
+def _note_arbitrate_success() -> None:
+    global _consecutive_arbitrate_timeouts
+    _consecutive_arbitrate_timeouts = 0
+
+# Nightly heal thresholds — two-tier (id=871):
+#   high tier (sim >= NIGHTLY_SIMILARITY_THRESHOLD): near-duplicate detection,
+#     full three-pass arbitration → {supersede, keep_both} (+ reconciled_by if
+#     the LLM proposes it).
+#   low tier (LOW_TIER_SIMILARITY_THRESHOLD <= sim < NIGHTLY_SIMILARITY_THRESHOLD):
+#     topical-overlap detection, LLM-only → {reconciled_by, keep_both}; surfaces
+#     framing drift the supersede/keep_both vocabulary can't express.
+NIGHTLY_SIMILARITY_THRESHOLD = 0.70
+LOW_TIER_SIMILARITY_THRESHOLD = 0.50
+NIGHTLY_TOP_K = 5
+# Arbitration priority. Similarity says how alike two nodes are, not what an
+# unresolved disagreement costs: a pair nothing ever retrieves costs nothing,
+# while a contradiction between two hot nodes misleads every reader until it is
+# arbitrated. ref_count is the available proxy for that retrieval pressure.
+# Cross-workstream pairs are weighted up because no single lane's context
+# resolves them — that is precisely the case where a reader in lane B is misled
+# by lane A's node, and the sweep already detects it (cross_lane_contradiction).
+CROSS_LANE_PRIORITY_WEIGHT = 2.0
+RECENCY_AGE_DIFF_DAYS = 30
+RECENCY_FRESH_WINDOW_DAYS = 30
+REF_COUNT_RATIO_THRESHOLD = 3.0
+REF_COUNT_MIN_BOTH = 1
+
+HEAL_CODEX_MODEL_ENV = (
+    "LATCH_HEAL_CODEX_MODEL",
+    "CODEX_HEAL_MODEL",
+    "LATCH_MAINTENANCE_CODEX_MODEL",
+    "CODEX_MAINTENANCE_MODEL",
+)
+HEAL_CLAUDE_MODEL_ENV = ("LATCH_HEAL_CLAUDE_MODEL",)
+
+
+# ---------- artifact evidence (the evidence contract) ----------
+#
+# Artifacts are EVIDENCE, not law. When a heal arbitration carries artifact
+# coordinates, the prompt must frame them as provenance (where the knowledge was
+# observed), NOT as proof of where the claim applies — otherwise the LLM would
+# wrongly treat a different file/repo as grounds to keep two genuinely-conflicting
+# claims apart, or (worse) the reverse. Semantic content still owns the decision.
+ARTIFACT_EVIDENCE_FRAMING = (
+    "Artifact coordinates below are PROVENANCE EVIDENCE — where the knowledge was "
+    "observed or which files were touched. They are NOT proof of where the claim "
+    "applies. A global directive or broad architectural decision can legitimately "
+    "supersede or reconcile across different artifact scopes. When the two nodes "
+    "appear to belong to different repos/worlds, PREFER keep_both or reconciled_by "
+    "over a destructive supersede unless the content clearly warrants it."
+)
+
+
+def _artifact_evidence_block(
+    a_repos, b_repos, *, label_a: str = "A", label_b: str = "B",
+) -> str:
+    """A short evidence block for an arbitration prompt, or '' when NEITHER node
+    has artifact evidence — keeping the prompt byte-identical for the scopeless
+    majority (the evidence contract: no behavior change without evidence)."""
+    a_repos = a_repos or frozenset()
+    b_repos = b_repos or frozenset()
+    if not a_repos and not b_repos:
+        return ""
+    a = ", ".join(sorted(a_repos)) or "(none)"
+    b = ", ".join(sorted(b_repos)) or "(none)"
+    return (
+        "\n\n--- ARTIFACT EVIDENCE ---\n"
+        + ARTIFACT_EVIDENCE_FRAMING
+        + f"\nNODE {label_a} repos: {a}\nNODE {label_b} repos: {b}"
+    )
+
+
+# ---------- near-duplicate search ----------
+
+def find_near_duplicates(
+    conn,
+    vec: np.ndarray,
+    *,
+    kind: str | None = None,
+    exclude_id: int | None = None,
+    threshold: float = SIMILARITY_THRESHOLD,
+    top_k: int = NEAR_DUP_TOP_K,
+) -> list[dict]:
+    """Return nodes within cosine-similarity `threshold` of `vec`, strongest first.
+
+    Uses the sqlite-vec virtual table when loaded, brute-force cosine otherwise.
+    Stale nodes are excluded (supersede chains shouldn't cascade).
+    """
+    if db.vec_loaded(conn):
+        try:
+            candidates = _vec_candidates(conn, vec, top_k=top_k)
+        except Exception:
+            candidates = _brute_candidates(conn, vec, top_k=top_k)
+    else:
+        candidates = _brute_candidates(conn, vec, top_k=top_k)
+
+    out = []
+    for c in candidates:
+        if c["id"] == exclude_id:
+            continue
+        if c["status"] == "stale":
+            continue
+        # Workstream lifecycle is machine-owned.  Heal may observe lanes for
+        # structural signals, but it must never feed them into generic
+        # supersede arbitration where a near-duplicate can stale the lane.
+        if c["kind"] == "workstream":
+            continue
+        if kind is not None and c["kind"] != kind:
+            continue
+        if c["similarity"] < threshold:
+            continue
+        out.append(c)
+    return out
+
+
+def _vec_candidates(conn, vec: np.ndarray, top_k: int) -> list[dict]:
+    qblob = embeddings.to_blob(vec)
+    rows = conn.execute(
+        "SELECT rowid, distance FROM vec_nodes "
+        "WHERE embedding MATCH ? AND k = ? ORDER BY distance",
+        (qblob, top_k),
+    ).fetchall()
+    if not rows:
+        return []
+    ids = [r["rowid"] for r in rows]
+    placeholders = ",".join("?" for _ in ids)
+    node_rows = conn.execute(
+        f"SELECT id, kind, title, body, status, session_id, created_at, updated_at, "
+        f"workstream_id "
+        f"FROM nodes WHERE id IN ({placeholders})",
+        ids,
+    ).fetchall()
+    nodes_by_id = {r["id"]: dict(r) for r in node_rows}
+    out = []
+    for r in rows:
+        node = nodes_by_id.get(r["rowid"])
+        if node is None:
+            continue
+        # cosine distance -> similarity
+        node["similarity"] = 1.0 - float(r["distance"])
+        out.append(node)
+    return out
+
+
+def _brute_candidates(conn, vec: np.ndarray, top_k: int) -> list[dict]:
+    rows = conn.execute(
+        "SELECT id, kind, title, body, status, session_id, created_at, updated_at, "
+        "workstream_id, embedding "
+        "FROM nodes WHERE embedding IS NOT NULL"
+    ).fetchall()
+    if not rows:
+        return []
+    mat = np.stack([np.frombuffer(r["embedding"], dtype=np.float32) for r in rows])
+    idx, scores = embeddings.cosine_topk(vec, mat, k=top_k)
+    out = []
+    for i, s in zip(idx, scores):
+        d = dict(rows[i])
+        d.pop("embedding", None)
+        d["similarity"] = float(s)
+        out.append(d)
+    return out
+
+
+# ---------- arbitration ----------
+
+ARBITRATE_PROMPT = """You are the arbitrator for a project knowledge-base on-insert heal.
+
+A new node is about to be inserted. It is highly similar to an existing node.
+Decide whether they should be merged (new supersedes old) or both kept.
+
+Return ONE JSON object, and nothing else:
+
+  {"decision": "supersede" | "keep_both", "reason": "<one short sentence>"}
+
+Guidance:
+  * supersede: the new node contains the same or strictly-better information
+    about the same thing — the old node is redundant or outdated.
+  * keep_both: the nodes are related but cover distinct angles, contexts, or
+    facets worth preserving side-by-side.
+  * When in doubt, prefer keep_both — nightly heal can revisit with more context.
+
+Output JSON only. No markdown fences, no commentary.
+"""
+
+
+def arbitrate(
+    new: dict, old: dict, similarity: float,
+    *, new_repos=frozenset(), old_repos=frozenset(),
+) -> dict:
+    """Ask the selected model backend to decide supersede vs keep_both.
+
+    Returns a dict with `decision` and `reason`. On any failure, defaults to
+    keep_both.
+
+    `new_repos` / `old_repos` are the nodes' artifact repo scopes (the evidence
+    contract): when present they are added to the prompt as provenance evidence
+    so the arbitrator prefers keep_both/reconciled across disjoint scopes. They
+    are evidence only — inline heal never blocks a collision merely because
+    provenance differs."""
+    if paths.is_disabled() or paths.is_in_compact():
+        return {"decision": "keep_both", "reason": "arbitrator skipped (disabled/in-compact)"}
+    if _arbitrator_circuit_open():
+        return {"decision": "keep_both", "reason": "arbitrator circuit open (repeated model backend timeouts; id=1570)"}
+
+    payload = (
+        ARBITRATE_PROMPT
+        + f"\n\n--- NEW NODE ---\nkind: {new.get('kind')}\n"
+        + f"title: {new.get('title')}\n\n{new.get('body', '')}"
+        + f"\n\n--- EXISTING NODE (id={old.get('id')}, similarity={similarity:.3f}) ---\n"
+        + f"kind: {old.get('kind')}\ntitle: {old.get('title')}\n"
+        + f"created_at: {old.get('created_at')}\nupdated_at: {old.get('updated_at')}\n\n"
+        + (old.get("body") or "")
+        + _artifact_evidence_block(new_repos, old_repos, label_a="NEW", label_b="EXISTING")
+    )
+
+    result = model_backends.invoke_prompt(
+        payload,
+        env_names=model_backends.MAINTENANCE_BACKEND_ENV,
+        timeout_s=ARBITRATE_TIMEOUT_S,
+        purpose="arbitrate",
+        claude_model_env=HEAL_CLAUDE_MODEL_ENV,
+        codex_model_env=HEAL_CODEX_MODEL_ENV,
+    )
+    if result.error is not None or result.text is None:
+        if result.timed_out:
+            _note_arbitrate_timeout()
+        _log(
+            f"arbitrate backend={result.backend} model={result.model or 'default'} "
+            f"subprocess failed: {result.error}"
+        )
+        return {
+            "decision": "keep_both",
+            "reason": f"arbitrator failed ({result.backend}): {result.error}",
+        }
+
+    _note_arbitrate_success()
+    verdict = _parse_arbitrate_output(result.text)
+    verdict["backend"] = result.backend
+    verdict["model"] = result.model
+    _log(
+        f"arbitrate backend={result.backend} model={result.model or 'default'} "
+        f"decision={verdict['decision']}"
+    )
+    return verdict
+
+
+def _parse_arbitrate_output(raw: str) -> dict:
+    raw = (raw or "").strip()
+    if not raw:
+        return {"decision": "keep_both", "reason": "arbitrator returned empty output"}
+    # Unwrap --output-format json envelope if present.
+    try:
+        env = json.loads(raw)
+        text = env.get("result") or env.get("response") or raw
+    except json.JSONDecodeError:
+        text = raw
+    text = text.strip()
+    if text.startswith("```"):
+        text = text.strip("`")
+        if text.startswith("json"):
+            text = text[4:].strip()
+    start = text.find("{")
+    end = text.rfind("}")
+    if start == -1 or end == -1:
+        return {"decision": "keep_both", "reason": "arbitrator output had no JSON object"}
+    try:
+        obj = json.loads(text[start : end + 1])
+    except json.JSONDecodeError as e:
+        return {"decision": "keep_both", "reason": f"arbitrator JSON parse failed: {e}"}
+    decision = obj.get("decision")
+    if decision not in ("supersede", "keep_both"):
+        return {"decision": "keep_both", "reason": f"arbitrator returned unknown decision {decision!r}"}
+    return {"decision": decision, "reason": str(obj.get("reason", ""))[:300]}
+
+
+# ---------- nightly arbitration (symmetric A/B, four-verb) ----------
+
+# Symmetric A/B prompt for nightly heal. Distinct from the asymmetric on-insert
+# prompt above because:
+#   1. Both nightly nodes are "existing" — NEW/EXISTING framing is misleading
+#      (id=443).
+#   2. Extended verb space includes `reconciled_by` for the framing-drift class
+#      (id=871) — older node remains canonical, newer constrains its scope.
+# Convention: callers pre-sort A=older, B=newer by updated_at (see _order_by_age),
+# so the supersede_a / supersede_b / reconciled_by verbs have unambiguous direction.
+NIGHTLY_ARBITRATE_PROMPT = """You are the arbitrator for a project knowledge-base nightly heal pass.
+
+Two similar nodes (A and B) have been paired. Decide their relationship.
+Convention: A is the OLDER node (lower updated_at), B is the NEWER node.
+
+Return ONE JSON object, and nothing else:
+
+  {"decision": "<verb>", "reason": "<one short sentence>"}
+
+Decision verbs:
+
+  * "supersede_a": A is strictly better — keep A canonical, mark B stale.
+    Use when the older node already says everything the newer one says (and
+    more), or the newer is redundant.
+  * "supersede_b": B is strictly better — keep B canonical, mark A stale.
+    Use when the newer node fully replaces the older (reversed decision,
+    corrected data, updated parameters that invalidate the old framing
+    entirely).
+  * "reconciled_by": A remains factually correct in its own scope, but B
+    constrains, narrows, re-scopes, or re-parameterises that framing. BOTH
+    stay canonical; an edge A->B is added so future readers see B as a
+    cross-reference whenever they look at A. Use when the older fact still
+    describes something accurately (mechanism, plan, parameter, decision
+    rationale) but a newer canonical decision constrains scope, time-scale,
+    or hyperparameters without replacing the underlying claim.
+  * "keep_both": A and B are related but cover distinct angles, contexts, or
+    facets worth preserving side-by-side without a directional cross-reference.
+
+Tie-breakers when in doubt:
+  * Between supersede_* and reconciled_by: prefer reconciled_by (non-destructive).
+  * Between reconciled_by and keep_both: prefer reconciled_by when one node's
+    framing visibly depends on or is constrained by the other.
+  * Between any two verbs: prefer keep_both (lowest-stakes default).
+
+Output JSON only. No markdown fences, no commentary.
+"""
+
+
+NIGHTLY_VALID_DECISIONS = ("supersede_a", "supersede_b", "keep_both", "reconciled_by")
+
+
+def _arbitrate_nightly(
+    older: dict, newer: dict, similarity: float,
+    *, a_repos=frozenset(), b_repos=frozenset(),
+) -> dict:
+    """Symmetric A/B arbitrator for nightly heal. Caller must pre-sort:
+    `older` is the lower-updated_at node, `newer` is the higher. The prompt
+    relies on this convention. `a_repos`/`b_repos` are the older/newer artifact
+    repo scopes (evidence contract): when present they are added to the prompt
+    as provenance evidence, biasing toward keep_both/reconciled across disjoint
+    scopes — but content still owns the decision.
+
+    Returns {"decision": <verb>, "reason": <str>}. On any failure, defaults
+    to keep_both."""
+    if paths.is_disabled() or paths.is_in_compact():
+        return {"decision": "keep_both", "reason": "arbitrator skipped (disabled/in-compact)"}
+    if _arbitrator_circuit_open():
+        return {"decision": "keep_both", "reason": "arbitrator circuit open (repeated model backend timeouts; id=1570)"}
+
+    payload = (
+        NIGHTLY_ARBITRATE_PROMPT
+        + f"\n\n--- NODE A (older, id={older.get('id')}, similarity={similarity:.3f}) ---\n"
+        + f"kind: {older.get('kind')}\ntitle: {older.get('title')}\n"
+        + f"created_at: {older.get('created_at', 'unknown')}\n"
+        + f"updated_at: {older.get('updated_at', 'unknown')}\n\n"
+        + (older.get("body") or "")
+        + f"\n\n--- NODE B (newer, id={newer.get('id')}) ---\n"
+        + f"kind: {newer.get('kind')}\ntitle: {newer.get('title')}\n"
+        + f"created_at: {newer.get('created_at', 'unknown')}\n"
+        + f"updated_at: {newer.get('updated_at', 'unknown')}\n\n"
+        + (newer.get("body") or "")
+        + _artifact_evidence_block(a_repos, b_repos, label_a="A", label_b="B")
+    )
+
+    result = model_backends.invoke_prompt(
+        payload,
+        env_names=model_backends.MAINTENANCE_BACKEND_ENV,
+        timeout_s=ARBITRATE_TIMEOUT_S,
+        purpose="arbitrate_nightly",
+        claude_model_env=HEAL_CLAUDE_MODEL_ENV,
+        codex_model_env=HEAL_CODEX_MODEL_ENV,
+    )
+    if result.error is not None or result.text is None:
+        if result.timed_out:
+            _note_arbitrate_timeout()
+        _log(
+            f"arbitrate_nightly backend={result.backend} "
+            f"model={result.model or 'default'} subprocess failed: {result.error}"
+        )
+        return {
+            "decision": "keep_both",
+            "reason": f"arbitrator failed ({result.backend}): {result.error}",
+        }
+
+    _note_arbitrate_success()
+    verdict = _parse_arbitrate_nightly_output(result.text)
+    verdict["backend"] = result.backend
+    verdict["model"] = result.model
+    _log(
+        f"arbitrate_nightly backend={result.backend} "
+        f"model={result.model or 'default'} decision={verdict['decision']}"
+    )
+    return verdict
+
+
+def _parse_arbitrate_nightly_output(raw: str) -> dict:
+    """Parse the four-verb nightly arbitrator response.
+
+    Accepts the legacy single-verb `supersede` (from the on-insert prompt) and
+    maps it to `supersede_b` so transitional outputs don't drop to keep_both
+    silently. Everything else unknown defaults to keep_both."""
+    raw = (raw or "").strip()
+    if not raw:
+        return {"decision": "keep_both", "reason": "arbitrator returned empty output"}
+    try:
+        env = json.loads(raw)
+        text = env.get("result") or env.get("response") or raw
+    except json.JSONDecodeError:
+        text = raw
+    text = text.strip()
+    if text.startswith("```"):
+        text = text.strip("`")
+        if text.startswith("json"):
+            text = text[4:].strip()
+    start = text.find("{")
+    end = text.rfind("}")
+    if start == -1 or end == -1:
+        return {"decision": "keep_both", "reason": "arbitrator output had no JSON object"}
+    try:
+        obj = json.loads(text[start : end + 1])
+    except json.JSONDecodeError as e:
+        return {"decision": "keep_both", "reason": f"arbitrator JSON parse failed: {e}"}
+    decision = obj.get("decision")
+    if decision == "supersede":
+        decision = "supersede_b"
+    if decision not in NIGHTLY_VALID_DECISIONS:
+        return {"decision": "keep_both", "reason": f"arbitrator returned unknown decision {decision!r}"}
+    return {"decision": decision, "reason": str(obj.get("reason", ""))[:300]}
+
+
+# ---------- nightly arbitration ----------
+
+def _parse_ts(s: str | None) -> datetime | None:
+    """Parse DB timestamp (UTC naive). Returns None for nulls/unparseable."""
+    if not s:
+        return None
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S.%f"):
+        try:
+            return datetime.strptime(s, fmt).replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+    return None
+
+
+def _pick_by_recency(a: dict, b: dict) -> dict | None:
+    """Returns {'winner': winner_node, 'loser': loser_node, 'reason': str} if
+    recency pass fires, else None. Conditions: age diff > RECENCY_AGE_DIFF_DAYS
+    AND the newer node was last updated within RECENCY_FRESH_WINDOW_DAYS.
+
+    Both conditions matter: the second prevents picking "less-stale of two stale."
+    """
+    ta = _parse_ts(a.get("updated_at"))
+    tb = _parse_ts(b.get("updated_at"))
+    if ta is None or tb is None:
+        return None
+    now = datetime.now(timezone.utc)
+    diff = abs((ta - tb).days)
+    if diff <= RECENCY_AGE_DIFF_DAYS:
+        return None
+    newer, older = (a, b) if ta > tb else (b, a)
+    newer_ts = ta if ta > tb else tb
+    if (now - newer_ts).days > RECENCY_FRESH_WINDOW_DAYS:
+        return None
+    return {"winner": newer, "loser": older,
+            "reason": f"newer by {diff}d and still fresh"}
+
+
+def _pair_priority(a: dict, b: dict) -> float:
+    """Expected cost of leaving this pair unarbitrated.
+
+    ``1 + max(ref_count)`` so a never-referenced pair still sorts above nothing
+    and stays ahead of a malformed row, scaled by the cross-lane weight. Used
+    only to select LLM-bound work for the available budget; it never changes a
+    verdict or mutation order.
+    """
+    refs = max(int(a.get("ref_count") or 0), int(b.get("ref_count") or 0))
+    cross_lane = a.get("workstream_id") != b.get("workstream_id")
+    return (1 + refs) * (CROSS_LANE_PRIORITY_WEIGHT if cross_lane else 1.0)
+
+
+def _order_by_age(a: dict, b: dict) -> tuple[dict, dict]:
+    """Return (older, newer) by updated_at, falling back to created_at, then id.
+    Used to give the symmetric nightly arbitrator a stable A/B convention so
+    the supersede_a / supersede_b / reconciled_by verbs are unambiguous."""
+    ta = _parse_ts(a.get("updated_at")) or _parse_ts(a.get("created_at"))
+    tb = _parse_ts(b.get("updated_at")) or _parse_ts(b.get("created_at"))
+    if ta is not None and tb is not None and ta != tb:
+        return (a, b) if ta < tb else (b, a)
+    ida, idb = a.get("id"), b.get("id")
+    if ida is not None and idb is not None and ida != idb:
+        return (a, b) if ida < idb else (b, a)
+    return a, b
+
+
+def _pick_by_ref_count(a: dict, b: dict) -> dict | None:
+    """Returns a pick if one side dominates by ref_count, else None. Requires
+    ratio >= REF_COUNT_RATIO_THRESHOLD AND both sides referenced at least
+    REF_COUNT_MIN_BOTH times (a 0-reference loser is a cold-start signal, not
+    a dominance signal). Restricted to same-kind pairs: cross-kind pairs
+    (entity-vs-fact, decision-vs-progress, etc.) are usually complementary
+    facets, not duplicates — defer those to the LLM."""
+    if a.get("kind") != b.get("kind"):
+        return None
+    ra = int(a.get("ref_count") or 0)
+    rb = int(b.get("ref_count") or 0)
+    lo, hi = min(ra, rb), max(ra, rb)
+    if lo < REF_COUNT_MIN_BOTH:
+        return None
+    if hi < lo * REF_COUNT_RATIO_THRESHOLD:
+        return None
+    winner, loser = (a, b) if ra > rb else (b, a)
+    return {"winner": winner, "loser": loser,
+            "reason": f"ref_count dominance {hi} vs {lo}"}
+
+
+def _deterministic_supersede(a: dict, b: dict) -> dict | None:
+    """Return the high-tier deterministic verdict, preserving pass order."""
+    for path, picker in (("recency", _pick_by_recency),
+                         ("ref_count", _pick_by_ref_count)):
+        pick = picker(a, b)
+        if pick is not None:
+            return {
+                "decision": "supersede",
+                "winner_id": pick["winner"]["id"],
+                "loser_id": pick["loser"]["id"],
+                "older_id": None, "newer_id": None,
+                "path": path, "tier": "high",
+                "reason": pick["reason"],
+            }
+    return None
+
+
+def three_pass_arbitrate(
+    a: dict, b: dict, *, similarity: float = 0.0, use_llm: bool = True,
+    tier: str = "high", a_repos=frozenset(), b_repos=frozenset(),
+) -> dict:
+    """Nightly arbitration. Two tiers (id=871):
+
+    Artifact Evidence Contract: if `a_repos` and `b_repos` are both non-empty and
+    DISJOINT, the deterministic recency/ref_count passes are skipped and the pair
+    is routed to the LLM (which sees the repo evidence and may still supersede or
+    reconcile). This prevents a silent, destructive cross-scope supersede; it
+    does NOT hard-partition heal — same/overlapping/either-scopeless pairs and
+    candidate discovery are unchanged.
+
+    `tier="high"` (similarity >= NIGHTLY_SIMILARITY_THRESHOLD): full three-pass
+      arbitration — Pass A recency → Pass B ref_count → Pass C LLM. LLM returns
+      any of {supersede_a, supersede_b, keep_both, reconciled_by}.
+
+    `tier="low"` (LOW_TIER_SIMILARITY_THRESHOLD <= similarity < ...): skip
+      Pass A and Pass B (recency-of-fact and ref_count dominance are duplicate
+      signals, not reconciliation signals) and go straight to the LLM. Expected
+      verbs are reconciled_by or keep_both; supersede_* is still accepted if
+      the LLM proposes it.
+
+    Returns:
+      {
+        "decision": "supersede" | "keep_both" | "reconciled_by",
+        "winner_id": int | None,    # set when decision=supersede
+        "loser_id":  int | None,    # set when decision=supersede
+        "older_id":  int | None,    # set when decision=reconciled_by
+        "newer_id":  int | None,    # set when decision=reconciled_by
+        "path":      "recency" | "ref_count" | "llm" | "skip",
+        "tier":      "high" | "low",
+        "reason":    str,
+      }
+    """
+    # Cross-scope guard: both nodes carry artifact evidence and their repo sets
+    # don't intersect → treat deterministic supersede as unsafe, defer to LLM.
+    cross_scope_disjoint = bool(a_repos and b_repos and not (a_repos & b_repos))
+    if tier == "high" and not cross_scope_disjoint:
+        deterministic = _deterministic_supersede(a, b)
+        if deterministic is not None:
+            return deterministic
+
+    if not use_llm:
+        return {
+            "decision": "keep_both",
+            "winner_id": None, "loser_id": None,
+            "older_id": None, "newer_id": None,
+            "path": "skip", "tier": tier,
+            "reason": "deterministic passes inconclusive; LLM disabled",
+        }
+
+    older, newer = _order_by_age(a, b)
+    # Map per-input repo scopes onto the older/newer ordering for the prompt.
+    older_repos, newer_repos = (
+        (a_repos, b_repos) if older.get("id") == a.get("id") else (b_repos, a_repos)
+    )
+    verdict = _arbitrate_nightly(
+        older, newer, similarity, a_repos=older_repos, b_repos=newer_repos,
+    )
+    decision = verdict["decision"]
+    reason = verdict.get("reason", "")
+
+    if decision == "supersede_a":
+        return {
+            "decision": "supersede",
+            "winner_id": older["id"], "loser_id": newer["id"],
+            "older_id": None, "newer_id": None,
+            "path": "llm", "tier": tier, "reason": reason,
+        }
+    if decision == "supersede_b":
+        return {
+            "decision": "supersede",
+            "winner_id": newer["id"], "loser_id": older["id"],
+            "older_id": None, "newer_id": None,
+            "path": "llm", "tier": tier, "reason": reason,
+        }
+    if decision == "reconciled_by":
+        return {
+            "decision": "reconciled_by",
+            "winner_id": None, "loser_id": None,
+            "older_id": older["id"], "newer_id": newer["id"],
+            "path": "llm", "tier": tier, "reason": reason,
+        }
+    return {
+        "decision": "keep_both",
+        "winner_id": None, "loser_id": None,
+        "older_id": None, "newer_id": None,
+        "path": "llm", "tier": tier, "reason": reason,
+    }
+
+
+def edge_exists_between(conn, x: int, y: int) -> bool:
+    """True if any active edge exists between x and y in either direction, any
+    relation. Tombstoned edges are treated as absent so heal will re-create the
+    edge (add_edge re-activates the tombstoned row in place)."""
+    row = conn.execute(
+        "SELECT 1 FROM edges "
+        "WHERE ((src = ? AND dst = ?) OR (src = ? AND dst = ?)) "
+        "  AND status = 'active' "
+        "LIMIT 1",
+        (x, y, y, x),
+    ).fetchone()
+    return row is not None
+
+
+# ---------- prepared structural events (transaction-neutral write path) ----------
+#
+# The prepare/commit/emit contract (PR #93 P1 discharge, KB id=5648):
+# transaction-neutral helpers write via db.*_nc only and return prepared event
+# envelopes [{"stream", "payload", "started_at"?}, ...]; the caller owns the
+# transaction and calls emit_prepared_events AFTER its commit, so a rollback
+# emits nothing — mechanically, not by per-caller review.
+
+
+def _prepare_edge(conn, src: int, dst: int, relation: str) -> list[dict]:
+    """Add/reactivate an edge without committing or emitting.
+
+    Captures the reconciliation.log payload BEFORE the edge write (the KB
+    id=1097/id=1121 capture-before-mutation rule) and returns it as a prepared
+    envelope — empty list for non-reconciliation relations. The envelope
+    carries `started_at`, never `elapsed_ms`; the post-commit emitter stamps
+    the elapsed time at emission.
+    """
+    canonical = db.canonicalize_relation(str(relation))
+    started_at = time.perf_counter()
+    captured = None
+    if canonical in db.RECONCILIATION_RELATIONS:
+        captured = db._capture_reconciliation_state(conn, src, dst, canonical)
+    db.add_edge_nc(conn, src, dst, canonical)
+    if captured is None:
+        return []
+    return [{
+        "stream": "reconciliation",
+        "payload": captured,
+        "started_at": started_at,
+    }]
+
+
+def emit_prepared_events(
+    prepared_events: list[dict],
+    *,
+    project_path: str | None = None,
+    session_id: str | None = None,
+) -> None:
+    """The single post-commit emitter for prepared structural events.
+
+    Callers invoke this once, AFTER their transaction commits — never inside
+    it — so telemetry for rolled-back writes cannot exist. Envelopes carrying
+    `started_at` get `elapsed_ms` stamped at emission time.
+    """
+    for event in prepared_events:
+        payload = dict(event["payload"])
+        started_at = event.get("started_at")
+        if started_at is not None:
+            payload["elapsed_ms"] = int(
+                (time.perf_counter() - float(started_at)) * 1000
+            )
+        log_utils.emit_event(
+            event["stream"],
+            payload,
+            project_path=project_path,
+            session_id=session_id,
+        )
+
+
+# Supersede/replace lineage verbs: audit edges that must stay anchored on the
+# (now stale) loser. Everything else is structural and inherits to the winner.
+_LINEAGE_RELATIONS = {"supersedes", "replaces"}
+
+
+def _inherit_edges(conn, winner_id: int, loser_id: int) -> tuple[int, list[dict]]:
+    """Re-point the loser's structural edges onto the winner so a supersede
+    doesn't orphan them on a node that drops out of default reads (KB id=1118).
+
+    For each active edge incident to the loser EXCEPT supersede/replace lineage
+    edges (which stay on the loser for audit): add the equivalent edge anchored
+    on the winner (idempotent) and tombstone the loser's copy. Self-loops and
+    edges whose other endpoint is the winner are skipped (the just-added
+    `supersedes` winner->loser edge is one such — and is lineage anyway).
+
+    Transaction-neutral: writes via the shared edge preparer and
+    db.tombstone_edge_nc only. Call AFTER the `supersedes` edge is recorded (so
+    reconciliation.log captures the supersede with the loser still non-stale)
+    and BEFORE the loser is staled — the capture-before-mutation order (KB
+    id=1121). Returns (migrated_count, prepared_events) for the owning wrapper
+    to commit and emit.
+    """
+    migrated = 0
+    prepared: list[dict] = []
+    for e in db.neighbors(conn, loser_id):
+        rel = e["relation"]
+        if rel in _LINEAGE_RELATIONS:
+            continue  # leave supersede/replace lineage on the loser (audit)
+        src, dst = e["src"], e["dst"]
+        other = dst if src == loser_id else src
+        if other == winner_id or other == loser_id:
+            # A loser<->winner non-lineage link or a loser self-loop: re-pointing
+            # would self-loop on the winner, and it's redundant once the loser is
+            # subsumed. Retire it rather than leave it active on a stale node.
+            db.tombstone_edge_nc(conn, src=src, dst=dst, relation=rel)
+            continue
+        new_src = winner_id if src == loser_id else src
+        new_dst = winner_id if dst == loser_id else dst
+        prepared.extend(_prepare_edge(conn, new_src, new_dst, rel))
+        db.tombstone_edge_nc(conn, src=src, dst=dst, relation=rel)
+        migrated += 1
+    return migrated, prepared
+
+
+def _apply_supersede_nc(conn, winner_id: int, loser_id: int) -> list[dict]:
+    """Transaction-neutral supersede lineage: supersedes edge winner -> loser,
+    structural edge inheritance, loser staled — in that order.
+
+    The supersedes capture runs BEFORE inheritance and the stale mutation so
+    reconciliation.log reflects the loser's pre-stale status (KB id=1097/
+    id=1121 capture-before-mutation rule); inheritance (KB id=1118) runs before
+    the stale so the loser's structural edges migrate rather than orphan.
+    Returns the prepared events for the owning wrapper to commit and emit.
+    """
+    prepared = _prepare_edge(conn, winner_id, loser_id, "supersedes")
+    _migrated, inherit_events = _inherit_edges(conn, winner_id, loser_id)
+    prepared.extend(inherit_events)
+    db.update_node_nc(conn, loser_id, status="stale")
+    return prepared
+
+
+def apply_nightly_supersede(
+    conn, winner_id: int, loser_id: int,
+    *, project_path: str | None = None, session_id: str | None = None,
+) -> None:
+    """Winner stays as-is; loser's structural edges inherit to the winner; loser
+    marked stale; supersedes edge winner -> loser.
+
+    Thin commit+emit wrapper over `_apply_supersede_nc` — the nightly integrity
+    path still self-commits (priority 2483: internal integrity/maintenance
+    paths are out of the simplification surface). Kept separate from
+    `apply_supersede` deliberately: collapsing the two widens the blast radius
+    to every caller for no behavioral gain.
+    """
+    try:
+        prepared = _apply_supersede_nc(conn, winner_id, loser_id)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    emit_prepared_events(
+        prepared, project_path=project_path, session_id=session_id,
+    )
+
+
+def apply_nightly_reconciled_by(
+    conn, older_id: int, newer_id: int,
+    *, project_path: str | None = None, session_id: str | None = None,
+) -> None:
+    """Both nodes stay canonical; `reconciled_by` edge older -> newer.
+
+    Distinct from apply_nightly_supersede: the older node remains factually
+    correct in its own scope. The edge makes the newer node surface via
+    `db.reconciliation_banner(conn, older_id)` whenever an agent kb_get's
+    the older — read-time guidance, not enforcement (id=534 / id=862)."""
+    db.add_edge(
+        conn, src=older_id, dst=newer_id, relation="reconciled_by",
+        project_path=project_path, session_id=session_id,
+    )
+
+
+# ---------- apply a decision ----------
+
+def apply_supersede(
+    conn, new_id: int, old_id: int,
+    *, project_path: str | None = None, session_id: str | None = None,
+) -> None:
+    """Mark old stale and add a supersedes edge new -> old. Audit trail kept.
+    The old node's structural edges inherit to the new node (KB id=1118).
+
+    Thin commit+emit wrapper over `_apply_supersede_nc`, which preserves the
+    capture-before-mutation ordering (KB id=1097/id=1121).
+    """
+    try:
+        prepared = _apply_supersede_nc(conn, new_id, old_id)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    emit_prepared_events(
+        prepared, project_path=project_path, session_id=session_id,
+    )
+
+
+def apply_keep_both(conn, new_id: int, old_id: int) -> None:
+    """Add a related_to edge new -> old. Commit+emit wrapper over the shared
+    edge preparer — related_to prepares no envelopes today, but the wrapper
+    keeps the prepare/commit/emit shape mechanical rather than special-cased."""
+    try:
+        prepared = _prepare_edge(conn, new_id, old_id, "related_to")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    emit_prepared_events(prepared)
+
+
+def _ratified_judgment_ids(conn, *node_ids: int) -> list[int]:
+    ratified: list[int] = []
+    for node_id in dict.fromkeys(int(node_id) for node_id in node_ids):
+        node = db.get_node(conn, node_id)
+        if (
+            node is not None
+            and node["kind"] in db.JUDGMENT_KINDS
+            and db.node_is_ratified(conn, node_id)
+        ):
+            ratified.append(node_id)
+    return ratified
+
+
+def _prepare_ratified_referral(
+    conn,
+    left_id: int,
+    right_id: int,
+    *,
+    trigger: str,
+) -> tuple[int, bool, list[dict]]:
+    """Prepare one atomic, deduplicated human referral without committing.
+
+    The caller owns the transaction and emits the returned event envelopes
+    only after commit. Keeping the referral node, its two links, and the
+    pair-parking edge in one transaction ensures a partial failure leaves the
+    contradiction eligible for a later retry.
+    """
+    node_a_id, node_b_id = sorted((int(left_id), int(right_id)))
+    ratified_ids = _ratified_judgment_ids(conn, node_a_id, node_b_id)
+    if not ratified_ids:
+        raise ValueError("human referral requires a ratified judgment node")
+    title = f"Human review required: ratified contradiction {node_a_id}/{node_b_id}"
+    row = conn.execute(
+        "SELECT id FROM nodes "
+        "WHERE kind = 'open_question' AND title = ? "
+        "ORDER BY id LIMIT 1",
+        (title,),
+    ).fetchone()
+    created = row is None
+    if created:
+        referral_id = db.insert_node_nc(
+            conn,
+            kind="open_question",
+            title=title,
+            body=(
+                "Unattended heal found a contradiction involving a ratified "
+                f"judgment. Human review is required before node {node_a_id} "
+                f"or node {node_b_id} is superseded."
+            ),
+            status="staging",
+        )
+    else:
+        referral_id = int(row["id"])
+
+    # Re-adding is idempotent and repairs either half of a partially-linked
+    # referral without creating another open_question.
+    prepared_events: list[dict] = []
+    prepared_events.extend(
+        _prepare_edge(conn, referral_id, node_a_id, "related_to")
+    )
+    prepared_events.extend(
+        _prepare_edge(conn, referral_id, node_b_id, "related_to")
+    )
+    # This active pair edge makes later nightly passes hit edge_exists_between
+    # and leave the unresolved contradiction parked for explicit human review.
+    prepared_events.extend(
+        _prepare_edge(conn, node_a_id, node_b_id, "related_to")
+    )
+
+    # The caller emits this only after the complete referral and parking edge
+    # are durable.
+    if created:
+        prepared_events.append({
+            "stream": "heal_human_referral",
+            "payload": {
+                "referral_id": referral_id,
+                "node_a_id": node_a_id,
+                "node_b_id": node_b_id,
+                "ratified_node_ids": sorted(ratified_ids),
+                "trigger": trigger,
+                "reason": "unattended supersede touched a ratified judgment",
+            },
+        })
+    return referral_id, created, prepared_events
+
+
+def _route_ratified_pair_to_human(
+    conn,
+    left_id: int,
+    right_id: int,
+    *,
+    trigger: str,
+    project_path: str | None = None,
+    session_id: str | None = None,
+) -> tuple[int, bool]:
+    """Commit and emit one atomic ratified-contradiction referral."""
+    if conn.in_transaction:
+        raise RuntimeError("human referral requires a clean connection")
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        referral_id, created, prepared_events = _prepare_ratified_referral(
+            conn, left_id, right_id, trigger=trigger,
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    emit_prepared_events(
+        prepared_events, project_path=project_path, session_id=session_id,
+    )
+    return referral_id, created
+
+
+# ---------- plan-freshness hint ----------
+
+# Edges from a ship-progress node to a plan-shaped node that signal the plan's
+# body may now be out-of-date and should be kb_update'd by the agent.
+PLAN_LINK_RELATIONS = ("implements", "advances", "depends_on")
+
+# Plan-shaped kinds — nodes whose body acts as a "where are we" surface for
+# downstream ship-progress to update. idea / open_question added per id=1194 §3:
+# a parked idea's body is a living spec, so a ship node implementing it should
+# nudge a body refresh too. This folds axis-3 self-state drift (a shipped node
+# still calling itself a forward plan, e.g. id=871) into the existing axis-2
+# plan-freshness mechanism rather than building a separate detector. The trigger
+# is the incoming ship edge, NOT body language — an un-shipped parked spec has
+# no such edge and stays silent until something actually ships against it.
+PLAN_KINDS = ("progress", "decision", "workstream", "idea", "open_question")
+
+
+def compute_plan_freshness_hint(
+    conn, new_id: int, new_kind: str,
+) -> list[dict]:
+    """Return a structured nudge listing plan-shaped neighbors that may now
+    be stale because of this ship-progress insert.
+
+    Triggers only when `new_kind == "progress"` and the new node has at least
+    one outbound edge whose relation is in PLAN_LINK_RELATIONS pointing at a
+    non-stale node whose kind is in PLAN_KINDS. The agent is expected to
+    follow up with `kb_update` on each listed `linked_id`.
+
+    Empty list when no nudge applies. Cheap — single SQL join, no LLM call.
+    """
+    if new_kind != "progress":
+        return []
+    placeholders = ",".join("?" for _ in PLAN_LINK_RELATIONS)
+    kind_placeholders = ",".join("?" for _ in PLAN_KINDS)
+    rows = conn.execute(
+        f"SELECT e.dst AS linked_id, e.relation AS relation, "
+        f"       n.kind AS kind, n.title AS title "
+        f"FROM edges e JOIN nodes n ON n.id = e.dst "
+        f"WHERE e.src = ? "
+        f"  AND e.status = 'active' "
+        f"  AND e.relation IN ({placeholders}) "
+        f"  AND n.kind IN ({kind_placeholders}) "
+        f"  AND COALESCE(n.status, '') != 'stale' "
+        f"ORDER BY e.dst ASC",
+        (new_id, *PLAN_LINK_RELATIONS, *PLAN_KINDS),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+# ---------- orphan hint (body-id mentions must be edges) ----------
+
+# Matches `id=123` (the project's canonical way of naming a node in prose).
+# `\b` anchors avoid matching things like `uuid=123` or `grid=4`.
+_ID_MENTION_RE = re.compile(r"\bid=(\d+)\b")
+# Fenced code blocks and inline-code spans are stripped before scanning so
+# `id=X` inside a code example or quoted snippet doesn't trip a false orphan
+# (kb_gate risk note on id=1149 Part 2).
+_FENCED_CODE_RE = re.compile(r"```.*?```", re.DOTALL)
+_INLINE_CODE_RE = re.compile(r"`[^`\n]*`")
+
+
+def _strip_code_spans(text: str) -> str:
+    """Blank out fenced + inline code so id=X inside code/quoted snippets is
+    not scanned. Replaces with spaces (not "") to preserve excerpt offsets."""
+    text = _FENCED_CODE_RE.sub(lambda m: " " * len(m.group(0)), text)
+    text = _INLINE_CODE_RE.sub(lambda m: " " * len(m.group(0)), text)
+    return text
+
+
+def compute_orphan_hint(
+    conn, node_id: int, body: str, kind: str | None = None,
+) -> list[dict]:
+    """Return body `id=X` mentions that lack an active edge to/from node_id.
+
+    Mirrors `compute_plan_freshness_hint`: cheap, single SQL probe per unique
+    mention, no LLM. A nudge in the A1 mould (KB id=825) — the agent should
+    `kb_link` each (or drop the mention), but it does NOT block the write.
+
+    Kind-scope (id=1194 §1/§2): when `kind` is supplied, only spec kinds
+    (idea / open_question / decision) are scanned — their bodies make
+    structural / dependency refs that SHOULD be edges. Index/summary kinds
+    (workstream / progress / fact / entity) make curated citation refs that
+    legitimately stay un-edged; scanning them over-fires (id=338: 27 flagged /
+    2 real). The exempt set mirrors the nightly sweep's `DRIFT_SCAN_KINDS` so
+    the write-time and nightly tiers can never disagree (the id=1158
+    duplication lesson). `kind=None` preserves the pure-scanner contract for
+    direct callers / unit tests.
+
+    Self-references (`id=<node_id>`) are ignored. Code spans are stripped
+    first (see `_strip_code_spans`) to avoid false positives on id=X inside
+    examples. Edge existence is checked permissively — an active edge in
+    EITHER direction satisfies the mention.
+
+    Returns a list of `{"referenced_id": int, "body_excerpt": str}`, empty
+    when every mention is edged (or there are none). Implements id=1149 Part 2.
+    """
+    if kind is not None:
+        from latch.pipeline.drift import DRIFT_SCAN_KINDS
+        if kind not in DRIFT_SCAN_KINDS:
+            return []
+    scannable = _strip_code_spans(body or "")
+    hints: list[dict] = []
+    seen: set[int] = set()
+    for m in _ID_MENTION_RE.finditer(scannable):
+        rid = int(m.group(1))
+        if rid == node_id or rid in seen:
+            continue
+        seen.add(rid)
+        edged = conn.execute(
+            "SELECT 1 FROM edges "
+            "WHERE status = 'active' "
+            "  AND ((src = ? AND dst = ?) OR (src = ? AND dst = ?)) "
+            "LIMIT 1",
+            (node_id, rid, rid, node_id),
+        ).fetchone()
+        if edged is None:
+            start = max(0, m.start() - 40)
+            end = min(len(scannable), m.end() + 40)
+            hints.append({
+                "referenced_id": rid,
+                "body_excerpt": scannable[start:end].strip(),
+            })
+    return hints
+
+
+# ---------- ship-edge relation hint (mis-typed related_to on a ship node) ----------
+
+def compute_ship_edge_hint(conn, new_id: int, new_kind: str) -> list[dict]:
+    """Return spec neighbors a progress node links to via `related_to` — almost
+    certainly mis-typed ship edges that should be implements/advances/depends_on.
+
+    Deterministic, structural A1 nudge (id=825), keying ONLY on
+    (kind(src) == progress, relation == related_to, kind(dst) in spec kinds).
+    Scoped to src=progress so legitimate idea<->idea sibling `related_to`
+    (e.g. id=1172 <-> id=1149) is never flagged. Closes the chicken-and-egg
+    that let id=871's `related_to` ship edge slip past plan_freshness: the
+    wrong relation now triggers a correction, and once upgraded the right
+    relation unlocks the plan_freshness body-refresh nudge. (id=1194 §4.)
+
+    Empty list when no nudge applies. Cheap — single SQL join, no LLM. The
+    spec-kind set is `drift.DRIFT_SCAN_KINDS` (single source of truth, shared
+    with orphan_hint + the nightly sweep).
+    """
+    if new_kind != "progress":
+        return []
+    from latch.pipeline.drift import DRIFT_SCAN_KINDS
+    kind_placeholders = ",".join("?" for _ in DRIFT_SCAN_KINDS)
+    rows = conn.execute(
+        f"SELECT e.dst AS linked_id, n.kind AS kind, n.title AS title "
+        f"FROM edges e JOIN nodes n ON n.id = e.dst "
+        f"WHERE e.src = ? "
+        f"  AND e.status = 'active' "
+        f"  AND e.relation = 'related_to' "
+        f"  AND n.kind IN ({kind_placeholders}) "
+        f"  AND COALESCE(n.status, '') != 'stale' "
+        f"ORDER BY e.dst ASC",
+        (new_id, *DRIFT_SCAN_KINDS),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+# ---------- single insert entry point ----------
+
+def _new_node_repo_scope(artifacts, project_path) -> frozenset:
+    """Repo-scope EVIDENCE for a not-yet-inserted node: the repos named by
+    explicit `artifacts` if any, else the coarse `project_path` stamp — mirrors
+    artifact_store.capture_for_node so inline heal sees the SAME scope that will
+    be attached right after insert. Evidence only; never blocks the insert."""
+    repos = set()
+    for a in artifacts or []:
+        repo, _ = artifact_store._coerce(a)
+        if repo and str(repo).strip():
+            repos.add(artifact_store.canonicalize_repo(repo))
+    if not repos and project_path and str(project_path).strip():
+        repos.add(artifact_store.canonicalize_repo(project_path))
+    return frozenset(repos)
+
+
+def decide_insert_candidates(
+    conn,
+    *,
+    kind: str,
+    title: str,
+    body: str,
+    threshold: float = SIMILARITY_THRESHOLD,
+):
+    """DECIDE phase, read-only: embed the new node's text and scan for
+    near-duplicate candidates. Callers run this OUTSIDE any transaction so the
+    embed cost (cold ONNX session build measured at ~129ms) and the KNN scan
+    never sit inside a held write lock. Returns (vec, candidates)."""
+    vec = embeddings.embed(f"{title}\n\n{body}")
+    candidates = find_near_duplicates(conn, vec, kind=kind, threshold=threshold)
+    return vec, candidates
+
+
+def prepare_insert_with_heal(
+    conn,
+    *,
+    kind: str,
+    title: str,
+    body: str,
+    status: str = "staging",
+    session_id: str | None = None,
+    links: list[dict] | None = None,
+    workstream_id: int | None = None,
+    embedding,
+    candidates: list[dict],
+    decision: str = "keep_both",
+    arbitrator: str | None = None,
+    started_at: float | None = None,
+) -> tuple[dict, list[dict]]:
+    """PREPARE phase — the shared transaction-neutral insert/heal primitive
+    (PR #93 P1 discharge, KB id=5648). Writes via db.*_nc helpers only; never
+    begins, commits, or emits. Consumed by the committing `insert_with_heal`
+    wrapper and by `kb_capture_decision`'s ratification transaction.
+
+    `embedding` and `candidates` come precomputed from the caller's DECIDE
+    phase (`decide_insert_candidates`), so no embed/KNN cost lands inside a
+    held write transaction. `decision` is the already-resolved heal outcome
+    for the top candidate ("keep_both" | "supersede"); `arbitrator` is the
+    arbitrator's reason (None when the LLM was not consulted).
+
+    Returns (result, prepared_events): the 8-key insert result (see
+    `insert_with_heal`) and the structural event envelopes for
+    `emit_prepared_events` after the caller's commit.
+    """
+    if kind in db.JUDGMENT_KINDS and status == "canonical":
+        raise db.RatificationRequiredError(
+            "unattended heal cannot mint canonical judgment; insert staging "
+            "and use an explicit ratification surface"
+        )
+    t0 = started_at if started_at is not None else time.perf_counter()
+    prepared_events: list[dict] = []
+
+    new_id = db.insert_node_nc(
+        conn, kind=kind, title=title, body=body, status=status,
+        session_id=session_id, embedding=embeddings.to_blob(embedding),
+        workstream_id=workstream_id,
+    )
+    for link in links or []:
+        try:
+            prepared_events.extend(
+                _prepare_edge(conn, new_id, int(link["dst"]), str(link["relation"]))
+            )
+        except (KeyError, ValueError, TypeError):
+            continue
+
+    # Hints stay at their pre-apply position: computed before the heal edge so
+    # machine-authored keep_both/supersede/inherited edges can't flip them.
+    # Capture inherits this position — the one pinned observable change: its
+    # orphan_hint now fires on a matched-id mention exactly as insert does.
+    plan_hint = compute_plan_freshness_hint(conn, new_id, kind)
+    orphan_hint = compute_orphan_hint(conn, new_id, body, kind)
+    ship_edge_hint = compute_ship_edge_hint(conn, new_id, kind)
+
+    result = {
+        "id": new_id, "heal": "none", "matched_id": None,
+        "similarity": None, "arbitrator": None,
+        "plan_freshness_hint": plan_hint, "orphan_hint": orphan_hint,
+        "ship_edge_hint": ship_edge_hint,
+    }
+    if not candidates:
+        # No heal envelope — heal did not fire (KB id=1095).
+        return result, prepared_events
+
+    top = candidates[0]
+    top_sim = float(top["similarity"])
+    # POINT-IN-TIME capture (KB id=1091 §4 + id=1095 capture-before-mutation
+    # rule). The supersede branch mutates top's status -> 'stale', so we MUST
+    # snapshot the pre-apply status before either branch runs.
+    matched_status_before = top["status"]
+    matched_kind = top["kind"]
+    matched_id = int(top["id"])
+
+    if top.get("workstream_id") != workstream_id:
+        prepared_events.append({
+            "stream": "lifecycle",
+            "payload": {
+                "event": "cross_lane_duplicate",
+                "substrate_version": lifecycle_signals.SUBSTRATE_VERSION,
+                "node_a": new_id,
+                "node_b": matched_id,
+                "ws_a": workstream_id,
+                "ws_b": top.get("workstream_id"),
+                "similarity": round(top_sim, 6),
+            },
+        })
+
+    if decision == "supersede":
+        if _ratified_judgment_ids(conn, new_id, matched_id):
+            _referral_id, _created, referral_events = (
+                _prepare_ratified_referral(
+                    conn, new_id, matched_id, trigger="llm",
+                )
+            )
+            prepared_events.extend(referral_events)
+            heal_state = "keep_both"
+        else:
+            prepared_events.extend(_apply_supersede_nc(conn, new_id, matched_id))
+            heal_state = "supersede"
+    else:
+        prepared_events.extend(_prepare_edge(conn, new_id, matched_id, "related_to"))
+        heal_state = "keep_both"
+
+    prepared_events.append({
+        "stream": "heal",
+        "payload": {
+            "inserted_node_id": new_id,
+            "inserted_kind": kind,
+            "matched_id": matched_id,
+            "matched_kind": matched_kind,
+            "matched_status_before": matched_status_before,
+            "similarity": top_sim,
+            "arbitrator_decision": heal_state,
+        },
+        "started_at": t0,
+    })
+    result.update({
+        "heal": heal_state, "matched_id": matched_id,
+        "similarity": top_sim, "arbitrator": arbitrator,
+    })
+    return result, prepared_events
+
+
+def insert_with_heal(
+    conn,
+    *,
+    kind: str,
+    title: str,
+    body: str,
+    status: str = "staging",
+    session_id: str | None = None,
+    links: list[dict] | None = None,
+    use_llm: bool = True,
+    threshold: float = SIMILARITY_THRESHOLD,
+    workstream_id: int | None = None,
+    project_path: str | None = None,
+    artifacts=None,
+) -> dict:
+    """Insert a new node, running the on-insert heal against near-duplicates.
+
+    Committing wrapper over the three-phase pipeline (KB id=5648): DECIDE
+    (read-only, no transaction: embed, KNN, budget gate, arbitration) →
+    PREPARE (`prepare_insert_with_heal`, transaction-neutral) → commit → EMIT
+    (`emit_prepared_events`). The wrapper owns the transaction and its
+    rollback: non-transactional callers (compactor, seed) rely on the node
+    being committed when this returns, and a failure rolls the whole insert
+    back — an FK-invalid link no longer strands a committed node.
+
+    Returns:
+      {
+        "id": <new node id>,
+        "heal": "none" | "keep_both" | "supersede",
+        "matched_id": <old id if heal != "none", else None>,
+        "similarity": <float if heal != "none", else None>,
+        "arbitrator": <arbitrator reason if LLM was consulted, else None>,
+        "plan_freshness_hint": [<{linked_id, relation, kind, title}>, ...]
+            — non-empty when this is a `progress` node linking to a plan-shaped
+            node via implements/advances/depends_on. The agent should follow
+            up with kb_update on each listed linked_id. Empty list otherwise.
+        "orphan_hint": [<{referenced_id, body_excerpt}>, ...]
+            — body `id=X` mentions with no active edge to/from the new node
+            at hint time. A PRE-HEAL diagnostic: computed before the
+            keep_both/supersede edge is applied, so the matched candidate can
+            appear here even though the heal edge exists on return — that
+            entry needs no follow-up (the heal edge already satisfies the
+            mention; re-linking with a different relation would add a second
+            edge). The agent should kb_link each other entry (or drop the
+            mention). Empty otherwise. See compute_orphan_hint (id=1149
+            Part 2). Kind-scoped to spec kinds (idea/open_question/decision)
+            per id=1194 §1/§2.
+        "ship_edge_hint": [<{linked_id, kind, title}>, ...]
+            — non-empty when this is a `progress` node linking to a spec node
+            (idea/open_question/decision) via `related_to`: a likely mis-typed
+            ship edge that should be implements/advances/depends_on so
+            plan-freshness can track it. See compute_ship_edge_hint (id=1194 §4).
+      }
+    """
+    if kind in db.JUDGMENT_KINDS and status == "canonical":
+        raise db.RatificationRequiredError(
+            "unattended heal cannot mint canonical judgment; insert staging "
+            "and use an explicit ratification surface"
+        )
+
+    # DECIDE: read-only, outside any transaction. Arbitration can hold a model
+    # subprocess open for up to ARBITRATE_TIMEOUT_S (150s); below the first
+    # write it would hold a RESERVED lock 30x past the 5000ms busy timeout.
+    t0 = time.perf_counter()
+    vec, candidates = decide_insert_candidates(
+        conn, kind=kind, title=title, body=body, threshold=threshold,
+    )
+
+    decision = "keep_both"
+    arbitrator = None
+    if candidates and use_llm:
+        # Budget gate for the on-insert LLM arbitrator. Charged to the
+        # non-heal bucket — kb_insert is user-driven and shouldn't compete
+        # with the nightly heal fan-out cap. project_path=None skips the gate
+        # (tests, back-compat).
+        allowed = True
+        if project_path is not None:
+            try:
+                allowed, _ = budget.check_and_record(
+                    project_path, category="nonheal",
+                )
+            except OSError as exc:
+                # Unreadable budget state means no arbitrator spend; fall back
+                # to the same safe keep_both deferral as a cap hit.
+                allowed = False
+                arbitrator = f"budget state unavailable ({exc}); deferred to nightly"
+            else:
+                if not allowed:
+                    arbitrator = "budget cap hit (non-heal); deferred to nightly"
+        if allowed:
+            top = candidates[0]
+            # Evidence contract: give the arbitrator the new + matched repo
+            # scopes so it treats provenance as evidence (prefer keep_both/
+            # reconciled across disjoint worlds). Computed BEFORE the call —
+            # the new node's provenance is attached by the caller only after
+            # this returns, so we derive it from the intended artifacts/
+            # project_path here.
+            new_repos = _new_node_repo_scope(artifacts, project_path)
+            old_repos = artifact_store.node_repo_scope(conn, top["id"])
+            verdict = arbitrate(
+                {"kind": kind, "title": title, "body": body}, top,
+                top["similarity"], new_repos=new_repos, old_repos=old_repos,
+            )
+            decision = verdict["decision"]
+            arbitrator = verdict["reason"]
+
+    # PREPARE + commit: a failure rolls back the whole insert, links included.
+    try:
+        result, prepared_events = prepare_insert_with_heal(
+            conn, kind=kind, title=title, body=body, status=status,
+            session_id=session_id, links=links, workstream_id=workstream_id,
+            embedding=vec, candidates=candidates,
+            decision=decision, arbitrator=arbitrator, started_at=t0,
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    # EMIT: post-commit only, so a rollback emits nothing.
+    emit_prepared_events(
+        prepared_events, project_path=project_path, session_id=session_id,
+    )
+    return result
+
+
+# ---------- nightly integrity pass ----------
+
+def run_integrity_pass(conn) -> dict:
+    """Scan for and repair common bitrot:
+
+    * orphan edges — src or dst no longer exist (should be rare with FK CASCADE,
+      but catches anything created before FKs were enforced or with FKs off).
+    * vec_nodes rows without a matching nodes row (delete).
+    * nodes with an embedding blob but no vec_nodes row (backfill, when loaded).
+    """
+    summary = {"orphan_edges_deleted": 0, "vec_orphans_deleted": 0, "vec_backfilled": 0}
+
+    cur = conn.execute(
+        "DELETE FROM edges WHERE src NOT IN (SELECT id FROM nodes) "
+        "OR dst NOT IN (SELECT id FROM nodes)"
+    )
+    summary["orphan_edges_deleted"] = cur.rowcount or 0
+    conn.commit()
+
+    if db.vec_loaded(conn):
+        try:
+            cur = conn.execute(
+                "DELETE FROM vec_nodes WHERE rowid NOT IN (SELECT id FROM nodes)"
+            )
+            summary["vec_orphans_deleted"] = cur.rowcount or 0
+            missing = conn.execute(
+                "SELECT id, embedding FROM nodes "
+                "WHERE embedding IS NOT NULL "
+                "AND id NOT IN (SELECT rowid FROM vec_nodes)"
+            ).fetchall()
+            for row in missing:
+                conn.execute(
+                    "INSERT INTO vec_nodes(rowid, embedding) VALUES (?, ?)",
+                    (row["id"], row["embedding"]),
+                )
+            summary["vec_backfilled"] = len(missing)
+            conn.commit()
+        except Exception as e:
+            _log(f"integrity vec pass failed (non-fatal): {e}")
+
+    return summary
+
+
+# ---------- nightly contradiction sweep ----------
+
+def nightly_heal(
+    conn,
+    project_path: str | None = None,
+    *,
+    use_llm: bool = True,
+    integrity: bool = True,
+    contradictions: bool = True,
+    high_threshold: float = NIGHTLY_SIMILARITY_THRESHOLD,
+    low_threshold: float = LOW_TIER_SIMILARITY_THRESHOLD,
+    top_k: int = NIGHTLY_TOP_K,
+) -> dict:
+    """Nightly healer. Three phases:
+
+    1. Integrity (optional): orphan cleanup + vec_nodes sync.
+    2. Contradiction sweep (two-tier, id=871; two-pass dispatch, id=950):
+         * Discovery pass: walk all candidates, build pair list filtered for
+           stale + edge-exists. Each pair tagged with tier.
+         * Arbitration pass: process high-tier pairs first (guaranteed budget
+           access for near-duplicates), then low-tier pairs with remaining
+           budget. Within a tier, higher similarity first.
+         * High tier (sim >= `high_threshold`): full three-pass arbitration
+           (recency → ref_count → LLM), decision in {supersede, keep_both,
+           reconciled_by}.
+         * Low tier (`low_threshold` <= sim < `high_threshold`): LLM-only,
+           decision in {reconciled_by, keep_both} (skip deterministic passes —
+           recency/ref_count are duplicate signals, not reconciliation
+           signals).
+       Pairs are skipped when an edge already exists between them OR the
+       match is already stale.
+    3. Summary.
+
+    LLM calls (the only expensive step) are gated on the same daily budget the
+    compactor uses. If the cap is hit mid-sweep, remaining LLM-bound collisions
+    are deferred without mutating either node or adding an edge. Structural
+    `heal_deferred` rows preserve the pair ids/tier/similarity for audit and the
+    edge-free pair remains eligible for a later sweep. `budget_blocked_by_tier`
+    surfaces which tier the cap was hit on.
+
+    Adjudicated pairs are idempotent because their edges short-circuit later
+    sweeps. Deferred pairs deliberately reappear until budget is available.
+    """
+    if paths.is_unlatched_mode():
+        return {
+            "ok": False,
+            "reason": "unlatched",
+            "message": paths.UNLATCHED_MESSAGE,
+        }
+    if paths.is_disabled():
+        return {"ok": False, "reason": "disabled"}
+
+    try:
+        resolved_backend = model_backends.resolve_backend(
+            env_names=model_backends.MAINTENANCE_BACKEND_ENV,
+        )
+    except ValueError:
+        resolved_backend = "invalid"
+    if resolved_backend == "claude":
+        try:
+            resolved_model = model_backends.resolve_claude_model(
+                HEAL_CLAUDE_MODEL_ENV,
+            )
+            model_error = None
+        except ValueError as exc:
+            resolved_model = None
+            model_error = str(exc)
+    elif resolved_backend == "codex":
+        resolved_model = model_backends.first_env_value(HEAL_CODEX_MODEL_ENV)
+        model_error = None
+    else:
+        resolved_model = None
+        model_error = None
+
+    summary: dict = {
+        "ok": True,
+        "backend": resolved_backend,
+        "model": resolved_model,
+        "integrity": None,
+        "examined": 0,
+        "collisions": 0,
+        "skipped_edge_exists": 0,
+        "skipped_stale": 0,
+        # Summaries are tree-managed roll-ups (near-duplicates of their members by
+        # construction); they are NOT contradiction candidates. Excluded on both
+        # sides — seed query below + the pair-admission guard in the arbitration
+        # loop. See id=1699/id=1797.
+        "skipped_summary": 0,
+        "superseded": 0,
+        "kept_both": 0,
+        "reconciled": 0,
+        "by_path": {
+            "recency": 0, "ref_count": 0, "llm": 0,
+            "skip": 0, "deferred": 0,
+        },
+        "by_tier": {"high": 0, "low": 0},
+        "llm_invocations": 0,
+        "budget_blocked": 0,
+        "budget_blocked_by_tier": {"high": 0, "low": 0},
+        "deferred": 0,
+        "deferred_by_tier": {"high": 0, "low": 0},
+        # Evidence contract: high-tier pairs whose disjoint artifact scopes caused
+        # the deterministic recency/ref_count supersede to be deferred to the LLM.
+        "cross_scope_deferred": 0,
+        "cross_lane_signals": 0,
+        # Priority mass (see _pair_priority) split by what the heal budget could
+        # actually reach this run. priority_llm / (priority_llm +
+        # priority_deferred) is the queue-aim metric: it answers "did the scarce
+        # LLM budget go to the contradictions that are actually being read?"
+        # independently of how many pairs the cap allowed.
+        "priority_llm": 0.0,
+        "priority_deferred": 0.0,
+        "human_referrals": 0,
+    }
+
+    # One heartbeat per sweep on every exit path. A crashing healer that wrote
+    # nothing is indistinguishable from a scheduler that never fired, which is
+    # the failure this row exists to rule out.
+    completed = False
+    error: str | None = None
+    try:
+        if model_error is not None:
+            summary["ok"] = False
+            summary["reason"] = "invalid_claude_model"
+            summary["model_error"] = model_error
+            error = "invalid_claude_model"
+            return summary
+        result = _nightly_heal_sweep(
+            conn, summary, project_path,
+            use_llm=use_llm, integrity=integrity, contradictions=contradictions,
+            high_threshold=high_threshold, low_threshold=low_threshold,
+            top_k=top_k,
+        )
+        completed = True
+        return result
+    except BaseException as exc:
+        error = type(exc).__name__
+        raise
+    finally:
+        _log_run_summary(summary, project_path, ok=completed, error=error)
+
+
+def _nightly_heal_sweep(
+    conn,
+    summary: dict,
+    project_path: str | None,
+    *,
+    use_llm: bool,
+    integrity: bool,
+    contradictions: bool,
+    high_threshold: float,
+    low_threshold: float,
+    top_k: int,
+) -> dict:
+    """The sweep body. Split out so `nightly_heal` owns one heartbeat boundary
+    covering every exit path, including exceptions."""
+    if integrity:
+        summary["integrity"] = run_integrity_pass(conn)
+        _debug(f"integrity pass: {summary['integrity']}")
+
+    if not contradictions:
+        return summary
+
+    candidates = conn.execute(
+        "SELECT id, kind, title, body, status, ref_count, created_at, updated_at, "
+        "       last_referenced_at, embedding "
+        "FROM nodes WHERE status != 'stale' AND embedding IS NOT NULL "
+        "  AND kind NOT IN ('summary', 'workstream') "
+        "ORDER BY id"
+    ).fetchall()
+    _debug(f"contradiction sweep: {len(candidates)} candidates, "
+           f"low_threshold={low_threshold}, high_threshold={high_threshold}, "
+           f"top_k={top_k}, use_llm={use_llm}")
+
+    # ---------- Discovery pass: build pair list across all candidates ----------
+    seen_pairs: set[tuple[int, int]] = set()
+    # (sim, tier, a_id, b_id, priority)
+    pair_list: list[tuple[float, str, int, int, float]] = []
+
+    for row in candidates:
+        a_id = row["id"]
+        a = db.get_node(conn, a_id)
+        if not a or a["status"] == "stale":
+            continue
+        summary["examined"] += 1
+        vec = np.frombuffer(row["embedding"], dtype=np.float32)
+
+        near = find_near_duplicates(
+            conn, vec, exclude_id=a_id, threshold=low_threshold, top_k=top_k,
+        )
+        for cand in near:
+            b_id = cand["id"]
+            pair = (min(a_id, b_id), max(a_id, b_id))
+            if pair in seen_pairs:
+                continue
+            seen_pairs.add(pair)
+            summary["collisions"] += 1
+
+            b = db.get_node(conn, b_id)
+            if not b or b["status"] == "stale":
+                summary["skipped_stale"] += 1
+                _debug(f"  pair ({a_id},{b_id}) sim={cand['similarity']:.3f} "
+                       f"SKIP: b stale")
+                continue
+            if edge_exists_between(conn, a_id, b_id):
+                summary["skipped_edge_exists"] += 1
+                _debug(f"  pair ({a_id},{b_id}) sim={cand['similarity']:.3f} "
+                       f"SKIP: edge already exists")
+                continue
+
+            if a.get("workstream_id") != b.get("workstream_id"):
+                log_utils.emit_event(
+                    "lifecycle",
+                    {
+                        "event": "cross_lane_contradiction",
+                        "substrate_version": lifecycle_signals.SUBSTRATE_VERSION,
+                        "node_a": a_id,
+                        "node_b": b_id,
+                        "ws_a": a.get("workstream_id"),
+                        "ws_b": b.get("workstream_id"),
+                        "similarity": round(float(cand["similarity"]), 6),
+                    },
+                    project_path=project_path,
+                    session_id=None,
+                )
+                summary["cross_lane_signals"] += 1
+
+            sim = cand["similarity"]
+            tier = "high" if sim >= high_threshold else "low"
+            summary["by_tier"][tier] += 1
+            pair_list.append((sim, tier, a_id, b_id, _pair_priority(a, b)))
+
+    # ---------- Arbitration pass: high-tier first, then low-tier ----------
+    # Sort: high-tier pairs before low-tier; within a tier, higher sim first.
+    # Deterministic arbitration MUST stay in this order: it commits supersedes
+    # that cascade (a stale node skips its other pairs), so reordering here
+    # would change persisted topology, not just budget allocation. Priority
+    # selects LLM-bound work for the available budget, below.
+    pair_list.sort(key=lambda p: (0 if p[1] == "high" else 1, -p[0]))
+
+    _debug(f"arbitration pass: {len(pair_list)} pairs queued "
+           f"(high={summary['by_tier']['high']}, low={summary['by_tier']['low']})")
+
+    # Priority may reorder only node-disjoint work. Candidate pairs sharing a
+    # node form a conflict component; each component advances strictly in the
+    # original tier/similarity order and stops at its first live LLM-bound pair.
+    # Its frontier competes for budget with the frontiers of other (therefore
+    # commuting) components. This keeps deterministic/LLM cascade precedence
+    # intact while letting an invalidated frontier release its slot to the best
+    # surviving candidate, even when that fallback appeared earlier globally.
+    records = [
+        {
+            "index": index,
+            "similarity": sim,
+            "tier": tier,
+            "a_id": a_id,
+            "b_id": b_id,
+            "priority": priority,
+        }
+        for index, (sim, tier, a_id, b_id, priority) in enumerate(pair_list)
+    ]
+
+    components: dict[int, list[dict]] = {}
+    if use_llm:
+        parent: dict[int, int] = {}
+
+        def component_root(node_id: int) -> int:
+            parent.setdefault(node_id, node_id)
+            while parent[node_id] != node_id:
+                parent[node_id] = parent[parent[node_id]]
+                node_id = parent[node_id]
+            return node_id
+
+        def union_components(a_id: int, b_id: int) -> None:
+            a_root = component_root(a_id)
+            b_root = component_root(b_id)
+            if a_root != b_root:
+                parent[b_root] = a_root
+
+        for record in records:
+            union_components(record["a_id"], record["b_id"])
+        for record in records:
+            root = component_root(record["a_id"])
+            components.setdefault(root, []).append(record)
+    positions = {root: 0 for root in components}
+
+    # Per-node repo-scope memo for the evidence-contract guard. Plain dict,
+    # populated lazily by artifact_store.node_repo_scope so each node's
+    # node_artifact lookup happens at most once across the whole pass.
+    scope_cache: dict = {}
+
+    def admit(record):
+        """Re-check current state and account for an invalidated pair once."""
+        sim = record["similarity"]
+        tier = record["tier"]
+        a_id = record["a_id"]
+        b_id = record["b_id"]
+        a = db.get_node(conn, a_id)
+        b = db.get_node(conn, b_id)
+        if not a or a["status"] == "stale" or not b or b["status"] == "stale":
+            summary["skipped_stale"] += 1
+            _debug(f"  pair ({a_id},{b_id}) sim={sim:.3f} tier={tier} "
+                   f"SKIP: became stale during arbitration")
+            return None
+        # Load-bearing rail (id=1699/id=1797): summaries are tree-managed and
+        # never contradiction candidates. The seed query excludes them as `a`;
+        # this catches one returned as `b` by find_near_duplicates(kind=None).
+        if (a["kind"] in {"summary", "workstream"}
+                or b["kind"] in {"summary", "workstream"}):
+            summary["skipped_summary"] += 1
+            _debug(f"  pair ({a_id},{b_id}) sim={sim:.3f} tier={tier} "
+                   f"SKIP: summary node not eligible for contradiction arbitration")
+            return None
+        if edge_exists_between(conn, a_id, b_id):
+            summary["skipped_edge_exists"] += 1
+            _debug(f"  pair ({a_id},{b_id}) sim={sim:.3f} tier={tier} "
+                   f"SKIP: edge added during arbitration")
+            return None
+        return a, b
+
+    def classify(record):
+        """Classify the component's current pair against current DB state."""
+        admitted = admit(record)
+        if admitted is None:
+            return None
+        a, b = admitted
+        record["priority"] = _pair_priority(a, b)
+        sim = record["similarity"]
+        tier = record["tier"]
+        a_id = record["a_id"]
+        b_id = record["b_id"]
+        _debug(f"  pair ({a_id},{b_id}) sim={sim:.3f} tier={tier} "
+               f"a=({a['kind']!r} {a['title']!r} ref={a.get('ref_count',0)}) "
+               f"b=({b['kind']!r} {b['title']!r} ref={b.get('ref_count',0)})")
+
+        # Artifact repo-scope evidence for the cross-scope guard (cached). Empty
+        # for the scopeless majority → three_pass_arbitrate behaves exactly as
+        # before. Evidence, not law: discovery already collided this pair.
+        a_repos = artifact_store.node_repo_scope(conn, a_id, cache=scope_cache)
+        b_repos = artifact_store.node_repo_scope(conn, b_id, cache=scope_cache)
+        # Ratified judgments are immune on both sides. Detect the deterministic
+        # supersede before the cross-scope guard can suppress it, but return the
+        # tentative verdict through the scheduler so classify stays mutation-free.
+        ratified_tentative = None
+        if tier == "high" and _ratified_judgment_ids(conn, a_id, b_id):
+            ratified_tentative = _deterministic_supersede(a, b)
+
+        cross_scope_deferred = (
+            ratified_tentative is None
+            and tier == "high" and a_repos and b_repos
+            and not (a_repos & b_repos)
+            and (_pick_by_recency(a, b) is not None
+                 or _pick_by_ref_count(a, b) is not None)
+        )
+
+        tentative = ratified_tentative or three_pass_arbitrate(
+            a, b, similarity=sim, use_llm=False, tier=tier,
+            a_repos=a_repos, b_repos=b_repos,
+        )
+        return {
+            "record": record,
+            "a": a,
+            "b": b,
+            "a_repos": a_repos,
+            "b_repos": b_repos,
+            "tentative": tentative,
+            "cross_scope_deferred": cross_scope_deferred,
+        }
+
+    def account_cross_scope(classified) -> None:
+        if not classified["cross_scope_deferred"]:
+            return
+        summary["cross_scope_deferred"] += 1
+        _debug(
+            f"    cross-scope disjoint {sorted(classified['a_repos'])} vs "
+            f"{sorted(classified['b_repos'])}"
+            f" — deferring deterministic supersede to LLM"
+        )
+
+    # With no model work there is no budget allocation to reorder. Retain the
+    # exact original loop, including commit and event order.
+    if not use_llm:
+        for record in records:
+            classified = classify(record)
+            if classified is None:
+                continue
+            account_cross_scope(classified)
+            _apply_verdict(
+                conn, summary, classified["tentative"],
+                record["a_id"], record["b_id"],
+                project_path=project_path,
+            )
+
+    # One cached live LLM-bound pair per component. A component never moves
+    # past this frontier until it is invoked or finally deferred.
+    frontiers: dict[int, dict] = {}
+
+    def advance_component(root: int) -> None:
+        frontiers.pop(root, None)
+        component = components[root]
+        while positions[root] < len(component):
+            classified = classify(component[positions[root]])
+            if classified is None:
+                positions[root] += 1
+                continue
+            record = classified["record"]
+            tentative = classified["tentative"]
+            if tentative["path"] != "skip":
+                _apply_verdict(
+                    conn, summary, tentative, record["a_id"], record["b_id"],
+                    project_path=project_path,
+                )
+                positions[root] += 1
+                continue
+            frontiers[root] = classified
+            return
+
+    for root in sorted(components, key=lambda value: components[value][0]["index"]):
+        advance_component(root)
+
+    def frontier_priority(item):
+        _root, classified = item
+        record = classified["record"]
+        return (
+            0 if record["tier"] == "high" else 1,
+            -record["priority"],
+            -record["similarity"],
+            record["index"],
+        )
+
+    def defer_pair(classified, *, reason: str, budget_state: dict) -> None:
+        record = classified["record"]
+        a = classified["a"]
+        b = classified["b"]
+        tier = record["tier"]
+        priority = record["priority"]
+        account_cross_scope(classified)
+        summary["budget_blocked"] += 1
+        summary["budget_blocked_by_tier"][tier] += 1
+        summary["deferred"] += 1
+        summary["deferred_by_tier"][tier] += 1
+        summary["by_path"]["deferred"] += 1
+        summary["priority_deferred"] += priority
+        pair_a, pair_b = sorted((record["a_id"], record["b_id"]))
+        log_utils.emit_event(
+            "heal_deferred",
+            {
+                "node_a_id": pair_a,
+                "node_b_id": pair_b,
+                "similarity": round(float(record["similarity"]), 6),
+                "tier": tier,
+                "reason": reason,
+                "budget_date": budget_state.get("date"),
+                "budget_count_heal": budget_state.get("count_heal"),
+                "retry_eligible": True,
+                "priority": round(float(priority), 6),
+                "ref_count_max": max(int(a.get("ref_count") or 0),
+                                     int(b.get("ref_count") or 0)),
+                "cross_lane": a.get("workstream_id") != b.get("workstream_id"),
+            },
+            project_path=project_path,
+            session_id=None,
+        )
+        _debug(f"    -> deferred without edge ({reason}, tier={tier})")
+
+    def refresh_frontiers() -> None:
+        """Refresh every frontier immediately before selection."""
+        for root in tuple(frontiers):
+            advance_component(root)
+
+    # Reserve the currently available selection width atomically. Reserved
+    # slots are generic: after each verdict exposes a new component frontier,
+    # it can enter the remaining top-K. Calls within that authoritative window
+    # still execute by original index, preserving the timeout breaker's order
+    # whenever budget covers the queue.
+    budget_stop_reason: str | None = None
+    budget_stop_state: dict = {}
+    reserved_slots = 0
+    reservation_date: str | None = None
+    reservation_approved: bool | None = None
+
+    def reset_expired_budget_plan() -> bool:
+        nonlocal reserved_slots, reservation_date, reservation_approved
+        nonlocal budget_stop_reason, budget_stop_state
+        state_date = (
+            reservation_date if reserved_slots
+            else budget_stop_state.get("date")
+        )
+        if (not (reserved_slots or budget_stop_reason == "budget_cap")
+                or state_date is None
+                or state_date == budget.current_date()):
+            return False
+        reserved_slots = 0
+        reservation_date = None
+        reservation_approved = None
+        if budget_stop_reason != "budget_state_error":
+            budget_stop_reason = None
+            budget_stop_state = {}
+        return True
+
+    try:
+        while frontiers:
+            refresh_frontiers()
+            if not frontiers:
+                break
+
+            # A daily reservation cannot authorize a next-day invocation.
+            # Drop the old local width and plan against the new UTC epoch; its
+            # pre-charge disappeared with budget.py's lazy rollover.
+            reset_expired_budget_plan()
+
+            if (reserved_slots < len(frontiers)
+                    and (budget_stop_reason is None
+                         or (budget_stop_reason == "budget_cap"
+                             and reserved_slots == 0))):
+                requested = len(frontiers) - reserved_slots
+                try:
+                    granted, state = budget.reserve_available(
+                        project_path,
+                        category="heal",
+                        requested=requested,
+                    )
+                except OSError as exc:
+                    budget_stop_reason = "budget_state_error"
+                    budget_stop_state = {"error": type(exc).__name__}
+                    _debug(f"LLM budget state unavailable: {type(exc).__name__}")
+                else:
+                    approved = budget.current_date() in state.get("approved_dates", [])
+                    epoch_changed = (
+                        reserved_slots
+                        and reservation_date is not None
+                        and state.get("date") != reservation_date
+                    )
+                    approval_changed = (
+                        reserved_slots
+                        and reservation_approved is not None
+                        and approved != reservation_approved
+                    )
+                    if epoch_changed or approval_changed:
+                        # Rollover/approval reset the counters that held the old
+                        # local width. Only this fresh grant is pre-charged.
+                        reserved_slots = granted
+                    else:
+                        reserved_slots += granted
+                    budget_stop_state = state
+                    if granted:
+                        reservation_date = state.get("date")
+                        reservation_approved = approved
+                    budget_stop_reason = (
+                        "budget_cap" if granted < requested else None
+                    )
+
+            if reset_expired_budget_plan():
+                continue
+
+            if reserved_slots == 0:
+                break
+            candidates = list(frontiers.items())
+            if reserved_slots < len(candidates):
+                candidates = sorted(candidates, key=frontier_priority)[:reserved_slots]
+            root, classified = min(
+                candidates,
+                key=lambda item: item[1]["record"]["index"],
+            )
+            record = classified["record"]
+            selected_index = record["index"]
+            selected_priority = record["priority"]
+            # Budget locking can wait for another process. Re-admit the chosen
+            # pair after that boundary so a concurrent stale/edge/deterministic
+            # change transfers this generic slot instead of consuming it.
+            scope_cache.pop(record["a_id"], None)
+            scope_cache.pop(record["b_id"], None)
+            advance_component(root)
+            classified = frontiers.get(root)
+            if (classified is None
+                    or classified["record"]["index"] != selected_index
+                    or classified["record"]["priority"] != selected_priority):
+                continue
+            record = classified["record"]
+            reserved_slots -= 1
+            account_cross_scope(classified)
+            summary["llm_invocations"] += 1
+            summary["priority_llm"] += record["priority"]
+            _debug(f"    invoking LLM arbitrator (tier={record['tier']})")
+            verdict = three_pass_arbitrate(
+                classified["a"], classified["b"],
+                similarity=record["similarity"], use_llm=True, tier=record["tier"],
+                a_repos=classified["a_repos"], b_repos=classified["b_repos"],
+            )
+            _apply_verdict(
+                conn, summary, verdict, record["a_id"], record["b_id"],
+                project_path=project_path,
+            )
+            positions[root] += 1
+            frontiers.pop(root, None)
+            advance_component(root)
+    finally:
+        if reserved_slots:
+            try:
+                released, _state = budget.release_reserved(
+                    project_path,
+                    category="heal",
+                    count=reserved_slots,
+                    expected_date=reservation_date,
+                    expected_approved=reservation_approved,
+                )
+                reserved_slots -= released
+            except Exception as exc:
+                # Never mask the arbitration/apply failure that caused unwind.
+                _debug(f"LLM budget reservation release failed: {type(exc).__name__}")
+
+    if budget_stop_reason is not None:
+        # The first denied atomic reservation is authoritative for the rest of
+        # this sweep. Merge component cursors by original index so deterministic
+        # work and final deferrals retain the former mutation/telemetry order.
+        while True:
+            remaining_roots = [
+                root for root, component in components.items()
+                if positions[root] < len(component)
+            ]
+            if not remaining_roots:
+                break
+            root = min(
+                remaining_roots,
+                key=lambda value: components[value][positions[value]]["index"],
+            )
+            record = components[root][positions[root]]
+            frontiers.pop(root, None)
+            classified = classify(record)
+            if classified is None:
+                positions[root] += 1
+                continue
+            tentative = classified["tentative"]
+            if tentative["path"] != "skip":
+                _apply_verdict(
+                    conn, summary, tentative, record["a_id"], record["b_id"],
+                    project_path=project_path,
+                )
+            else:
+                defer_pair(
+                    classified,
+                    reason=budget_stop_reason,
+                    budget_state=budget_stop_state,
+                )
+            positions[root] += 1
+
+    try:
+        summary["log_retention"] = log_utils.maintain_log_retention(project_path)
+    except Exception as e:
+        _debug(f"log_retention failed: {e}")
+        summary["log_retention"] = {"error": str(e)}
+
+    # The request-text store needs its own sweep: the structural sweep above
+    # gzips with the ambient umask, which must never touch cleartext prompts.
+    # Lazy import keeps heal's import graph unchanged (id=5300 item 2).
+    try:
+        from latch.gate import request_text_store
+        summary["request_text_retention"] = request_text_store.maintain_retention(
+            project_path
+        )
+    except Exception as e:
+        _debug(f"request-text retention failed: {e}")
+        summary["request_text_retention"] = {"error": str(e)}
+
+    try:
+        today = datetime.now(timezone.utc).date()
+        summary["correlator"] = correlator.correlate(
+            project_path, today - timedelta(days=1), today,
+        )
+    except Exception as e:
+        _debug(f"correlator failed: {e}")
+        summary["correlator"] = {"error": str(e)}
+
+    # Deterministic body-edge / state drift sweep (id=1149 Part 3). No LLM;
+    # surface-only. Lazy import avoids a heal<->drift cycle (drift reuses
+    # heal's code-span helpers).
+    try:
+        from latch.pipeline import drift
+        summary["drift"] = drift.sweep(conn, project_path)
+    except Exception as e:
+        _debug(f"drift sweep failed: {e}")
+        summary["drift"] = {"error": str(e)}
+
+    _debug(f"sweep complete: {summary}")
+    return summary
+
+
+def _apply_verdict(
+    conn, summary: dict, verdict: dict, a_id: int, b_id: int,
+    *, project_path: str | None = None,
+) -> None:
+    """Apply the verdict's DB mutation and bump the matching counters."""
+    summary["by_path"][verdict["path"]] = summary["by_path"].get(verdict["path"], 0) + 1
+    if verdict["decision"] == "supersede":
+        if _ratified_judgment_ids(
+            conn, verdict["winner_id"], verdict["loser_id"]
+        ):
+            referral_id, _created = _route_ratified_pair_to_human(
+                conn,
+                a_id,
+                b_id,
+                trigger=verdict["path"],
+                project_path=project_path,
+            )
+            summary["kept_both"] += 1
+            summary["human_referrals"] = summary.get("human_referrals", 0) + 1
+            _debug(
+                f"    -> human referral via {verdict['path']} "
+                f"(tier={verdict.get('tier')}): referral={referral_id} "
+                f"pair=({min(a_id, b_id)},{max(a_id, b_id)})"
+            )
+            return
+        apply_nightly_supersede(
+            conn, verdict["winner_id"], verdict["loser_id"],
+            project_path=project_path,
+        )
+        summary["superseded"] += 1
+        _debug(f"    -> supersede via {verdict['path']} (tier={verdict.get('tier')}): "
+               f"winner={verdict['winner_id']} loser={verdict['loser_id']} "
+               f"reason={verdict.get('reason','')!r}")
+    elif verdict["decision"] == "reconciled_by":
+        apply_nightly_reconciled_by(
+            conn, verdict["older_id"], verdict["newer_id"],
+            project_path=project_path,
+        )
+        summary["reconciled"] += 1
+        _debug(f"    -> reconciled_by via {verdict['path']} (tier={verdict.get('tier')}): "
+               f"older={verdict['older_id']} newer={verdict['newer_id']} "
+               f"reason={verdict.get('reason','')!r}")
+    else:
+        apply_keep_both(conn, a_id, b_id)
+        summary["kept_both"] += 1
+        _debug(f"    -> keep_both via {verdict['path']} (tier={verdict.get('tier')}): "
+               f"reason={verdict.get('reason','')!r}")
+
+
+# ---------- logging ----------
+
+def _log(msg: str) -> None:
+    log_path = paths.KB_ROOT / "heal.log"
+    try:
+        with log_path.open("a", encoding="utf-8") as f:
+            f.write(f"[{datetime.now().isoformat(timespec='seconds')}] {msg}\n")
+    except Exception:
+        pass
+
+
+def _log_run_summary(summary: dict, project_path: str | None, *,
+                     ok: bool, error: str | None = None) -> None:
+    """Emit one `heal_run` row per nightly sweep, success or failure.
+
+    heal.log contains per-arbitration model/decision diagnostics, not one
+    completion record per sweep. This row is the positive run heartbeat. It
+    goes to the project-scoped daily stream rather than KB_ROOT/heal.log because
+    KB_ROOT is a module-level constant that test runs do not isolate — writing
+    run rows there would mix real sweeps with pytest output. Counts only: no
+    node text or titles.
+    """
+    fields = ("examined", "collisions", "superseded", "kept_both",
+              "reconciled", "deferred", "budget_blocked",
+              "priority_llm", "priority_deferred", "human_referrals",
+              "backend", "model")
+    row = {k: summary.get(k, 0) for k in fields}
+    row["by_path"] = summary.get("by_path", {})
+    row["integrity"] = summary.get("integrity", {})
+    row["ok"] = ok
+    # Structural only — an exception message can carry local node text.
+    row["error"] = error
+    log_utils.emit_event("heal_run", row, project_path=project_path)
+
+
+def _debug(msg: str) -> None:
+    """Per-decision debug log. No-op unless CLAUDE_KB_DEBUG_LOG points at a file.
+    Set that env var before invoking a maintenance pass (e.g. `python
+    src/latch/pipeline/selfheal.py <project>`) to capture verbose per-decision logging."""
+    path = os.environ.get("CLAUDE_KB_DEBUG_LOG")
+    if not path:
+        return
+    try:
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(f"[{datetime.now().isoformat(timespec='seconds')}] {msg}\n")
+    except Exception:
+        pass

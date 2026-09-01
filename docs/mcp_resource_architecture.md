@@ -41,7 +41,7 @@ The observed failure has two independent layers.
 
 The Codex app server creates separate stdio MCP children for tasks and subagent
 contexts and retains many of them. In the live sample, 14 open-latch
-`src/mcp_server.py` processes were direct children of one Codex app-server PID.
+`src/latch/mcp/mcp_server.py` processes were direct children of one Codex app-server PID.
 Start-time clusters aligned with task/subagent activity. No recursive latch MCP
 children, compactors, or self-heal jobs existed beneath them.
 
@@ -121,7 +121,7 @@ sections.
 
 ### Ownership and discovery
 
-- `src/mcp_server.py` intercepts direct execution before importing FastMCP or
+- `src/latch/mcp/mcp_server.py` intercepts direct execution before importing FastMCP or
   ONNX and enters `mcp_proxy.py`. Existing installer/config paths do not change.
 - The first proxy acquires an atomic start lock and launches `mcp_daemon.py`.
   Concurrent proxies wait for the same owner.
@@ -446,7 +446,7 @@ Commands:
 ## Rollout and reversal
 
 No configuration migration is required: installed hosts already execute
-`src/mcp_server.py`, which now enters the lightweight proxy before heavyweight
+`src/latch/mcp/mcp_server.py`, which now enters the lightweight proxy before heavyweight
 imports. Existing, already-running legacy MCP processes retain old code until
 their host context exits or the host is restarted.
 

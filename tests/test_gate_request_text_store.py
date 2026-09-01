@@ -29,12 +29,12 @@ _ROOT = Path(__file__).resolve().parent.parent
 _SRC = _ROOT / "src"
 sys.path.insert(0, str(_SRC))
 
-import db                   # noqa: E402
-import embeddings           # noqa: E402
-import gate                 # noqa: E402
-import log_utils            # noqa: E402
-import paths                # noqa: E402
-import request_text_store   # noqa: E402
+from latch.store import db                   # noqa: E402
+from latch.retrieval import embeddings           # noqa: E402
+from latch.gate import gate                 # noqa: E402
+from latch.common import log_utils            # noqa: E402
+from latch.store import paths                # noqa: E402
+from latch.gate import request_text_store   # noqa: E402
 
 # Classifier path only — the adversary layer would fire a second live call.
 gate.ADVERSARY_ENABLED = False

@@ -12,8 +12,8 @@ from pathlib import Path
 
 import pytest
 
-import outcome_measurement as om
-import outcome_measurement_runner as runner
+from latch.evals import outcome_measurement as om
+from latch.evals import outcome_measurement_runner as runner
 
 
 UTC = timezone.utc

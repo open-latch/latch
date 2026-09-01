@@ -18,4 +18,4 @@ else
   echo "latch_quickstart: no Python found (set LATCH_PYTHON (legacy: CLAUDE_KB_PYTHON) to your interpreter)." >&2
   exit 2
 fi
-exec "$PY" "${KB_HOME}/src/quickstart.py" "$@"
+exec "$PY" "${KB_HOME}/src/latch/install/quickstart.py" "$@"

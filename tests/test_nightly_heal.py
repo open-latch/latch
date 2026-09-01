@@ -16,10 +16,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-import db  # noqa: E402
-import embeddings  # noqa: E402
-import heal  # noqa: E402
-import log_utils  # noqa: E402
+from latch.store import db  # noqa: E402
+from latch.retrieval import embeddings  # noqa: E402
+from latch.pipeline import heal  # noqa: E402
+from latch.common import log_utils  # noqa: E402
 
 
 def _assert(cond, msg):
@@ -520,7 +520,7 @@ def test_nightly_heal_budget_blocked_defers_without_edge_and_retries():
         _set_ref(conn, b, 2)
 
         # Pre-fill the heal budget so the sweep's next reservation grants zero.
-        import budget
+        from latch.gate import budget
         cap = budget.DEFAULT_HEAL_DAILY_CAP
         for _ in range(cap):
             budget.check_and_record(tmp, category="heal", cap=cap)
@@ -598,7 +598,7 @@ def test_nightly_heal_budget_blocked_defers_without_edge_and_retries():
 def test_nightly_heal_budget_status_error_defers_and_runs_maintenance():
     """A budget-state I/O failure must fail closed for LLM work while allowing
     deterministic arbitration and every trailing maintenance stage."""
-    import budget
+    from latch.gate import budget
 
     tmp, conn = _fresh_db()
     try:
@@ -685,7 +685,7 @@ def test_nightly_heal_budget_status_error_defers_and_runs_maintenance():
 def test_nightly_heal_releases_unused_batch_after_apply_failure():
     """An unexpected early failure consumes only the attempt that started;
     every later slot from the atomic batch must be returned for the next run."""
-    import budget
+    from latch.gate import budget
 
     tmp, conn = _fresh_db()
     original_find = heal.find_near_duplicates
@@ -750,7 +750,7 @@ def test_nightly_heal_releases_unused_batch_after_apply_failure():
 def test_nightly_heal_replans_batch_across_utc_rollover():
     """A pre-charged slot from yesterday cannot authorize today's call; the
     live pair must be atomically reserved again without a false deferral."""
-    import budget
+    from latch.gate import budget
 
     tmp, conn = _fresh_db()
     original_find = heal.find_near_duplicates
@@ -818,7 +818,7 @@ def test_nightly_heal_replans_batch_across_utc_rollover():
 def test_nightly_heal_never_merges_reservations_across_utc_days():
     """If midnight falls inside an expansion reservation, old generic slots
     must not widen the new day's priority window."""
-    import budget
+    from latch.gate import budget
 
     tmp, conn = _fresh_db()
     original_find = heal.find_near_duplicates
@@ -912,7 +912,7 @@ def test_nightly_heal_never_merges_reservations_across_utc_days():
 def test_nightly_heal_transfers_reserved_slot_after_live_invalidation():
     """A pair invalidated while another model call runs must not consume its
     reserved token; the token transfers to the highest-priority live fallback."""
-    import budget
+    from latch.gate import budget
 
     tmp, conn = _fresh_db()
     original_find = heal.find_near_duplicates
@@ -998,7 +998,7 @@ def test_nightly_heal_transfers_reserved_slot_after_live_invalidation():
 def test_nightly_heal_revalidates_after_budget_reservation():
     """A candidate invalidated while budget I/O is in flight cannot consume
     the returned slot; the highest-priority live fallback receives it."""
-    import budget
+    from latch.gate import budget
 
     tmp, conn = _fresh_db()
     original_find = heal.find_near_duplicates
@@ -1091,7 +1091,7 @@ def test_nightly_heal_revalidates_after_budget_reservation():
 def test_nightly_heal_keeps_generic_slots_for_downstream_frontiers():
     """Invalidated frontiers do not prove their generic slots are surplus: a
     surviving component can expose more live LLM work after its next verdict."""
-    import budget
+    from latch.gate import budget
 
     tmp, conn = _fresh_db()
     original_find = heal.find_near_duplicates
@@ -1217,7 +1217,7 @@ def test_nightly_heal_high_tier_arbitrated_before_low_tier_under_budget_pressure
         heal._arbitrate_nightly = stub_arb
 
         # Pre-fill heal budget leaving only 1 LLM call available.
-        import budget
+        from latch.gate import budget
         cap = budget.DEFAULT_HEAL_DAILY_CAP
         for _ in range(cap - 1):
             budget.check_and_record(tmp, category="heal", cap=cap)
@@ -1418,7 +1418,7 @@ def test_nightly_heal_runs_log_retention():
 
 
 def test_nightly_heal_log_retention_failure_isolated():
-    import log_utils
+    from latch.common import log_utils
     tmp, conn = _fresh_db()
     saved = log_utils.maintain_log_retention
     try:
@@ -1454,7 +1454,7 @@ def test_nightly_heal_runs_correlator():
 
 
 def test_nightly_heal_correlator_failure_isolated():
-    import correlator
+    from latch.proof import correlator
     tmp, conn = _fresh_db()
     saved = correlator.correlate
     try:
@@ -1568,7 +1568,7 @@ def _priority_probe(conn, tmp, pairs, *, refs, ws=None):
     Returns the (sorted) pair the arbitrator actually spent it on.
     `pairs` is [(a, b, sim), ...]; `refs`/`ws` map node id -> value.
     """
-    import budget
+    from latch.gate import budget
     for node_id, n in refs.items():
         _set_ref(conn, node_id, n)
     for node_id, w in (ws or {}).items():
@@ -1664,7 +1664,7 @@ def test_priority_preserves_similarity_order_when_budget_covers_queue():
     """Priority is a scarce-budget selector, not a general invocation reorder.
     With room for the full queue, LLM calls retain similarity order so the
     process-global timeout breaker cannot change persisted topology."""
-    import budget
+    from latch.gate import budget
 
     tmp, conn = _fresh_db()
     original_find = heal.find_near_duplicates
@@ -1821,7 +1821,7 @@ def test_priority_planning_preserves_mixed_shared_node_precedence():
     """A higher-similarity LLM pair must mutate before a lower-similarity
     deterministic pair that shares its node. Priority selects the LLM slot;
     it must not let the deterministic pair jump ahead and stale that node."""
-    import budget
+    from latch.gate import budget
 
     tmp, conn = _fresh_db()
     try:
@@ -1887,7 +1887,7 @@ def test_priority_reclaims_invalidated_slot_for_later_fallback():
     """A deterministic cascade can invalidate the initially highest-priority
     LLM pair before its turn. The sole live fallback must consume that slot,
     even though it appears later in similarity order."""
-    import budget
+    from latch.gate import budget
 
     tmp, conn = _fresh_db()
     try:
@@ -1979,7 +1979,7 @@ def test_priority_reclaims_invalidated_slot_for_highest_ranked_fallback():
     unspent slot goes to the highest-priority surviving fallback -- not merely
     the next fallback encountered in similarity order. The winning fallback is
     deliberately earlier than the invalidating mutation in global order."""
-    import budget
+    from latch.gate import budget
 
     tmp, conn = _fresh_db()
     try:

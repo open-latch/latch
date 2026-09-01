@@ -11,4 +11,4 @@ set -euo pipefail
 
 KB_HOME="${LATCH_HOME:-${CLAUDE_KB_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}}"
 
-exec python "${KB_HOME}/src/correlator_cli.py" "$@"
+exec python "${KB_HOME}/src/latch/proof/correlator_cli.py" "$@"

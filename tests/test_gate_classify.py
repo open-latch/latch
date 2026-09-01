@@ -24,12 +24,12 @@ from pathlib import Path
 _SRC = Path(__file__).resolve().parent.parent / "src"
 sys.path.insert(0, str(_SRC))
 
-import budget       # noqa: E402
-import db           # noqa: E402
-import embeddings   # noqa: E402
-import gate         # noqa: E402
-import log_utils    # noqa: E402
-import paths        # noqa: E402
+from latch.gate import budget       # noqa: E402
+from latch.store import db           # noqa: E402
+from latch.retrieval import embeddings   # noqa: E402
+from latch.gate import gate         # noqa: E402
+from latch.common import log_utils    # noqa: E402
+from latch.store import paths        # noqa: E402
 
 # This file exercises the CLASSIFIER path. The adversary layer is now default-ON
 # (id=1343) and would fire a real second `claude -p` on the use_llm=True +

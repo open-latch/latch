@@ -194,7 +194,7 @@ validate_checkout() {
   [ "$actual" = "$expected" ] \
     || die "existing checkout origin is $actual, expected $expected; refusing overwrite"
   [ -f "$app/VERSION" ] && [ -f "$app/requirements.txt" ] \
-    && [ -f "$app/src/quickstart.py" ] \
+    && [ -f "$app/src/latch/install/quickstart.py" ] \
     || die "checkout is missing required Latch files: $app"
 }
 
@@ -291,7 +291,7 @@ sqlite_vec_preflight() {
   if ! "$python_path" -B -c '
 import sys
 sys.path.insert(0, sys.argv[1])
-from doctor import OK, _VEC_PROBE, _run_probe
+from latch.install.doctor import OK, _VEC_PROBE, _run_probe
 level, _ = _run_probe(_VEC_PROBE, "VEC_OK", 30, arch_hint=True)
 if level != OK:
     raise SystemExit(1)
@@ -372,7 +372,7 @@ VERSION="$(tr -d '\r\n' < "$INSTALL_DIR/VERSION")"
 note 'Running the guided Latch activation'
 run_quickstart() {
   env LATCH_HOME="$INSTALL_DIR" LATCH_PYTHON="$PYTHON_PATH" \
-    "$PYTHON_PATH" "$INSTALL_DIR/src/quickstart.py" \
+    "$PYTHON_PATH" "$INSTALL_DIR/src/latch/install/quickstart.py" \
     --project "$PROJECT" ${QUICKSTART_ARGS[@]+"${QUICKSTART_ARGS[@]}"}
 }
 

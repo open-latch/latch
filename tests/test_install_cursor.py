@@ -12,11 +12,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-import agents_md_sync  # noqa: E402
-import cursor_rules_sync  # noqa: E402
-import cursor_hooks  # noqa: E402
-import install_engine  # noqa: E402
-import install_cursor as ic  # noqa: E402
+from latch.hosts import agents_md_sync  # noqa: E402
+from latch.hosts import cursor_rules_sync  # noqa: E402
+from latch.hosts import cursor_hooks  # noqa: E402
+from latch.install import install_engine  # noqa: E402
+from latch.install import install_cursor as ic  # noqa: E402
 
 
 def _assert(cond, msg):
@@ -25,17 +25,17 @@ def _assert(cond, msg):
 
 
 def test_render_cursor_server_uses_cursor_mcp_shape():
-    server = ic.render_cursor_server("/PY", "/repo/src/mcp_server.py", model_backend="codex")
+    server = ic.render_cursor_server("/PY", "/repo/src/latch/mcp/mcp_server.py", model_backend="codex")
     _assert(server["type"] == "stdio", server)
     _assert(server["command"] == "/PY", server)
-    _assert(server["args"] == ["/repo/src/mcp_server.py"], server)
+    _assert(server["args"] == ["/repo/src/latch/mcp/mcp_server.py"], server)
     _assert(server["env"]["LATCH_ADAPTER"] == "cursor", server)
     _assert(server["env"]["LATCH_MODEL_BACKEND"] == "codex", server)
     _assert(server["env"]["LATCH_GATE_BACKEND"] == "codex", server)
     _assert(server["env"]["LATCH_MAINTENANCE_BACKEND"] == "codex", server)
     _assert(server["env"]["LATCH_COMPACTOR_BACKEND"] == "codex", server)
 
-    default = ic.render_cursor_server("/PY", "/repo/src/mcp_server.py")
+    default = ic.render_cursor_server("/PY", "/repo/src/latch/mcp/mcp_server.py")
     _assert(default["type"] == "stdio", default)
     _assert(default["env"]["LATCH_ADAPTER"] == "cursor", default)
     for key in (
@@ -434,7 +434,7 @@ def test_check_mode_verifies_mcp_and_agents():
         rule = d / ".cursor" / "rules" / "latch.mdc"
         agents = d / "AGENTS.md"
         python_path = install_engine.resolve_python(sys.executable)
-        server_py = str((ic.KB_HOME / "src" / "mcp_server.py")).replace("\\", "/")
+        server_py = str((ic.KB_HOME / "src" / "latch" / "mcp" / "mcp_server.py")).replace("\\", "/")
         body, _ = ic.merge_mcp_config("", python_path, server_py)
         config.parent.mkdir(parents=True)
         config.write_text(body, encoding="utf-8")
@@ -801,10 +801,10 @@ def test_with_hooks_installs_and_check_requires_hooks():
         ok, detail = cursor_hooks.hooks_status(
             hooks,
             install_engine.resolve_python(None),
-            str(ic.KB_HOME / "src" / "hooks" / "cursor_session_start.py"),
-            str(ic.KB_HOME / "src" / "hooks" / "cursor_before_submit.py"),
-            str(ic.KB_HOME / "src" / "hooks" / "cursor_pre_tool_use.py"),
-            str(ic.KB_HOME / "src" / "hooks" / "cursor_post_tool_use.py"),
+            str(ic.KB_HOME / "src" / "latch" / "hooks" / "cursor_session_start.py"),
+            str(ic.KB_HOME / "src" / "latch" / "hooks" / "cursor_before_submit.py"),
+            str(ic.KB_HOME / "src" / "latch" / "hooks" / "cursor_pre_tool_use.py"),
+            str(ic.KB_HOME / "src" / "latch" / "hooks" / "cursor_post_tool_use.py"),
         )
         _assert(ok, detail)
         rc = ic.main([

@@ -5,7 +5,7 @@
 > latch in an unusual environment.
 >
 > **The code is the source of truth for the live tool & command surface**
-> (`src/mcp_server.py` for MCP tools, `commands/` and `/help` in-session for
+> (`src/latch/mcp/mcp_server.py` for MCP tools, `commands/` and `/help` in-session for
 > slash commands). This doc describes the *shape* of that surface, not an
 > exhaustive signature list — by design. An enumerated table in prose silently
 > rots against the code (the old README listed 6 of 10 slash commands); pointing
@@ -23,37 +23,23 @@ ${LATCH_HOME}/
 ├── CONTRIBUTING.md           # contribution scope and DCO sign-off
 ├── TRADEMARK.md              # lightweight brand-use guidance
 ├── requirements.txt
+├── pyproject.toml            # src-layout editable-install metadata
+├── tools/reorg/              # deterministic flat-src migration codemod
 ├── settings_snippet.json     # template for ~/.claude/settings.json
 ├── claude_md_snippet.md      # template block for each project's CLAUDE.md
 ├── src/
-│   ├── schema.sql            # SQLite schema (nodes, edges, sessions, FTS)
-│   ├── paths.py              # pinned/shared KB selection + legacy CWD fallback
-│   ├── db.py                 # SQLite helpers
-│   ├── embeddings.py         # local ONNX MiniLM embedder (vendored all-MiniLM-L6-v2)
-│   ├── search.py             # hybrid FTS + cosine retrieval
-│   ├── mcp_server.py         # MCP tools: kb_search/get/recent/insert/...
-│   ├── mcp_proxy.py          # lightweight per-host stdio compatibility process
-│   ├── mcp_daemon.py         # shared multi-connection MCP/model owner
-│   ├── mcp_broker.py         # discovery, election, leases, and bounded lifecycle
-│   ├── compactor.py          # session -> KB nodes via Claude or Codex backend
-│   ├── gate.py               # decision-chain assembly + classifier (kb_gate)
-│   ├── heal.py               # on-insert + nightly contradiction healer
-│   ├── maintenance.py        # heal / decay / promote / tree
-│   ├── tree.py               # RAPTOR-style summary clustering
-│   ├── budget.py             # daily LLM-call budget
-│   ├── doctor.py             # cross-platform install verifier (latch_doctor)
-│   ├── install_codex.py      # Codex MCP config + AGENTS.md installer
-│   ├── install_cursor.py     # Cursor MCP + rules + commands + AGENTS.md installer
-│   ├── agents_md_sync.py     # managed AGENTS.md region sync for Codex
-│   ├── cursor_rules_sync.py  # managed Cursor .mdc activation rule sync
-│   ├── claude_md_sync.py     # managed CLAUDE.md region sync for Claude Code
-│   ├── managed_doc_sync.py   # shared managed-region mechanics
-│   └── hooks/
-│       ├── _common.py
-│       ├── stop.py           # turn counter + auto-compact every 5 turns
-│       ├── session_end.py    # final compact + promote to canonical
-│       ├── session_start.py  # silent managed-document repair
-│       └── user_prompt_submit.py  # bounded prompt context surfacing
+│   └── latch/
+│       ├── store/            # schema, SQLite, vaults, lifecycle, workstreams
+│       ├── retrieval/        # embeddings, search, feeders, tree, authority
+│       ├── gate/             # decision gate, reports, budget, verification
+│       ├── pipeline/         # compaction, heal, maintenance, seed, backends
+│       ├── mcp/              # server, proxy, daemon, broker, runtime, stdio
+│       ├── hosts/            # Claude/Codex/Cursor sync, hooks, sessions, wiring
+│       ├── install/          # installers, doctors, quickstart, update, versioning
+│       ├── evals/            # evaluations and outcome measurement
+│       ├── proof/            # proof packet, release checks, demos, correlation
+│       ├── common/           # shared locking and logging
+│       └── hooks/            # literal-path lifecycle entrypoints
 ├── bin/                      # wrappers: slash commands, installers, latch_doctor
 ├── commands/                 # slash command markdown (copy to ~/.claude/commands/)
 ├── vendor/                   # vendored ONNX MiniLM model + tokenizer (no download)
@@ -117,7 +103,7 @@ latch exposes **MCP tools** (callable inline by Claude Code, Codex, and
 Cursor) plus host-specific command prompts where the host supports them.
 The canonical, always-current list is the code:
 
-- **MCP tools** — defined in `src/mcp_server.py`. Read/write KB tools
+- **MCP tools** — defined in `src/latch/mcp/mcp_server.py`. Read/write KB tools
   (`kb_search`, `kb_get`, `kb_recent`, `kb_insert`, `kb_update`, `kb_link`,
   `kb_correct_plan`/`kb_correct_apply`, …) plus the gate (`kb_gate`, which
   assembles a decision chain for a coding request and returns a go/no-go
@@ -195,10 +181,10 @@ Codex support is intentionally adapter-specific. It does **not** reuse the
 Claude Code installer, does **not** call `claude mcp add`, and does **not**
 write to `~/.claude/settings.json`.
 
-`bin/install_codex.{sh,ps1}` runs `src/install_codex.py`, which:
+`bin/install_codex.{sh,ps1}` runs `src/latch/install/install_codex.py`, which:
 
 - **Manages a marked Codex `config.toml` block** containing
-  `[mcp_servers.latch]`, the Python interpreter, `src/mcp_server.py`,
+  `[mcp_servers.latch]`, the Python interpreter, `src/latch/mcp/mcp_server.py`,
   server-level approval mode, and a Codex MCP env table with
   `LATCH_MODEL_BACKEND = "codex"` and `LATCH_GATE_BACKEND = "codex"`. Existing
   `[mcp_servers.claude-kb]` tables are treated as supported legacy latch-owned
@@ -212,11 +198,11 @@ write to `~/.claude/settings.json`.
 - **Manages Codex `hooks.json` for the silent `SessionStart` bootstrap only.**
   It preserves unrelated user hooks, removes older latch-owned Codex
   `SessionStart` / `Stop` entries, and installs
-  `src/hooks/codex_session_start.py`. It does not install Stop or SessionEnd
+  `src/latch/hooks/codex_session_start.py`. It does not install Stop or SessionEnd
   compaction hooks.
 - **Syncs `AGENTS.md`** by rendering the shared latch contract with
   Codex/AGENTS wording and distinct `LATCH AGENTS SNIPPET` markers. The
-  mechanics live in `src/managed_doc_sync.py`; `src/claude_md_sync.py` keeps the
+  mechanics live in `src/latch/hosts/managed_doc_sync.py`; `src/latch/hosts/claude_md_sync.py` keeps the
   existing Claude marker strings and CLI behavior.
 
 Usage from the project root whose `AGENTS.md` should receive the latch contract:
@@ -255,10 +241,10 @@ missing or changed metadata fails closed for that history leg. Cursor-only
 seeding stops, while aggregate `--source all` seeding records the unavailable
 leg and continues with other authorized sources.
 
-`bin/install_cursor.{sh,ps1}` runs `src/install_cursor.py`, which:
+`bin/install_cursor.{sh,ps1}` runs `src/latch/install/install_cursor.py`, which:
 
 - **Manages project `.cursor/mcp.json`** with a `mcpServers.latch` stdio server
-  pointing at `src/mcp_server.py`. It preserves unrelated MCP servers and
+  pointing at `src/latch/mcp/mcp_server.py`. It preserves unrelated MCP servers and
   settings, removes older latch-owned legacy names, and uses the Cursor Agent
   CLI as the native model backend. Explicit `claude` and `codex` compatibility
   overrides remain available through `--model-backend`.
@@ -289,7 +275,7 @@ Usage from the project root whose Cursor workspace should use latch:
 /path/to/latch/bin/latch_cursor_doctor.sh --with-hooks
 ```
 
-`src/cursor_doctor.py` performs strict static checks for `.cursor/mcp.json`,
+`src/latch/hosts/cursor_doctor.py` performs strict static checks for `.cursor/mcp.json`,
 the MCP launch target, `AGENTS.md`, Cursor rules, commands, skills, and optional
 hooks. With the native backend it also requires a reachable, authenticated
 Cursor Agent CLI. CLI-side MCP visibility does not replace the user-controlled
@@ -335,7 +321,7 @@ Maintenance (local backup + heal + weekly decay/tree + prune) is
 rights, no cron/Task-Scheduler entry. On session start the MCP server checks an
 elapsed-time cadence (`<selected-kb-dir>/maintenance_state.json`) and, if anything
 is due, spawns the pass as a detached background process
-(`src/selfheal.py`). It runs off-process so it never blocks your session; KB
+(`src/latch/pipeline/selfheal.py`). It runs off-process so it never blocks your session; KB
 reads stay live and writes briefly wait if they land mid-pass.
 
 Cadence (elapsed since last run): heal every 48h, decay + tree weekly, local
@@ -344,7 +330,7 @@ runtime dependency is Python). Model-backed heal arbitration and tree summary
 generation use Claude by default for existing Claude installs; adapter env such
 as Codex's `LATCH_MODEL_BACKEND=codex` routes those calls through the selected
 backend. Run a pass manually with
-`python src/selfheal.py <project_dir>`, or via `/kb-heal` · `/kb-decay` ·
+`python src/latch/pipeline/selfheal.py <project_dir>`, or via `/kb-heal` · `/kb-decay` ·
 `/kb-tree`.
 
 **Optional git snapshot (off by default).** Maintenance does not touch git — a

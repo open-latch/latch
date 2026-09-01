@@ -29,15 +29,19 @@ if [ -z "$latch_home" ]; then
 fi
 if [ -z "$latch_home" ]; then
   candidate="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
-  if [ -f "$candidate/src/mcp_server.py" ] && [ -d "$candidate/commands" ]; then
+  if { [ -f "$candidate/src/latch/mcp/mcp_server.py" ] || [ -f "$candidate/src/mcp_server.py" ]; } && [ -d "$candidate/commands" ]; then
     latch_home="$candidate"
   fi
 fi
-if [ -z "$latch_home" ] || [ ! -f "$latch_home/src/mcp_server.py" ]; then
+if [ -z "$latch_home" ] || { [ ! -f "$latch_home/src/latch/mcp/mcp_server.py" ] && [ ! -f "$latch_home/src/mcp_server.py" ]; }; then
   echo "Could not find latch checkout; set LATCH_HOME to your latch install." >&2
   exit 1
 fi
-python "$latch_home/src/budget.py" approve "$(pwd)"
+budget_script="$latch_home/src/latch/gate/budget.py"
+if [ ! -f "$budget_script" ]; then
+  budget_script="$latch_home/src/budget.py"
+fi
+python "$budget_script" approve "$(pwd)"
 ```
 
 Report the JSON output, especially `date`, `count_nonheal`, `count_heal`, and
@@ -47,5 +51,9 @@ backstop.
 For a read-only status check, run:
 
 ```bash
-python "$latch_home/src/budget.py" status "$(pwd)"
+budget_script="$latch_home/src/latch/gate/budget.py"
+if [ ! -f "$budget_script" ]; then
+  budget_script="$latch_home/src/budget.py"
+fi
+python "$budget_script" status "$(pwd)"
 ```

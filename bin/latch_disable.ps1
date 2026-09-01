@@ -5,7 +5,7 @@
   bin/latch_disable.sh.
 
 .DESCRIPTION
-  Checked first thing by every hook (`is_disabled()` in src/paths.py) and the
+  Checked first thing by every hook (`is_disabled()` in src/latch/store/paths.py) and the
   compactor, so it takes effect on the very next prompt — no Claude Code restart
   needed. Latch-scoped: stops ONLY latch; your other skills/plugins/hooks keep
   working. The MCP server stays registered but inert unless a tool is called.

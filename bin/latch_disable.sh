@@ -2,7 +2,7 @@
 #
 # latch_disable.sh — the panic button. Instantly no-op ALL latch hooks + the
 # compactor by creating the DISABLE sentinel at the repo root. Checked first
-# thing by every hook (`is_disabled()` in src/paths.py) and the compactor, so it
+# thing by every hook (`is_disabled()` in src/latch/store/paths.py) and the compactor, so it
 # takes effect on the very next prompt — no Claude Code restart needed.
 #
 # This is latch-scoped: it stops ONLY latch. Your other Claude Code skills,

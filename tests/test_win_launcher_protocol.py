@@ -27,11 +27,11 @@ if os.name != "nt":
     pytest.skip("windowless launcher is Windows-only", allow_module_level=True)
 
 SRC = Path(__file__).resolve().parent.parent / "src"
-LAUNCHER = SRC / "mcp_launcher_win.py"
+LAUNCHER = SRC / "latch" / "mcp" / "mcp_launcher_win.py"
 PYTHONW = Path(sys.executable).with_name("pythonw.exe")
 sys.path.insert(0, str(SRC))
 
-import paths  # noqa: E402
+from latch.store import paths  # noqa: E402
 
 
 def _env(tmp_path: Path, kb_dir: Path, *, force_legacy: bool = False) -> dict:

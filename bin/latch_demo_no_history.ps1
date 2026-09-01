@@ -11,5 +11,5 @@ $Py = if ($env:LATCH_PYTHON) { $env:LATCH_PYTHON } `
       elseif ($env:CLAUDE_KB_PYTHON) { $env:CLAUDE_KB_PYTHON } `
       elseif (Test-Path $VenvPy) { $VenvPy } `
       else { "python" }
-& $Py (Join-Path $KbHome "src\no_history_demo.py") @args
+& $Py (Join-Path $KbHome "src\latch\proof\no_history_demo.py") @args
 exit $LASTEXITCODE

@@ -8,7 +8,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import _isolation  # noqa: F401,E402
-import evals  # noqa: E402
+from latch.evals import evals  # noqa: E402
 
 
 def _assert(cond, msg):

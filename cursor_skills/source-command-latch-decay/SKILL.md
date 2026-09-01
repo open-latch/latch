@@ -18,7 +18,7 @@ receipts do not allow those environment assignments.
 Latch Cursor skill boundary: resolve `latch_home` as `${CURSOR_PLUGIN_ROOT}`
 when set, otherwise use the absolute checkout in the project-sync footer.
 Select native `cursor` for plugin installs or the backend in that footer. Run
-`<CURSOR_MCP_PYTHON> "$latch_home/src/maintenance.py" weekly "$PWD"` with
+`<CURSOR_MCP_PYTHON> "$latch_home/src/latch/pipeline/maintenance.py" weekly "$PWD"` with
 `LATCH_PYTHON` set to that same absolute interpreter and
 `LATCH_MAINTENANCE_BACKEND` and `LATCH_MODEL_BACKEND` set to that backend.
 Report `decayed_rows`, `promoted_count`, and `promoted_ids`.

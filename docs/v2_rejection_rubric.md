@@ -58,8 +58,8 @@ exists and the backfill has landed.
 
 ## Recall note
 
-The current detector (`src/gate_report.py:448`) matches
+The retired detector documented by `scripts/backfill_rejected_paths.py:75` matched
 `"rejected" | "discarded" | "ruled"` in the body. This rubric is **not** scoped to
 that keyword set: a rejection phrased "we are not going to do X because Y" is genuine
-under criteria 1–4 and invisible to `:448`. Candidate generation must therefore widen
+under criteria 1–4 and invisible to that detector. Candidate generation must therefore widen
 beyond those three words, and the recall gap between the two is reported, not hidden.

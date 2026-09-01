@@ -10,9 +10,9 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-import db  # noqa: E402
-import heal  # noqa: E402
-import mcp_server  # noqa: E402
+from latch.store import db  # noqa: E402
+from latch.pipeline import heal  # noqa: E402
+from latch.mcp import mcp_server  # noqa: E402
 
 
 @pytest.fixture

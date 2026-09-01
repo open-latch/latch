@@ -46,7 +46,7 @@ function Restore-UnlatchedInstructions {
   if (-not $py) {
     throw "latch_enable: UNLATCHED is active but no Python was found to restore project instruction files. Set LATCH_PYTHON (legacy: CLAUDE_KB_PYTHON), then run bin/unlatch.ps1 -Confirm latch."
   }
-  & $py (Join-Path $KbHome "src/unlatch.py") on --project $ProjectDir
+  & $py (Join-Path $KbHome "src/latch/install/unlatch.py") on --project $ProjectDir
 }
 
 if ((Test-Path $unlatched) -or (Test-Path $unlatchState)) {

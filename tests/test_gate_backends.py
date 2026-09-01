@@ -12,10 +12,10 @@ from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-import gate  # noqa: E402
-import log_utils  # noqa: E402
-import mcp_runtime  # noqa: E402
-import paths  # noqa: E402
+from latch.gate import gate  # noqa: E402
+from latch.common import log_utils  # noqa: E402
+from latch.mcp import mcp_runtime  # noqa: E402
+from latch.store import paths  # noqa: E402
 
 
 CLASSIFIER_JSON = (

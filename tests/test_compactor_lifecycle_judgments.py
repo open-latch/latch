@@ -10,9 +10,9 @@ import pytest
 SRC = Path(__file__).resolve().parent.parent / "src"
 sys.path.insert(0, str(SRC))
 
-import compactor  # noqa: E402
-import db  # noqa: E402
-import lifecycle_signals  # noqa: E402
+from latch.pipeline import compactor  # noqa: E402
+from latch.store import db  # noqa: E402
+from latch.store import lifecycle_signals  # noqa: E402
 
 
 def _connect(tmp_path):

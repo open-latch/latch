@@ -22,12 +22,12 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parent.parent
-SERVER = ROOT / "src" / "mcp_server.py"
-PROMPT_HOOK = ROOT / "src" / "hooks" / "user_prompt_submit.py"
+SERVER = ROOT / "src" / "latch" / "mcp" / "mcp_server.py"
+PROMPT_HOOK = ROOT / "src" / "latch" / "hooks" / "user_prompt_submit.py"
 EPOCH_2_COMMIT = "5c9f39cdc558b98e4736ba15a7e6f5011168c7c1"
 sys.path.insert(0, str(ROOT / "src"))
-import mcp_broker  # noqa: E402
-import paths  # noqa: E402
+from latch.mcp import mcp_broker  # noqa: E402
+from latch.store import paths  # noqa: E402
 
 
 def _assert(condition: Any, message: str) -> None:
@@ -589,21 +589,25 @@ def test_retained_proxy_recovers_after_in_place_compatible_upgrade() -> None:
 
         def runtime_key() -> str:
             return subprocess.check_output(
-                [sys.executable, "-c", "import mcp_broker; print(mcp_broker.RUNTIME_KEY)"],
+                [
+                    sys.executable,
+                    "-c",
+                    "from latch.mcp import mcp_broker; print(mcp_broker.RUNTIME_KEY)",
+                ],
                 env=env,
                 text=True,
                 timeout=10.0,
             ).strip()
 
         current_key = runtime_key()
-        runtime_module = install_src / "mcp_runtime.py"
+        runtime_module = install_src / "latch" / "mcp" / "mcp_runtime.py"
         stat = runtime_module.stat()
         os.utime(runtime_module, (stat.st_atime + 60, stat.st_mtime + 60))
         _assert(runtime_key() == current_key, "runtime key changed from mtime only")
 
         # Produce an older content key while retaining the explicit capability
         # epoch. This is the supported future in-place-upgrade path.
-        broker_path = install_src / "mcp_broker.py"
+        broker_path = install_src / "latch" / "mcp" / "mcp_broker.py"
         broker_source = broker_path.read_text(encoding="utf-8")
         broker_path.write_text(
             broker_source + "\n# compatible-upgrade-test-fingerprint\n",
@@ -615,7 +619,7 @@ def test_retained_proxy_recovers_after_in_place_compatible_upgrade() -> None:
         bootstrap = McpClient(
             kb_dir,
             "in-place-upgrade-bootstrap",
-            server_path=install_src / "mcp_server.py",
+            server_path=install_src / "latch" / "mcp" / "mcp_server.py",
             env_overrides={
                 "LATCH_HOME": str(ROOT),
                 "PYTHONPATH": str(install_src),
@@ -625,7 +629,7 @@ def test_retained_proxy_recovers_after_in_place_compatible_upgrade() -> None:
         client = McpClient(
             kb_dir,
             "in-place-upgrade-session",
-            server_path=install_src / "mcp_server.py",
+            server_path=install_src / "latch" / "mcp" / "mcp_server.py",
             env_overrides={
                 "LATCH_HOME": str(ROOT),
                 "PYTHONPATH": str(install_src),
@@ -639,7 +643,7 @@ def test_retained_proxy_recovers_after_in_place_compatible_upgrade() -> None:
         # Replace the same live install path, then kill the old owner. The
         # retained proxy still has old_key cached in memory and must be aliased
         # to one owner started from the updated source.
-        shutil.copy2(ROOT / "src" / "mcp_broker.py", broker_path)
+        shutil.copy2(ROOT / "src" / "latch" / "mcp" / "mcp_broker.py", broker_path)
         _assert(runtime_key() == current_key, "updated install key is not content-stable")
         os.kill(old_pid, signal.SIGTERM)
         _wait_for_pid_exit(old_pid)
@@ -736,6 +740,7 @@ def _assert_historical_proxy_requires_fresh_task(commit: str) -> None:
     install = Path(tempfile.mkdtemp(prefix=f"latch-{safe_commit}-install-"))
     install_src = install / "src"
     client: McpClient | None = None
+    replacement_owner: subprocess.Popen[bytes] | None = None
     try:
         _copy_git_src(commit, install_src)
         overrides = {
@@ -749,11 +754,82 @@ def _assert_historical_proxy_requires_fresh_task(commit: str) -> None:
             server_path=install_src / "mcp_server.py",
             env_overrides=overrides,
         )
-        old_pid = client.status()["process_pid"]
+        before = client.status()
+        old_pid = int(before["process_pid"])
+        requested_key = str(before["daemon"]["runtime_key"])
         shutil.rmtree(install_src)
         _copy_current_install_src(install_src)
         os.kill(old_pid, signal.SIGTERM)
         _wait_for_pid_exit(old_pid)
+
+        # The pure package move deliberately leaves no flat compatibility
+        # launcher.  Per the accepted manual-repair residual, model a repaired
+        # current launcher explicitly while retaining the real old proxy and
+        # its wire behavior.
+        _assert(
+            not (install_src / "mcp_daemon.py").exists(),
+            "legacy launcher unexpectedly survived",
+        )
+        owner_env = os.environ.copy()
+        owner_env.update({
+            "LATCH_HOME": str(ROOT),
+            "LATCH_KB_DIR": str(kb_dir),
+            "LATCH_MCP_DAEMON_PROCESS": "1",
+            "LATCH_MCP_RUNTIME_KEY": requested_key,
+            "LATCH_MCP_PROTOCOL_VERSION": "1",
+            "LATCH_MCP_INITIAL_PROJECT_CWD": str(ROOT),
+            "CLAUDE_KB_IN_MAINTENANCE": "1",
+            "PYTHONPATH": str(install_src),
+            "PYTHONDONTWRITEBYTECODE": "1",
+        })
+        owner_env.pop("LATCH_MCP_PROXY_CAPABILITY_EPOCH", None)
+        replacement_owner = subprocess.Popen(
+            [
+                sys.executable,
+                str(install_src / "latch" / "mcp" / "mcp_daemon.py"),
+            ],
+            env=owner_env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
+        alias_paths = (
+            kb_dir / "mcp-daemon.json",
+            kb_dir
+            / "runtime"
+            / "mcp-runtimes"
+            / requested_key
+            / "mcp-daemon.json",
+        )
+        deadline = time.monotonic() + 15.0
+        aliases_ready = False
+        while time.monotonic() < deadline:
+            if replacement_owner.poll() is not None:
+                detail = (
+                    replacement_owner.stderr.read().decode(errors="replace")
+                    if replacement_owner.stderr is not None
+                    else ""
+                )
+                raise AssertionError(
+                    f"replacement compatibility owner exited: {detail}"
+                )
+            try:
+                payloads = [
+                    json.loads(path.read_text(encoding="utf-8"))
+                    for path in alias_paths
+                ]
+            except (OSError, ValueError):
+                time.sleep(0.05)
+                continue
+            aliases_ready = all(
+                payload.get("pid") != old_pid
+                and payload.get("runtime_key") == requested_key
+                and payload.get("compatibility") == "fresh_task_required"
+                for payload in payloads
+            )
+            if aliases_ready:
+                break
+            time.sleep(0.05)
+        _assert(aliases_ready, f"replacement aliases not ready: {alias_paths}")
 
         started = time.monotonic()
         for attempt in range(2):
@@ -789,6 +865,14 @@ def _assert_historical_proxy_requires_fresh_task(commit: str) -> None:
         if client is not None:
             client.close()
         _stop_daemon(kb_dir)
+        if replacement_owner is not None and replacement_owner.poll() is None:
+            replacement_owner.terminate()
+        if replacement_owner is not None:
+            try:
+                replacement_owner.wait(timeout=5.0)
+            except subprocess.TimeoutExpired:
+                replacement_owner.kill()
+                replacement_owner.wait(timeout=5.0)
         shutil.rmtree(install, ignore_errors=True)
 
 
@@ -842,7 +926,7 @@ def test_historical_transport_receives_fresh_task_error_cross_platform(
     else:
         env["LATCH_MCP_PROXY_CAPABILITY_EPOCH"] = str(capability_epoch)
     process = subprocess.Popen(
-        [sys.executable, str(ROOT / "src" / "mcp_daemon.py")],
+        [sys.executable, str(ROOT / "src" / "latch" / "mcp" / "mcp_daemon.py")],
         env=env,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
@@ -1005,7 +1089,7 @@ def test_prompt_embed_activity_keeps_owner_warm() -> None:
         env = os.environ.copy()
         env.update({"LATCH_KB_DIR": str(kb_dir), "PYTHONPATH": str(ROOT / "src")})
         code = (
-            "import embeddings,time\n"
+            "from latch.retrieval import embeddings; import time\n"
             "for _ in range(4):\n"
             " assert embeddings.embed_remote('keep warm', '.', timeout=1) is not None\n"
             " time.sleep(.35)\n"
