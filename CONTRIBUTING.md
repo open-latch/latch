@@ -88,6 +88,19 @@ useful for review context; do not put the tool in the commit author,
 - Prefer proof-honest docs: describe what latch does now, and keep planning or
   internal-facing artifacts out of the public tree.
 
+## Python source layout
+
+Production Python lives in the `src/latch/` package, grouped by the subsystem
+directories documented in `ARCHITECTURE.md`. Use package-qualified imports such
+as `from latch.store import paths`; do not add flat sibling imports or a second
+import name for the same module. Tests continue to put the repository's `src/`
+directory on `sys.path` and do not require an editable install.
+
+Files that an installer, hook, wrapper, or runbook executes by literal path must
+retain the uniform `__package__` guard used by the existing entrypoints. When
+porting a branch created before the package move, follow
+`tools/reorg/README.md` rather than moving or renaming files by hand.
+
 ## Safety-critical tests
 
 Run tests through pytest only:

@@ -1,0 +1,2395 @@
+[
+  {
+    "glob": "bin/*",
+    "before": "src/agents_md_sync.py",
+    "after": "src/latch/hosts/agents_md_sync.py",
+    "count": 2,
+    "label": "bin agents-md sync path"
+  },
+  {
+    "glob": "bin/*",
+    "before": "src/claude_md_sync.py",
+    "after": "src/latch/hosts/claude_md_sync.py",
+    "count": 4,
+    "label": "bin claude-md sync path"
+  },
+  {
+    "glob": "bin/*",
+    "before": "src/codex_compact.py",
+    "after": "src/latch/hosts/codex_compact.py",
+    "count": 4,
+    "label": "bin Codex compactor path"
+  },
+  {
+    "glob": "bin/*",
+    "before": "src/codex_doctor.py",
+    "after": "src/latch/hosts/codex_doctor.py",
+    "count": 2,
+    "label": "bin Codex doctor path"
+  },
+  {
+    "glob": "bin/*",
+    "before": "src/cursor_compact.py",
+    "after": "src/latch/hosts/cursor_compact.py",
+    "count": 2,
+    "label": "bin Cursor compactor path"
+  },
+  {
+    "glob": "bin/*",
+    "before": "src/cursor_doctor.py",
+    "after": "src/latch/hosts/cursor_doctor.py",
+    "count": 2,
+    "label": "bin Cursor doctor path"
+  },
+  {
+    "glob": "bin/*",
+    "before": "src/install_engine.py",
+    "after": "src/latch/install/install_engine.py",
+    "count": 8,
+    "label": "bin engine installer path"
+  },
+  {
+    "glob": "bin/*",
+    "before": "src/install_codex.py",
+    "after": "src/latch/install/install_codex.py",
+    "count": 2,
+    "label": "bin Codex installer path"
+  },
+  {
+    "glob": "bin/*",
+    "before": "src/install_cursor.py",
+    "after": "src/latch/install/install_cursor.py",
+    "count": 2,
+    "label": "bin Cursor installer path"
+  },
+  {
+    "glob": "bin/*",
+    "before": "src/install_vscode.py",
+    "after": "src/latch/install/install_vscode.py",
+    "count": 2,
+    "label": "bin VS Code installer path"
+  },
+  {
+    "glob": "bin/*",
+    "before": "src/install_claude_desktop.py",
+    "after": "src/latch/install/install_claude_desktop.py",
+    "count": 2,
+    "label": "bin Claude Desktop installer path"
+  },
+  {
+    "glob": "bin/*",
+    "before": "src/doctor.py",
+    "after": "src/latch/install/doctor.py",
+    "count": 6,
+    "label": "bin doctor path"
+  },
+  {
+    "glob": "bin/*",
+    "before": "src/quickstart.py",
+    "after": "src/latch/install/quickstart.py",
+    "count": 1,
+    "label": "bin quickstart path"
+  },
+  {
+    "glob": "bin/*",
+    "before": "src/update_latch.py",
+    "after": "src/latch/install/update_latch.py",
+    "count": 1,
+    "label": "bin update path"
+  },
+  {
+    "glob": "bin/*",
+    "before": "src/versioning.py",
+    "after": "src/latch/install/versioning.py",
+    "count": 1,
+    "label": "bin versioning path"
+  },
+  {
+    "glob": "bin/*",
+    "before": "src/unlatch.py",
+    "after": "src/latch/install/unlatch.py",
+    "count": 4,
+    "label": "bin unlatch path"
+  },
+  {
+    "glob": "bin/*",
+    "before": "src/uninstall_engine.py",
+    "after": "src/latch/install/uninstall_engine.py",
+    "count": 5,
+    "label": "bin uninstall path"
+  },
+  {
+    "glob": "bin/*",
+    "before": "src/seed.py",
+    "after": "src/latch/pipeline/seed.py",
+    "count": 1,
+    "label": "bin seed path"
+  },
+  {
+    "glob": "bin/*",
+    "before": "src/compactor.py",
+    "after": "src/latch/pipeline/compactor.py",
+    "count": 2,
+    "label": "bin compactor path"
+  },
+  {
+    "glob": "bin/*",
+    "before": "src/drift_cli.py",
+    "after": "src/latch/pipeline/drift_cli.py",
+    "count": 1,
+    "label": "bin drift path"
+  },
+  {
+    "glob": "bin/*",
+    "before": "src/evals.py",
+    "after": "src/latch/evals/evals.py",
+    "count": 2,
+    "label": "bin evals path"
+  },
+  {
+    "glob": "bin/*",
+    "before": "src/seed_report_evals.py",
+    "after": "src/latch/evals/seed_report_evals.py",
+    "count": 1,
+    "label": "bin seed report path"
+  },
+  {
+    "glob": "bin/*",
+    "before": "src/outcome_measurement_cli.py",
+    "after": "src/latch/evals/outcome_measurement_cli.py",
+    "count": 1,
+    "label": "bin outcome audit path"
+  },
+  {
+    "glob": "bin/*",
+    "before": "src/gate_report.py",
+    "after": "src/latch/gate/gate_report.py",
+    "count": 2,
+    "label": "bin gate report path"
+  },
+  {
+    "glob": "bin/*",
+    "before": "src/kb_gate_cli.py",
+    "after": "src/latch/gate/kb_gate_cli.py",
+    "count": 1,
+    "label": "bin gate CLI path"
+  },
+  {
+    "glob": "bin/*",
+    "before": "src/kb_focus_cli.py",
+    "after": "src/latch/store/kb_focus_cli.py",
+    "count": 1,
+    "label": "bin focus CLI path"
+  },
+  {
+    "glob": "bin/*",
+    "before": "src/project_direction.py",
+    "after": "src/latch/retrieval/project_direction.py",
+    "count": 2,
+    "label": "bin project direction path"
+  },
+  {
+    "glob": "bin/*",
+    "before": "src/correlator_cli.py",
+    "after": "src/latch/proof/correlator_cli.py",
+    "count": 1,
+    "label": "bin correlator path"
+  },
+  {
+    "glob": "bin/*",
+    "before": "src/no_history_demo.py",
+    "after": "src/latch/proof/no_history_demo.py",
+    "count": 1,
+    "label": "bin no-history demo path"
+  },
+  {
+    "glob": "bin/*",
+    "before": "src/proof_packet.py",
+    "after": "src/latch/proof/proof_packet.py",
+    "count": 2,
+    "label": "bin proof packet path"
+  },
+  {
+    "glob": "bin/*",
+    "before": "src/public_release_check.py",
+    "after": "src/latch/proof/public_release_check.py",
+    "count": 2,
+    "label": "bin public-release path"
+  },
+  {
+    "glob": "bin/*",
+    "before": "src/paths.py",
+    "after": "src/latch/store/paths.py",
+    "count": 2,
+    "label": "bin paths prose"
+  },
+  {
+    "glob": "bin/*",
+    "before": "src\\no_history_demo.py",
+    "after": "src\\latch\\proof\\no_history_demo.py",
+    "count": 1,
+    "label": "PowerShell no-history path"
+  },
+  {
+    "glob": "bin/*",
+    "before": "src\\quickstart.py",
+    "after": "src\\latch\\install\\quickstart.py",
+    "count": 1,
+    "label": "PowerShell quickstart path"
+  },
+  {
+    "glob": "bin/*",
+    "before": "src\\seed.py",
+    "after": "src\\latch\\pipeline\\seed.py",
+    "count": 1,
+    "label": "PowerShell seed path"
+  },
+  {
+    "glob": "bin/*",
+    "before": "src\\update_latch.py",
+    "after": "src\\latch\\install\\update_latch.py",
+    "count": 1,
+    "label": "PowerShell update path"
+  },
+  {
+    "glob": "bin/*",
+    "before": "src\\versioning.py",
+    "after": "src\\latch\\install\\versioning.py",
+    "count": 1,
+    "label": "PowerShell versioning path"
+  },
+  {
+    "path": "bin/run_mcp_with_stderr.py",
+    "before": "KB_HOME / \"src\" / \"mcp_server.py\"",
+    "after": "KB_HOME / \"src\" / \"latch\" / \"mcp\" / \"mcp_server.py\"",
+    "count": 1,
+    "label": "MCP stderr wrapper path"
+  },
+  {
+    "path": "install.sh",
+    "before": "$app/src/quickstart.py",
+    "after": "$app/src/latch/install/quickstart.py",
+    "count": 1,
+    "label": "bootstrap quickstart validation"
+  },
+  {
+    "path": "install.sh",
+    "before": "$INSTALL_DIR/src/quickstart.py",
+    "after": "$INSTALL_DIR/src/latch/install/quickstart.py",
+    "count": 1,
+    "label": "bootstrap quickstart invocation"
+  },
+  {
+    "path": "install.ps1",
+    "before": "src\\quickstart.py",
+    "after": "src\\latch\\install\\quickstart.py",
+    "count": 2,
+    "label": "PowerShell bootstrap quickstart paths"
+  },
+  {
+    "path": "install.sh",
+    "before": "from doctor import OK, _VEC_PROBE, _run_probe",
+    "after": "from latch.install.doctor import OK, _VEC_PROBE, _run_probe",
+    "count": 1,
+    "label": "bootstrap sqlite probe import"
+  },
+  {
+    "path": "install.ps1",
+    "before": "from doctor import OK, _VEC_PROBE, _run_probe",
+    "after": "from latch.install.doctor import OK, _VEC_PROBE, _run_probe",
+    "count": 1,
+    "label": "PowerShell bootstrap sqlite probe import"
+  },
+  {
+    "path": "settings_snippet.json",
+    "before": "/src/hooks/",
+    "after": "/src/latch/hooks/",
+    "count": 6,
+    "label": "Claude hook template paths"
+  },
+  {
+    "glob": "commands/*",
+    "before": "src/budget.py",
+    "after": "src/latch/gate/budget.py",
+    "count": 2,
+    "label": "command budget paths"
+  },
+  {
+    "glob": "commands/*",
+    "before": "src/maintenance.py",
+    "after": "src/latch/pipeline/maintenance.py",
+    "count": 3,
+    "label": "command maintenance paths"
+  },
+  {
+    "glob": "commands/*",
+    "before": "src/compactor.py",
+    "after": "src/latch/pipeline/compactor.py",
+    "count": 1,
+    "label": "command compactor prose"
+  },
+  {
+    "glob": "cursor_skills/*/SKILL.md",
+    "before": "src/budget.py",
+    "after": "src/latch/gate/budget.py",
+    "count": 1,
+    "label": "Cursor skill budget path"
+  },
+  {
+    "glob": "cursor_skills/*/SKILL.md",
+    "before": "src/maintenance.py",
+    "after": "src/latch/pipeline/maintenance.py",
+    "count": 3,
+    "label": "Cursor skill maintenance paths"
+  },
+  {
+    "glob": ".githooks/*",
+    "before": "src/public_release_check.py",
+    "after": "src/latch/proof/public_release_check.py",
+    "count": 3,
+    "label": "Git-hook release-check paths"
+  },
+  {
+    "glob": ".agents/skills/source-command-*/SKILL.md",
+    "before": "if [ -f \"$candidate/src/mcp_server.py\" ] && [ -d \"$candidate/commands\" ]; then",
+    "after": "if { [ -f \"$candidate/src/latch/mcp/mcp_server.py\" ] || [ -f \"$candidate/src/mcp_server.py\" ]; } && [ -d \"$candidate/commands\" ]; then",
+    "count": 8,
+    "label": "Codex skill checkout discovery dual tolerance"
+  },
+  {
+    "glob": ".agents/skills/source-command-*/SKILL.md",
+    "before": "if [ -z \"$latch_home\" ] || [ ! -f \"$latch_home/src/mcp_server.py\" ]; then",
+    "after": "if [ -z \"$latch_home\" ] || { [ ! -f \"$latch_home/src/latch/mcp/mcp_server.py\" ] && [ ! -f \"$latch_home/src/mcp_server.py\" ]; }; then",
+    "count": 7,
+    "label": "Codex skill final checkout validation dual tolerance"
+  },
+  {
+    "path": ".agents/skills/source-command-latch-compact/SKILL.md",
+    "before": "src/compactor.py",
+    "after": "src/latch/pipeline/compactor.py",
+    "count": 1,
+    "label": "Codex compact skill prose"
+  },
+  {
+    "path": ".github/review-panel/policy.json",
+    "before": "src/seed.py",
+    "after": "src/latch/pipeline/seed.py",
+    "count": 2,
+    "label": "mechanical path update in .github/review-panel/policy.json"
+  },
+  {
+    "path": ".github/review-panel/policy.json",
+    "before": "src/mcp_server.py",
+    "after": "src/latch/mcp/mcp_server.py",
+    "count": 1,
+    "label": "mechanical path update in .github/review-panel/policy.json"
+  },
+  {
+    "path": ".github/review-panel/policy.json",
+    "before": "src/managed_doc_sync.py",
+    "after": "src/latch/hosts/managed_doc_sync.py",
+    "count": 1,
+    "label": "mechanical path update in .github/review-panel/policy.json"
+  },
+  {
+    "path": ".github/review-panel/policy.json",
+    "before": "src/agents_md_sync.py",
+    "after": "src/latch/hosts/agents_md_sync.py",
+    "count": 1,
+    "label": "mechanical path update in .github/review-panel/policy.json"
+  },
+  {
+    "path": ".github/review-panel/policy.json",
+    "before": "src/claude_md_sync.py",
+    "after": "src/latch/hosts/claude_md_sync.py",
+    "count": 1,
+    "label": "mechanical path update in .github/review-panel/policy.json"
+  },
+  {
+    "path": ".github/review-panel/policy.json",
+    "before": "src/cursor_rules_sync.py",
+    "after": "src/latch/hosts/cursor_rules_sync.py",
+    "count": 1,
+    "label": "mechanical path update in .github/review-panel/policy.json"
+  },
+  {
+    "path": ".github/review-panel/policy.json",
+    "before": "src/doctor.py",
+    "after": "src/latch/install/doctor.py",
+    "count": 1,
+    "label": "mechanical path update in .github/review-panel/policy.json"
+  },
+  {
+    "path": ".github/review-panel/policy.json",
+    "before": "src/quickstart.py",
+    "after": "src/latch/install/quickstart.py",
+    "count": 1,
+    "label": "mechanical path update in .github/review-panel/policy.json"
+  },
+  {
+    "path": ".github/review-panel/policy.json",
+    "before": "src/seed_report_evals.py",
+    "after": "src/latch/evals/seed_report_evals.py",
+    "count": 1,
+    "label": "mechanical path update in .github/review-panel/policy.json"
+  },
+  {
+    "path": ".github/workflows/mcp-runtime-lifecycle.yml",
+    "before": "src/paths.py",
+    "after": "src/latch/store/paths.py",
+    "count": 1,
+    "label": "mechanical path update in .github/workflows/mcp-runtime-lifecycle.yml"
+  },
+  {
+    "path": ".github/workflows/mcp-runtime-lifecycle.yml",
+    "before": "src/embeddings.py",
+    "after": "src/latch/retrieval/embeddings.py",
+    "count": 1,
+    "label": "mechanical path update in .github/workflows/mcp-runtime-lifecycle.yml"
+  },
+  {
+    "path": ".github/workflows/mcp-runtime-lifecycle.yml",
+    "before": "src/windows_stdio.py",
+    "after": "src/latch/mcp/windows_stdio.py",
+    "count": 1,
+    "label": "mechanical path update in .github/workflows/mcp-runtime-lifecycle.yml"
+  },
+  {
+    "path": ".github/workflows/mcp-runtime-lifecycle.yml",
+    "before": "src/codex_session.py",
+    "after": "src/latch/hosts/codex_session.py",
+    "count": 1,
+    "label": "mechanical path update in .github/workflows/mcp-runtime-lifecycle.yml"
+  },
+  {
+    "path": ".github/workflows/mcp-runtime-lifecycle.yml",
+    "before": "src/cursor_doctor.py",
+    "after": "src/latch/hosts/cursor_doctor.py",
+    "count": 1,
+    "label": "mechanical path update in .github/workflows/mcp-runtime-lifecycle.yml"
+  },
+  {
+    "path": ".github/workflows/mcp-runtime-lifecycle.yml",
+    "before": "src/cursor_wiring.py",
+    "after": "src/latch/hosts/cursor_wiring.py",
+    "count": 1,
+    "label": "mechanical path update in .github/workflows/mcp-runtime-lifecycle.yml"
+  },
+  {
+    "path": ".github/workflows/mcp-runtime-lifecycle.yml",
+    "before": "src/install_cursor.py",
+    "after": "src/latch/install/install_cursor.py",
+    "count": 1,
+    "label": "mechanical path update in .github/workflows/mcp-runtime-lifecycle.yml"
+  },
+  {
+    "path": ".github/workflows/mcp-runtime-lifecycle.yml",
+    "before": "src/doctor.py",
+    "after": "src/latch/install/doctor.py",
+    "count": 1,
+    "label": "mechanical path update in .github/workflows/mcp-runtime-lifecycle.yml"
+  },
+  {
+    "path": ".github/workflows/mcp-runtime-lifecycle.yml",
+    "before": "src/hooks/_common.py",
+    "after": "src/latch/hooks/_common.py",
+    "count": 1,
+    "label": "mechanical path update in .github/workflows/mcp-runtime-lifecycle.yml"
+  },
+  {
+    "path": ".github/workflows/mcp-runtime-lifecycle.yml",
+    "before": "src/hooks/user_prompt_submit.py",
+    "after": "src/latch/hooks/user_prompt_submit.py",
+    "count": 1,
+    "label": "mechanical path update in .github/workflows/mcp-runtime-lifecycle.yml"
+  },
+  {
+    "path": ".github/workflows/mcp-runtime-lifecycle.yml",
+    "before": "src/hooks/cursor_post_tool_use.py",
+    "after": "src/latch/hooks/cursor_post_tool_use.py",
+    "count": 1,
+    "label": "mechanical path update in .github/workflows/mcp-runtime-lifecycle.yml"
+  },
+  {
+    "path": ".github/workflows/release.yml",
+    "before": "src/versioning.py",
+    "after": "src/latch/install/versioning.py",
+    "count": 1,
+    "label": "mechanical path update in .github/workflows/release.yml"
+  },
+  {
+    "path": "ARCHITECTURE.md",
+    "before": "src/selfheal.py",
+    "after": "src/latch/pipeline/selfheal.py",
+    "count": 2,
+    "label": "mechanical path update in ARCHITECTURE.md"
+  },
+  {
+    "path": "ARCHITECTURE.md",
+    "before": "src/mcp_server.py",
+    "after": "src/latch/mcp/mcp_server.py",
+    "count": 4,
+    "label": "mechanical path update in ARCHITECTURE.md"
+  },
+  {
+    "path": "ARCHITECTURE.md",
+    "before": "src/managed_doc_sync.py",
+    "after": "src/latch/hosts/managed_doc_sync.py",
+    "count": 1,
+    "label": "mechanical path update in ARCHITECTURE.md"
+  },
+  {
+    "path": "ARCHITECTURE.md",
+    "before": "src/claude_md_sync.py",
+    "after": "src/latch/hosts/claude_md_sync.py",
+    "count": 1,
+    "label": "mechanical path update in ARCHITECTURE.md"
+  },
+  {
+    "path": "ARCHITECTURE.md",
+    "before": "src/cursor_doctor.py",
+    "after": "src/latch/hosts/cursor_doctor.py",
+    "count": 1,
+    "label": "mechanical path update in ARCHITECTURE.md"
+  },
+  {
+    "path": "ARCHITECTURE.md",
+    "before": "src/install_codex.py",
+    "after": "src/latch/install/install_codex.py",
+    "count": 1,
+    "label": "mechanical path update in ARCHITECTURE.md"
+  },
+  {
+    "path": "ARCHITECTURE.md",
+    "before": "src/install_cursor.py",
+    "after": "src/latch/install/install_cursor.py",
+    "count": 1,
+    "label": "mechanical path update in ARCHITECTURE.md"
+  },
+  {
+    "path": "ARCHITECTURE.md",
+    "before": "src/hooks/codex_session_start.py",
+    "after": "src/latch/hooks/codex_session_start.py",
+    "count": 1,
+    "label": "mechanical path update in ARCHITECTURE.md"
+  },
+  {
+    "path": "docs/agent-contract-reference.md",
+    "before": "src/agents_md_sync.py",
+    "after": "src/latch/hosts/agents_md_sync.py",
+    "count": 1,
+    "label": "mechanical path update in docs/agent-contract-reference.md"
+  },
+  {
+    "path": "docs/agent-contract-reference.md",
+    "before": "src/claude_md_sync.py",
+    "after": "src/latch/hosts/claude_md_sync.py",
+    "count": 1,
+    "label": "mechanical path update in docs/agent-contract-reference.md"
+  },
+  {
+    "path": "docs/mcp_resource_architecture.md",
+    "before": "src/mcp_server.py",
+    "after": "src/latch/mcp/mcp_server.py",
+    "count": 3,
+    "label": "mechanical path update in docs/mcp_resource_architecture.md"
+  },
+  {
+    "path": "docs/v4_citation_metric.md",
+    "before": "src/v4_citation_rate.py",
+    "after": "src/latch/evals/v4_citation_rate.py",
+    "count": 1,
+    "label": "mechanical path update in docs/v4_citation_metric.md"
+  },
+  {
+    "path": "runbooks/kb_durability.md",
+    "before": "src/vault_backup.py",
+    "after": "src/latch/store/vault_backup.py",
+    "count": 5,
+    "label": "mechanical path update in runbooks/kb_durability.md"
+  },
+  {
+    "path": ".agents/skills/source-command-latch-budget-approve/SKILL.md",
+    "before": "fi\npython \"$latch_home/src/budget.py\" approve \"$(pwd)\"\n```\n",
+    "after": "fi\nbudget_script=\"$latch_home/src/latch/gate/budget.py\"\nif [ ! -f \"$budget_script\" ]; then\n  budget_script=\"$latch_home/src/budget.py\"\nfi\npython \"$budget_script\" approve \"$(pwd)\"\n```\n",
+    "count": 1,
+    "label": "enumerated reorg patch in .agents/skills/source-command-latch-budget-approve/SKILL.md"
+  },
+  {
+    "path": ".agents/skills/source-command-latch-budget-approve/SKILL.md",
+    "before": "```bash\npython \"$latch_home/src/budget.py\" status \"$(pwd)\"\n```\n",
+    "after": "```bash\nbudget_script=\"$latch_home/src/latch/gate/budget.py\"\nif [ ! -f \"$budget_script\" ]; then\n  budget_script=\"$latch_home/src/budget.py\"\nfi\npython \"$budget_script\" status \"$(pwd)\"\n```\n",
+    "count": 1,
+    "label": "enumerated reorg patch in .agents/skills/source-command-latch-budget-approve/SKILL.md"
+  },
+  {
+    "path": ".agents/skills/source-command-latch-decay/SKILL.md",
+    "before": "fi\npython \"$latch_home/src/maintenance.py\" weekly \"$(pwd)\"\n```\n",
+    "after": "fi\nmaintenance_script=\"$latch_home/src/latch/pipeline/maintenance.py\"\nif [ ! -f \"$maintenance_script\" ]; then\n  maintenance_script=\"$latch_home/src/maintenance.py\"\nfi\npython \"$maintenance_script\" weekly \"$(pwd)\"\n```\n",
+    "count": 1,
+    "label": "enumerated reorg patch in .agents/skills/source-command-latch-decay/SKILL.md"
+  },
+  {
+    "path": ".agents/skills/source-command-latch-heal/SKILL.md",
+    "before": "fi\npython \"$latch_home/src/maintenance.py\" nightly \"$(pwd)\"\n```\n",
+    "after": "fi\nmaintenance_script=\"$latch_home/src/latch/pipeline/maintenance.py\"\nif [ ! -f \"$maintenance_script\" ]; then\n  maintenance_script=\"$latch_home/src/maintenance.py\"\nfi\npython \"$maintenance_script\" nightly \"$(pwd)\"\n```\n",
+    "count": 1,
+    "label": "enumerated reorg patch in .agents/skills/source-command-latch-heal/SKILL.md"
+  },
+  {
+    "path": ".agents/skills/source-command-latch-tree/SKILL.md",
+    "before": "fi\npython \"$latch_home/src/maintenance.py\" tree \"$(pwd)\"\n```\n",
+    "after": "fi\nmaintenance_script=\"$latch_home/src/latch/pipeline/maintenance.py\"\nif [ ! -f \"$maintenance_script\" ]; then\n  maintenance_script=\"$latch_home/src/maintenance.py\"\nfi\npython \"$maintenance_script\" tree \"$(pwd)\"\n```\n",
+    "count": 1,
+    "label": "enumerated reorg patch in .agents/skills/source-command-latch-tree/SKILL.md"
+  },
+  {
+    "path": ".github/review-panel/policy.json",
+    "before": "    \"src/latch/mcp/mcp_server.py\",\n    \"src/*_sync.py\",\n    \"src/install_*.py\",\n    \"src/uninstall*.py\",\n    \"tests/seed_report_review_fixtures.py\"\n",
+    "after": "    \"src/latch/mcp/mcp_server.py\",\n    \"src/latch/hosts/*_sync.py\",\n    \"src/latch/install/install_*.py\",\n    \"src/latch/install/uninstall*.py\",\n    \"tests/seed_report_review_fixtures.py\"\n",
+    "count": 1,
+    "label": "enumerated reorg patch in .github/review-panel/policy.json"
+  },
+  {
+    "path": ".github/scripts/agent_contract_footprint.py",
+    "before": "\ndef load_snapshot(read_text: Callable[[str], str]) -> Snapshot:\n    managed = read_text(\"src/managed_doc_sync.py\")\n    claude = read_text(\"src/claude_md_sync.py\")\n    agents = read_text(\"src/agents_md_sync.py\")\n    return Snapshot(\n",
+    "after": "\ndef _read_first(read_text: Callable[[str], str], *paths: str) -> str:\n    last_error: OSError | ValueError | None = None\n    for path in paths:\n        try:\n            return read_text(path)\n        except (OSError, ValueError) as exc:\n            last_error = exc\n    assert last_error is not None\n    raise last_error\n\n\ndef load_snapshot(read_text: Callable[[str], str]) -> Snapshot:\n    managed = _read_first(\n        read_text, \"src/latch/hosts/managed_doc_sync.py\", \"src/managed_doc_sync.py\"\n    )\n    claude = _read_first(\n        read_text, \"src/latch/hosts/claude_md_sync.py\", \"src/claude_md_sync.py\"\n    )\n    agents = _read_first(\n        read_text, \"src/latch/hosts/agents_md_sync.py\", \"src/agents_md_sync.py\"\n    )\n    return Snapshot(\n",
+    "count": 1,
+    "label": "enumerated reorg patch in .github/scripts/agent_contract_footprint.py"
+  },
+  {
+    "path": ".github/workflows/mcp-runtime-lifecycle.yml",
+    "before": "    paths:\n      - \"src/mcp_*.py\"\n      - \"src/latch/install/install_cursor.py\"\n",
+    "after": "    paths:\n      - \"src/latch/mcp/mcp_*.py\"\n      - \"src/latch/install/install_cursor.py\"\n",
+    "count": 1,
+    "label": "enumerated reorg patch in .github/workflows/mcp-runtime-lifecycle.yml"
+  },
+  {
+    "path": "ARCHITECTURE.md",
+    "before": "├── requirements.txt\n├── settings_snippet.json     # template for ~/.claude/settings.json\n├── claude_md_snippet.md      # template block for each project's CLAUDE.md\n├── src/\n│   ├── schema.sql            # SQLite schema (nodes, edges, sessions, FTS)\n│   ├── paths.py              # pinned/shared KB selection + legacy CWD fallback\n│   ├── db.py                 # SQLite helpers\n│   ├── embeddings.py         # local ONNX MiniLM embedder (vendored all-MiniLM-L6-v2)\n│   ├── search.py             # hybrid FTS + cosine retrieval\n│   ├── mcp_server.py         # MCP tools: kb_search/get/recent/insert/...\n│   ├── mcp_proxy.py          # lightweight per-host stdio compatibility process\n│   ├── mcp_daemon.py         # shared multi-connection MCP/model owner\n│   ├── mcp_broker.py         # discovery, election, leases, and bounded lifecycle\n│   ├── compactor.py          # session -> KB nodes via Claude or Codex backend\n│   ├── gate.py               # decision-chain assembly + classifier (kb_gate)\n│   ├── heal.py               # on-insert + nightly contradiction healer\n│   ├── maintenance.py        # heal / decay / promote / tree\n│   ├── tree.py               # RAPTOR-style summary clustering\n│   ├── budget.py             # daily LLM-call budget\n│   ├── doctor.py             # cross-platform install verifier (latch_doctor)\n│   ├── install_codex.py      # Codex MCP config + AGENTS.md installer\n│   ├── install_cursor.py     # Cursor MCP + rules + commands + AGENTS.md installer\n│   ├── agents_md_sync.py     # managed AGENTS.md region sync for Codex\n│   ├── cursor_rules_sync.py  # managed Cursor .mdc activation rule sync\n│   ├── claude_md_sync.py     # managed CLAUDE.md region sync for Claude Code\n│   ├── managed_doc_sync.py   # shared managed-region mechanics\n│   └── hooks/\n│       ├── _common.py\n│       ├── stop.py           # turn counter + auto-compact every 5 turns\n│       ├── session_end.py    # final compact + promote to canonical\n│       ├── session_start.py  # silent managed-document repair\n│       └── user_prompt_submit.py  # bounded prompt context surfacing\n├── bin/                      # wrappers: slash commands, installers, latch_doctor\n",
+    "after": "├── requirements.txt\n├── pyproject.toml            # src-layout editable-install metadata\n├── tools/reorg/              # deterministic flat-src migration codemod\n├── settings_snippet.json     # template for ~/.claude/settings.json\n├── claude_md_snippet.md      # template block for each project's CLAUDE.md\n├── src/\n│   └── latch/\n│       ├── store/            # schema, SQLite, vaults, lifecycle, workstreams\n│       ├── retrieval/        # embeddings, search, feeders, tree, authority\n│       ├── gate/             # decision gate, reports, budget, verification\n│       ├── pipeline/         # compaction, heal, maintenance, seed, backends\n│       ├── mcp/              # server, proxy, daemon, broker, runtime, stdio\n│       ├── hosts/            # Claude/Codex/Cursor sync, hooks, sessions, wiring\n│       ├── install/          # installers, doctors, quickstart, update, versioning\n│       ├── evals/            # evaluations and outcome measurement\n│       ├── proof/            # proof packet, release checks, demos, correlation\n│       ├── common/           # shared locking and logging\n│       └── hooks/            # literal-path lifecycle entrypoints\n├── bin/                      # wrappers: slash commands, installers, latch_doctor\n",
+    "count": 1,
+    "label": "enumerated reorg patch in ARCHITECTURE.md"
+  },
+  {
+    "path": "WIRING_VERSION",
+    "before": "6\n",
+    "after": "7\n",
+    "count": 1,
+    "label": "enumerated reorg patch in WIRING_VERSION"
+  },
+  {
+    "path": "bin/install_commands.ps1",
+    "before": "    if ($normalized.Contains($KbHome)) { return $true }\n    return ($normalized -match '/bin/(run_kb_gate|run_latch_gate|latch_baseline|unlatch|latch_gate_report|run_compact_now|run_latch_compact_now|run_kb_focus)\\.sh|/bin/latch_direction\\.sh|/src/(budget|maintenance)\\.py|kb_profile_(active|bind)|mission-control verification profile|trust-and-go verification profile')\n}\n",
+    "after": "    if ($normalized.Contains($KbHome)) { return $true }\n    return ($normalized -match '/bin/(run_kb_gate|run_latch_gate|latch_baseline|unlatch|latch_gate_report|run_compact_now|run_latch_compact_now|run_kb_focus)\\.sh|/bin/latch_direction\\.sh|/src/(budget|maintenance|latch/gate/budget|latch/pipeline/maintenance)\\.py|kb_profile_(active|bind)|mission-control verification profile|trust-and-go verification profile')\n}\n",
+    "count": 1,
+    "label": "enumerated reorg patch in bin/install_commands.ps1"
+  },
+  {
+    "path": "bin/install_commands.sh",
+    "before": "  grep -Fq \"$KB_HOME\" \"$file\" && return 0\n  grep -Eq '/bin/(run_kb_gate|run_latch_gate|latch_baseline|unlatch|latch_gate_report|run_compact_now|run_latch_compact_now|run_kb_focus)\\.sh|/bin/latch_direction\\.sh|/src/(budget|maintenance)\\.py|kb_profile_(active|bind)|mission-control verification profile|trust-and-go verification profile' \"$file\"\n}\n",
+    "after": "  grep -Fq \"$KB_HOME\" \"$file\" && return 0\n  grep -Eq '/bin/(run_kb_gate|run_latch_gate|latch_baseline|unlatch|latch_gate_report|run_compact_now|run_latch_compact_now|run_kb_focus)\\.sh|/bin/latch_direction\\.sh|/src/(budget|maintenance|latch/gate/budget|latch/pipeline/maintenance)\\.py|kb_profile_(active|bind)|mission-control verification profile|trust-and-go verification profile' \"$file\"\n}\n",
+    "count": 1,
+    "label": "enumerated reorg patch in bin/install_commands.sh"
+  },
+  {
+    "path": "docs/v2_rejection_rubric.md",
+    "before": "\nThe current detector (`src/gate_report.py:448`) matches\n`\"rejected\" | \"discarded\" | \"ruled\"` in the body. This rubric is **not** scoped to\nthat keyword set: a rejection phrased \"we are not going to do X because Y\" is genuine\nunder criteria 1–4 and invisible to `:448`. Candidate generation must therefore widen\nbeyond those three words, and the recall gap between the two is reported, not hidden.\n",
+    "after": "\nThe retired detector documented by `scripts/backfill_rejected_paths.py:75` matched\n`\"rejected\" | \"discarded\" | \"ruled\"` in the body. This rubric is **not** scoped to\nthat keyword set: a rejection phrased \"we are not going to do X because Y\" is genuine\nunder criteria 1–4 and invisible to that detector. Candidate generation must therefore widen\nbeyond those three words, and the recall gap between the two is reported, not hidden.\n",
+    "count": 1,
+    "label": "enumerated reorg patch in docs/v2_rejection_rubric.md"
+  },
+  {
+    "path": "runbooks/windows_incident_hardening_handoff.md",
+    "before": "$Vault = (& .\\.venv\\Scripts\\python.exe -c `\n  \"import sys; sys.path.insert(0, 'src'); import paths; print(paths.project_dir())\").Trim()\n$Vault | Set-Content (Join-Path $Evidence \"vault-path.txt\")\n",
+    "after": "$Vault = (& .\\.venv\\Scripts\\python.exe -c `\n  \"import sys; sys.path.insert(0, 'src'); from latch.store import paths; print(paths.project_dir())\").Trim()\n$Vault | Set-Content (Join-Path $Evidence \"vault-path.txt\")\n",
+    "count": 1,
+    "label": "enumerated reorg patch in runbooks/windows_incident_hardening_handoff.md"
+  },
+  {
+    "path": "src/latch/hosts/codex_doctor.py",
+    "before": "\"src\" / \"mcp_server.py\"",
+    "after": "\"src\" / \"latch\" / \"mcp\" / \"mcp_server.py\"",
+    "count": 1,
+    "label": "mechanical path update in src/latch/hosts/codex_doctor.py"
+  },
+  {
+    "path": "src/latch/hosts/codex_doctor.py",
+    "before": "\"src\" / \"hooks\" / \"codex_session_start.py\"",
+    "after": "\"src\" / \"latch\" / \"hooks\" / \"codex_session_start.py\"",
+    "count": 1,
+    "label": "mechanical path update in src/latch/hosts/codex_doctor.py"
+  },
+  {
+    "path": "src/latch/hosts/codex_wiring.py",
+    "before": "\"src\" / \"mcp_server.py\"",
+    "after": "\"src\" / \"latch\" / \"mcp\" / \"mcp_server.py\"",
+    "count": 1,
+    "label": "mechanical path update in src/latch/hosts/codex_wiring.py"
+  },
+  {
+    "path": "src/latch/hosts/codex_wiring.py",
+    "before": "\"src\" / \"install_codex.py\"",
+    "after": "\"src\" / \"latch\" / \"install\" / \"install_codex.py\"",
+    "count": 1,
+    "label": "mechanical path update in src/latch/hosts/codex_wiring.py"
+  },
+  {
+    "path": "src/latch/hosts/codex_wiring.py",
+    "before": "'src' / 'install_codex.py'",
+    "after": "'src' / 'latch' / 'install' / 'install_codex.py'",
+    "count": 1,
+    "label": "mechanical path update in src/latch/hosts/codex_wiring.py"
+  },
+  {
+    "path": "src/latch/hosts/codex_wiring.py",
+    "before": "\"src\" / \"hooks\" / \"codex_session_start.py\"",
+    "after": "\"src\" / \"latch\" / \"hooks\" / \"codex_session_start.py\"",
+    "count": 1,
+    "label": "mechanical path update in src/latch/hosts/codex_wiring.py"
+  },
+  {
+    "path": "src/latch/hosts/cursor_doctor.py",
+    "before": "\"src\" / \"mcp_server.py\"",
+    "after": "\"src\" / \"latch\" / \"mcp\" / \"mcp_server.py\"",
+    "count": 1,
+    "label": "mechanical path update in src/latch/hosts/cursor_doctor.py"
+  },
+  {
+    "path": "src/latch/hosts/cursor_doctor.py",
+    "before": "\"src\" / \"hooks\" / \"cursor_session_start.py\"",
+    "after": "\"src\" / \"latch\" / \"hooks\" / \"cursor_session_start.py\"",
+    "count": 1,
+    "label": "mechanical path update in src/latch/hosts/cursor_doctor.py"
+  },
+  {
+    "path": "src/latch/hosts/cursor_doctor.py",
+    "before": "\"src\" / \"hooks\" / \"cursor_before_submit.py\"",
+    "after": "\"src\" / \"latch\" / \"hooks\" / \"cursor_before_submit.py\"",
+    "count": 1,
+    "label": "mechanical path update in src/latch/hosts/cursor_doctor.py"
+  },
+  {
+    "path": "src/latch/hosts/cursor_doctor.py",
+    "before": "\"src\" / \"hooks\" / \"cursor_pre_tool_use.py\"",
+    "after": "\"src\" / \"latch\" / \"hooks\" / \"cursor_pre_tool_use.py\"",
+    "count": 1,
+    "label": "mechanical path update in src/latch/hosts/cursor_doctor.py"
+  },
+  {
+    "path": "src/latch/hosts/cursor_doctor.py",
+    "before": "\"src\" / \"hooks\" / \"cursor_post_tool_use.py\"",
+    "after": "\"src\" / \"latch\" / \"hooks\" / \"cursor_post_tool_use.py\"",
+    "count": 1,
+    "label": "mechanical path update in src/latch/hosts/cursor_doctor.py"
+  },
+  {
+    "path": "src/latch/hosts/cursor_wiring.py",
+    "before": "'src' / 'install_cursor.py'",
+    "after": "'src' / 'latch' / 'install' / 'install_cursor.py'",
+    "count": 1,
+    "label": "mechanical path update in src/latch/hosts/cursor_wiring.py"
+  },
+  {
+    "path": "src/latch/hosts/cursor_wiring.py",
+    "before": "\"src\" / \"hooks\" / \"cursor_session_start.py\"",
+    "after": "\"src\" / \"latch\" / \"hooks\" / \"cursor_session_start.py\"",
+    "count": 1,
+    "label": "mechanical path update in src/latch/hosts/cursor_wiring.py"
+  },
+  {
+    "path": "src/latch/hosts/cursor_wiring.py",
+    "before": "\"src\" / \"hooks\" / \"cursor_before_submit.py\"",
+    "after": "\"src\" / \"latch\" / \"hooks\" / \"cursor_before_submit.py\"",
+    "count": 1,
+    "label": "mechanical path update in src/latch/hosts/cursor_wiring.py"
+  },
+  {
+    "path": "src/latch/hosts/cursor_wiring.py",
+    "before": "\"src\" / \"hooks\" / \"cursor_pre_tool_use.py\"",
+    "after": "\"src\" / \"latch\" / \"hooks\" / \"cursor_pre_tool_use.py\"",
+    "count": 1,
+    "label": "mechanical path update in src/latch/hosts/cursor_wiring.py"
+  },
+  {
+    "path": "src/latch/hosts/cursor_wiring.py",
+    "before": "\"src\" / \"hooks\" / \"cursor_post_tool_use.py\"",
+    "after": "\"src\" / \"latch\" / \"hooks\" / \"cursor_post_tool_use.py\"",
+    "count": 1,
+    "label": "mechanical path update in src/latch/hosts/cursor_wiring.py"
+  },
+  {
+    "path": "src/latch/install/install_claude_desktop.py",
+    "before": "\"src\" / \"mcp_server.py\"",
+    "after": "\"src\" / \"latch\" / \"mcp\" / \"mcp_server.py\"",
+    "count": 1,
+    "label": "mechanical path update in src/latch/install/install_claude_desktop.py"
+  },
+  {
+    "path": "src/latch/install/install_codex.py",
+    "before": "\"src\" / \"mcp_server.py\"",
+    "after": "\"src\" / \"latch\" / \"mcp\" / \"mcp_server.py\"",
+    "count": 1,
+    "label": "mechanical path update in src/latch/install/install_codex.py"
+  },
+  {
+    "path": "src/latch/install/install_codex.py",
+    "before": "\"src\" / \"hooks\" / \"codex_session_start.py\"",
+    "after": "\"src\" / \"latch\" / \"hooks\" / \"codex_session_start.py\"",
+    "count": 1,
+    "label": "mechanical path update in src/latch/install/install_codex.py"
+  },
+  {
+    "path": "src/latch/install/install_cursor.py",
+    "before": "src/budget.py",
+    "after": "src/latch/gate/budget.py",
+    "count": 2,
+    "label": "mechanical path update in src/latch/install/install_cursor.py"
+  },
+  {
+    "path": "src/latch/install/install_cursor.py",
+    "before": "src/maintenance.py",
+    "after": "src/latch/pipeline/maintenance.py",
+    "count": 4,
+    "label": "mechanical path update in src/latch/install/install_cursor.py"
+  },
+  {
+    "path": "src/latch/install/install_cursor.py",
+    "before": "\"src\" / \"mcp_server.py\"",
+    "after": "\"src\" / \"latch\" / \"mcp\" / \"mcp_server.py\"",
+    "count": 1,
+    "label": "mechanical path update in src/latch/install/install_cursor.py"
+  },
+  {
+    "path": "src/latch/install/install_cursor.py",
+    "before": "\"src\" / \"hooks\" / \"cursor_session_start.py\"",
+    "after": "\"src\" / \"latch\" / \"hooks\" / \"cursor_session_start.py\"",
+    "count": 2,
+    "label": "mechanical path update in src/latch/install/install_cursor.py"
+  },
+  {
+    "path": "src/latch/install/install_cursor.py",
+    "before": "\"src\" / \"hooks\" / \"cursor_before_submit.py\"",
+    "after": "\"src\" / \"latch\" / \"hooks\" / \"cursor_before_submit.py\"",
+    "count": 2,
+    "label": "mechanical path update in src/latch/install/install_cursor.py"
+  },
+  {
+    "path": "src/latch/install/install_cursor.py",
+    "before": "\"src\" / \"hooks\" / \"cursor_pre_tool_use.py\"",
+    "after": "\"src\" / \"latch\" / \"hooks\" / \"cursor_pre_tool_use.py\"",
+    "count": 2,
+    "label": "mechanical path update in src/latch/install/install_cursor.py"
+  },
+  {
+    "path": "src/latch/install/install_cursor.py",
+    "before": "\"src\" / \"hooks\" / \"cursor_post_tool_use.py\"",
+    "after": "\"src\" / \"latch\" / \"hooks\" / \"cursor_post_tool_use.py\"",
+    "count": 2,
+    "label": "mechanical path update in src/latch/install/install_cursor.py"
+  },
+  {
+    "path": "src/latch/install/install_engine.py",
+    "before": "\"src\" / \"seed.py\"",
+    "after": "\"src\" / \"latch\" / \"pipeline\" / \"seed.py\"",
+    "count": 1,
+    "label": "mechanical path update in src/latch/install/install_engine.py"
+  },
+  {
+    "path": "src/latch/install/install_engine.py",
+    "before": "\"src\" / \"mcp_server.py\"",
+    "after": "\"src\" / \"latch\" / \"mcp\" / \"mcp_server.py\"",
+    "count": 1,
+    "label": "mechanical path update in src/latch/install/install_engine.py"
+  },
+  {
+    "path": "src/latch/install/install_vscode.py",
+    "before": "\"src\" / \"mcp_server.py\"",
+    "after": "\"src\" / \"latch\" / \"mcp\" / \"mcp_server.py\"",
+    "count": 1,
+    "label": "mechanical path update in src/latch/install/install_vscode.py"
+  },
+  {
+    "path": "src/latch/proof/public_release_check.py",
+    "before": "src/public_release_check.py",
+    "after": "src/latch/proof/public_release_check.py",
+    "count": 1,
+    "label": "mechanical path update in src/latch/proof/public_release_check.py"
+  },
+  {
+    "path": "src/latch/store/paths.py",
+    "before": "\"src\" / \"schema.sql\"",
+    "after": "\"src\" / \"latch\" / \"store\" / \"schema.sql\"",
+    "count": 1,
+    "label": "mechanical path update in src/latch/store/paths.py"
+  },
+  {
+    "path": "src/latch/evals/outcome_measurement_runner.py",
+    "before": "Path(__file__).resolve().parent.parent",
+    "after": "next(p for p in Path(__file__).resolve().parents if p.name == \"src\").parent",
+    "count": 2,
+    "label": "nearest-src root anchor in src/latch/evals/outcome_measurement_runner.py"
+  },
+  {
+    "path": "src/latch/hosts/agents_md_sync.py",
+    "before": "Path(__file__).resolve().parent.parent",
+    "after": "next(p for p in Path(__file__).resolve().parents if p.name == \"src\").parent",
+    "count": 1,
+    "label": "nearest-src root anchor in src/latch/hosts/agents_md_sync.py"
+  },
+  {
+    "path": "src/latch/hosts/claude_md_sync.py",
+    "before": "Path(__file__).resolve().parent.parent",
+    "after": "next(p for p in Path(__file__).resolve().parents if p.name == \"src\").parent",
+    "count": 1,
+    "label": "nearest-src root anchor in src/latch/hosts/claude_md_sync.py"
+  },
+  {
+    "path": "src/latch/hosts/cursor_rules_sync.py",
+    "before": "Path(__file__).resolve().parent.parent",
+    "after": "next(p for p in Path(__file__).resolve().parents if p.name == \"src\").parent",
+    "count": 1,
+    "label": "nearest-src root anchor in src/latch/hosts/cursor_rules_sync.py"
+  },
+  {
+    "path": "src/latch/install/install_claude_desktop.py",
+    "before": "Path(__file__).resolve().parent.parent",
+    "after": "next(p for p in Path(__file__).resolve().parents if p.name == \"src\").parent",
+    "count": 1,
+    "label": "nearest-src root anchor in src/latch/install/install_claude_desktop.py"
+  },
+  {
+    "path": "src/latch/install/install_codex.py",
+    "before": "Path(__file__).resolve().parent.parent",
+    "after": "next(p for p in Path(__file__).resolve().parents if p.name == \"src\").parent",
+    "count": 1,
+    "label": "nearest-src root anchor in src/latch/install/install_codex.py"
+  },
+  {
+    "path": "src/latch/install/install_cursor.py",
+    "before": "Path(__file__).resolve().parent.parent",
+    "after": "next(p for p in Path(__file__).resolve().parents if p.name == \"src\").parent",
+    "count": 1,
+    "label": "nearest-src root anchor in src/latch/install/install_cursor.py"
+  },
+  {
+    "path": "src/latch/install/install_engine.py",
+    "before": "Path(__file__).resolve().parent.parent",
+    "after": "next(p for p in Path(__file__).resolve().parents if p.name == \"src\").parent",
+    "count": 1,
+    "label": "nearest-src root anchor in src/latch/install/install_engine.py"
+  },
+  {
+    "path": "src/latch/install/install_vscode.py",
+    "before": "Path(__file__).resolve().parent.parent",
+    "after": "next(p for p in Path(__file__).resolve().parents if p.name == \"src\").parent",
+    "count": 1,
+    "label": "nearest-src root anchor in src/latch/install/install_vscode.py"
+  },
+  {
+    "path": "src/latch/install/quickstart.py",
+    "before": "Path(__file__).resolve().parent.parent",
+    "after": "next(p for p in Path(__file__).resolve().parents if p.name == \"src\").parent",
+    "count": 1,
+    "label": "nearest-src root anchor in src/latch/install/quickstart.py"
+  },
+  {
+    "path": "src/latch/install/versioning.py",
+    "before": "Path(__file__).resolve().parent.parent",
+    "after": "next(p for p in Path(__file__).resolve().parents if p.name == \"src\").parent",
+    "count": 1,
+    "label": "nearest-src root anchor in src/latch/install/versioning.py"
+  },
+  {
+    "path": "src/latch/pipeline/seed.py",
+    "before": "Path(__file__).resolve().parent.parent",
+    "after": "next(p for p in Path(__file__).resolve().parents if p.name == \"src\").parent",
+    "count": 1,
+    "label": "nearest-src root anchor in src/latch/pipeline/seed.py"
+  },
+  {
+    "path": "src/latch/proof/proof_packet.py",
+    "before": "Path(__file__).resolve().parent.parent",
+    "after": "next(p for p in Path(__file__).resolve().parents if p.name == \"src\").parent",
+    "count": 1,
+    "label": "nearest-src root anchor in src/latch/proof/proof_packet.py"
+  },
+  {
+    "path": "src/latch/store/paths.py",
+    "before": "Path(__file__).resolve().parent.parent",
+    "after": "next(p for p in Path(__file__).resolve().parents if p.name == \"src\").parent",
+    "count": 1,
+    "label": "nearest-src root anchor in src/latch/store/paths.py"
+  },
+  {
+    "path": "src/latch/store/snapshot.py",
+    "before": "Path(__file__).resolve().parent.parent",
+    "after": "next(p for p in Path(__file__).resolve().parents if p.name == \"src\").parent",
+    "count": 1,
+    "label": "nearest-src root anchor in src/latch/store/snapshot.py"
+  },
+  {
+    "path": "src/latch/evals/outcome_measurement_runner.py",
+    "before": "\n    return next(p for p in Path(__file__).resolve().parents if p.name == \"src\").parent / PACKAGED_CONTRACT_RELPATH\n\n",
+    "after": "\n    root = next(p for p in Path(__file__).resolve().parents if p.name == \"src\").parent\n    return root / PACKAGED_CONTRACT_RELPATH\n\n",
+    "count": 1,
+    "label": "enumerated reorg patch in src/latch/evals/outcome_measurement_runner.py"
+  },
+  {
+    "path": "src/latch/hooks/_common.py",
+    "before": "    \"\"\"Fire-and-forget the compactor so the hook returns immediately.\"\"\"\n    compactor = str(Path(__file__).resolve().parent.parent / \"compactor.py\")\n    args = [PYTHON_BIN, compactor, session_id, project_path]\n",
+    "after": "    \"\"\"Fire-and-forget the compactor so the hook returns immediately.\"\"\"\n    src = next(p for p in Path(__file__).resolve().parents if p.name == \"src\")\n    compactor = str(src / \"latch\" / \"pipeline\" / \"compactor.py\")\n    args = [PYTHON_BIN, compactor, session_id, project_path]\n",
+    "count": 1,
+    "label": "enumerated reorg patch in src/latch/hooks/_common.py"
+  },
+  {
+    "path": "src/latch/hooks/codex_session_start.py",
+    "before": "# directly from hooks.json.\nSRC = Path(__file__).resolve().parent.parent\n\nfrom latch.hooks._common import hook_field, log, read_hook_input, transcript_path  # noqa: E402\n",
+    "after": "# directly from hooks.json.\nfrom latch.hooks._common import hook_field, log, read_hook_input, transcript_path  # noqa: E402\n",
+    "count": 1,
+    "label": "enumerated reorg patch in src/latch/hooks/codex_session_start.py"
+  },
+  {
+    "path": "src/latch/hooks/cursor_before_submit.py",
+    "before": "from pathlib import Path\n\nSRC = Path(__file__).resolve().parent.parent\n\n",
+    "after": "from pathlib import Path\n\n",
+    "count": 1,
+    "label": "enumerated reorg patch in src/latch/hooks/cursor_before_submit.py",
+    "pending_after": 1,
+    "converged_after": 1
+  },
+  {
+    "path": "src/latch/hooks/cursor_post_tool_use.py",
+    "before": "from pathlib import Path\n\nSRC = Path(__file__).resolve().parent.parent\n\n",
+    "after": "from pathlib import Path\n\n",
+    "count": 1,
+    "label": "enumerated reorg patch in src/latch/hooks/cursor_post_tool_use.py",
+    "pending_after": 1,
+    "converged_after": 1
+  },
+  {
+    "path": "src/latch/hooks/cursor_pre_tool_use.py",
+    "before": "from pathlib import Path\n\nSRC = Path(__file__).resolve().parent.parent\n\n",
+    "after": "from pathlib import Path\n\n",
+    "count": 1,
+    "label": "enumerated reorg patch in src/latch/hooks/cursor_pre_tool_use.py",
+    "pending_after": 1,
+    "converged_after": 1
+  },
+  {
+    "path": "src/latch/hooks/cursor_session_start.py",
+    "before": "from pathlib import Path\n\nSRC = Path(__file__).resolve().parent.parent\n\n",
+    "after": "from pathlib import Path\n\n",
+    "count": 1,
+    "label": "enumerated reorg patch in src/latch/hooks/cursor_session_start.py",
+    "pending_after": 1,
+    "converged_after": 1
+  },
+  {
+    "path": "src/latch/hooks/vscode_session_start.py",
+    "before": "from pathlib import Path\n\n# Ensure src/ and src/hooks/ are importable when VS Code launches this script\n# directly from .github/hooks/latch.json.\nSRC = Path(__file__).resolve().parent.parent\n\n",
+    "after": "from pathlib import Path\n\n",
+    "count": 1,
+    "label": "enumerated reorg patch in src/latch/hooks/vscode_session_start.py",
+    "pending_after": 1,
+    "converged_after": 1
+  },
+  {
+    "path": "src/latch/hooks/vscode_session_start.py",
+    "before": "        doc_name=\"AGENTS.md\",\n        manual_command=f\"{SRC.parent}/bin/install_agents_md.sh --yes\",\n    )\n",
+    "after": "        doc_name=\"AGENTS.md\",\n        manual_command=f\"{next(p for p in Path(__file__).resolve().parents if p.name == 'src').parent}/bin/install_agents_md.sh --yes\",\n    )\n",
+    "count": 1,
+    "label": "enumerated reorg patch in src/latch/hooks/vscode_session_start.py"
+  },
+  {
+    "path": "src/latch/hosts/codex_hooks.py",
+    "before": "    normalized = command.replace(\"\\\\\", \"/\")\n    return any(f\"/src/hooks/{name}\" in normalized for name in OWNED_HOOK_BASENAMES)\n\n",
+    "after": "    normalized = command.replace(\"\\\\\", \"/\")\n    return any(\n        marker in normalized\n        for name in OWNED_HOOK_BASENAMES\n        for marker in (f\"/src/latch/hooks/{name}\", f\"/src/hooks/{name}\")\n    )\n\n",
+    "count": 1,
+    "label": "enumerated reorg patch in src/latch/hosts/codex_hooks.py"
+  },
+  {
+    "path": "src/latch/hosts/codex_wiring.py",
+    "before": "    expected_servers = {\n        str(ROOT / \"src\" / name).replace(\"\\\\\", \"/\").rstrip(\"/\")\n        for name in (\"mcp_server.py\", \"mcp_launcher_win.py\")\n    }\n",
+    "after": "    expected_servers = {\n        str(path).replace(\"\\\\\", \"/\").rstrip(\"/\")\n        for name in (\"mcp_server.py\", \"mcp_launcher_win.py\")\n        for path in (\n            ROOT / \"src\" / \"latch\" / \"mcp\" / name,\n            ROOT / \"src\" / name,\n        )\n    }\n",
+    "count": 1,
+    "label": "enumerated reorg patch in src/latch/hosts/codex_wiring.py"
+  },
+  {
+    "path": "src/latch/hosts/codex_wiring.py",
+    "before": "        normalized = text.replace(\"\\\\\", \"/\")\n        if any(f\"/src/hooks/{name}\" in normalized for name in codex_hooks.OWNED_HOOK_BASENAMES):\n            raise RuntimeError(f\"Codex hooks are invalid JSON: {exc}\") from exc\n",
+    "after": "        normalized = text.replace(\"\\\\\", \"/\")\n        if any(\n            marker in normalized\n            for name in codex_hooks.OWNED_HOOK_BASENAMES\n            for marker in (f\"/src/latch/hooks/{name}\", f\"/src/hooks/{name}\")\n        ):\n            raise RuntimeError(f\"Codex hooks are invalid JSON: {exc}\") from exc\n",
+    "count": 1,
+    "label": "enumerated reorg patch in src/latch/hosts/codex_wiring.py"
+  },
+  {
+    "path": "src/latch/hosts/cursor_gate_state.py",
+    "before": "        return (\n            _trusted_script(script, \"src/budget.py\")\n            and len(args) == 2\n",
+    "after": "        return (\n            (\n                _trusted_script(script, \"src/latch/gate/budget.py\")\n                or _trusted_script(script, \"src/budget.py\")\n            )\n            and len(args) == 2\n",
+    "count": 1,
+    "label": "enumerated reorg patch in src/latch/hosts/cursor_gate_state.py"
+  },
+  {
+    "path": "src/latch/hosts/cursor_gate_state.py",
+    "before": "        return (\n            _trusted_script(script, \"src/maintenance.py\")\n            and len(args) == 2\n",
+    "after": "        return (\n            (\n                _trusted_script(script, \"src/latch/pipeline/maintenance.py\")\n                or _trusted_script(script, \"src/maintenance.py\")\n            )\n            and len(args) == 2\n",
+    "count": 1,
+    "label": "enumerated reorg patch in src/latch/hosts/cursor_gate_state.py"
+  },
+  {
+    "path": "src/latch/hosts/cursor_hooks.py",
+    "before": "    command = str(entry.get(\"command\", \"\")).replace(\"\\\\\", \"/\")\n    return any(f\"/src/hooks/{name}\" in command for name in OWNED_HOOK_BASENAMES)\n\n",
+    "after": "    command = str(entry.get(\"command\", \"\")).replace(\"\\\\\", \"/\")\n    return any(\n        marker in command\n        for name in OWNED_HOOK_BASENAMES\n        for marker in (f\"/src/latch/hooks/{name}\", f\"/src/hooks/{name}\")\n    )\n\n",
+    "count": 1,
+    "label": "enumerated reorg patch in src/latch/hosts/cursor_hooks.py"
+  },
+  {
+    "path": "src/latch/hosts/cursor_wiring.py",
+    "before": "            raise RuntimeError(f\"AGENTS.md wiring is {agents_state}; refusing repair\")\n        python_path, server_py, backend = _server_details(mcp_path)\n        for name in install_cursor.CURSOR_COMMAND_FILES:\n",
+    "after": "            raise RuntimeError(f\"AGENTS.md wiring is {agents_state}; refusing repair\")\n        python_path, _installed_server, backend = _server_details(mcp_path)\n        server_py = str(\n            install_cursor.KB_HOME / \"src\" / \"latch\" / \"mcp\" / \"mcp_server.py\"\n        )\n        for name in install_cursor.CURSOR_COMMAND_FILES:\n",
+    "count": 1,
+    "label": "enumerated reorg patch in src/latch/hosts/cursor_wiring.py"
+  },
+  {
+    "path": "src/latch/install/doctor.py",
+    "before": "REQUIRED_MODULES = [\"mcp\", \"onnxruntime\", \"tokenizers\", \"numpy\", \"sqlite_vec\"]\nSRC_DIR = Path(__file__).resolve().parent\n\n",
+    "after": "REQUIRED_MODULES = [\"mcp\", \"onnxruntime\", \"tokenizers\", \"numpy\", \"sqlite_vec\"]\nSRC_DIR = next(p for p in Path(__file__).resolve().parents if p.name == \"src\")\n\n",
+    "count": 1,
+    "label": "enumerated reorg patch in src/latch/install/doctor.py"
+  },
+  {
+    "path": "src/latch/install/doctor.py",
+    "before": "        f\"sys.path.insert(0, {str(src_dir)!r})\\n\"\n        \"import embeddings\\n\"\n        \"v = embeddings.embed('latch doctor health check')\\n\"\n",
+    "after": "        f\"sys.path.insert(0, {str(src_dir)!r})\\n\"\n        \"from latch.retrieval import embeddings\\n\"\n        \"v = embeddings.embed('latch doctor health check')\\n\"\n",
+    "count": 1,
+    "label": "enumerated reorg patch in src/latch/install/doctor.py"
+  },
+  {
+    "path": "src/latch/install/doctor.py",
+    "before": "        \"/bin/latch_direction.sh\",\n        \"/src/budget.py\",\n",
+    "after": "        \"/bin/latch_direction.sh\",\n        \"/src/latch/gate/budget.py\",\n        \"/src/latch/pipeline/maintenance.py\",\n        \"/src/budget.py\",\n",
+    "count": 1,
+    "label": "enumerated reorg patch in src/latch/install/doctor.py"
+  },
+  {
+    "path": "src/latch/install/doctor.py",
+    "before": "    try:\n        sys.path.insert(0, str(SRC_DIR))\n        from latch.hosts import claude_md_sync\n",
+    "after": "    try:\n        from latch.hosts import claude_md_sync\n",
+    "count": 1,
+    "label": "enumerated reorg patch in src/latch/install/doctor.py"
+  },
+  {
+    "path": "src/latch/install/install_cursor.py",
+    "before": "CURSOR_COMPACT_ASSETS = (\n    Path(\"src\") / \"cursor_backend.py\",\n    Path(\"src\") / \"cursor_compact.py\",\n    Path(\"src\") / \"cursor_transcript.py\",\n    Path(\"bin\") / \"run_cursor_compact_now.sh\",\n",
+    "after": "CURSOR_COMPACT_ASSETS = (\n    Path(\"src\") / \"latch\" / \"hosts\" / \"cursor_backend.py\",\n    Path(\"src\") / \"latch\" / \"hosts\" / \"cursor_compact.py\",\n    Path(\"src\") / \"latch\" / \"hosts\" / \"cursor_transcript.py\",\n    Path(\"bin\") / \"run_cursor_compact_now.sh\",\n",
+    "count": 1,
+    "label": "enumerated reorg patch in src/latch/install/install_cursor.py"
+  },
+  {
+    "path": "src/latch/install/install_engine.py",
+    "before": "# rather than duplicate, and stale interpreter paths get re-pointed).\nLATCH_HOOK_MARKER = \"/src/hooks/\"\n\n",
+    "after": "# rather than duplicate, and stale interpreter paths get re-pointed).\nLATCH_HOOK_MARKER = \"/src/latch/hooks/\"\nLEGACY_LATCH_HOOK_MARKER = \"/src/hooks/\"\nLATCH_HOOK_MARKERS = (LATCH_HOOK_MARKER, LEGACY_LATCH_HOOK_MARKER)\n\n",
+    "count": 1,
+    "label": "enumerated reorg patch in src/latch/install/install_engine.py"
+  },
+  {
+    "path": "src/latch/install/install_engine.py",
+    "before": "    \"/bin/latch_direction.sh\",\n    \"/src/budget.py\",\n",
+    "after": "    \"/bin/latch_direction.sh\",\n    \"/src/latch/gate/budget.py\",\n    \"/src/latch/pipeline/maintenance.py\",\n    \"/src/budget.py\",\n",
+    "count": 1,
+    "label": "enumerated reorg patch in src/latch/install/install_engine.py"
+  },
+  {
+    "path": "src/latch/install/install_engine.py",
+    "before": "    for h in entry.get(\"hooks\", []):\n        if LATCH_HOOK_MARKER in (h.get(\"command\") or \"\"):\n            return True\n",
+    "after": "    for h in entry.get(\"hooks\", []):\n        if any(marker in (h.get(\"command\") or \"\") for marker in LATCH_HOOK_MARKERS):\n            return True\n",
+    "count": 1,
+    "label": "enumerated reorg patch in src/latch/install/install_engine.py"
+  },
+  {
+    "path": "src/latch/install/install_vscode.py",
+    "before": ") -> dict[str, Any]:\n    hook_dir = KB_HOME / \"src\" / \"hooks\"\n    common_env = _adapter_env(model_backend)\n",
+    "after": ") -> dict[str, Any]:\n    hook_dir = KB_HOME / \"src\" / \"latch\" / \"hooks\"\n    common_env = _adapter_env(model_backend)\n",
+    "count": 1,
+    "label": "enumerated reorg patch in src/latch/install/install_vscode.py"
+  },
+  {
+    "path": "src/latch/install/quickstart.py",
+    "before": "\ndef _src(name: str) -> str:\n    return str(KB_HOME / \"src\" / name)\n\n",
+    "after": "\n_SOURCE_ENTRYPOINTS = {\n    \"install_engine.py\": Path(\"latch/install/install_engine.py\"),\n    \"claude_md_sync.py\": Path(\"latch/hosts/claude_md_sync.py\"),\n    \"install_codex.py\": Path(\"latch/install/install_codex.py\"),\n    \"install_cursor.py\": Path(\"latch/install/install_cursor.py\"),\n    \"doctor.py\": Path(\"latch/install/doctor.py\"),\n    \"codex_doctor.py\": Path(\"latch/hosts/codex_doctor.py\"),\n    \"cursor_doctor.py\": Path(\"latch/hosts/cursor_doctor.py\"),\n    \"seed.py\": Path(\"latch/pipeline/seed.py\"),\n}\n\n\ndef _src(name: str) -> str:\n    return str(KB_HOME / \"src\" / _SOURCE_ENTRYPOINTS[name])\n\n",
+    "count": 1,
+    "label": "enumerated reorg patch in src/latch/install/quickstart.py"
+  },
+  {
+    "path": "src/latch/mcp/mcp_broker.py",
+    "before": "\ndef _runtime_key() -> str:\n",
+    "after": "\ndef _runtime_content_files() -> tuple[Path, ...]:\n    \"\"\"Return every small file whose bytes define runtime compatibility.\"\"\"\n\n    root = Path(__file__).resolve().parent\n    pkg = next(p for p in Path(__file__).resolve().parents if p.name == \"latch\")\n    return (\n        root / \"mcp_broker.py\",\n        root / \"mcp_proxy.py\",\n        root / \"mcp_daemon.py\",\n        root / \"mcp_server.py\",\n        root / \"mcp_runtime.py\",\n        # Gate/capture behavior executes inside the long-lived owner. Include\n        # every online dependency so an update performs the normal blue/green\n        # transition instead of reconnecting new proxies to an owner with stale\n        # protocol pins, runtime attestation, or project-proof behavior.\n        pkg / \"gate\" / \"gate.py\",\n        pkg / \"gate\" / \"capture_streams.py\",\n        pkg / \"evals\" / \"outcome_measurement.py\",\n        pkg / \"evals\" / \"outcome_measurement_runner.py\",\n        pkg / \"evals\" / \"outcome_evidence.py\",\n        pkg / \"store\" / \"artifacts.py\",\n        pkg / \"proof\" / \"project_proof.py\",\n        pkg / \"store\" / \"paths.py\",\n        pkg / \"store\" / \"db.py\",\n        pkg / \"store\" / \"vault_identity.py\",\n        pkg / \"common\" / \"log_utils.py\",\n        paths.KB_ROOT / \"vendor\" / \"config.json\",\n        paths.KB_ROOT / \"vendor\" / \"tokenizer.json\",\n        paths.KB_ROOT / \"vendor\" / \"tokenizer_config.json\",\n        paths.KB_ROOT / \"vendor\" / \"vocab.txt\",\n    )\n\n\ndef _runtime_key() -> str:\n",
+    "count": 1,
+    "label": "enumerated reorg patch in src/latch/mcp/mcp_broker.py"
+  },
+  {
+    "path": "src/latch/mcp/mcp_broker.py",
+    "before": "    \"\"\"\n    root = Path(__file__).resolve().parent\n    content_files = (\n        root / \"mcp_broker.py\",\n        root / \"mcp_proxy.py\",\n        root / \"mcp_daemon.py\",\n        root / \"mcp_server.py\",\n        root / \"mcp_runtime.py\",\n        # Gate/capture behavior executes inside the long-lived owner. Include\n        # every online dependency so an update performs the normal blue/green\n        # transition instead of reconnecting new proxies to an owner with stale\n        # protocol pins, runtime attestation, or project-proof behavior.\n        root / \"gate.py\",\n        root / \"capture_streams.py\",\n        root / \"outcome_measurement.py\",\n        root / \"outcome_measurement_runner.py\",\n        root / \"outcome_evidence.py\",\n        root / \"artifacts.py\",\n        root / \"project_proof.py\",\n        root / \"paths.py\",\n        root / \"db.py\",\n        root / \"vault_identity.py\",\n        root / \"log_utils.py\",\n        paths.KB_ROOT / \"vendor\" / \"config.json\",\n        paths.KB_ROOT / \"vendor\" / \"tokenizer.json\",\n        paths.KB_ROOT / \"vendor\" / \"tokenizer_config.json\",\n        paths.KB_ROOT / \"vendor\" / \"vocab.txt\",\n    )\n    h = hashlib.sha256(f\"protocol={PROTOCOL_VERSION}\".encode())\n    for path in content_files:\n        h.update(f\"\\0{path.name}\\0\".encode())\n",
+    "after": "    \"\"\"\n    h = hashlib.sha256(f\"protocol={PROTOCOL_VERSION}\".encode())\n    for path in _runtime_content_files():\n        h.update(f\"\\0{path.name}\\0\".encode())\n",
+    "count": 1,
+    "label": "enumerated reorg patch in src/latch/mcp/mcp_broker.py"
+  },
+  {
+    "path": "src/latch/store/paths.py",
+    "before": "def _default_kb_root() -> Path:\n    # paths.py lives at <KB_ROOT>/src/paths.py\n    return next(p for p in Path(__file__).resolve().parents if p.name == \"src\").parent\n",
+    "after": "def _default_kb_root() -> Path:\n    # The package lives below <KB_ROOT>/src/ at varying subpackage depths.\n    return next(p for p in Path(__file__).resolve().parents if p.name == \"src\").parent\n",
+    "count": 1,
+    "label": "enumerated reorg patch in src/latch/store/paths.py"
+  },
+  {
+    "path": "src/latch/store/snapshot.py",
+    "before": "def _projects_root() -> Path:\n    return next(p for p in Path(__file__).resolve().parents if p.name == \"src\").parent / \"projects\"\n\n",
+    "after": "def _projects_root() -> Path:\n    root = next(p for p in Path(__file__).resolve().parents if p.name == \"src\").parent\n    return root / \"projects\"\n\n",
+    "count": 1,
+    "label": "enumerated reorg patch in src/latch/store/snapshot.py"
+  },
+  {
+    "path": "src/latch/store/workstream_automation.py",
+    "before": "def _load_workstreams() -> ModuleType:\n    return importlib.import_module(\"workstreams\")\n\n",
+    "after": "def _load_workstreams() -> ModuleType:\n    return importlib.import_module(\"latch.store.workstreams\")\n\n",
+    "count": 1,
+    "label": "enumerated reorg patch in src/latch/store/workstream_automation.py"
+  },
+  {
+    "path": "tests/test_canonical_authority_guard.py",
+    "before": "src/db.py",
+    "after": "src/latch/store/db.py",
+    "count": 5,
+    "label": "mechanical path update in tests/test_canonical_authority_guard.py"
+  },
+  {
+    "path": "tests/test_canonical_authority_guard.py",
+    "before": "src/priorities.py",
+    "after": "src/latch/store/priorities.py",
+    "count": 1,
+    "label": "mechanical path update in tests/test_canonical_authority_guard.py"
+  },
+  {
+    "path": "tests/test_canonical_authority_guard.py",
+    "before": "src/profiles.py",
+    "after": "src/latch/store/profiles.py",
+    "count": 1,
+    "label": "mechanical path update in tests/test_canonical_authority_guard.py"
+  },
+  {
+    "path": "tests/test_canonical_authority_guard.py",
+    "before": "src/workstreams.py",
+    "after": "src/latch/store/workstreams.py",
+    "count": 5,
+    "label": "mechanical path update in tests/test_canonical_authority_guard.py"
+  },
+  {
+    "path": "tests/test_canonical_authority_guard.py",
+    "before": "src/tree.py",
+    "after": "src/latch/retrieval/tree.py",
+    "count": 1,
+    "label": "mechanical path update in tests/test_canonical_authority_guard.py"
+  },
+  {
+    "path": "tests/test_canonical_authority_guard.py",
+    "before": "src/verify.py",
+    "after": "src/latch/gate/verify.py",
+    "count": 1,
+    "label": "mechanical path update in tests/test_canonical_authority_guard.py"
+  },
+  {
+    "path": "tests/test_canonical_authority_guard.py",
+    "before": "src/compactor.py",
+    "after": "src/latch/pipeline/compactor.py",
+    "count": 2,
+    "label": "mechanical path update in tests/test_canonical_authority_guard.py"
+  },
+  {
+    "path": "tests/test_canonical_authority_guard.py",
+    "before": "src/heal.py",
+    "after": "src/latch/pipeline/heal.py",
+    "count": 1,
+    "label": "mechanical path update in tests/test_canonical_authority_guard.py"
+  },
+  {
+    "path": "tests/test_canonical_authority_guard.py",
+    "before": "src/mcp_server.py",
+    "after": "src/latch/mcp/mcp_server.py",
+    "count": 8,
+    "label": "mechanical path update in tests/test_canonical_authority_guard.py"
+  },
+  {
+    "path": "tests/test_canonical_authority_guard.py",
+    "before": "src/evals.py",
+    "after": "src/latch/evals/evals.py",
+    "count": 1,
+    "label": "mechanical path update in tests/test_canonical_authority_guard.py"
+  },
+  {
+    "path": "tests/test_canonical_authority_guard.py",
+    "before": "src/no_history_demo.py",
+    "after": "src/latch/proof/no_history_demo.py",
+    "count": 1,
+    "label": "mechanical path update in tests/test_canonical_authority_guard.py"
+  },
+  {
+    "path": "tests/test_codex_doctor.py",
+    "before": "src/mcp_server.py",
+    "after": "src/latch/mcp/mcp_server.py",
+    "count": 3,
+    "label": "mechanical path update in tests/test_codex_doctor.py"
+  },
+  {
+    "path": "tests/test_codex_doctor.py",
+    "before": "src/hooks/codex_session_start.py",
+    "after": "src/latch/hooks/codex_session_start.py",
+    "count": 3,
+    "label": "mechanical path update in tests/test_codex_doctor.py"
+  },
+  {
+    "path": "tests/test_codex_hooks.py",
+    "before": "src/hooks/codex_session_start.py",
+    "after": "src/latch/hooks/codex_session_start.py",
+    "count": 6,
+    "label": "mechanical path update in tests/test_codex_hooks.py"
+  },
+  {
+    "path": "tests/test_cursor_doctor.py",
+    "before": "src/mcp_server.py",
+    "after": "src/latch/mcp/mcp_server.py",
+    "count": 3,
+    "label": "mechanical path update in tests/test_cursor_doctor.py"
+  },
+  {
+    "path": "tests/test_cursor_doctor.py",
+    "before": "\"src\" / \"hooks\" / \"cursor_session_start.py\"",
+    "after": "\"src\" / \"latch\" / \"hooks\" / \"cursor_session_start.py\"",
+    "count": 1,
+    "label": "mechanical path update in tests/test_cursor_doctor.py"
+  },
+  {
+    "path": "tests/test_cursor_doctor.py",
+    "before": "\"src\" / \"hooks\" / \"cursor_before_submit.py\"",
+    "after": "\"src\" / \"latch\" / \"hooks\" / \"cursor_before_submit.py\"",
+    "count": 1,
+    "label": "mechanical path update in tests/test_cursor_doctor.py"
+  },
+  {
+    "path": "tests/test_cursor_doctor.py",
+    "before": "\"src\" / \"hooks\" / \"cursor_pre_tool_use.py\"",
+    "after": "\"src\" / \"latch\" / \"hooks\" / \"cursor_pre_tool_use.py\"",
+    "count": 1,
+    "label": "mechanical path update in tests/test_cursor_doctor.py"
+  },
+  {
+    "path": "tests/test_cursor_doctor.py",
+    "before": "\"src\" / \"hooks\" / \"cursor_post_tool_use.py\"",
+    "after": "\"src\" / \"latch\" / \"hooks\" / \"cursor_post_tool_use.py\"",
+    "count": 1,
+    "label": "mechanical path update in tests/test_cursor_doctor.py"
+  },
+  {
+    "path": "tests/test_cursor_gate_state.py",
+    "before": "\"src\" / \"budget.py\"",
+    "after": "\"src\" / \"latch\" / \"gate\" / \"budget.py\"",
+    "count": 1,
+    "label": "mechanical path update in tests/test_cursor_gate_state.py"
+  },
+  {
+    "path": "tests/test_cursor_gate_state.py",
+    "before": "\"src\" / \"maintenance.py\"",
+    "after": "\"src\" / \"latch\" / \"pipeline\" / \"maintenance.py\"",
+    "count": 4,
+    "label": "mechanical path update in tests/test_cursor_gate_state.py"
+  },
+  {
+    "path": "tests/test_cursor_hooks.py",
+    "before": "src/hooks/cursor_before_submit.py",
+    "after": "src/latch/hooks/cursor_before_submit.py",
+    "count": 1,
+    "label": "mechanical path update in tests/test_cursor_hooks.py"
+  },
+  {
+    "path": "tests/test_cursor_hooks.py",
+    "before": "src/hooks/cursor_pre_tool_use.py",
+    "after": "src/latch/hooks/cursor_pre_tool_use.py",
+    "count": 1,
+    "label": "mechanical path update in tests/test_cursor_hooks.py"
+  },
+  {
+    "path": "tests/test_cursor_lifecycle_e2e.py",
+    "before": "\"src\" / \"cursor_doctor.py\"",
+    "after": "\"src\" / \"latch\" / \"hosts\" / \"cursor_doctor.py\"",
+    "count": 1,
+    "label": "mechanical path update in tests/test_cursor_lifecycle_e2e.py"
+  },
+  {
+    "path": "tests/test_cursor_lifecycle_e2e.py",
+    "before": "\"src\" / \"install_cursor.py\"",
+    "after": "\"src\" / \"latch\" / \"install\" / \"install_cursor.py\"",
+    "count": 1,
+    "label": "mechanical path update in tests/test_cursor_lifecycle_e2e.py"
+  },
+  {
+    "path": "tests/test_cursor_lifecycle_e2e.py",
+    "before": "\"src\" / \"uninstall_engine.py\"",
+    "after": "\"src\" / \"latch\" / \"install\" / \"uninstall_engine.py\"",
+    "count": 1,
+    "label": "mechanical path update in tests/test_cursor_lifecycle_e2e.py"
+  },
+  {
+    "path": "tests/test_destructive_path_guard.py",
+    "before": "\"src\" / \"uninstall_engine.py\"",
+    "after": "\"src\" / \"latch\" / \"install\" / \"uninstall_engine.py\"",
+    "count": 1,
+    "label": "mechanical path update in tests/test_destructive_path_guard.py"
+  },
+  {
+    "path": "tests/test_install_claude_desktop.py",
+    "before": "src/mcp_server.py",
+    "after": "src/latch/mcp/mcp_server.py",
+    "count": 2,
+    "label": "mechanical path update in tests/test_install_claude_desktop.py"
+  },
+  {
+    "path": "tests/test_install_codex.py",
+    "before": "src/mcp_server.py",
+    "after": "src/latch/mcp/mcp_server.py",
+    "count": 2,
+    "label": "mechanical path update in tests/test_install_codex.py"
+  },
+  {
+    "path": "tests/test_install_cursor.py",
+    "before": "src/mcp_server.py",
+    "after": "src/latch/mcp/mcp_server.py",
+    "count": 3,
+    "label": "mechanical path update in tests/test_install_cursor.py"
+  },
+  {
+    "path": "tests/test_install_cursor.py",
+    "before": "\"src\" / \"hooks\" / \"cursor_session_start.py\"",
+    "after": "\"src\" / \"latch\" / \"hooks\" / \"cursor_session_start.py\"",
+    "count": 1,
+    "label": "mechanical path update in tests/test_install_cursor.py"
+  },
+  {
+    "path": "tests/test_install_cursor.py",
+    "before": "\"src\" / \"hooks\" / \"cursor_before_submit.py\"",
+    "after": "\"src\" / \"latch\" / \"hooks\" / \"cursor_before_submit.py\"",
+    "count": 1,
+    "label": "mechanical path update in tests/test_install_cursor.py"
+  },
+  {
+    "path": "tests/test_install_cursor.py",
+    "before": "\"src\" / \"hooks\" / \"cursor_pre_tool_use.py\"",
+    "after": "\"src\" / \"latch\" / \"hooks\" / \"cursor_pre_tool_use.py\"",
+    "count": 1,
+    "label": "mechanical path update in tests/test_install_cursor.py"
+  },
+  {
+    "path": "tests/test_install_cursor.py",
+    "before": "\"src\" / \"hooks\" / \"cursor_post_tool_use.py\"",
+    "after": "\"src\" / \"latch\" / \"hooks\" / \"cursor_post_tool_use.py\"",
+    "count": 1,
+    "label": "mechanical path update in tests/test_install_cursor.py"
+  },
+  {
+    "path": "tests/test_install_engine.py",
+    "before": "\"src\" / \"seed.py\"",
+    "after": "\"src\" / \"latch\" / \"pipeline\" / \"seed.py\"",
+    "count": 1,
+    "label": "mechanical path update in tests/test_install_engine.py"
+  },
+  {
+    "path": "tests/test_install_vscode.py",
+    "before": "src/mcp_server.py",
+    "after": "src/latch/mcp/mcp_server.py",
+    "count": 2,
+    "label": "mechanical path update in tests/test_install_vscode.py"
+  },
+  {
+    "path": "tests/test_mcp_lifecycle_contract.py",
+    "before": "\"src\" / \"mcp_server.py\"",
+    "after": "\"src\" / \"latch\" / \"mcp\" / \"mcp_server.py\"",
+    "count": 1,
+    "label": "mechanical path update in tests/test_mcp_lifecycle_contract.py"
+  },
+  {
+    "path": "tests/test_mcp_lifecycle_contract.py",
+    "before": "\"src\" / \"mcp_daemon.py\"",
+    "after": "\"src\" / \"latch\" / \"mcp\" / \"mcp_daemon.py\"",
+    "count": 4,
+    "label": "mechanical path update in tests/test_mcp_lifecycle_contract.py"
+  },
+  {
+    "path": "tests/test_mcp_lifecycle_contract.py",
+    "before": "\"src\" / \"mcp_launcher_win.py\"",
+    "after": "\"src\" / \"latch\" / \"mcp\" / \"mcp_launcher_win.py\"",
+    "count": 1,
+    "label": "mechanical path update in tests/test_mcp_lifecycle_contract.py"
+  },
+  {
+    "path": "tests/test_mcp_shared_runtime.py",
+    "before": "\"src\" / \"mcp_server.py\"",
+    "after": "\"src\" / \"latch\" / \"mcp\" / \"mcp_server.py\"",
+    "count": 1,
+    "label": "mechanical path update in tests/test_mcp_shared_runtime.py"
+  },
+  {
+    "path": "tests/test_mcp_shared_runtime.py",
+    "before": "\"src\" / \"mcp_daemon.py\"",
+    "after": "\"src\" / \"latch\" / \"mcp\" / \"mcp_daemon.py\"",
+    "count": 1,
+    "label": "mechanical path update in tests/test_mcp_shared_runtime.py"
+  },
+  {
+    "path": "tests/test_mcp_shared_runtime.py",
+    "before": "\"src\" / \"mcp_broker.py\"",
+    "after": "\"src\" / \"latch\" / \"mcp\" / \"mcp_broker.py\"",
+    "count": 1,
+    "label": "mechanical path update in tests/test_mcp_shared_runtime.py"
+  },
+  {
+    "path": "tests/test_mcp_shared_runtime.py",
+    "before": "\"src\" / \"hooks\" / \"user_prompt_submit.py\"",
+    "after": "\"src\" / \"latch\" / \"hooks\" / \"user_prompt_submit.py\"",
+    "count": 1,
+    "label": "mechanical path update in tests/test_mcp_shared_runtime.py"
+  },
+  {
+    "path": "tests/test_no_history_demo.py",
+    "before": "\"src\" / \"no_history_demo.py\"",
+    "after": "\"src\" / \"latch\" / \"proof\" / \"no_history_demo.py\"",
+    "count": 1,
+    "label": "mechanical path update in tests/test_no_history_demo.py"
+  },
+  {
+    "path": "tests/test_outcome_measurement_cli.py",
+    "before": "\"src\" / \"outcome_measurement_cli.py\"",
+    "after": "\"src\" / \"latch\" / \"evals\" / \"outcome_measurement_cli.py\"",
+    "count": 1,
+    "label": "mechanical path update in tests/test_outcome_measurement_cli.py"
+  },
+  {
+    "path": "tests/test_proof_packet.py",
+    "before": "src/schema.sql",
+    "after": "src/latch/store/schema.sql",
+    "count": 1,
+    "label": "mechanical path update in tests/test_proof_packet.py"
+  },
+  {
+    "path": "tests/test_proof_packet.py",
+    "before": "src/priorities.py",
+    "after": "src/latch/store/priorities.py",
+    "count": 1,
+    "label": "mechanical path update in tests/test_proof_packet.py"
+  },
+  {
+    "path": "tests/test_proof_packet.py",
+    "before": "src/profiles.py",
+    "after": "src/latch/store/profiles.py",
+    "count": 1,
+    "label": "mechanical path update in tests/test_proof_packet.py"
+  },
+  {
+    "path": "tests/test_proof_packet.py",
+    "before": "src/budget.py",
+    "after": "src/latch/gate/budget.py",
+    "count": 1,
+    "label": "mechanical path update in tests/test_proof_packet.py"
+  },
+  {
+    "path": "tests/test_proof_packet.py",
+    "before": "src/codex_transcript.py",
+    "after": "src/latch/hosts/codex_transcript.py",
+    "count": 1,
+    "label": "mechanical path update in tests/test_proof_packet.py"
+  },
+  {
+    "path": "tests/test_proof_packet.py",
+    "before": "src/proof_packet.py",
+    "after": "src/latch/proof/proof_packet.py",
+    "count": 2,
+    "label": "mechanical path update in tests/test_proof_packet.py"
+  },
+  {
+    "path": "tests/test_quickstart.py",
+    "before": "\"src\" / \"seed.py\"",
+    "after": "\"src\" / \"latch\" / \"pipeline\" / \"seed.py\"",
+    "count": 1,
+    "label": "mechanical path update in tests/test_quickstart.py"
+  },
+  {
+    "path": "tests/test_ratification_mcp.py",
+    "before": "src/mcp_server.py",
+    "after": "src/latch/mcp/mcp_server.py",
+    "count": 2,
+    "label": "mechanical path update in tests/test_ratification_mcp.py"
+  },
+  {
+    "path": "tests/test_review_panel.py",
+    "before": "src/seed.py",
+    "after": "src/latch/pipeline/seed.py",
+    "count": 1,
+    "label": "mechanical path update in tests/test_review_panel.py"
+  },
+  {
+    "path": "tests/test_review_panel.py",
+    "before": "\"src\" / \"seed.py\"",
+    "after": "\"src\" / \"latch\" / \"pipeline\" / \"seed.py\"",
+    "count": 1,
+    "label": "mechanical path update in tests/test_review_panel.py"
+  },
+  {
+    "path": "tests/test_review_panel.py",
+    "before": "src/quickstart.py",
+    "after": "src/latch/install/quickstart.py",
+    "count": 1,
+    "label": "mechanical path update in tests/test_review_panel.py"
+  },
+  {
+    "path": "tests/test_run_kb_gate_wrapper.py",
+    "before": "\"src\" / \"kb_gate_cli.py\"",
+    "after": "\"src\" / \"latch\" / \"gate\" / \"kb_gate_cli.py\"",
+    "count": 2,
+    "label": "mechanical path update in tests/test_run_kb_gate_wrapper.py"
+  },
+  {
+    "path": "tests/test_schema_version.py",
+    "before": "\"src\" / \"schema.sql\"",
+    "after": "\"src\" / \"latch\" / \"store\" / \"schema.sql\"",
+    "count": 4,
+    "label": "mechanical path update in tests/test_schema_version.py"
+  },
+  {
+    "path": "tests/test_uninstall_engine.py",
+    "before": "src/hooks/cursor_session_start.py",
+    "after": "src/latch/hooks/cursor_session_start.py",
+    "count": 1,
+    "label": "mechanical path update in tests/test_uninstall_engine.py"
+  },
+  {
+    "path": "tests/test_uninstall_engine.py",
+    "before": "src/hooks/cursor_before_submit.py",
+    "after": "src/latch/hooks/cursor_before_submit.py",
+    "count": 1,
+    "label": "mechanical path update in tests/test_uninstall_engine.py"
+  },
+  {
+    "path": "tests/test_uninstall_engine.py",
+    "before": "src/hooks/cursor_pre_tool_use.py",
+    "after": "src/latch/hooks/cursor_pre_tool_use.py",
+    "count": 1,
+    "label": "mechanical path update in tests/test_uninstall_engine.py"
+  },
+  {
+    "path": "tests/test_uninstall_engine.py",
+    "before": "src/hooks/cursor_post_tool_use.py",
+    "after": "src/latch/hooks/cursor_post_tool_use.py",
+    "count": 1,
+    "label": "mechanical path update in tests/test_uninstall_engine.py"
+  },
+  {
+    "path": "tests/test_vault_backup.py",
+    "before": "\"src\" / \"schema.sql\"",
+    "after": "\"src\" / \"latch\" / \"store\" / \"schema.sql\"",
+    "count": 2,
+    "label": "mechanical path update in tests/test_vault_backup.py"
+  },
+  {
+    "path": "tests/test_vault_safety.py",
+    "before": "\"src\" / \"schema.sql\"",
+    "after": "\"src\" / \"latch\" / \"store\" / \"schema.sql\"",
+    "count": 1,
+    "label": "mechanical path update in tests/test_vault_safety.py"
+  },
+  {
+    "path": "tests/test_wiring_version.py",
+    "before": "\"src\" / \"mcp_launcher_win.py\"",
+    "after": "\"src\" / \"latch\" / \"mcp\" / \"mcp_launcher_win.py\"",
+    "count": 1,
+    "label": "mechanical path update in tests/test_wiring_version.py"
+  },
+  {
+    "path": "tests/test_wiring_version.py",
+    "before": "\"src\" / \"hooks\" / \"cursor_session_start.py\"",
+    "after": "\"src\" / \"latch\" / \"hooks\" / \"cursor_session_start.py\"",
+    "count": 1,
+    "label": "mechanical path update in tests/test_wiring_version.py"
+  },
+  {
+    "path": "tests/test_wiring_version.py",
+    "before": "\"src\" / \"hooks\" / \"cursor_before_submit.py\"",
+    "after": "\"src\" / \"latch\" / \"hooks\" / \"cursor_before_submit.py\"",
+    "count": 1,
+    "label": "mechanical path update in tests/test_wiring_version.py"
+  },
+  {
+    "path": "tests/test_wiring_version.py",
+    "before": "\"src\" / \"hooks\" / \"cursor_pre_tool_use.py\"",
+    "after": "\"src\" / \"latch\" / \"hooks\" / \"cursor_pre_tool_use.py\"",
+    "count": 1,
+    "label": "mechanical path update in tests/test_wiring_version.py"
+  },
+  {
+    "path": "tests/test_wiring_version.py",
+    "before": "\"src\" / \"hooks\" / \"cursor_post_tool_use.py\"",
+    "after": "\"src\" / \"latch\" / \"hooks\" / \"cursor_post_tool_use.py\"",
+    "count": 1,
+    "label": "mechanical path update in tests/test_wiring_version.py"
+  },
+  {
+    "path": "tests/roundtrip_uninstall.ps1",
+    "before": "chk(any(\"NOT-LATCH\" in c for c in ss),\"non-latch SessionStart hook preserved\")\nchk(any(\"/src/hooks/\" in c for c in ss),\"latch SessionStart hook added\")\nchk(\"PreToolUse\" in hooks,\"unrelated PreToolUse hook preserved\")\n",
+    "after": "chk(any(\"NOT-LATCH\" in c for c in ss),\"non-latch SessionStart hook preserved\")\nchk(any(\"/src/latch/hooks/\" in c or \"/src/hooks/\" in c for c in ss),\"latch SessionStart hook added\")\nchk(\"PreToolUse\" in hooks,\"unrelated PreToolUse hook preserved\")\n",
+    "count": 1,
+    "label": "enumerated reorg patch in tests/roundtrip_uninstall.ps1"
+  },
+  {
+    "path": "tests/roundtrip_uninstall.ps1",
+    "before": "chk(any(\"NOT-LATCH\" in c for c in ss),\"non-latch SessionStart hook preserved\")\nchk(not any(\"/src/hooks/\" in c for c in ss),\"latch SessionStart hook removed\")\nchk(\"PreToolUse\" in hooks,\"unrelated PreToolUse hook preserved\")\n",
+    "after": "chk(any(\"NOT-LATCH\" in c for c in ss),\"non-latch SessionStart hook preserved\")\nchk(not any(\"/src/latch/hooks/\" in c or \"/src/hooks/\" in c for c in ss),\"latch SessionStart hook removed\")\nchk(\"PreToolUse\" in hooks,\"unrelated PreToolUse hook preserved\")\n",
+    "count": 1,
+    "label": "enumerated reorg patch in tests/roundtrip_uninstall.ps1"
+  },
+  {
+    "path": "tests/roundtrip_uninstall.sh",
+    "before": "chk(any(\"NOT-LATCH\" in c for c in ss),\"non-latch SessionStart hook preserved\")\nchk(any(\"/src/hooks/\" in c for c in ss),\"latch SessionStart hook added\")\nchk(\"PreToolUse\" in hooks,\"unrelated PreToolUse hook preserved\")\n",
+    "after": "chk(any(\"NOT-LATCH\" in c for c in ss),\"non-latch SessionStart hook preserved\")\nchk(any(\"/src/latch/hooks/\" in c or \"/src/hooks/\" in c for c in ss),\"latch SessionStart hook added\")\nchk(\"PreToolUse\" in hooks,\"unrelated PreToolUse hook preserved\")\n",
+    "count": 1,
+    "label": "enumerated reorg patch in tests/roundtrip_uninstall.sh"
+  },
+  {
+    "path": "tests/roundtrip_uninstall.sh",
+    "before": "echo; echo \"### kill switch: disable -> status -> enable\"\ndisabled(){ \"$VENV_PY\" -c \"import sys;sys.path.insert(0,'$SBX/src');import paths;print(int(paths.is_disabled()),int(paths.is_write_disabled()))\"; }\nbash \"$SBX/bin/latch_disable.sh\" 2>&1 | sed 's/^/    /'\n",
+    "after": "echo; echo \"### kill switch: disable -> status -> enable\"\ndisabled(){ \"$VENV_PY\" -c \"import sys;sys.path.insert(0,'$SBX/src');from latch.store import paths;print(int(paths.is_disabled()),int(paths.is_write_disabled()))\"; }\nbash \"$SBX/bin/latch_disable.sh\" 2>&1 | sed 's/^/    /'\n",
+    "count": 1,
+    "label": "enumerated reorg patch in tests/roundtrip_uninstall.sh"
+  },
+  {
+    "path": "tests/roundtrip_uninstall.sh",
+    "before": "chk(any(\"NOT-LATCH\" in c for c in ss),\"non-latch SessionStart hook preserved\")\nchk(not any(\"/src/hooks/\" in c for c in ss),\"latch SessionStart hook removed\")\nchk(\"PreToolUse\" in hooks,\"unrelated PreToolUse hook preserved\")\n",
+    "after": "chk(any(\"NOT-LATCH\" in c for c in ss),\"non-latch SessionStart hook preserved\")\nchk(not any(\"/src/latch/hooks/\" in c or \"/src/hooks/\" in c for c in ss),\"latch SessionStart hook removed\")\nchk(\"PreToolUse\" in hooks,\"unrelated PreToolUse hook preserved\")\n",
+    "count": 1,
+    "label": "enumerated reorg patch in tests/roundtrip_uninstall.sh"
+  },
+  {
+    "path": "tests/test_bootstrap_install.py",
+    "before": "    git(origin, \"config\", \"user.name\", \"Latch Tests\")\n    (origin / \"src\").mkdir()\n    (origin / \"src\" / \"quickstart.py\").write_text(\n        \"\"\"#!/usr/bin/env python3\n",
+    "after": "    git(origin, \"config\", \"user.name\", \"Latch Tests\")\n    install_src = origin / \"src\" / \"latch\" / \"install\"\n    install_src.mkdir(parents=True)\n    (install_src / \"quickstart.py\").write_text(\n        \"\"\"#!/usr/bin/env python3\n",
+    "count": 1,
+    "label": "enumerated reorg patch in tests/test_bootstrap_install.py"
+  },
+  {
+    "path": "tests/test_bootstrap_install.py",
+    "before": "    )\n    (origin / \"src\" / \"doctor.py\").write_text(\n        \"\"\"import os\n",
+    "after": "    )\n    (install_src / \"doctor.py\").write_text(\n        \"\"\"import os\n",
+    "count": 1,
+    "label": "enumerated reorg patch in tests/test_bootstrap_install.py"
+  },
+  {
+    "path": "tests/test_bootstrap_install.py",
+    "before": "    assert arch_hint is True\n    installed_version = (Path(__file__).resolve().parents[1] / \"VERSION\").read_text().strip()\n    if (\n",
+    "after": "    assert arch_hint is True\n    root = next(p for p in Path(__file__).resolve().parents if p.name == \"src\").parent\n    installed_version = (root / \"VERSION\").read_text().strip()\n    if (\n",
+    "count": 1,
+    "label": "enumerated reorg patch in tests/test_bootstrap_install.py"
+  },
+  {
+    "path": "tests/test_bootstrap_install.py",
+    "before": "        assert \"quickstart.py\" in text\n        assert \"from doctor import OK, _VEC_PROBE, _run_probe\" in text\n        assert \"upgrade refused because the install checkout is dirty\" in text\n",
+    "after": "        assert \"quickstart.py\" in text\n        assert \"from latch.install.doctor import OK, _VEC_PROBE, _run_probe\" in text\n        assert \"upgrade refused because the install checkout is dirty\" in text\n",
+    "count": 1,
+    "label": "enumerated reorg patch in tests/test_bootstrap_install.py"
+  },
+  {
+    "path": "tests/test_canonical_authority_guard.py",
+    "before": "    tree = ast.parse(\n        (SRC / \"mcp_server.py\").read_text(encoding=\"utf-8\"),\n        filename=\"src/latch/mcp/mcp_server.py\",\n",
+    "after": "    tree = ast.parse(\n        (SRC / \"latch\" / \"mcp\" / \"mcp_server.py\").read_text(encoding=\"utf-8\"),\n        filename=\"src/latch/mcp/mcp_server.py\",\n",
+    "count": 1,
+    "label": "enumerated reorg patch in tests/test_canonical_authority_guard.py"
+  },
+  {
+    "path": "tests/test_codex_command_parity.py",
+    "before": "\n    assert 'python \"$latch_home/src/maintenance.py\" weekly \"$(pwd)\"' in text\n\n",
+    "after": "\n    assert 'maintenance_script=\"$latch_home/src/latch/pipeline/maintenance.py\"' in text\n    assert 'maintenance_script=\"$latch_home/src/maintenance.py\"' in text\n    assert 'python \"$maintenance_script\" weekly \"$(pwd)\"' in text\n\n",
+    "count": 1,
+    "label": "enumerated reorg patch in tests/test_codex_command_parity.py"
+  },
+  {
+    "path": "tests/test_codex_command_parity.py",
+    "before": "        assert \"AGENTS.md\" in text\n        assert \"src/mcp_server.py\" in text\n",
+    "after": "        assert \"AGENTS.md\" in text\n        assert \"src/latch/mcp/mcp_server.py\" in text\n        assert \"src/mcp_server.py\" in text\n",
+    "count": 1,
+    "label": "enumerated reorg patch in tests/test_codex_command_parity.py"
+  },
+  {
+    "path": "tests/test_codex_wiring.py",
+    "before": "            r\"C:\\Program Files\\Latch\\venv\\Scripts\\python.exe\",\n            str(ROOT / \"src\" / \"mcp_server.py\"),\n        )\n",
+    "after": "            r\"C:\\Program Files\\Latch\\venv\\Scripts\\python.exe\",\n                str(ROOT / \"src\" / \"latch\" / \"mcp\" / \"mcp_server.py\"),\n        )\n",
+    "count": 1,
+    "label": "enumerated reorg patch in tests/test_codex_wiring.py"
+  },
+  {
+    "path": "tests/test_cursor_gate_state.py",
+    "before": "        (\"/latch-gate-report\", f\"bash {paths.KB_ROOT / 'bin' / 'latch_gate_report.sh'}\"),\n        (\"/latch-budget-approve\", f\"{python} {paths.KB_ROOT / 'src' / 'budget.py'} approve {root}\"),\n        (\"/latch-decay\", f\"{python} {paths.KB_ROOT / 'src' / 'maintenance.py'} weekly {root}\"),\n        (\"/latch-heal\", f\"{python} {paths.KB_ROOT / 'src' / 'maintenance.py'} nightly {root}\"),\n        (\"/latch-tree\", f\"{python} {paths.KB_ROOT / 'src' / 'maintenance.py'} tree {root}\"),\n    ]\n    try:\n        for prompt, command in cases:\n            cgs.begin_prompt(root, sid, prompt)\n",
+    "after": "        (\"/latch-gate-report\", f\"bash {paths.KB_ROOT / 'bin' / 'latch_gate_report.sh'}\"),\n        (\"/latch-budget-approve\", f\"{python} {paths.KB_ROOT / 'src' / 'latch' / 'gate' / 'budget.py'} approve {root}\"),\n        (\"/latch-decay\", f\"{python} {paths.KB_ROOT / 'src' / 'latch' / 'pipeline' / 'maintenance.py'} weekly {root}\"),\n        (\"/latch-heal\", f\"{python} {paths.KB_ROOT / 'src' / 'latch' / 'pipeline' / 'maintenance.py'} nightly {root}\"),\n        (\"/latch-tree\", f\"{python} {paths.KB_ROOT / 'src' / 'latch' / 'pipeline' / 'maintenance.py'} tree {root}\"),\n    ]\n    try:\n        for prompt, command in cases:\n            cgs.begin_prompt(root, sid, prompt)\n            assert cpre.decision(_shell(command, root, sid)) == {}, prompt\n\n        legacy_cases = [\n            (\"/latch-budget-approve\", f\"{python} {paths.KB_ROOT / 'src' / 'budget.py'} approve {root}\"),\n            (\"/latch-decay\", f\"{python} {paths.KB_ROOT / 'src' / 'maintenance.py'} weekly {root}\"),\n            (\"/latch-heal\", f\"{python} {paths.KB_ROOT / 'src' / 'maintenance.py'} nightly {root}\"),\n            (\"/latch-tree\", f\"{python} {paths.KB_ROOT / 'src' / 'maintenance.py'} tree {root}\"),\n        ]\n        for prompt, command in legacy_cases:\n            cgs.begin_prompt(root, sid, prompt)\n",
+    "count": 1,
+    "label": "enumerated reorg patch in tests/test_cursor_gate_state.py"
+  },
+  {
+    "path": "tests/test_cursor_hooks.py",
+    "before": "HOOK_ARGS = (\n    \"/repo/src/hooks/cursor_session_start.py\",\n    \"/repo/src/latch/hooks/cursor_before_submit.py\",\n    \"/repo/src/latch/hooks/cursor_pre_tool_use.py\",\n    \"/repo/src/hooks/cursor_post_tool_use.py\",\n)\n",
+    "after": "HOOK_ARGS = (\n        \"/repo/src/latch/hooks/cursor_session_start.py\",\n        \"/repo/src/latch/hooks/cursor_before_submit.py\",\n        \"/repo/src/latch/hooks/cursor_pre_tool_use.py\",\n        \"/repo/src/latch/hooks/cursor_post_tool_use.py\",\n)\n",
+    "count": 1,
+    "label": "enumerated reorg patch in tests/test_cursor_hooks.py"
+  },
+  {
+    "path": "tests/test_install_cursor.py",
+    "before": "        python_path = install_engine.resolve_python(sys.executable)\n        server_py = str((ic.KB_HOME / \"src\" / \"mcp_server.py\")).replace(\"\\\\\", \"/\")\n        body, _ = ic.merge_mcp_config(\"\", python_path, server_py)\n",
+    "after": "        python_path = install_engine.resolve_python(sys.executable)\n        server_py = str((ic.KB_HOME / \"src\" / \"latch\" / \"mcp\" / \"mcp_server.py\")).replace(\"\\\\\", \"/\")\n        body, _ = ic.merge_mcp_config(\"\", python_path, server_py)\n",
+    "count": 1,
+    "label": "enumerated reorg patch in tests/test_install_cursor.py"
+  },
+  {
+    "path": "tests/test_mcp_lifecycle_contract.py",
+    "before": "    proc = subprocess.run(\n        [sys.executable, \"-c\", \"import mcp_daemon\"],\n        cwd=str(ROOT / \"src\"),\n",
+    "after": "    proc = subprocess.run(\n        [sys.executable, \"-c\", \"from latch.mcp import mcp_daemon\"],\n        cwd=str(ROOT / \"src\"),\n",
+    "count": 1,
+    "label": "enumerated reorg patch in tests/test_mcp_lifecycle_contract.py"
+  },
+  {
+    "path": "tests/test_mcp_lifecycle_contract.py",
+    "before": "            (\n                \"import mcp_broker,time; \"\n                \"h=mcp_broker.acquire_owner_fence(); \"\n",
+    "after": "            (\n                \"from latch.mcp import mcp_broker; import time; \"\n                \"h=mcp_broker.acquire_owner_fence(); \"\n",
+    "count": 1,
+    "label": "enumerated reorg patch in tests/test_mcp_lifecycle_contract.py"
+  },
+  {
+    "path": "tests/test_mcp_shared_runtime.py",
+    "before": "            return subprocess.check_output(\n                [sys.executable, \"-c\", \"import mcp_broker; print(mcp_broker.RUNTIME_KEY)\"],\n                env=env,\n",
+    "after": "            return subprocess.check_output(\n                [\n                    sys.executable,\n                    \"-c\",\n                    \"from latch.mcp import mcp_broker; print(mcp_broker.RUNTIME_KEY)\",\n                ],\n                env=env,\n",
+    "count": 1,
+    "label": "enumerated reorg patch in tests/test_mcp_shared_runtime.py"
+  },
+  {
+    "path": "tests/test_mcp_shared_runtime.py",
+    "before": "        current_key = runtime_key()\n        runtime_module = install_src / \"mcp_runtime.py\"\n        stat = runtime_module.stat()\n",
+    "after": "        current_key = runtime_key()\n        runtime_module = install_src / \"latch\" / \"mcp\" / \"mcp_runtime.py\"\n        stat = runtime_module.stat()\n",
+    "count": 1,
+    "label": "enumerated reorg patch in tests/test_mcp_shared_runtime.py"
+  },
+  {
+    "path": "tests/test_mcp_shared_runtime.py",
+    "before": "        # epoch. This is the supported future in-place-upgrade path.\n        broker_path = install_src / \"mcp_broker.py\"\n        broker_source = broker_path.read_text(encoding=\"utf-8\")\n",
+    "after": "        # epoch. This is the supported future in-place-upgrade path.\n        broker_path = install_src / \"latch\" / \"mcp\" / \"mcp_broker.py\"\n        broker_source = broker_path.read_text(encoding=\"utf-8\")\n",
+    "count": 1,
+    "label": "enumerated reorg patch in tests/test_mcp_shared_runtime.py"
+  },
+  {
+    "path": "tests/test_mcp_shared_runtime.py",
+    "before": "            \"in-place-upgrade-bootstrap\",\n            server_path=install_src / \"mcp_server.py\",\n            env_overrides={\n",
+    "after": "            \"in-place-upgrade-bootstrap\",\n            server_path=install_src / \"latch\" / \"mcp\" / \"mcp_server.py\",\n            env_overrides={\n",
+    "count": 1,
+    "label": "enumerated reorg patch in tests/test_mcp_shared_runtime.py"
+  },
+  {
+    "path": "tests/test_mcp_shared_runtime.py",
+    "before": "            \"in-place-upgrade-session\",\n            server_path=install_src / \"mcp_server.py\",\n            env_overrides={\n",
+    "after": "            \"in-place-upgrade-session\",\n            server_path=install_src / \"latch\" / \"mcp\" / \"mcp_server.py\",\n            env_overrides={\n",
+    "count": 1,
+    "label": "enumerated reorg patch in tests/test_mcp_shared_runtime.py"
+  },
+  {
+    "path": "tests/test_mcp_shared_runtime.py",
+    "before": "    install_src = install / \"src\"\n    client: McpClient | None = None\n    try:\n",
+    "after": "    install_src = install / \"src\"\n    client: McpClient | None = None\n    replacement_owner: subprocess.Popen[bytes] | None = None\n    try:\n",
+    "count": 1,
+    "label": "enumerated reorg patch in tests/test_mcp_shared_runtime.py"
+  },
+  {
+    "path": "tests/test_mcp_shared_runtime.py",
+    "before": "        )\n        old_pid = client.status()[\"process_pid\"]\n        shutil.rmtree(install_src)\n",
+    "after": "        )\n        before = client.status()\n        old_pid = int(before[\"process_pid\"])\n        requested_key = str(before[\"daemon\"][\"runtime_key\"])\n        shutil.rmtree(install_src)\n",
+    "count": 1,
+    "label": "enumerated reorg patch in tests/test_mcp_shared_runtime.py"
+  },
+  {
+    "path": "tests/test_mcp_shared_runtime.py",
+    "before": "        _copy_current_install_src(install_src)\n        os.kill(old_pid, signal.SIGTERM)\n        _wait_for_pid_exit(old_pid)\n\n",
+    "after": "        _copy_current_install_src(install_src)\n        os.kill(old_pid, signal.SIGTERM)\n        _wait_for_pid_exit(old_pid)\n\n        # The pure package move deliberately leaves no flat compatibility\n        # launcher.  Per the accepted manual-repair residual, model a repaired\n        # current launcher explicitly while retaining the real old proxy and\n        # its wire behavior.\n        _assert(\n            not (install_src / \"mcp_daemon.py\").exists(),\n            \"legacy launcher unexpectedly survived\",\n        )\n        owner_env = os.environ.copy()\n        owner_env.update({\n            \"LATCH_HOME\": str(ROOT),\n            \"LATCH_KB_DIR\": str(kb_dir),\n            \"LATCH_MCP_DAEMON_PROCESS\": \"1\",\n            \"LATCH_MCP_RUNTIME_KEY\": requested_key,\n            \"LATCH_MCP_PROTOCOL_VERSION\": \"1\",\n            \"LATCH_MCP_INITIAL_PROJECT_CWD\": str(ROOT),\n            \"CLAUDE_KB_IN_MAINTENANCE\": \"1\",\n            \"PYTHONPATH\": str(install_src),\n            \"PYTHONDONTWRITEBYTECODE\": \"1\",\n        })\n        owner_env.pop(\"LATCH_MCP_PROXY_CAPABILITY_EPOCH\", None)\n        replacement_owner = subprocess.Popen(\n            [\n                sys.executable,\n                str(install_src / \"latch\" / \"mcp\" / \"mcp_daemon.py\"),\n            ],\n            env=owner_env,\n            stdout=subprocess.DEVNULL,\n            stderr=subprocess.PIPE,\n        )\n        alias_paths = (\n            kb_dir / \"mcp-daemon.json\",\n            kb_dir\n            / \"runtime\"\n            / \"mcp-runtimes\"\n            / requested_key\n            / \"mcp-daemon.json\",\n        )\n        deadline = time.monotonic() + 15.0\n        aliases_ready = False\n        while time.monotonic() < deadline:\n            if replacement_owner.poll() is not None:\n                detail = (\n                    replacement_owner.stderr.read().decode(errors=\"replace\")\n                    if replacement_owner.stderr is not None\n                    else \"\"\n                )\n                raise AssertionError(\n                    f\"replacement compatibility owner exited: {detail}\"\n                )\n            try:\n                payloads = [\n                    json.loads(path.read_text(encoding=\"utf-8\"))\n                    for path in alias_paths\n                ]\n            except (OSError, ValueError):\n                time.sleep(0.05)\n                continue\n            aliases_ready = all(\n                payload.get(\"pid\") != old_pid\n                and payload.get(\"runtime_key\") == requested_key\n                and payload.get(\"compatibility\") == \"fresh_task_required\"\n                for payload in payloads\n            )\n            if aliases_ready:\n                break\n            time.sleep(0.05)\n        _assert(aliases_ready, f\"replacement aliases not ready: {alias_paths}\")\n\n",
+    "count": 1,
+    "label": "enumerated reorg patch in tests/test_mcp_shared_runtime.py"
+  },
+  {
+    "path": "tests/test_mcp_shared_runtime.py",
+    "before": "            client.close()\n        _stop_daemon(kb_dir)\n        shutil.rmtree(install, ignore_errors=True)\n",
+    "after": "            client.close()\n        _stop_daemon(kb_dir)\n        if replacement_owner is not None and replacement_owner.poll() is None:\n            replacement_owner.terminate()\n        if replacement_owner is not None:\n            try:\n                replacement_owner.wait(timeout=5.0)\n            except subprocess.TimeoutExpired:\n                replacement_owner.kill()\n                replacement_owner.wait(timeout=5.0)\n        shutil.rmtree(install, ignore_errors=True)\n",
+    "count": 1,
+    "label": "enumerated reorg patch in tests/test_mcp_shared_runtime.py"
+  },
+  {
+    "path": "tests/test_mcp_shared_runtime.py",
+    "before": "        code = (\n            \"import embeddings,time\\n\"\n            \"for _ in range(4):\\n\"\n",
+    "after": "        code = (\n            \"from latch.retrieval import embeddings; import time\\n\"\n            \"for _ in range(4):\\n\"\n",
+    "count": 1,
+    "label": "enumerated reorg patch in tests/test_mcp_shared_runtime.py"
+  },
+  {
+    "path": "tests/test_quickstart.py",
+    "before": "            \"LATCH_KB_DIR\": str(target),\n            \"PYTHONPATH\": str(Path(qs.__file__).resolve().parent),\n        })\n",
+    "after": "            \"LATCH_KB_DIR\": str(target),\n            \"PYTHONPATH\": str(next(p for p in Path(qs.__file__).resolve().parents if p.name == \"src\")),\n        })\n",
+    "count": 1,
+    "label": "enumerated reorg patch in tests/test_quickstart.py"
+  },
+  {
+    "path": "tests/test_quickstart.py",
+    "before": "            [sys.executable, \"-c\", (\n                \"import quickstart; \"\n                \"level, message = quickstart.pin_kb_for_quickstart(None, dry_run=False); \"\n",
+    "after": "            [sys.executable, \"-c\", (\n                \"from latch.install import quickstart; \"\n                \"level, message = quickstart.pin_kb_for_quickstart(None, dry_run=False); \"\n",
+    "count": 1,
+    "label": "enumerated reorg patch in tests/test_quickstart.py"
+  },
+  {
+    "path": "tests/test_quickstart.py",
+    "before": "        later_db = subprocess.check_output(\n            [sys.executable, \"-c\", \"import paths; print(paths.db_path())\"],\n            cwd=mcp_cwd,\n",
+    "after": "        later_db = subprocess.check_output(\n            [sys.executable, \"-c\", \"from latch.store import paths; print(paths.db_path())\"],\n            cwd=mcp_cwd,\n",
+    "count": 1,
+    "label": "enumerated reorg patch in tests/test_quickstart.py"
+  },
+  {
+    "path": "tests/test_review_panel.py",
+    "before": "    seed = target / \"src\" / \"latch\" / \"pipeline\" / \"seed.py\"\n    seed.parent.mkdir()\n    seed.write_text(\"raise RuntimeError('must not execute')\\n\", encoding=\"utf-8\")\n",
+    "after": "    seed = target / \"src\" / \"latch\" / \"pipeline\" / \"seed.py\"\n    seed.parent.mkdir(parents=True)\n    seed.write_text(\"raise RuntimeError('must not execute')\\n\", encoding=\"utf-8\")\n",
+    "count": 1,
+    "label": "enumerated reorg patch in tests/test_review_panel.py"
+  },
+  {
+    "path": "tests/test_uninstall_engine.py",
+    "before": "            \"/py\",\n            \"/repo/src/latch/hooks/cursor_session_start.py\",\n            \"/repo/src/latch/hooks/cursor_before_submit.py\",\n            \"/repo/src/latch/hooks/cursor_pre_tool_use.py\",\n            \"/repo/src/latch/hooks/cursor_post_tool_use.py\",\n            path=hooks_path,\n",
+    "after": "            \"/py\",\n        \"/repo/src/latch/hooks/cursor_session_start.py\",\n        \"/repo/src/latch/hooks/cursor_before_submit.py\",\n        \"/repo/src/latch/hooks/cursor_pre_tool_use.py\",\n        \"/repo/src/latch/hooks/cursor_post_tool_use.py\",\n            path=hooks_path,\n",
+    "count": 1,
+    "label": "enumerated reorg patch in tests/test_uninstall_engine.py"
+  },
+  {
+    "path": "tests/test_vault_safety.py",
+    "before": "    code = (\n        \"import json,paths; p=paths.project_dir('child-scope').resolve(); \"\n        \"print(json.dumps({'path':str(p),'root':str(paths.validated_test_root())}))\"\n",
+    "after": "    code = (\n        \"import json; from latch.store import paths; \"\n        \"p=paths.project_dir('child-scope').resolve(); \"\n        \"print(json.dumps({'path':str(p),'root':str(paths.validated_test_root())}))\"\n",
+    "count": 1,
+    "label": "enumerated reorg patch in tests/test_vault_safety.py"
+  },
+  {
+    "path": "tests/test_versioning.py",
+    "before": "    assert versioning.KB_SCHEMA_VERSION == 3\n    assert versioning.WIRING_VERSION == 6\n    assert versioning.check_tag(\"v1.1.0\")[0]\n",
+    "after": "    assert versioning.KB_SCHEMA_VERSION == 3\n    assert versioning.WIRING_VERSION == 7\n    assert versioning.check_tag(\"v1.1.0\")[0]\n",
+    "count": 1,
+    "label": "enumerated reorg patch in tests/test_versioning.py"
+  },
+  {
+    "path": "tests/test_versioning.py",
+    "before": "    assert data[\"kb_schema_version\"] == 3\n    assert data[\"wiring_version\"] == 6\n    assert data[\"install_root\"] == str(ROOT)\n",
+    "after": "    assert data[\"kb_schema_version\"] == 3\n    assert data[\"wiring_version\"] == 7\n    assert data[\"install_root\"] == str(ROOT)\n",
+    "count": 1,
+    "label": "enumerated reorg patch in tests/test_versioning.py"
+  },
+  {
+    "path": "tests/test_win_launcher_protocol.py",
+    "before": "SRC = Path(__file__).resolve().parent.parent / \"src\"\nLAUNCHER = SRC / \"mcp_launcher_win.py\"\nPYTHONW = Path(sys.executable).with_name(\"pythonw.exe\")\n",
+    "after": "SRC = Path(__file__).resolve().parent.parent / \"src\"\nLAUNCHER = SRC / \"latch\" / \"mcp\" / \"mcp_launcher_win.py\"\nPYTHONW = Path(sys.executable).with_name(\"pythonw.exe\")\n",
+    "count": 1,
+    "label": "enumerated reorg patch in tests/test_win_launcher_protocol.py"
+  },
+  {
+    "path": "tests/test_wiring_version.py",
+    "before": "    rendered, _ = install_cursor.merge_mcp_config(\n        existing, python_path, str(ROOT / \"src\" / \"mcp_server.py\"), path=mcp\n    )\n",
+    "after": "    rendered, _ = install_cursor.merge_mcp_config(\n        existing, python_path, str(ROOT / \"src\" / \"latch\" / \"mcp\" / \"mcp_server.py\"), path=mcp\n    )\n",
+    "count": 1,
+    "label": "enumerated reorg patch in tests/test_wiring_version.py"
+  },
+  {
+    "path": "src/latch/evals/v4_citation_rate.py",
+    "before": "src/v4_citation_rate.py",
+    "after": "src/latch/evals/v4_citation_rate.py",
+    "count": 1,
+    "label": "mechanical path update in src/latch/evals/v4_citation_rate.py"
+  },
+  {
+    "path": "src/latch/install/doctor.py",
+    "before": "src/install_engine.py",
+    "after": "src/latch/install/install_engine.py",
+    "count": 1,
+    "label": "mechanical path update in src/latch/install/doctor.py"
+  },
+  {
+    "path": "src/latch/install/doctor.py",
+    "before": "src/doctor.py",
+    "after": "src/latch/install/doctor.py",
+    "count": 1,
+    "label": "mechanical path update in src/latch/install/doctor.py"
+  },
+  {
+    "path": "src/latch/install/install_engine.py",
+    "before": "src/install_engine.py",
+    "after": "src/latch/install/install_engine.py",
+    "count": 1,
+    "label": "mechanical path update in src/latch/install/install_engine.py"
+  },
+  {
+    "path": "src/latch/install/uninstall_engine.py",
+    "before": "src/uninstall_engine.py",
+    "after": "src/latch/install/uninstall_engine.py",
+    "count": 2,
+    "label": "mechanical path update in src/latch/install/uninstall_engine.py"
+  },
+  {
+    "path": "src/latch/mcp/mcp_server.py",
+    "before": "src/profiles.py",
+    "after": "src/latch/store/profiles.py",
+    "count": 1,
+    "label": "mechanical path update in src/latch/mcp/mcp_server.py"
+  },
+  {
+    "path": "src/latch/pipeline/heal.py",
+    "before": "src/selfheal.py",
+    "after": "src/latch/pipeline/selfheal.py",
+    "count": 1,
+    "label": "mechanical path update in src/latch/pipeline/heal.py"
+  },
+  {
+    "path": "src/latch/store/snapshot.py",
+    "before": "src/snapshot.py",
+    "after": "src/latch/store/snapshot.py",
+    "count": 2,
+    "label": "mechanical path update in src/latch/store/snapshot.py"
+  },
+  {
+    "path": "src/latch/store/snapshot.py",
+    "before": "src/migrate_v2.py",
+    "after": "src/latch/store/migrate_v2.py",
+    "count": 1,
+    "label": "mechanical path update in src/latch/store/snapshot.py"
+  },
+  {
+    "path": "bin/predicate_coverage.sh",
+    "before": "../src/predicate_coverage.py",
+    "after": "../src/latch/gate/predicate_coverage.py",
+    "count": 1,
+    "optional": true,
+    "label": "phase-a predicate coverage wrapper path"
+  },
+  {
+    "path": "src/latch/gate/predicate_snapshot.py",
+    "before": "_PUBLIC_SOURCE_ROOT = Path(__file__).resolve().parent.parent",
+    "after": "_PUBLIC_SOURCE_ROOT = next(p for p in Path(__file__).resolve().parents if p.name == \"src\").parent",
+    "count": 1,
+    "optional": true,
+    "label": "phase-a predicate snapshot public-source root anchor"
+  },
+  {
+    "path": "tests/test_predicate_compiler.py",
+    "before": "return importlib.import_module(\"predicate\")",
+    "after": "return importlib.import_module(\"latch.gate.predicate\")",
+    "count": 1,
+    "optional": true,
+    "label": "phase-a predicate compiler test dynamic package import"
+  },
+  {
+    "path": "tests/test_predicate_contract.py",
+    "before": "return importlib.import_module(name)",
+    "after": "return importlib.import_module(f\"latch.gate.{name}\")",
+    "count": 1,
+    "optional": true,
+    "label": "phase-a predicate contract test dynamic package import"
+  },
+  {
+    "path": "tests/test_predicate_coverage.py",
+    "before": "return importlib.import_module(\"predicate_coverage\")",
+    "after": "return importlib.import_module(\"latch.gate.predicate_coverage\")",
+    "count": 1,
+    "optional": true,
+    "label": "phase-a predicate coverage test dynamic package import"
+  },
+  {
+    "path": "tests/test_predicate_semantics.py",
+    "before": "return importlib.import_module(\"predicate\")",
+    "after": "return importlib.import_module(\"latch.gate.predicate\")",
+    "count": 1,
+    "optional": true,
+    "label": "phase-a predicate semantics test dynamic package import"
+  },
+  {
+    "path": "tests/test_predicate_snapshot.py",
+    "before": "return importlib.import_module(name)",
+    "after": "return importlib.import_module(f\"latch.gate.{name}\")",
+    "count": 1,
+    "optional": true,
+    "label": "phase-a predicate snapshot test dynamic package import"
+  },
+  {
+    "path": "tests/test_predicate_compiler.py",
+    "before": "import predicate\n\nbanned_roots",
+    "after": "from latch.gate import predicate\n\nbanned_roots",
+    "count": 1,
+    "optional": true,
+    "label": "phase-a isolated compiler probe package import"
+  },
+  {
+    "path": "tests/test_predicate_compiler.py",
+    "before": "if name.split(\".\", 1)[0] in banned_roots",
+    "after": "if (name.rsplit(\".\", 1)[-1] if name.startswith(\"latch.\") else name.split(\".\", 1)[0]) in banned_roots",
+    "count": 1,
+    "optional": true,
+    "label": "phase-a isolated compiler probe package-aware import audit"
+  },
+  {
+    "path": "tests/test_predicate_semantics.py",
+    "before": "import predicate\n\ndef row",
+    "after": "from latch.gate import predicate\n\ndef row",
+    "count": 1,
+    "optional": true,
+    "label": "phase-a isolated semantics probe package import"
+  },
+  {
+    "path": "tests/test_predicate_contract.py",
+    "before": "_SRC / \"predicate_snapshot.py\"",
+    "after": "_SRC / \"latch\" / \"gate\" / \"predicate_snapshot.py\"",
+    "count": 1,
+    "optional": true,
+    "label": "phase-a predicate snapshot public-surface path"
+  },
+  {
+    "path": "tests/test_predicate_contract.py",
+    "before": "_SRC / \"predicate_consumer.py\"",
+    "after": "_SRC / \"latch\" / \"gate\" / \"predicate_consumer.py\"",
+    "count": 1,
+    "optional": true,
+    "label": "phase-a predicate consumer public-surface path"
+  },
+  {
+    "path": "tests/test_predicate_g1.py",
+    "before": "import predicate_policy\nimport predicate_snapshot\nimport predicate_consumer",
+    "after": "from latch.gate import predicate_consumer, predicate_policy, predicate_snapshot",
+    "count": 1,
+    "optional": true,
+    "label": "phase-a isolated G1 probe package imports"
+  },
+  {
+    "path": "tests/test_predicate_g1.py",
+    "before": "banned_modules = {\"http.client\", \"urllib.request\"}\nbaseline_banned = {",
+    "after": "banned_modules = {\"http.client\", \"urllib.request\"}\ndef is_banned_module(name):\n    if name in banned_modules:\n        return True\n    if name == \"latch.gate\":\n        return False\n    root = name.rsplit(\".\", 1)[-1] if name.startswith(\"latch.\") else name.split(\".\", 1)[0]\n    return root in banned_roots\nbaseline_banned = {",
+    "count": 1,
+    "optional": true,
+    "label": "phase-a G1 probe package-aware banned-module predicate"
+  },
+  {
+    "path": "tests/test_predicate_g1.py",
+    "before": "if name.split(\".\", 1)[0] in banned_roots or name in banned_modules",
+    "after": "if is_banned_module(name)",
+    "count": 2,
+    "optional": true,
+    "label": "phase-a G1 probe package-aware loaded-module checks"
+  },
+  {
+    "path": "tests/test_predicate_g1.py",
+    "before": "    root = name.split(\".\", 1)[0]\n    if level == 0 and (root in banned_roots or name in banned_modules):",
+    "after": "    requested = {name}\n    if name.startswith(\"latch.\") and fromlist:\n        requested.update(f\"{name}.{item}\" for item in fromlist)\n    if level == 0 and any(is_banned_module(item) for item in requested):",
+    "count": 1,
+    "optional": true,
+    "label": "phase-a G1 probe package-aware guarded import"
+  },
+  {
+    "path": "tests/test_predicate_g1.py",
+    "before": "def test_policy_path_import_graph_has_no_model_budget_network_or_gate_dependency():\n    def import_graph(roots: set[str]) -> set[str]:",
+    "after": "def test_policy_path_import_graph_has_no_model_budget_network_or_gate_dependency():\n    def source_path(module_name: str) -> Path:\n        return _SRC.joinpath(*module_name.split(\".\")).with_suffix(\".py\")\n\n    def import_graph(roots: set[str]) -> set[str]:",
+    "count": 1,
+    "optional": true,
+    "label": "phase-a predicate import-graph package source resolver"
+  },
+  {
+    "path": "tests/test_predicate_g1.py",
+    "before": "path = _SRC / f\"{module_name}.py\"",
+    "after": "path = source_path(module_name)",
+    "count": 1,
+    "optional": true,
+    "label": "phase-a predicate import-graph source path"
+  },
+  {
+    "path": "tests/test_predicate_g1.py",
+    "before": "                elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:\n                    names = [node.module]",
+    "after": "                elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:\n                    names = [node.module]\n                    if node.module.startswith(\"latch.\"):\n                        names.extend(\n                            f\"{node.module}.{alias.name}\"\n                            for alias in node.names\n                            if alias.name != \"*\"\n                        )",
+    "count": 1,
+    "optional": true,
+    "label": "phase-a predicate import-graph package imports"
+  },
+  {
+    "path": "tests/test_predicate_g1.py",
+    "before": "                for name in names:\n                    root = name.split(\".\", 1)[0]\n                    imports.add(root)",
+    "after": "                for name in names:\n                    root = (\n                        name.rsplit(\".\", 1)[-1]\n                        if name.startswith(\"latch.\")\n                        else name.split(\".\", 1)[0]\n                    )\n                    module_path = source_path(name)\n                    if not name.startswith(\"latch.\") or module_path.is_file():\n                        imports.add(root)",
+    "count": 1,
+    "optional": true,
+    "label": "phase-a predicate import-graph package module name"
+  },
+  {
+    "path": "tests/test_predicate_g1.py",
+    "before": "if (_SRC / f\"{root}.py\").is_file():",
+    "after": "if module_path.is_file():",
+    "count": 1,
+    "optional": true,
+    "label": "phase-a predicate import-graph package dependency path"
+  },
+  {
+    "path": "tests/test_predicate_g1.py",
+    "before": "queue.append(root)",
+    "after": "queue.append(name)",
+    "count": 1,
+    "optional": true,
+    "label": "phase-a predicate import-graph package dependency queue"
+  },
+  {
+    "path": "tests/test_predicate_g1.py",
+    "before": "{\"predicate_consumer\", \"predicate_snapshot\", \"predicate\"}",
+    "after": "{\n            \"latch.gate.predicate_consumer\",\n            \"latch.gate.predicate_snapshot\",\n            \"latch.gate.predicate\",\n        }",
+    "count": 1,
+    "optional": true,
+    "label": "phase-a predicate consumer import-graph package roots"
+  },
+  {
+    "path": "tests/test_predicate_g1.py",
+    "before": "{\"predicate_policy\", \"predicate_snapshot\", \"predicate_consumer\", \"predicate\"}",
+    "after": "{\n            \"latch.gate.predicate_policy\",\n            \"latch.gate.predicate_snapshot\",\n            \"latch.gate.predicate_consumer\",\n            \"latch.gate.predicate\",\n        }",
+    "count": 1,
+    "optional": true,
+    "label": "phase-a predicate projection import-graph package roots"
+  },
+  {
+    "path": "tests/test_hook_input.py",
+    "before": "\n@pytest.mark.parametrize(\"hook\", [cursor_before_submit, cursor_pre_tool_use])\ndef test_cursor_fail_closed_hooks_propagate_invalid_utf8(monkeypatch, hook):\n",
+    "after": "\n@pytest.mark.parametrize(\n    \"hook\",\n    [cursor_before_submit, cursor_pre_tool_use],\n    ids=(\"cursor_before_submit\", \"cursor_pre_tool_use\"),\n)\ndef test_cursor_fail_closed_hooks_propagate_invalid_utf8(monkeypatch, hook):\n",
+    "count": 1,
+    "label": "enumerated reorg patch in tests/test_hook_input.py"
+  },
+  {
+    "path": "src/latch/hooks/codex_session_start.py",
+    "before": "\n# Ensure src/ and src/hooks/ are importable when Codex launches this script\n# directly from hooks.json.\n",
+    "after": "\n# Ensure src/ and src/latch/hooks/ are importable when Codex launches this script\n# directly from hooks.json.\n",
+    "count": 1,
+    "label": "Codex hook package-path comment"
+  },
+  {
+    "path": "tests/test_outcome_events.py",
+    "before": "    target = Path(mcp_broker.__file__).resolve().parent / filename\n",
+    "after": "    targets = [\n        path for path in mcp_broker._runtime_content_files()\n        if path.name == filename\n    ]\n    assert len(targets) == 1\n    target = targets[0].resolve()\n",
+    "count": 1,
+    "label": "resolve runtime-key test targets from packaged content manifest"
+  },
+  {
+    "path": "tests/seed_report_review_fixtures.py",
+    "before": "        str(SRC / \"seed.py\"),",
+    "after": "        str(SRC / \"latch\" / \"pipeline\" / \"seed.py\"),",
+    "count": 1,
+    "label": "seed review fixture packaged entrypoint"
+  },
+  {
+    "path": "tests/test_unlatch.py",
+    "before": "str(ROOT / \"src\" / \"hooks\" / script)",
+    "after": "str(ROOT / \"src\" / \"latch\" / \"hooks\" / script)",
+    "count": 1,
+    "label": "unlatched hook fixture packaged entrypoint"
+  },
+  {
+    "path": "tests/test_unlatch.py",
+    "before": "str(ROOT / \"src\" / \"unlatch.py\")",
+    "after": "str(ROOT / \"src\" / \"latch\" / \"install\" / \"unlatch.py\")",
+    "count": 1,
+    "label": "unlatch fixture packaged entrypoint"
+  },
+  {
+    "path": "tests/test_unlatch.py",
+    "before": "str(ROOT / \"src\" / \"kb_gate_cli.py\")",
+    "after": "str(ROOT / \"src\" / \"latch\" / \"gate\" / \"kb_gate_cli.py\")",
+    "count": 1,
+    "label": "unlatched gate fixture packaged entrypoint"
+  },
+  {
+    "path": "tests/test_post_tool_use.py",
+    "before": "sys.path.insert(0, str(Path(__file__).resolve().parent.parent / \"src\" / \"hooks\"))",
+    "after": "sys.path.insert(0, str(Path(__file__).resolve().parent.parent / \"src\"))",
+    "count": 1,
+    "label": "post-tool test imports packaged hook module from src root"
+  },
+  {
+    "path": "artifacts/agent-contract-trim/evidence.json",
+    "before": "\"candidate\": 6",
+    "after": "\"candidate\": 7",
+    "count": 1,
+    "label": "record current wiring generation in rendered-surface evidence"
+  },
+  {
+    "path": "artifacts/agent-contract-trim/evidence.json",
+    "before": "40d2a77f473c733c5a56d917fe445741e4e9ce820e8c9acb1423644020184f00",
+    "after": "17d7815975dfcfda8c008f1e429828ddb84c65c93d4228da38f0df59b67d23f4",
+    "count": 1,
+    "label": "refresh Claude rendered-surface hash for wiring generation 7"
+  },
+  {
+    "path": "artifacts/agent-contract-trim/evidence.json",
+    "before": "b89caa679f5879cfec7f71bddd1298f2a3b5882bd7b2241e33dda18fcc711c5e",
+    "after": "07d9438c14462bd1efa4ea6ba798999782bade3f9f993fb81efbf5682d7c4baa",
+    "count": 1,
+    "label": "refresh Codex rendered-surface hash for wiring generation 7"
+  },
+  {
+    "path": "artifacts/agent-contract-trim/evidence.json",
+    "before": "f443f99d99198a6e03bfe58b2697ada42a669a7bc2c5869f1dbe3a96f244d5dc",
+    "after": "93a36b18b58c014a084ea309f765c0c18a565fd00b7b32a2276e006dfba8f501",
+    "count": 1,
+    "label": "refresh Cursor rendered-surface hash for wiring generation 7"
+  },
+  {
+    "path": "artifacts/agent-contract-trim/evidence.json",
+    "before": "462a2a9a1e0165cdcc5daab06deb57f3e3c2aa4c0509f018d5ca1ccf9d5a4bbe",
+    "after": "963ad97680f716a9f4dc59229dd5b77240b31e8ce81aa3a466eb98c50172320c",
+    "count": 1,
+    "label": "refresh combined rendered-surface hash for wiring generation 7"
+  },
+  {
+    "path": "artifacts/agent-contract-trim/evidence.json",
+    "before": "current wiring version 6",
+    "after": "current wiring version 7",
+    "count": 1,
+    "label": "refresh rendered-surface rollback evidence wording"
+  },
+  {
+    "path": "tests/measure_hook_latency.py",
+    "before": "_SRC / \"hooks\" / \"user_prompt_submit.py\"",
+    "after": "_SRC / \"latch\" / \"hooks\" / \"user_prompt_submit.py\"",
+    "count": 1,
+    "label": "latency harness packaged hook entrypoint"
+  },
+  {
+    "path": "CONTRIBUTING.md",
+    "before": "- Prefer proof-honest docs: describe what latch does now, and keep planning or\n  internal-facing artifacts out of the public tree.\n\n## Safety-critical tests",
+    "after": "- Prefer proof-honest docs: describe what latch does now, and keep planning or\n  internal-facing artifacts out of the public tree.\n\n## Python source layout\n\nProduction Python lives in the `src/latch/` package, grouped by the subsystem\ndirectories documented in `ARCHITECTURE.md`. Use package-qualified imports such\nas `from latch.store import paths`; do not add flat sibling imports or a second\nimport name for the same module. Tests continue to put the repository's `src/`\ndirectory on `sys.path` and do not require an editable install.\n\nFiles that an installer, hook, wrapper, or runbook executes by literal path must\nretain the uniform `__package__` guard used by the existing entrypoints. When\nporting a branch created before the package move, follow\n`tools/reorg/README.md` rather than moving or renaming files by hand.\n\n## Safety-critical tests",
+    "count": 1,
+    "label": "document packaged Python source and porting convention"
+  },
+  {
+    "path": "tests/test_windows_stdio.py",
+    "before": "from windows_stdio import ensure_windows_standard_streams; ",
+    "after": "from latch.mcp.windows_stdio import ensure_windows_standard_streams; ",
+    "count": 1,
+    "label": "Windows pythonw probe package import"
+  },
+  {
+    "path": "tests/test_canonical_authority_guard.py",
+    "before": "# `import db as d2; d2.insert_node_nc`); a from-import rename or a helper",
+    "after": "# `from latch.store import db as d2; d2.insert_node_nc`); a from-import rename\n# or a helper",
+    "count": 1,
+    "label": "package-qualify canonical-authority alias example"
+  },
+  {
+    "path": ".gitignore",
+    "before": ".vscode/\n.idea/\n",
+    "after": ".vscode/\n.idea/\n\n# local generated output\ntmp/\noutputs/\n",
+    "count": 1,
+    "label": "ignore local modularization output directories"
+  }
+]
