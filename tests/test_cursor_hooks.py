@@ -9,13 +9,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-import cursor_hooks as ch  # noqa: E402
+from latch.hosts import cursor_hooks as ch  # noqa: E402
 
 HOOK_ARGS = (
-    "/repo/src/hooks/cursor_session_start.py",
-    "/repo/src/hooks/cursor_before_submit.py",
-    "/repo/src/hooks/cursor_pre_tool_use.py",
-    "/repo/src/hooks/cursor_post_tool_use.py",
+        "/repo/src/latch/hooks/cursor_session_start.py",
+        "/repo/src/latch/hooks/cursor_before_submit.py",
+        "/repo/src/latch/hooks/cursor_pre_tool_use.py",
+        "/repo/src/latch/hooks/cursor_post_tool_use.py",
 )
 
 

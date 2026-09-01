@@ -24,10 +24,10 @@ _SRC = Path(__file__).resolve().parent.parent / "src"
 sys.path.insert(0, str(_SRC))
 sys.path.insert(0, str(_SRC / "hooks"))
 
-import db          # noqa: E402
-import embeddings  # noqa: E402
-import gate        # noqa: E402
-import priorities  # noqa: E402
+from latch.store import db          # noqa: E402
+from latch.retrieval import embeddings  # noqa: E402
+from latch.gate import gate        # noqa: E402
+from latch.store import priorities  # noqa: E402
 
 
 def _assert(cond, msg):
@@ -68,7 +68,7 @@ def test_public_priority_mutations_lock_before_opening_db(monkeypatch):
     MCP boundary gives every public priority mutation the same lock ordering as
     lifecycle operations.
     """
-    import mcp_server
+    from latch.mcp import mcp_server
 
     events: list[str] = []
     project = "/deterministic/priority-lock-project"
@@ -140,7 +140,7 @@ def test_public_priority_mutations_fail_closed_when_lifecycle_lock_is_busy(
     monkeypatch,
 ):
     """A live lifecycle writer times out without opening SQLite or mutating."""
-    import mcp_server
+    from latch.mcp import mcp_server
 
     @contextmanager
     def busy_lock(*args, **kwargs):
@@ -173,7 +173,7 @@ def test_public_priority_write_waits_for_shared_lifecycle_lock(
     tmp_path, monkeypatch,
 ):
     """A public write cannot reach SQLite while the lifecycle lock is held."""
-    import mcp_server
+    from latch.mcp import mcp_server
 
     project = str(tmp_path)
     worker_attempted_lock = threading.Event()

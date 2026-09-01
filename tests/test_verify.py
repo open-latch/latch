@@ -30,10 +30,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-import db  # noqa: E402
-import verify  # noqa: E402
-import log_utils  # noqa: E402
-import paths  # noqa: E402
+from latch.store import db  # noqa: E402
+from latch.gate import verify  # noqa: E402
+from latch.common import log_utils  # noqa: E402
+from latch.store import paths  # noqa: E402
 
 # The embedder is stubbed PER TEST, never at module scope. A module-level
 # monkeypatch executes at pytest COLLECTION time and would clobber the shared

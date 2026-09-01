@@ -58,7 +58,7 @@ is_latch_command() {
   [ -f "$file" ] || return 1
   grep -Fq "<KB_HOME>" "$file" && return 0
   grep -Fq "$KB_HOME" "$file" && return 0
-  grep -Eq '/bin/(run_kb_gate|run_latch_gate|latch_baseline|unlatch|latch_gate_report|run_compact_now|run_latch_compact_now|run_kb_focus)\.sh|/bin/latch_direction\.sh|/src/(budget|maintenance)\.py|kb_profile_(active|bind)|mission-control verification profile|trust-and-go verification profile' "$file"
+  grep -Eq '/bin/(run_kb_gate|run_latch_gate|latch_baseline|unlatch|latch_gate_report|run_compact_now|run_latch_compact_now|run_kb_focus)\.sh|/bin/latch_direction\.sh|/src/(budget|maintenance|latch/gate/budget|latch/pipeline/maintenance)\.py|kb_profile_(active|bind)|mission-control verification profile|trust-and-go verification profile' "$file"
 }
 
 update_legacy_alias() {

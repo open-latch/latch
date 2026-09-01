@@ -10,8 +10,8 @@ import ast
 import re
 from pathlib import Path
 
-import db
-import maintenance
+from latch.store import db
+from latch.pipeline import maintenance
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -200,121 +200,121 @@ def _ratification_writer_surfaces() -> frozenset[tuple[str, str, str]]:
 # one of the two ratified human surfaces.
 _CLASSIFIED_CANONICAL_SURFACES: dict[tuple[str, str, str, str], str] = {
     (
-        "src/compactor.py",
+        "src/latch/pipeline/compactor.py",
         "_apply_compaction",
         "db.insert_node",
         "summary_status",
     ): "machine:compactor-progress",
     (
-        "src/compactor.py",
+        "src/latch/pipeline/compactor.py",
         "_apply_compaction",
         "db.update_node",
         "summary_status",
     ): "machine:compactor-progress",
     (
-        "src/db.py", "insert_node", "insert_node_nc", "status",
+        "src/latch/store/db.py", "insert_node", "insert_node_nc", "status",
     ): "guarded:db-delegate",
     (
-        "src/db.py", "insert_node_nc", "node-status-low-level", "status",
+        "src/latch/store/db.py", "insert_node_nc", "node-status-low-level", "status",
     ): "low-level:legacy-seed",
     (
-        "src/db.py", "promote_by_ref_count", "sql:execute", "canonical",
+        "src/latch/store/db.py", "promote_by_ref_count", "sql:execute", "canonical",
     ): "unattended:evidence-promotion",
     (
-        "src/db.py", "update_node", "update_node_nc", "status",
+        "src/latch/store/db.py", "update_node", "update_node_nc", "status",
     ): "guarded:db-delegate",
     (
-        "src/db.py", "update_node_nc", "node-transition-choke", "status",
+        "src/latch/store/db.py", "update_node_nc", "node-transition-choke", "status",
     ): "guarded:transition-choke",
     (
-        "src/evals.py",
+        "src/latch/evals/evals.py",
         "_seed_nodes",
         "db.insert_node",
         "node.get('status', 'canonical')",
     ): "fixture:offline-eval",
     (
-        "src/heal.py", "prepare_insert_with_heal", "db.insert_node_nc", "status",
+        "src/latch/pipeline/heal.py", "prepare_insert_with_heal", "db.insert_node_nc", "status",
     ): "unattended:judgment-birth-refusal",
     (
-        "src/mcp_server.py",
+        "src/latch/mcp/mcp_server.py",
         "kb_capture_decision._capture",
         "db.update_node_nc",
         "'canonical'",
     ): "human:ratified-capture-decision",
     (
-        "src/mcp_server.py",
+        "src/latch/mcp/mcp_server.py",
         "kb_correct_apply._correct",
         "verify.correct_apply",
         "corrected_status",
     ): "public:judgment-birth-refusal",
     (
-        "src/mcp_server.py",
+        "src/latch/mcp/mcp_server.py",
         "kb_insert._insert",
         "heal.insert_with_heal",
         "status",
     ): "public:judgment-birth-refusal",
     (
-        "src/mcp_server.py",
+        "src/latch/mcp/mcp_server.py",
         "kb_update._update",
         "db.update_node",
         "status",
     ): "guarded:public-update",
     (
-        "src/mcp_server.py",
+        "src/latch/mcp/mcp_server.py",
         "kb_update._update",
         "db.update_node_nc",
         "status",
     ): "human:ratified-latch-update",
     (
-        "src/no_history_demo.py",
+        "src/latch/proof/no_history_demo.py",
         "create_fixture",
         "db.insert_node",
         "'canonical'",
     ): "fixture:no-history-demo",
     (
-        "src/priorities.py",
+        "src/latch/store/priorities.py",
         "add_priority",
         "db.insert_node_nc",
         "ACTIVE_STATUS",
     ): "machine:priority",
     (
-        "src/profiles.py", "create_profile", "db.insert_node", "status",
+        "src/latch/store/profiles.py", "create_profile", "db.insert_node", "status",
     ): "machine:profile",
     (
-        "src/tree.py", "build_tree", "db.insert_node", "'canonical'",
+        "src/latch/retrieval/tree.py", "build_tree", "db.insert_node", "'canonical'",
     ): "machine:tree-summary",
     (
-        "src/verify.py",
+        "src/latch/gate/verify.py",
         "correct_apply",
         "db.insert_node_nc",
         "corrected_status",
     ): "low-level:correction",
     (
-        "src/workstreams.py",
+        "src/latch/store/workstreams.py",
         "_copy_merge_priorities_nc",
         "db.insert_node_nc",
         "priorities.ACTIVE_STATUS",
     ): "machine:priority-copy",
     (
-        "src/workstreams.py",
+        "src/latch/store/workstreams.py",
         "_reconcile_lifecycle_integrity_in_transaction",
         "db.update_node_nc",
         "desired",
     ): "machine:workstream-repair",
     (
-        "src/workstreams.py",
+        "src/latch/store/workstreams.py",
         "reopen_workstream",
         "db.update_node_nc",
         "restored_status",
     ): "machine:workstream-reopen",
     (
-        "src/workstreams.py",
+        "src/latch/store/workstreams.py",
         "unmerge_workstreams",
         "db.update_node_nc",
         "payload.get('source_prior_status') or 'staging'",
     ): "machine:workstream-unmerge",
     (
-        "src/workstreams.py",
+        "src/latch/store/workstreams.py",
         "unmerge_workstreams",
         "sql:execute",
         "dynamic-status",
@@ -389,12 +389,12 @@ def test_insert_with_heal_remains_a_registered_canonical_surface():
 def test_exactly_two_public_ratification_writers_are_registered():
     assert _ratification_writer_surfaces() == frozenset({
         (
-            "src/mcp_server.py",
+            "src/latch/mcp/mcp_server.py",
             "kb_capture_decision._capture",
             "db.insert_ratification_nc",
         ),
         (
-            "src/mcp_server.py",
+            "src/latch/mcp/mcp_server.py",
             "kb_update._update",
             "db.insert_ratification_nc",
         ),
@@ -403,7 +403,8 @@ def test_exactly_two_public_ratification_writers_are_registered():
 
 # The private-pipeline calls kb_capture_decision._capture may never regrow
 # (5648 item 6). Leaf-name matching catches attribute aliasing (e.g.
-# `import db as d2; d2.insert_node_nc`); a from-import rename or a helper
+# `from latch.store import db as d2; d2.insert_node_nc`); a from-import rename
+# or a helper
 # defined outside _capture is beyond any name-based ratchet — best-effort by
 # design, backed by the frozen canonical-minting registry and the two-writer
 # ratification pins.
@@ -422,8 +423,8 @@ def test_capture_decision_has_no_private_insert_pipeline():
     copy of the insert pipeline. Red against e7194b4, where _capture called
     every one of the forbidden functions directly."""
     tree = ast.parse(
-        (SRC / "mcp_server.py").read_text(encoding="utf-8"),
-        filename="src/mcp_server.py",
+        (SRC / "latch" / "mcp" / "mcp_server.py").read_text(encoding="utf-8"),
+        filename="src/latch/mcp/mcp_server.py",
     )
     capture_fn = None
     for outer in ast.walk(tree):

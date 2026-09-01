@@ -48,10 +48,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _isolation  # noqa: E402,F401
 sys.path.insert(0, str(_SRC))
 
-import db          # noqa: E402
-import embeddings  # noqa: E402
-import heal        # noqa: E402
-import lockfile    # noqa: E402
+from latch.store import db          # noqa: E402
+from latch.retrieval import embeddings  # noqa: E402
+from latch.pipeline import heal        # noqa: E402
+from latch.common import lockfile    # noqa: E402
 
 # A realistic large workstream body (~9.5 KB, matching id=338 per id=1310's trace).
 _LARGE_BODY = (

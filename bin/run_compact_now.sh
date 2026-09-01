@@ -14,7 +14,7 @@
 # Existing settings that use ${CLAUDE_KB_HOME} still work as the legacy alias.
 #
 # Manual /latch-compact is a rolling compact (no --final), session_summary stays
-# in `staging` status. See src/compactor.py.
+# in `staging` status. See src/latch/pipeline/compactor.py.
 
 set -euo pipefail
 
@@ -47,7 +47,7 @@ fi
 # falls back to plain pwd on POSIX shells where -W is unsupported.
 PROJECT_DIR=$(pwd -W 2>/dev/null || pwd)
 
-# Resolve the interpreter the SAME way src/install_engine.py:resolve_python and
+# Resolve the interpreter the SAME way src/latch/install/install_engine.py:resolve_python and
 # the hooks do — prefer the repo venv (where latch's deps live). A bare `python`
 # does not exist on macOS, and PATH python3 there is often the Rosetta/system
 # interpreter that lacks numpy. The .venv checks fall through cleanly on installs
@@ -70,5 +70,5 @@ else
   exit 2
 fi
 
-exec "${PY}" "${KB_HOME}/src/compactor.py" \
+exec "${PY}" "${KB_HOME}/src/latch/pipeline/compactor.py" \
   "${SESSION_ID}" "${PROJECT_DIR}" "${TRANSCRIPT}"

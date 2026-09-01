@@ -17,11 +17,11 @@ import pytest
 SRC = Path(__file__).resolve().parents[1] / "src"
 sys.path.insert(0, str(SRC))
 
-import correlator  # noqa: E402
-import correlator_cli  # noqa: E402
-import db  # noqa: E402
-import outcome_measurement  # noqa: E402
-import paths  # noqa: E402
+from latch.proof import correlator  # noqa: E402
+from latch.proof import correlator_cli  # noqa: E402
+from latch.store import db  # noqa: E402
+from latch.evals import outcome_measurement  # noqa: E402
+from latch.store import paths  # noqa: E402
 
 
 DAY = date(2026, 7, 30)

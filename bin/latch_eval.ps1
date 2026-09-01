@@ -18,5 +18,5 @@ if ($env:LATCH_PYTHON) {
   exit 2
 }
 
-& $Py (Join-Path $KBHome "src/evals.py") @args
+& $Py (Join-Path $KBHome "src/latch/evals/evals.py") @args
 exit $LASTEXITCODE

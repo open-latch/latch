@@ -13,9 +13,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-import db  # noqa: E402
-import embeddings  # noqa: E402
-import heal  # noqa: E402
+from latch.store import db  # noqa: E402
+from latch.retrieval import embeddings  # noqa: E402
+from latch.pipeline import heal  # noqa: E402
 
 
 def _assert(cond, msg):
@@ -333,7 +333,7 @@ def test_capture_and_insert_agree_on_matched_id_mention():
     insert_with_heal must surface the SAME orphan_hint. Red against e7194b4:
     capture computed hints after its keep_both edge, so the mention looked
     edged and capture returned an empty list while insert_with_heal fired."""
-    import mcp_server
+    from latch.mcp import mcp_server
 
     tmp, conn = _fresh_db()
     saved = {}
@@ -385,7 +385,7 @@ def test_capture_and_insert_agree_on_matched_id_mention():
     finally:
         heal.find_near_duplicates = saved.get("find", heal.find_near_duplicates)
         if "conn" in saved:
-            import mcp_server
+            from latch.mcp import mcp_server
             mcp_server._conn = saved["conn"]
             mcp_server._project_cwd = saved["cwd"]
             mcp_server._project_session_id = saved["sid"]

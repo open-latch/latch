@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "src" / "hooks"))
 
-import user_prompt_submit as ups  # noqa: E402
+from latch.hooks import user_prompt_submit as ups  # noqa: E402
 
 
 def _stub_main(monkeypatch, tmp_path: Path, *, prompt: str) -> list[dict]:

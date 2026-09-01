@@ -12,11 +12,11 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
-import db  # noqa: E402
-import install_engine  # noqa: E402
-import paths  # noqa: E402
-import uninstall_engine  # noqa: E402
-import vault_identity  # noqa: E402
+from latch.store import db  # noqa: E402
+from latch.install import install_engine  # noqa: E402
+from latch.store import paths  # noqa: E402
+from latch.install import uninstall_engine  # noqa: E402
+from latch.store import vault_identity  # noqa: E402
 
 
 def _new_test_vault(scope: Path) -> tuple[Path, vault_identity.VaultIdentity]:
@@ -46,7 +46,7 @@ def test_unidentified_existing_database_is_adopted_as_production(tmp_path):
     vault.mkdir(parents=True)
     legacy = sqlite3.connect(vault / "kb.db")
     try:
-        legacy.executescript((ROOT / "src" / "schema.sql").read_text(encoding="utf-8"))
+        legacy.executescript((ROOT / "src" / "latch" / "store" / "schema.sql").read_text(encoding="utf-8"))
         legacy.execute(
             "INSERT INTO nodes(kind,title,body,status) "
             "VALUES('decision','legacy','must survive','canonical')"
@@ -160,7 +160,8 @@ def test_direct_test_runner_refuses_before_pinned_vault_cleanup(tmp_path):
 
 def test_subprocess_inherits_authenticated_test_root(tmp_path):
     code = (
-        "import json,paths; p=paths.project_dir('child-scope').resolve(); "
+        "import json; from latch.store import paths; "
+        "p=paths.project_dir('child-scope').resolve(); "
         "print(json.dumps({'path':str(p),'root':str(paths.validated_test_root())}))"
     )
     env = os.environ.copy()

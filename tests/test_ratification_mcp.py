@@ -11,9 +11,9 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-import db  # noqa: E402
-import heal  # noqa: E402
-import mcp_server  # noqa: E402
+from latch.store import db  # noqa: E402
+from latch.pipeline import heal  # noqa: E402
+from latch.mcp import mcp_server  # noqa: E402
 
 
 @pytest.fixture
@@ -137,8 +137,8 @@ def _ratification_write_call_sites() -> set[tuple[str, str]]:
 
 def test_exactly_two_production_functions_write_ratification() -> None:
     assert _ratification_write_call_sites() == {
-        ("src/mcp_server.py", "kb_capture_decision._capture"),
-        ("src/mcp_server.py", "kb_update._update"),
+        ("src/latch/mcp/mcp_server.py", "kb_capture_decision._capture"),
+        ("src/latch/mcp/mcp_server.py", "kb_update._update"),
     }
 
 

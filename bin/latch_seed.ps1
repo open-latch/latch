@@ -16,5 +16,5 @@ $Py = if ($env:LATCH_PYTHON) { $env:LATCH_PYTHON } `
       elseif ($env:CLAUDE_KB_PYTHON) { $env:CLAUDE_KB_PYTHON } `
       elseif (Test-Path $VenvPy) { $VenvPy } `
       else { "python" }
-& $Py (Join-Path $KbHome "src\seed.py") @args
+& $Py (Join-Path $KbHome "src\latch\pipeline\seed.py") @args
 exit $LASTEXITCODE

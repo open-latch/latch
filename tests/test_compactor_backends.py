@@ -10,7 +10,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-import compactor  # noqa: E402
+from latch.pipeline import compactor  # noqa: E402
 
 
 COMPACTION_JSON = (

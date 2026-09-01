@@ -15,14 +15,14 @@ import sys
 import pytest
 from filelock import FileLock
 
-import db
-import gate
-import log_utils
-import outcome_measurement as om
-import outcome_measurement_cli as cli
-import outcome_measurement_runner as runner
-import paths
-import project_proof
+from latch.store import db
+from latch.gate import gate
+from latch.common import log_utils
+from latch.evals import outcome_measurement as om
+from latch.evals import outcome_measurement_cli as cli
+from latch.evals import outcome_measurement_runner as runner
+from latch.store import paths
+from latch.proof import project_proof
 
 
 UTC = timezone.utc
@@ -749,7 +749,7 @@ def test_canonical_report_is_reachable_without_patching_pinned_constants(
     completed = subprocess.run(
         [
             sys.executable,
-            str(deployed / "src" / "outcome_measurement_cli.py"),
+            str(deployed / "src" / "latch" / "evals" / "outcome_measurement_cli.py"),
             "--project", str(built["project"]),
             "--envelope", str(built["envelope"]),
             "--contract", str(contract),

@@ -2,7 +2,7 @@
 #
 # install_claude_md.sh — thin wrapper. Sync latch's CLAUDE.md engine-contract
 # region into a project's CLAUDE.md from claude_md_snippet.md (the single source
-# of truth). All logic lives in src/claude_md_sync.py so this CLI, the
+# of truth). All logic lives in src/latch/hosts/claude_md_sync.py so this CLI, the
 # SessionStart hook auto-sync, and the drift gate share ONE implementation.
 #
 # Usage:
@@ -27,4 +27,4 @@ else
   echo "install_claude_md: no Python found (set LATCH_PYTHON (legacy: CLAUDE_KB_PYTHON) to your interpreter)." >&2
   exit 2
 fi
-exec "$PY" "${KB_HOME}/src/claude_md_sync.py" "$@"
+exec "$PY" "${KB_HOME}/src/latch/hosts/claude_md_sync.py" "$@"

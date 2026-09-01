@@ -17,4 +17,4 @@ else
   PY="python"
 fi
 
-exec "${PY}" "${KB_HOME}/src/agents_md_sync.py" "$@"
+exec "${PY}" "${KB_HOME}/src/latch/hosts/agents_md_sync.py" "$@"

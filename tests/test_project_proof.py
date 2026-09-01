@@ -13,8 +13,8 @@ import pytest
 _SRC = Path(__file__).resolve().parent.parent / "src"
 sys.path.insert(0, str(_SRC))
 
-import paths  # noqa: E402
-import project_proof  # noqa: E402
+from latch.store import paths  # noqa: E402
+from latch.proof import project_proof  # noqa: E402
 
 
 _VAULT_KEY = bytes.fromhex("7b" * 32)

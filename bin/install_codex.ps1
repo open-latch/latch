@@ -20,5 +20,5 @@ if ($env:LATCH_PYTHON) {
   $Py = "python"
 }
 
-& $Py (Join-Path $KbHome "src/install_codex.py") @args
+& $Py (Join-Path $KbHome "src/latch/install/install_codex.py") @args
 exit $LASTEXITCODE

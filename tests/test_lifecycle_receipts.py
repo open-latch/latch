@@ -11,10 +11,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
-import db  # noqa: E402
-import lifecycle_receipts  # noqa: E402
-import maintenance  # noqa: E402
-import paths  # noqa: E402
+from latch.store import db  # noqa: E402
+from latch.store import lifecycle_receipts  # noqa: E402
+from latch.pipeline import maintenance  # noqa: E402
+from latch.store import paths  # noqa: E402
 
 
 def _connect(tmp_path: Path, monkeypatch) -> sqlite3.Connection:

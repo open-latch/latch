@@ -10,9 +10,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-import agents_md_sync  # noqa: E402
-import codex_doctor as cd  # noqa: E402
-import install_codex as ic  # noqa: E402
+from latch.hosts import agents_md_sync  # noqa: E402
+from latch.hosts import codex_doctor as cd  # noqa: E402
+from latch.install import install_codex as ic  # noqa: E402
 
 SID = "019ed000-0000-7000-8000-000000000001"
 
@@ -47,11 +47,11 @@ def test_check_codex_config_ok_and_missing():
     d = _tmp()
     try:
         config = d / "config.toml"
-        body, _changes = ic.merge_config("", "/py", "/repo/src/mcp_server.py")
+        body, _changes = ic.merge_config("", "/py", "/repo/src/latch/mcp/mcp_server.py")
         config.write_text(body, encoding="utf-8")
-        ok = cd.check_codex_config(config, "/py", "/repo/src/mcp_server.py")
+        ok = cd.check_codex_config(config, "/py", "/repo/src/latch/mcp/mcp_server.py")
         _assert(ok.level == cd.OK, ok)
-        missing = cd.check_codex_config(d / "missing.toml", "/py", "/repo/src/mcp_server.py")
+        missing = cd.check_codex_config(d / "missing.toml", "/py", "/repo/src/latch/mcp/mcp_server.py")
         _assert(missing.level == cd.FAIL, missing)
     finally:
         shutil.rmtree(d, ignore_errors=True)
@@ -214,7 +214,7 @@ def test_check_kb_access_missing_db_preserves_quickstart_seed_order():
             agents_path=d / "AGENTS.md",
             python_path=sys.executable,
             server_py=str(Path(__file__)),
-            hook_py="/repo/src/hooks/codex_session_start.py",
+            hook_py="/repo/src/latch/hooks/codex_session_start.py",
             session_id=None,
             skip_agents=True,
             skip_hooks=True,
@@ -364,7 +364,7 @@ def test_run_all_includes_kb_access_check():
             agents_path=d / "missing-AGENTS.md",
             python_path=sys.executable,
             server_py=str(Path(__file__)),
-            hook_py="/repo/src/hooks/codex_session_start.py",
+            hook_py="/repo/src/latch/hooks/codex_session_start.py",
             session_id=None,
             skip_agents=True,
             skip_hooks=True,
@@ -384,7 +384,7 @@ def test_check_codex_hooks():
     try:
         hooks = d / "hooks.json"
         config = d / "config.toml"
-        hook_py = "/repo/src/hooks/codex_session_start.py"
+        hook_py = "/repo/src/latch/hooks/codex_session_start.py"
         body, _ = cd.codex_hooks.merge_hooks("", "/py", hook_py)
         hooks.write_text(body, encoding="utf-8")
         config.write_text(

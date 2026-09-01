@@ -16,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import numpy as np  # noqa: E402
 
-import embeddings  # noqa: E402
+from latch.retrieval import embeddings  # noqa: E402
 N_SAMPLES = 1000
 TOL = 1e-5
 FIXTURE_PATH = Path(__file__).resolve().parent / "fixtures" / "embedder_parity_corpus.txt"

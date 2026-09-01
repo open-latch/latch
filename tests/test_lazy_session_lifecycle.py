@@ -10,11 +10,11 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "src" / "hooks"))
 
-import compactor  # noqa: E402
-import db  # noqa: E402
-import session_end  # noqa: E402
-import stop  # noqa: E402
-import user_prompt_submit as prompt_hook  # noqa: E402
+from latch.pipeline import compactor  # noqa: E402
+from latch.store import db  # noqa: E402
+from latch.hooks import session_end  # noqa: E402
+from latch.hooks import stop  # noqa: E402
+from latch.hooks import user_prompt_submit as prompt_hook  # noqa: E402
 
 
 def _session(project: Path, session_id: str) -> dict | None:

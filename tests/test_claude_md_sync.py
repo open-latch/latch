@@ -14,7 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-import claude_md_sync as cms  # noqa: E402
+from latch.hosts import claude_md_sync as cms  # noqa: E402
 
 
 def _assert(cond, msg):

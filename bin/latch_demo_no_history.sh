@@ -21,4 +21,4 @@ else
   exit 2
 fi
 
-exec "$PY" "${KB_HOME}/src/no_history_demo.py" "$@"
+exec "$PY" "${KB_HOME}/src/latch/proof/no_history_demo.py" "$@"

@@ -64,10 +64,27 @@ def _constant(source: str, name: str) -> str:
     raise ValueError(f"could not read string constant {name}")
 
 
+def _read_first(read_text: Callable[[str], str], *paths: str) -> str:
+    last_error: OSError | ValueError | None = None
+    for path in paths:
+        try:
+            return read_text(path)
+        except (OSError, ValueError) as exc:
+            last_error = exc
+    assert last_error is not None
+    raise last_error
+
+
 def load_snapshot(read_text: Callable[[str], str]) -> Snapshot:
-    managed = read_text("src/managed_doc_sync.py")
-    claude = read_text("src/claude_md_sync.py")
-    agents = read_text("src/agents_md_sync.py")
+    managed = _read_first(
+        read_text, "src/latch/hosts/managed_doc_sync.py", "src/managed_doc_sync.py"
+    )
+    claude = _read_first(
+        read_text, "src/latch/hosts/claude_md_sync.py", "src/claude_md_sync.py"
+    )
+    agents = _read_first(
+        read_text, "src/latch/hosts/agents_md_sync.py", "src/agents_md_sync.py"
+    )
     return Snapshot(
         source_snippet=read_text("claude_md_snippet.md"),
         cursor_rule_source=read_text("cursor_rule_snippet.mdc"),

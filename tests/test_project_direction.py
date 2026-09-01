@@ -13,11 +13,11 @@ import _isolation  # noqa: F401,E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-import artifacts  # noqa: E402
-import authority  # noqa: E402
-import db  # noqa: E402
-import project_direction as pd  # noqa: E402
-import priorities as priority_store  # noqa: E402
+from latch.store import artifacts  # noqa: E402
+from latch.retrieval import authority  # noqa: E402
+from latch.store import db  # noqa: E402
+from latch.retrieval import project_direction as pd  # noqa: E402
+from latch.store import priorities as priority_store  # noqa: E402
 
 
 def _assert(cond, msg):
