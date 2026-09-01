@@ -9,7 +9,7 @@ import sys
 _ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_ROOT / "src"))
 
-from predicate_consumer import reference_main  # noqa: E402
+from latch.gate.predicate_consumer import reference_main  # noqa: E402
 
 
 if __name__ == "__main__":

@@ -1,5 +1,8 @@
 """Aggregate-only coverage report for rejected-path predicate compilation."""
 from __future__ import annotations
+if __package__ in (None, ""):
+    import sys, pathlib
+    sys.path.insert(0, str(next(p for p in pathlib.Path(__file__).resolve().parents if p.name == "src")))
 
 import argparse
 from collections import Counter
@@ -9,7 +12,7 @@ import sqlite3
 import sys
 from typing import Sequence
 
-import predicate
+from latch.gate import predicate
 
 
 _WRITE_PROBE = """

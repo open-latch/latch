@@ -21,7 +21,7 @@ _SRC = _ROOT / "src"
 def _predicate_module():
     sys.path.insert(0, str(_SRC))
     try:
-        return importlib.import_module("predicate")
+        return importlib.import_module("latch.gate.predicate")
     finally:
         sys.path.remove(str(_SRC))
 
@@ -81,7 +81,7 @@ import json
 import sys
 
 sys.path.insert(0, sys.argv[1])
-import predicate
+from latch.gate import predicate
 
 banned_roots = {
     "aiohttp", "anthropic", "budget", "httpx", "model_backends", "openai",
@@ -89,7 +89,7 @@ banned_roots = {
 }
 loaded = sorted(
     name for name in sys.modules
-    if name.split(".", 1)[0] in banned_roots
+    if (name.rsplit(".", 1)[-1] if name.startswith("latch.") else name.split(".", 1)[0]) in banned_roots
 )
 print(json.dumps(loaded))
 raise SystemExit(bool(loaded))

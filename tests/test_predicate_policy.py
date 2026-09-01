@@ -16,15 +16,15 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
-import db  # noqa: E402
-import predicate  # noqa: E402
-import predicate_consumer  # noqa: E402
-import schema_version  # noqa: E402
-import versioning  # noqa: E402
-import predicate_snapshot  # noqa: E402
+from latch.store import db  # noqa: E402
+from latch.gate import predicate  # noqa: E402
+from latch.gate import predicate_consumer  # noqa: E402
+from latch.store import schema_version  # noqa: E402
+from latch.install import versioning  # noqa: E402
+from latch.gate import predicate_snapshot  # noqa: E402
 
 try:  # Regression-first: make collection succeed before F1 exists.
-    import predicate_policy  # noqa: E402
+    from latch.gate import predicate_policy  # noqa: E402
 except ImportError:
     predicate_policy = None
 

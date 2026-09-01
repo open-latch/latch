@@ -18,12 +18,12 @@ import stat
 import tempfile
 from typing import Any, Callable, Mapping, Sequence
 
-import predicate
+from latch.gate import predicate
 
 
 SNAPSHOT_VERSION = "predicate-policy-snapshot-v1"
 PROJECTION_ENGINE = "predicate-policy-projection-v1"
-_PUBLIC_SOURCE_ROOT = Path(__file__).resolve().parent.parent
+_PUBLIC_SOURCE_ROOT = next(p for p in Path(__file__).resolve().parents if p.name == "src").parent
 _MAX_TOKEN_BYTES = 64 * 1024
 _SAFE_OPAQUE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$")
 _SAFE_REASON_CODE_RE = re.compile(r"^[a-z][a-z0-9_]*(?::[a-z][a-z0-9_]*)?$")

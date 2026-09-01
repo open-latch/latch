@@ -20,7 +20,7 @@ _SRC = _ROOT / "src"
 def _predicate_module():
     sys.path.insert(0, str(_SRC))
     try:
-        return importlib.import_module("predicate")
+        return importlib.import_module("latch.gate.predicate")
     finally:
         sys.path.remove(str(_SRC))
 
@@ -441,7 +441,7 @@ def test_glob_matching_is_bounded_for_redundant_and_repeated_globstars():
     code = r'''
 import sys
 sys.path.insert(0, sys.argv[1])
-import predicate
+from latch.gate import predicate
 
 def row(scope_predicate, row_id):
     return {

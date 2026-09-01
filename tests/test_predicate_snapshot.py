@@ -25,7 +25,7 @@ _SRC = _ROOT / "src"
 def _module(name: str):
     sys.path.insert(0, str(_SRC))
     try:
-        return importlib.import_module(name)
+        return importlib.import_module(f"latch.gate.{name}")
     finally:
         sys.path.remove(str(_SRC))
 

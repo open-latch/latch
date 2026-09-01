@@ -131,9 +131,16 @@ banned_roots = {
     "openai", "requests", "semantic_search", "socket", "urllib3",
 }
 banned_modules = {"http.client", "urllib.request"}
+def is_banned_module(name):
+    if name in banned_modules:
+        return True
+    if name == "latch.gate":
+        return False
+    root = name.rsplit(".", 1)[-1] if name.startswith("latch.") else name.split(".", 1)[0]
+    return root in banned_roots
 baseline_banned = {
     name for name in sys.modules
-    if name.split(".", 1)[0] in banned_roots or name in banned_modules
+    if is_banned_module(name)
 }
 events = []
 def bomb(kind):
@@ -146,16 +153,16 @@ socket.create_connection = bomb("socket.create_connection")
 urllib.request.urlopen = bomb("urllib.request.urlopen")
 original_import = builtins.__import__
 def guarded_import(name, globals=None, locals=None, fromlist=(), level=0):
-    root = name.split(".", 1)[0]
-    if level == 0 and (root in banned_roots or name in banned_modules):
+    requested = {name}
+    if name.startswith("latch.") and fromlist:
+        requested.update(f"{name}.{item}" for item in fromlist)
+    if level == 0 and any(is_banned_module(item) for item in requested):
         events.append({"kind": "forbidden_import", "name": name})
         raise AssertionError(f"forbidden policy-path import: {name}")
     return original_import(name, globals, locals, fromlist, level)
 builtins.__import__ = guarded_import
 sys.path.insert(0, source_root)
-import predicate_policy
-import predicate_snapshot
-import predicate_consumer
+from latch.gate import predicate_consumer, predicate_policy, predicate_snapshot
 def projector():
     connection = sqlite3.connect(f"file:{vault_path}?mode=ro", uri=True)
     connection.row_factory = sqlite3.Row
@@ -184,7 +191,7 @@ for _ in range(100):
     caught += 1
 loaded_banned = sorted(
     name for name in sys.modules
-    if name.split(".", 1)[0] in banned_roots or name in banned_modules
+    if is_banned_module(name)
     if name not in baseline_banned
 )
 print(json.dumps({
@@ -221,6 +228,9 @@ print(json.dumps({
 
 
 def test_policy_path_import_graph_has_no_model_budget_network_or_gate_dependency():
+    def source_path(module_name: str) -> Path:
+        return _SRC.joinpath(*module_name.split(".")).with_suffix(".py")
+
     def import_graph(roots: set[str]) -> set[str]:
         queue = list(roots)
         visited: set[str] = set()
@@ -230,20 +240,32 @@ def test_policy_path_import_graph_has_no_model_budget_network_or_gate_dependency
             if module_name in visited:
                 continue
             visited.add(module_name)
-            path = _SRC / f"{module_name}.py"
+            path = source_path(module_name)
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
             for node in ast.walk(tree):
                 if isinstance(node, ast.Import):
                     names = [alias.name for alias in node.names]
                 elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
                     names = [node.module]
+                    if node.module.startswith("latch."):
+                        names.extend(
+                            f"{node.module}.{alias.name}"
+                            for alias in node.names
+                            if alias.name != "*"
+                        )
                 else:
                     continue
                 for name in names:
-                    root = name.split(".", 1)[0]
-                    imports.add(root)
-                    if (_SRC / f"{root}.py").is_file():
-                        queue.append(root)
+                    root = (
+                        name.rsplit(".", 1)[-1]
+                        if name.startswith("latch.")
+                        else name.split(".", 1)[0]
+                    )
+                    module_path = source_path(name)
+                    if not name.startswith("latch.") or module_path.is_file():
+                        imports.add(root)
+                    if module_path.is_file():
+                        queue.append(name)
         return imports
 
     banned = {
@@ -252,13 +274,22 @@ def test_policy_path_import_graph_has_no_model_budget_network_or_gate_dependency
         "urllib", "urllib3",
     }
     consumer_imports = import_graph(
-        {"predicate_consumer", "predicate_snapshot", "predicate"}
+        {
+            "latch.gate.predicate_consumer",
+            "latch.gate.predicate_snapshot",
+            "latch.gate.predicate",
+        }
     )
     assert "sqlite3" not in consumer_imports
     assert consumer_imports.isdisjoint(banned), sorted(consumer_imports & banned)
 
     projection_imports = import_graph(
-        {"predicate_policy", "predicate_snapshot", "predicate_consumer", "predicate"}
+        {
+            "latch.gate.predicate_policy",
+            "latch.gate.predicate_snapshot",
+            "latch.gate.predicate_consumer",
+            "latch.gate.predicate",
+        }
     )
     assert "sqlite3" in projection_imports
     assert projection_imports.isdisjoint(banned), sorted(projection_imports & banned)

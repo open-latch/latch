@@ -6,6 +6,9 @@ contains structural ids, counts, digests, and aggregate reason codes, never
 policy text, action text, or filesystem paths.
 """
 from __future__ import annotations
+if __package__ in (None, ""):
+    import sys, pathlib
+    sys.path.insert(0, str(next(p for p in pathlib.Path(__file__).resolve().parents if p.name == "src")))
 
 from dataclasses import dataclass, fields
 import json
@@ -14,8 +17,8 @@ import re
 import sys
 from typing import Mapping, Sequence
 
-import predicate
-import predicate_snapshot
+from latch.gate import predicate
+from latch.gate import predicate_snapshot
 
 
 RECEIPT_CONTRACT = "predicate-policy-receipt-v1"
