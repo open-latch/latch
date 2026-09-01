@@ -67,3 +67,7 @@ vendor/*
 Thumbs.db
 .vscode/
 .idea/
+
+# local generated output
+tmp/
+outputs/

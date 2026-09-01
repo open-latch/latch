@@ -16,6 +16,12 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/open-latch/latch/actions/workflows/public-release-hygiene.yml"><img src="https://github.com/open-latch/latch/actions/workflows/public-release-hygiene.yml/badge.svg?branch=main" alt="Public release hygiene CI"></a>
+  <a href="https://github.com/open-latch/latch/releases"><img src="https://img.shields.io/github/v/release/open-latch/latch" alt="Latest release"></a>
+  <a href="./LICENSE"><img src="https://img.shields.io/github/license/open-latch/latch" alt="License: Apache-2.0"></a>
+</p>
+
+<p align="center">
   <img src="./docs/assets/latch-hero.gif" alt="latch catching a coding agent before it revives a rejected project decision" width="900">
 </p>
 
@@ -29,10 +35,12 @@
 <p align="center">
   <a href="#the-receipt">The receipt</a> &middot;
   <a href="#why-a-gate-not-a-rule">Why a gate</a> &middot;
+  <a href="#how-it-works">How it works</a> &middot;
   <a href="#what-you-get-on-day-one">Day one</a> &middot;
   <a href="#get-started">Get started</a> &middot;
   <a href="#try-it-in-2-minutes">2-minute demo</a> &middot;
   <a href="#supported-agents">Agents</a> &middot;
+  <a href="#proof-and-limits">Results</a> &middot;
   <a href="#safety-and-control">Overhead &amp; safety</a>
 </p>
 
@@ -94,7 +102,7 @@ just context it can talk past. Give it a spec, a rule, or a `CLAUDE.md` and you 
 can ignore — or quote in one breath and violate in the same diff.
 
 latch is the runtime gate that closes that gap. It keeps your project's cited decisions, rejected
-paths, rationale, and evidence in a local KB, then puts a go/no-go verdict in the agent's path
+paths, preferences, rationale, and evidence in a local KB, then puts a go/no-go verdict in the agent's path
 **before files change** — and shows you the receipt. That is decision continuity, not a bigger
 transcript or a generic recall layer.
 
@@ -124,6 +132,25 @@ code at the action boundary, so it complements those tools rather than competing
 And the check is cheap: the per-prompt retrieval hook runs locally in roughly 120–150 ms, and the
 gate itself is a model call that fires only on write-shaped work — never on every prompt. Numbers
 and repro scripts are in [Safety and control](#safety-and-control).
+
+## How it works
+
+Five moving parts, one local engine — the same vocabulary you'll find in
+[ARCHITECTURE.md](./ARCHITECTURE.md):
+
+1. **A typed knowledge graph in one SQLite file.** Decisions, rejected paths, preferences, facts,
+   and open questions are typed nodes linked by edges — local, inspectable, no cloud account.
+2. **Staging before authority.** Newly captured knowledge lands in `staging`; seeding is
+   review-first, so nothing your agents recover becomes project judgment without you.
+3. **Explicit ratification, kept append-only.** Promotion, supersession, and reconciliation are
+   recorded as history rather than rewrites — a ruling gets superseded by a newer decision, never
+   silently edited, and the receipt names each cited node's current status.
+4. **Hybrid retrieval, bounded.** FTS5 keyword search plus vector similarity over local MiniLM
+   embeddings (via sqlite-vec), fused with reciprocal-rank fusion and expanded through bounded
+   graph neighborhoods — all on-device.
+5. **A gate that shows its work.** On write-shaped requests the gate assembles the relevant rulings
+   and returns a go/no-go verdict citing the exact nodes (`id`, kind, status) it relied on — the
+   receipt you saw above.
 
 ## What you get on day one
 
@@ -373,6 +400,25 @@ ask), and a nightly background *heal* that reconciles contradictions. Per-day ca
 background work (defaults: 100 foreground calls, 33 nightly heal), so a fresh install can't run up a
 surprise; `bin/latch_gate_report.sh` shows recent activity without spending anything.
 
+**Background Claude model.** When the selected backend is Claude, latch always passes an explicit
+`--model`; it never silently inherits the Claude CLI's user default. The public default is `sonnet`
+for every background purpose. Set these environment variables on the latch host/adapter to override
+it, in precedence order:
+
+| Purpose | Purpose-specific override |
+| --- | --- |
+| gate classifier and adversary | `LATCH_GATE_CLAUDE_MODEL` |
+| compaction | `LATCH_COMPACTOR_CLAUDE_MODEL` |
+| heal arbitration | `LATCH_HEAL_CLAUDE_MODEL` |
+| tree summaries | `LATCH_TREE_CLAUDE_MODEL` |
+
+Each purpose then falls back to `LATCH_MAINTENANCE_CLAUDE_MODEL`, then
+`LATCH_CLAUDE_MODEL`, then `sonnet`. For example, `LATCH_CLAUDE_MODEL=opus` selects Opus for every
+Claude-backed background call, while `LATCH_TREE_CLAUDE_MODEL=haiku` changes only tree summaries.
+Detached maintenance carries these non-secret selectors across its autonomous boundary but never
+connection credentials. Structural gate and heal records use the stable field name `model`;
+compaction status uses `summarizer_model`, and the text maintenance logs include `model=...`.
+
 **Kill switch.** Stop latch hooks without uninstalling:
 
 ```bash
@@ -430,6 +476,40 @@ An honest guardrail names its limits.
   suites; they are not broad claims about every repo or model.
 
 ## Proof and limits
+
+### The decision-authority evaluation
+
+The headline result. In an internal, owner-amended evaluation over **24 historical decisions** —
+one revival probe and one legitimate control each, five runs per probe and arm — presenting the
+prior decision through latch produced better adherence than placing the same decision text in a
+carefully maintained instruction file, without wrongly refusing legitimate adjacent work:
+
+| Measure | Instruction file | latch |
+| --- | ---: | ---: |
+| Prior decision respected | 101 / 120 | **116 / 120** |
+| Rejected approach revived | 19 / 120 | **4 / 120** |
+| Legitimate work explicitly refused | 4 / 120 | **0 / 120** |
+
+The honest caveat: this is an internal evaluation with disclosed post-result amendments, not an
+independent benchmark, and it does not establish that latch outperforms a complete named product or
+that the result generalizes beyond this corpus. The preregistered method, the raw treatment
+alongside the amended one, both amendments, and the anonymized run ledger are published in
+[benchmarks/decision_authority_v1](./benchmarks/decision_authority_v1/). Every public count
+recomputes from the checked-in ledger:
+
+```bash
+python3 benchmarks/decision_authority_v1/recompute.py
+```
+
+### What CI holds on every merge
+
+The public-release-hygiene workflow runs the full cumulative test suite — 2,302 passed, 14 skipped
+at the time of writing (2026-08) — plus contract jobs on macOS, Ubuntu, and Windows, and a
+proof-packet consistency check that fails any PR whose README claims drift from the captured
+receipt. Stable builds ship as tagged [releases](https://github.com/open-latch/latch/releases)
+(latest: `v1.1.0`).
+
+### The proof packet
 
 The checked-in [V1 public proof packet](./proof/README.md) pairs one observed model-backed receipt
 with two small deterministic fixture suites:

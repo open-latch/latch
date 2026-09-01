@@ -20,6 +20,14 @@ import mcp_runtime
 
 SUPPORTED_BACKENDS = {"claude", "codex", "cursor"}
 
+# One Latch-owned Claude default for every background purpose. Purpose-specific
+# selectors are prepended by callers; these two are the shared fallback chain.
+CLAUDE_MODEL_ENV = (
+    "LATCH_MAINTENANCE_CLAUDE_MODEL",
+    "LATCH_CLAUDE_MODEL",
+)
+DEFAULT_CLAUDE_MODEL = "sonnet"
+
 # Maintenance is launched from the MCP server environment, sometimes long after
 # the original user action. Prefer a maintenance-specific knob, then a generic
 # model knob, then the gate knob already written by earlier Codex installs.
@@ -45,6 +53,7 @@ class ModelCallResult:
     error: str | None
     timed_out: bool
     backend: str
+    model: str | None = None
 
 
 def first_env_value(names: Iterable[str]) -> str | None:
@@ -53,6 +62,15 @@ def first_env_value(names: Iterable[str]) -> str | None:
         if value:
             return value
     return None
+
+
+def resolve_claude_model(env_names: Iterable[str] = ()) -> str:
+    """Resolve a Claude model without falling through to the host CLI default."""
+    raw = first_env_value((*tuple(env_names), *CLAUDE_MODEL_ENV))
+    model = str(raw if raw is not None else DEFAULT_CLAUDE_MODEL).strip()
+    if not model:
+        raise ValueError("Claude model resolved to an empty value")
+    return model
 
 
 def resolve_backend(
@@ -84,6 +102,7 @@ def invoke_prompt(
     timeout_s: int,
     purpose: str = "model",
     claude_bin: str | None = None,
+    claude_model_env: Iterable[str] = (),
     codex_bin: str | None = None,
     codex_model_env: Iterable[str] = (),
     cursor_bin: str | None = None,
@@ -95,27 +114,34 @@ def invoke_prompt(
         return ModelCallResult(None, str(e), False, str(backend or default))
 
     if resolved == "codex":
+        model = first_env_value(codex_model_env)
         return _invoke_codex(
             prompt,
             timeout_s=timeout_s,
             purpose=purpose,
             codex_bin=codex_bin,
-            model=first_env_value(codex_model_env),
+            model=model,
         )
     if resolved == "cursor":
+        model = first_env_value(cursor_model_env)
         text, error, timed_out = cursor_backend.invoke_prompt(
             prompt,
             timeout_s=timeout_s,
             purpose=purpose,
             agent_bin=cursor_bin,
-            model=first_env_value(cursor_model_env),
+            model=model,
         )
-        return ModelCallResult(text, error, timed_out, "cursor")
+        return ModelCallResult(text, error, timed_out, "cursor", model)
+    try:
+        model = resolve_claude_model(claude_model_env)
+    except ValueError as e:
+        return ModelCallResult(None, str(e), False, "claude", None)
     return _invoke_claude(
         prompt,
         timeout_s=timeout_s,
         purpose=purpose,
         claude_bin=claude_bin,
+        model=model,
     )
 
 
@@ -125,15 +151,28 @@ def _invoke_claude(
     timeout_s: int,
     purpose: str,
     claude_bin: str | None = None,
+    model: str | None = None,
 ) -> ModelCallResult:
     env = mcp_runtime.connection_subprocess_environment("claude")
     env["CLAUDE_KB_IN_COMPACT"] = "1"
+    try:
+        resolved_model = model or resolve_claude_model()
+    except ValueError as e:
+        return ModelCallResult(None, str(e), False, "claude", None)
     try:
         bin_path = claude_bin or mcp_runtime.connection_binary(
             "CLAUDE_BIN", process_default=CLAUDE_BIN
         )
         proc = subprocess.run(
-            [bin_path, "-p", "--no-session-persistence", "--output-format", "json"],
+            [
+                bin_path,
+                "-p",
+                "--no-session-persistence",
+                "--output-format",
+                "json",
+                "--model",
+                resolved_model,
+            ],
             input=prompt,
             capture_output=True,
             text=True,
@@ -143,20 +182,21 @@ def _invoke_claude(
             creationflags=CREATE_NO_WINDOW,
         )
     except subprocess.TimeoutExpired:
-        return ModelCallResult(None, f"{purpose} timed out after {timeout_s}s", True, "claude")
-    except FileNotFoundError as e:
-        return ModelCallResult(None, f"subprocess failed: {type(e).__name__}: {e}", False, "claude")
+        return ModelCallResult(None, f"{purpose} timed out after {timeout_s}s", True, "claude", resolved_model)
+    except OSError as e:
+        return ModelCallResult(None, f"subprocess failed: {type(e).__name__}: {e}", False, "claude", resolved_model)
 
     if proc.returncode != 0:
         detail = mcp_runtime.redact_subprocess_output(
             (proc.stderr or proc.stdout or "").strip()
         )
-        return ModelCallResult(None, f"claude backend exit {proc.returncode}: {detail[:1000]}", False, "claude")
+        return ModelCallResult(None, f"claude backend exit {proc.returncode}: {detail[:1000]}", False, "claude", resolved_model)
     return ModelCallResult(
         mcp_runtime.redact_subprocess_output(proc.stdout),
         None,
         False,
         "claude",
+        resolved_model,
     )
 
 
@@ -207,15 +247,15 @@ def _invoke_codex(
                 final_text = proc.stdout
             final_text = mcp_runtime.redact_subprocess_output(final_text)
     except subprocess.TimeoutExpired:
-        return ModelCallResult(None, f"{purpose} timed out after {timeout_s}s", True, "codex")
+        return ModelCallResult(None, f"{purpose} timed out after {timeout_s}s", True, "codex", model)
     except OSError as e:
-        return ModelCallResult(None, f"subprocess failed: {type(e).__name__}: {e}", False, "codex")
+        return ModelCallResult(None, f"subprocess failed: {type(e).__name__}: {e}", False, "codex", model)
 
     if proc.returncode != 0:
         detail = mcp_runtime.redact_subprocess_output(
             (proc.stderr or proc.stdout or "").strip()
         )
-        return ModelCallResult(None, f"codex backend exit {proc.returncode}: {detail[-1000:]}", False, "codex")
+        return ModelCallResult(None, f"codex backend exit {proc.returncode}: {detail[-1000:]}", False, "codex", model)
     if not final_text.strip():
-        return ModelCallResult(None, "codex backend returned empty final message", False, "codex")
-    return ModelCallResult(final_text, None, False, "codex")
+        return ModelCallResult(None, "codex backend returned empty final message", False, "codex", model)
+    return ModelCallResult(final_text, None, False, "codex", model)

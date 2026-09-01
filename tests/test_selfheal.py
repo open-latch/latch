@@ -622,6 +622,57 @@ def test_spawn_builds_correct_command():
         shutil.rmtree(proj, ignore_errors=True)
 
 
+def test_claude_model_override_crosses_autonomous_boundary_without_credentials(monkeypatch):
+    proj = _fresh_project()
+    captured = {}
+
+    class _FakePopen:
+        def __init__(self, _args, **kwargs):
+            captured.update(kwargs)
+
+    context = mcp_runtime.ConnectionContext(
+        connection_id="claude-maintenance-model",
+        project_cwd=proj,
+        session_id=None,
+        session_source="test",
+        proxy_pid=123,
+        proxy_started_at="now",
+        runtime_key="test",
+        gate_backend="claude",
+        maintenance_backend="claude",
+    )
+    private = mcp_runtime.validate_child_environment({
+        "PATH": os.environ.get("PATH", ""),
+        "CLAUDE_BIN": sys.executable,
+        "ANTHROPIC_API_KEY": "claude-secret",
+        "LATCH_CLAUDE_MODEL": "opus",
+        "LATCH_HEAL_CLAUDE_MODEL": "heal-opus",
+        "LATCH_TREE_CLAUDE_MODEL": "tree-opus",
+    })
+    try:
+        monkeypatch.setattr(selfheal.subprocess, "Popen", _FakePopen)
+        monkeypatch.setattr(
+            selfheal.paths,
+            "configured_maintenance_runner",
+            lambda **_kwargs: (
+                "claude",
+                sys.executable,
+                str(Path(proj).parent),
+                os.pathsep.join(("/vault/bin", "/usr/bin")),
+            ),
+        )
+        with mcp_runtime.bind_connection(context, child_environment=private):
+            selfheal.spawn_detached(proj)
+
+        env = captured["env"]
+        _assert(env["LATCH_CLAUDE_MODEL"] == "opus", env)
+        _assert(env["LATCH_HEAL_CLAUDE_MODEL"] == "heal-opus", env)
+        _assert(env["LATCH_TREE_CLAUDE_MODEL"] == "tree-opus", env)
+        _assert("ANTHROPIC_API_KEY" not in env, env)
+    finally:
+        shutil.rmtree(proj, ignore_errors=True)
+
+
 def test_windows_shared_spawn_preserves_broker_owned_site_packages(
     monkeypatch, tmp_path
 ):

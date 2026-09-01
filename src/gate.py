@@ -75,6 +75,7 @@ import log_utils
 import lifecycle_signals
 import mcp_broker
 import mcp_runtime
+import model_backends
 import outcome_measurement
 import paths
 import priorities
@@ -952,6 +953,7 @@ CLASSIFIER_TIMEOUT_S = _env_int_any(
 )
 CLAUDE_BIN = os.environ.get("CLAUDE_BIN") or shutil.which("claude") or "claude"
 CODEX_BIN = os.environ.get("CODEX_BIN") or shutil.which("codex") or "codex"
+GATE_CLAUDE_MODEL_ENV = ("LATCH_GATE_CLAUDE_MODEL",)
 SUPPORTED_CLASSIFIER_BACKENDS = {"claude", "codex", "cursor"}
 # CREATE_NO_WINDOW: don't flash a console window per claude.cmd call when the
 # parent has no console. 0 on POSIX (no-op). See heal.py for the full rationale.
@@ -1693,6 +1695,22 @@ def _connection_binary(
     return mcp_runtime.connection_binary(name, process_default=process_default)
 
 
+def _classifier_model(backend: str) -> str | None:
+    if backend == "claude":
+        return model_backends.resolve_claude_model(GATE_CLAUDE_MODEL_ENV)
+    if backend == "codex":
+        return (
+            mcp_runtime.connection_env_value("LATCH_GATE_CODEX_MODEL")
+            or mcp_runtime.connection_env_value("CODEX_GATE_MODEL")
+        )
+    if backend == "cursor":
+        return (
+            mcp_runtime.connection_env_value("LATCH_GATE_CURSOR_MODEL")
+            or mcp_runtime.connection_env_value("CURSOR_GATE_MODEL")
+        )
+    return None
+
+
 def _invoke_classifier_backend_once(
     prompt: str,
     *,
@@ -1732,12 +1750,24 @@ def _invoke_claude_classifier_once(
     # nested compactions. Same convention as heal.arbitrate.
     env["CLAUDE_KB_IN_COMPACT"] = "1"
     try:
+        model = model_backends.resolve_claude_model(GATE_CLAUDE_MODEL_ENV)
+    except ValueError as e:
+        return None, str(e), False
+    try:
         bin_path = claude_bin or _connection_binary(
             "CLAUDE_BIN",
             process_default=CLAUDE_BIN,
         )
         proc = subprocess.run(
-            [bin_path, "-p", "--no-session-persistence", "--output-format", "json"],
+            [
+                bin_path,
+                "-p",
+                "--no-session-persistence",
+                "--output-format",
+                "json",
+                "--model",
+                model,
+            ],
             input=prompt,
             capture_output=True, text=True, encoding="utf-8",
             timeout=timeout_s,
@@ -1746,7 +1776,7 @@ def _invoke_claude_classifier_once(
         )
     except subprocess.TimeoutExpired:
         return None, f"{purpose} timed out after {timeout_s}s", True
-    except FileNotFoundError as e:
+    except OSError as e:
         return None, f"subprocess failed: {type(e).__name__}: {e}", False
     if proc.returncode != 0:
         detail = mcp_runtime.redact_subprocess_output(
@@ -1886,6 +1916,15 @@ def classify_gate(
         resolved_backend = _classifier_backend(backend)
     except ValueError as e:
         return {**_classifier_error(str(e)), "prompt_chars": 0}
+    try:
+        resolved_model = _classifier_model(resolved_backend)
+    except ValueError as e:
+        return {
+            **_classifier_error(str(e)),
+            "prompt_chars": 0,
+            "backend": resolved_backend,
+            "model": None,
+        }
 
     try:
         allowed, _ = budget.check_and_record(project_path, category="nonheal")
@@ -1922,14 +1961,17 @@ def classify_gate(
         return {**_classifier_error(err or f"classifier timed out after {timeout_s}s"),
                 "prompt_chars": prompt_chars, "timed_out": True,
                 "backend": resolved_backend,
+                "model": resolved_model,
                 "surfaced_rejected_paths": surfaced_ids}
     if err is not None or raw is None:
         return {**_classifier_error(err or "classifier subprocess failed"),
                 "prompt_chars": prompt_chars, "backend": resolved_backend,
+                "model": resolved_model,
                 "surfaced_rejected_paths": surfaced_ids}
     result = parse_classifier_output(raw)
     result["prompt_chars"] = prompt_chars
     result["backend"] = resolved_backend
+    result["model"] = resolved_model
     result["surfaced_rejected_paths"] = surfaced_ids
     # Clamp citations to the surfaced set (dedup, first occurrence wins): a
     # cited rp id the prompt never contained is a hallucination and must not
@@ -2204,6 +2246,10 @@ def adversary_classify(
         resolved_backend = _classifier_backend(backend)
     except ValueError as e:
         return _adversary_error(str(e))
+    try:
+        resolved_model = _classifier_model(resolved_backend)
+    except ValueError as e:
+        return {**_adversary_error(str(e)), "backend": resolved_backend, "model": None}
 
     # A real second LLM call — counts toward the same daily cap as the
     # classifier (scope §7 acknowledges the doubled per-gate cost on PROCEED).
@@ -2227,9 +2273,11 @@ def adversary_classify(
     if err is not None or raw is None:
         adv = _adversary_error(err or "adversary subprocess failed")
         adv["backend"] = resolved_backend
+        adv["model"] = resolved_model
         return adv
     adv = parse_adversary_output(raw)
     adv["backend"] = resolved_backend
+    adv["model"] = resolved_model
     return adv
 
 
@@ -2811,6 +2859,7 @@ def _log_invocation(
             # it derives from (capped at render time, so this is post-cap).
             "prompt_chars": verdict.get("prompt_chars"),
             "backend": verdict.get("backend"),
+            "model": verdict.get("model"),
             "timed_out": bool(verdict.get("timed_out", False)),
             "elapsed_ms": elapsed_ms,
             "budget_count": _budget_count_snapshot(project_path),
