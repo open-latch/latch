@@ -13,12 +13,12 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
-import agents_md_sync  # noqa: E402
-import codex_hooks  # noqa: E402
-import codex_wiring  # noqa: E402
-import install_codex  # noqa: E402
-import install_engine  # noqa: E402
-import versioning  # noqa: E402
+from latch.hosts import agents_md_sync  # noqa: E402
+from latch.hosts import codex_hooks  # noqa: E402
+from latch.hosts import codex_wiring  # noqa: E402
+from latch.install import install_codex  # noqa: E402
+from latch.install import install_engine  # noqa: E402
+from latch.install import versioning  # noqa: E402
 
 
 def _older(text: str) -> str:
@@ -453,7 +453,7 @@ def test_codex_bundle_uses_managed_command_not_ambient_python(
     assert seen == [
         (
             r"C:\Program Files\Latch\venv\Scripts\python.exe",
-            str(ROOT / "src" / "mcp_server.py"),
+                str(ROOT / "src" / "latch" / "mcp" / "mcp_server.py"),
         )
     ]
 

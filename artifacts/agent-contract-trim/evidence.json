@@ -17,7 +17,7 @@
   },
   "wiring_version": {
     "before": 4,
-    "candidate": 6
+    "candidate": 7
   },
   "measurement": {
     "method": "Render each managed surface with kb_home=/opt/latch, include managed begin/end markers, count splitlines and whitespace-delimited words, and hash UTF-8 bytes.",
@@ -30,10 +30,10 @@
     },
     "candidate": {
       "source_snippet": {"lines": 88, "words": 518, "bytes": 4302, "sha256": "cf757651cc3701cfff148d79b23d2ffbcdff7a5240d6c7f620b28c3327b3165f"},
-      "claude_managed_block": {"lines": 93, "words": 582, "bytes": 4708, "sha256": "40d2a77f473c733c5a56d917fe445741e4e9ce820e8c9acb1423644020184f00"},
-      "agents_managed_block": {"lines": 93, "words": 583, "bytes": 4719, "sha256": "b89caa679f5879cfec7f71bddd1298f2a3b5882bd7b2241e33dda18fcc711c5e"},
-      "cursor_rule": {"lines": 46, "words": 340, "bytes": 2408, "sha256": "f443f99d99198a6e03bfe58b2697ada42a669a7bc2c5869f1dbe3a96f244d5dc"},
-      "cursor_always_loaded": {"lines": 140, "words": 923, "bytes": 7128, "sha256": "462a2a9a1e0165cdcc5daab06deb57f3e3c2aa4c0509f018d5ca1ccf9d5a4bbe"}
+      "claude_managed_block": {"lines": 93, "words": 582, "bytes": 4708, "sha256": "17d7815975dfcfda8c008f1e429828ddb84c65c93d4228da38f0df59b67d23f4"},
+      "agents_managed_block": {"lines": 93, "words": 583, "bytes": 4719, "sha256": "07d9438c14462bd1efa4ea6ba798999782bade3f9f993fb81efbf5682d7c4baa"},
+      "cursor_rule": {"lines": 46, "words": 340, "bytes": 2408, "sha256": "93a36b18b58c014a084ea309f765c0c18a565fd00b7b32a2276e006dfba8f501"},
+      "cursor_always_loaded": {"lines": 140, "words": 923, "bytes": 7128, "sha256": "963ad97680f716a9f4dc59229dd5b77240b31e8ce81aa3a466eb98c50172320c"}
     },
     "reductions_percent": {
       "source_snippet": {"lines": 65.2, "words": 74.4},
@@ -144,7 +144,7 @@
   "update_and_rollback": {
     "result": "passed",
     "evidence": [
-      "Older managed documents repair once to current wiring version 6 and preserve user content.",
+      "Older managed documents repair once to current wiring version 7 and preserve user content.",
       "Unmanaged projects remain untouched.",
       "Version 999 managed documents and Cursor rules are refused rather than downgraded.",
       "Managed-document and Cursor-rule backups reproduce the older bytes; restoring those bytes is detected as older and safely rolls forward again.",

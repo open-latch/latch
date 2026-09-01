@@ -25,8 +25,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-import lockfile  # noqa: E402
-import paths  # noqa: E402
+from latch.common import lockfile  # noqa: E402
+from latch.store import paths  # noqa: E402
 
 
 def _assert(cond, msg):

@@ -12,13 +12,13 @@ import pytest
 _SRC = Path(__file__).resolve().parent.parent / "src"
 sys.path.insert(0, str(_SRC))
 
-import db  # noqa: E402
-import gate  # noqa: E402
-import log_utils  # noqa: E402
-import mcp_broker  # noqa: E402
-import mcp_server  # noqa: E402
-import paths  # noqa: E402
-import project_proof  # noqa: E402
+from latch.store import db  # noqa: E402
+from latch.gate import gate  # noqa: E402
+from latch.common import log_utils  # noqa: E402
+from latch.mcp import mcp_broker  # noqa: E402
+from latch.mcp import mcp_server  # noqa: E402
+from latch.store import paths  # noqa: E402
+from latch.proof import project_proof  # noqa: E402
 
 
 _ID_LIST_FIELDS = (

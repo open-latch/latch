@@ -11,7 +11,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-import install_codex as ic  # noqa: E402
+from latch.install import install_codex as ic  # noqa: E402
 
 
 def _assert(cond, msg):
@@ -20,11 +20,11 @@ def _assert(cond, msg):
 
 
 def test_render_mcp_block_uses_codex_shape():
-    out = ic.render_mcp_block("/PY", "/repo/src/mcp_server.py")
+    out = ic.render_mcp_block("/PY", "/repo/src/latch/mcp/mcp_server.py")
     _assert(ic.BEGIN_MARK in out and ic.END_MARK in out, "managed markers missing")
     _assert("[mcp_servers.latch]" in out, "Codex MCP table missing")
     _assert('command = "/PY"' in out, "python command missing")
-    _assert('args = ["/repo/src/mcp_server.py"]' in out, "server args missing")
+    _assert('args = ["/repo/src/latch/mcp/mcp_server.py"]' in out, "server args missing")
     _assert("required = true" in out,
             "Codex must not silently start without the Latch MCP tools")
     _assert(tomllib.loads(out)["mcp_servers"]["latch"]["required"] is True,

@@ -34,10 +34,10 @@ import pytest
 _SRC = Path(__file__).resolve().parent.parent / "src"
 sys.path.insert(0, str(_SRC))
 
-import db            # noqa: E402
-import gate_report   # noqa: E402
-import schema_version  # noqa: E402
-import versioning    # noqa: E402
+from latch.store import db            # noqa: E402
+from latch.gate import gate_report   # noqa: E402
+from latch.store import schema_version  # noqa: E402
+from latch.install import versioning    # noqa: E402
 
 
 @pytest.fixture()

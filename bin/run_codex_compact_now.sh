@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Wrapper for manual Codex latch compaction.
 # Resolves the Codex session from the first arg or $CODEX_THREAD_ID, then lets
-# src/codex_compact.py find and validate the matching ~/.codex rollout JSONL.
+# src/latch/hosts/codex_compact.py find and validate the matching ~/.codex rollout JSONL.
 # This path is fail-closed: it never falls back to ~/.claude/projects.
 # By default it uses Codex's own `codex exec` summarizer backend; pass
 # --summarizer claude to exercise the legacy shared Claude CLI backend.
@@ -28,4 +28,4 @@ else
   exit 2
 fi
 
-exec "${PY}" "${KB_HOME}/src/codex_compact.py" "$@"
+exec "${PY}" "${KB_HOME}/src/latch/hosts/codex_compact.py" "$@"

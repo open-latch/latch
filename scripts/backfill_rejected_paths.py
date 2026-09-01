@@ -70,7 +70,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-import db  # noqa: E402
+from latch.store import db  # noqa: E402
 
 # The wide net, per the rubric's recall note: the retired detector matched only
 # "rejected" | "discarded" | "ruled", which misses a rejection phrased "we are

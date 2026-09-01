@@ -19,11 +19,11 @@ _SRC = Path(__file__).resolve().parent.parent / "src"
 sys.path.insert(0, str(_SRC))
 sys.path.insert(0, str(_SRC / "hooks"))  # for the stop-hook integration test
 
-import capture_streams  # noqa: E402
-import db               # noqa: E402
-import log_utils        # noqa: E402
-import profiles         # noqa: E402
-import stop             # noqa: E402  (src/hooks/stop.py)
+from latch.gate import capture_streams  # noqa: E402
+from latch.store import db               # noqa: E402
+from latch.common import log_utils        # noqa: E402
+from latch.store import profiles         # noqa: E402
+from latch.hooks import stop             # noqa: E402  (src/hooks/stop.py)
 
 
 def _assert(cond, msg):

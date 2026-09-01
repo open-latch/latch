@@ -12,7 +12,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-import quickstart as qs  # noqa: E402
+from latch.install import quickstart as qs  # noqa: E402
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -172,7 +172,7 @@ def test_seed_command_includes_project_source_sessions_and_apply():
         backend="codex",
         last_sessions=50,
     )
-    _assert(args[:2] == ["/py", str(qs.KB_HOME / "src" / "seed.py")], args)
+    _assert(args[:2] == ["/py", str(qs.KB_HOME / "src" / "latch" / "pipeline" / "seed.py")], args)
     _assert("--project" in args and str(project) in args, args)
     _assert("--source" in args and "both" in args, args)
     _assert(args.count("--backend") == 1 and "codex" in args, args)
@@ -549,12 +549,12 @@ def test_quickstart_persists_transient_env_pin_for_later_processes():
         env.update({
             "LATCH_HOME": str(root),
             "LATCH_KB_DIR": str(target),
-            "PYTHONPATH": str(Path(qs.__file__).resolve().parent),
+            "PYTHONPATH": str(next(p for p in Path(qs.__file__).resolve().parents if p.name == "src")),
         })
         env.pop("CLAUDE_KB_DIR", None)
         pin = subprocess.run(
             [sys.executable, "-c", (
-                "import quickstart; "
+                "from latch.install import quickstart; "
                 "level, message = quickstart.pin_kb_for_quickstart(None, dry_run=False); "
                 "print(level, message)"
             )],
@@ -571,7 +571,7 @@ def test_quickstart_persists_transient_env_pin_for_later_processes():
         env.pop(qs.paths.TEST_ROOT_ENV, None)
         env.pop(qs.paths.TEST_CAPABILITY_ENV, None)
         later_db = subprocess.check_output(
-            [sys.executable, "-c", "import paths; print(paths.db_path())"],
+            [sys.executable, "-c", "from latch.store import paths; print(paths.db_path())"],
             cwd=mcp_cwd,
             env=env,
             text=True,

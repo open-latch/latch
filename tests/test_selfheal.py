@@ -23,10 +23,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-import lockfile  # noqa: E402
-import mcp_runtime  # noqa: E402
-import paths  # noqa: E402
-import selfheal  # noqa: E402
+from latch.common import lockfile  # noqa: E402
+from latch.mcp import mcp_runtime  # noqa: E402
+from latch.store import paths  # noqa: E402
+from latch.pipeline import selfheal  # noqa: E402
 
 
 def _assert(cond, msg):
@@ -299,7 +299,7 @@ def test_run_selfheal_skips_when_locked():
 
 def _seed_db(proj):
     """Create a minimal kb.db so _backup_db has something to copy."""
-    import db
+    from latch.store import db
     db.connect(proj).close()
 
 

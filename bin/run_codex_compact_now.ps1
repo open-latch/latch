@@ -4,7 +4,7 @@
 
 .DESCRIPTION
   Codex preview counterpart of bin/run_codex_compact_now.sh. This wrapper is
-  intentionally fail-closed: it delegates to src/codex_compact.py, which resolves
+  intentionally fail-closed: it delegates to src/latch/hosts/codex_compact.py, which resolves
   the session from the first argument or $env:CODEX_THREAD_ID and validates a
   matching rollout transcript under ~/.codex/sessions. It never falls back to
   Claude Code transcripts under ~/.claude/projects. By default it uses Codex's
@@ -39,5 +39,5 @@ $Py = if ($env:LATCH_PYTHON) {
   "python"
 }
 
-& $Py (Join-Path $KbHome "src/codex_compact.py") @args
+& $Py (Join-Path $KbHome "src/latch/hosts/codex_compact.py") @args
 exit $LASTEXITCODE

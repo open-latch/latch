@@ -9,8 +9,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-import codex_hooks as ch  # noqa: E402
-import versioning  # noqa: E402
+from latch.hosts import codex_hooks as ch  # noqa: E402
+from latch.install import versioning  # noqa: E402
 
 
 def _assert(cond, msg):
@@ -44,12 +44,12 @@ def test_merge_hooks_installs_session_start_only_and_preserves_unrelated():
             ],
         }
     }, indent=2) + "\n"
-    new, changes = ch.merge_hooks(existing, "/py", "/repo/src/hooks/codex_session_start.py")
+    new, changes = ch.merge_hooks(existing, "/py", "/repo/src/latch/hooks/codex_session_start.py")
     _assert(changes, "merge should report changes")
     obj = json.loads(new)
     starts = obj["hooks"]["SessionStart"]
     _assert(starts[0]["hooks"][0]["command"] == (
-        "/py /repo/src/hooks/codex_session_start.py "
+        "/py /repo/src/latch/hooks/codex_session_start.py "
         f"--latch-wiring-version {versioning.WIRING_VERSION}"
     ),
             starts)
@@ -61,9 +61,9 @@ def test_merge_hooks_installs_session_start_only_and_preserves_unrelated():
 
 
 def test_merge_hooks_idempotent():
-    new1, changes1 = ch.merge_hooks("", "/py", "/repo/src/hooks/codex_session_start.py")
+    new1, changes1 = ch.merge_hooks("", "/py", "/repo/src/latch/hooks/codex_session_start.py")
     _assert(changes1, "first merge should change")
-    new2, changes2 = ch.merge_hooks(new1, "/py", "/repo/src/hooks/codex_session_start.py")
+    new2, changes2 = ch.merge_hooks(new1, "/py", "/repo/src/latch/hooks/codex_session_start.py")
     _assert(new2 == new1, "second merge should be byte-identical")
     _assert(changes2 == [], f"second merge should report no changes, got {changes2}")
     print("PASS merge_hooks_idempotent")
@@ -73,9 +73,9 @@ def test_hooks_status_and_backup():
     d = _tmp()
     try:
         hooks = d / "hooks.json"
-        desired, _ = ch.merge_hooks("", "/py", "/repo/src/hooks/codex_session_start.py")
+        desired, _ = ch.merge_hooks("", "/py", "/repo/src/latch/hooks/codex_session_start.py")
         ch.write_hooks(hooks, desired)
-        ok, detail = ch.hooks_status(hooks, "/py", "/repo/src/hooks/codex_session_start.py")
+        ok, detail = ch.hooks_status(hooks, "/py", "/repo/src/latch/hooks/codex_session_start.py")
         _assert(ok, detail)
         ch.write_hooks(hooks, desired)
         _assert((d / "hooks.json.latchbak").exists(), "backup should exist")

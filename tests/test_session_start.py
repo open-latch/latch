@@ -9,8 +9,8 @@ SRC = Path(__file__).resolve().parent.parent / "src"
 sys.path.insert(0, str(SRC))
 sys.path.insert(0, str(SRC / "hooks"))
 
-import db  # noqa: E402
-import session_start  # noqa: E402
+from latch.store import db  # noqa: E402
+from latch.hooks import session_start  # noqa: E402
 
 
 def _healthy_guards(monkeypatch) -> None:

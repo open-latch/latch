@@ -46,10 +46,10 @@ sys.path.insert(0, str(TESTS))
 sys.path.insert(0, str(ROOT / "src"))
 
 import _isolation  # noqa: E402,F401  (must precede runtime modules)
-import db          # noqa: E402
-import embeddings  # noqa: E402
-import gate        # noqa: E402
-import log_utils   # noqa: E402
+from latch.store import db          # noqa: E402
+from latch.retrieval import embeddings  # noqa: E402
+from latch.gate import gate        # noqa: E402
+from latch.common import log_utils   # noqa: E402
 
 gate.ADVERSARY_ENABLED = False
 

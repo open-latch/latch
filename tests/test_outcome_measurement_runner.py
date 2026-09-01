@@ -8,10 +8,10 @@ from pathlib import Path
 
 import pytest
 
-import db
-import outcome_measurement as om
-import outcome_measurement_runner as runner
-import project_proof
+from latch.store import db
+from latch.evals import outcome_measurement as om
+from latch.evals import outcome_measurement_runner as runner
+from latch.proof import project_proof
 
 
 UTC = timezone.utc

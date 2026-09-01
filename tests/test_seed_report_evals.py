@@ -7,7 +7,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-import seed_report_evals  # noqa: E402
+from latch.evals import seed_report_evals  # noqa: E402
 
 
 def _assert(cond, msg):

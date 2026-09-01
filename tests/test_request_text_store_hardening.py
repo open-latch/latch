@@ -59,14 +59,14 @@ _ROOT = Path(__file__).resolve().parent.parent
 _SRC = _ROOT / "src"
 sys.path.insert(0, str(_SRC))
 
-import capture_streams      # noqa: E402
-import db                   # noqa: E402
-import embeddings           # noqa: E402
-import gate                 # noqa: E402
-import heal                 # noqa: E402
-import log_utils            # noqa: E402
-import paths                # noqa: E402
-import request_text_store   # noqa: E402
+from latch.gate import capture_streams      # noqa: E402
+from latch.store import db                   # noqa: E402
+from latch.retrieval import embeddings           # noqa: E402
+from latch.gate import gate                 # noqa: E402
+from latch.pipeline import heal                 # noqa: E402
+from latch.common import log_utils            # noqa: E402
+from latch.store import paths                # noqa: E402
+from latch.gate import request_text_store   # noqa: E402
 
 # Classifier path only — the adversary layer would fire a second live call.
 gate.ADVERSARY_ENABLED = False
@@ -836,8 +836,8 @@ def test_the_shared_daemon_can_never_see_the_retired_flag():
     daemon's environment from an allowlist, so the flag an operator exports
     never arrives. Pinning that here keeps a future refactor from quietly
     moving the notice back inside the daemon."""
-    import mcp_broker      # noqa: PLC0415
-    import mcp_runtime     # noqa: PLC0415
+    from latch.mcp import mcp_broker      # noqa: PLC0415
+    from latch.mcp import mcp_runtime     # noqa: PLC0415
 
     allowlisted = (
         mcp_broker.DAEMON_OS_ENV_VARS
@@ -863,7 +863,7 @@ def test_the_mcp_proxy_emits_the_retired_flag_notice():
     notice fires there — before any branch that could exit early, and on
     stderr only. `connection_metadata` is made to fail so `main` returns
     immediately without starting a daemon."""
-    import mcp_proxy       # noqa: PLC0415
+    from latch.mcp import mcp_proxy       # noqa: PLC0415
 
     prev_env = os.environ.pop(RETIRED_ENV, None)
     prev_legacy = os.environ.pop("LATCH_MCP_FORCE_LEGACY", None)
@@ -907,7 +907,7 @@ def test_doctor_reports_the_retired_flag():
     """Criterion-5 repair, third boundary. Stderr is only operator-visible if
     the host shows it; doctor is the surface an operator opens on purpose, and
     it runs in their own environment rather than the daemon's."""
-    import doctor          # noqa: PLC0415
+    from latch.install import doctor          # noqa: PLC0415
 
     prev_env = os.environ.pop(RETIRED_ENV, None)
     try:

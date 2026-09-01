@@ -24,7 +24,7 @@ _TESTS = Path(__file__).resolve().parent
 _SRC = _TESTS.parent / "src"
 sys.path.insert(0, str(_SRC))
 
-import v4_citation_rate as v4  # noqa: E402
+from latch.evals import v4_citation_rate as v4  # noqa: E402
 
 FIXTURE = _TESTS / "fixtures" / "v4_gate_log_corpus.jsonl"
 
@@ -89,7 +89,7 @@ def test_conformance_floor_on_real_schema_rows():
 
 
 def test_labels_match_gate_contract():
-    import gate  # deliberate: parity check only, not a runtime dependency
+    from latch.gate import gate  # deliberate: parity check only, not a runtime dependency
 
     _assert(
         tuple(v4.CLASSIFIER_LABELS) == tuple(gate.CLASSIFIER_LABELS),

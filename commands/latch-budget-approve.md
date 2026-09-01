@@ -18,7 +18,7 @@ cost safety — do not approve on your own initiative.
 Run with the Bash tool:
 
 ```bash
-python "<KB_HOME>/src/budget.py" approve "$(pwd)"
+python "<KB_HOME>/src/latch/gate/budget.py" approve "$(pwd)"
 ```
 
 Report back the current state from the command's JSON output (`date`,
@@ -32,5 +32,5 @@ Report back the current state from the command's JSON output (`date`,
 To see the current budget state without approving, run:
 
 ```bash
-python "<KB_HOME>/src/budget.py" status "$(pwd)"
+python "<KB_HOME>/src/latch/gate/budget.py" status "$(pwd)"
 ```

@@ -11,12 +11,12 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
-import db  # noqa: E402
-import lifecycle_signals  # noqa: E402
-import paths  # noqa: E402
-import workstream_automation as automation  # noqa: E402
-import workstream_detector  # noqa: E402
-import workstreams  # noqa: E402
+from latch.store import db  # noqa: E402
+from latch.store import lifecycle_signals  # noqa: E402
+from latch.store import paths  # noqa: E402
+from latch.store import workstream_automation as automation  # noqa: E402
+from latch.store import workstream_detector  # noqa: E402
+from latch.store import workstreams  # noqa: E402
 
 
 NOW = "2026-07-22 12:00:00"

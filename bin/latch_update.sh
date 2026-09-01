@@ -9,4 +9,4 @@ if [[ -z "$PY" ]]; then
   fi
 fi
 if [[ -z "$PY" ]]; then echo "latch_update: no Python found (set LATCH_PYTHON)." >&2; exit 1; fi
-exec "$PY" "$LATCH_HOME/src/update_latch.py" "$@"
+exec "$PY" "$LATCH_HOME/src/latch/install/update_latch.py" "$@"

@@ -27,8 +27,8 @@ def _utc_date_iso(offset_days: int = 0) -> str:
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-import budget  # noqa: E402
-import paths  # noqa: E402
+from latch.gate import budget  # noqa: E402
+from latch.store import paths  # noqa: E402
 
 
 def _assert(cond, msg):
@@ -487,8 +487,8 @@ if __name__ == "__main__":
 def test_unreadable_budget_state_degrades_gate_without_spend(tmp_path, monkeypatch):
     """A corrupt budget store must route the gate to its designed no-spend
     degrade path (skipped verdict), not crash the tool surface."""
-    import gate
-    import paths
+    from latch.gate import gate
+    from latch.store import paths
 
     monkeypatch.setattr(paths, "is_unlatched_mode", lambda: False)
     monkeypatch.setattr(paths, "is_disabled", lambda: False)
@@ -513,8 +513,8 @@ def test_unreadable_budget_state_degrades_gate_without_spend(tmp_path, monkeypat
 def test_unreadable_budget_state_degrades_compaction_without_spend(
     tmp_path, monkeypatch,
 ):
-    import compactor
-    import paths
+    from latch.pipeline import compactor
+    from latch.store import paths
 
     monkeypatch.setattr(paths, "is_unlatched_mode", lambda: False)
     monkeypatch.setattr(paths, "is_disabled", lambda: False)

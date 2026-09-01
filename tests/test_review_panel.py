@@ -413,7 +413,7 @@ def test_scope_runs_draft_prs_and_marks_user_facing_changes(
     monkeypatch.setattr(
         review_panel,
         "changed_files",
-        lambda _base, _head: ["src/quickstart.py"],
+        lambda _base, _head: ["src/latch/install/quickstart.py"],
     )
 
     result = review_panel.main(
@@ -767,13 +767,13 @@ def test_artifact_packet_empty_pathset_and_disabled_recipes_do_not_execute(
     )
     assert (empty_output / "user-facing.diff").read_text(encoding="utf-8") == ""
 
-    seed = target / "src" / "seed.py"
-    seed.parent.mkdir()
+    seed = target / "src" / "latch" / "pipeline" / "seed.py"
+    seed.parent.mkdir(parents=True)
     seed.write_text("raise RuntimeError('must not execute')\n", encoding="utf-8")
     monkeypatch.setattr(
         review_panel,
         "changed_files",
-        lambda _base, _head: ["src/seed.py"],
+        lambda _base, _head: ["src/latch/pipeline/seed.py"],
     )
     monkeypatch.setattr(
         review_panel,

@@ -23,4 +23,4 @@ else
   exit 2
 fi
 
-exec "${PY}" "${KB_HOME}/src/codex_doctor.py" "$@"
+exec "${PY}" "${KB_HOME}/src/latch/hosts/codex_doctor.py" "$@"

@@ -8,14 +8,14 @@ import sqlite3
 
 import pytest
 
-import artifacts
-import budget
-import db
-import feeders
-import gate
-import model_backends
-import paths
-import seed
+from latch.store import artifacts
+from latch.gate import budget
+from latch.store import db
+from latch.retrieval import feeders
+from latch.gate import gate
+from latch.pipeline import model_backends
+from latch.store import paths
+from latch.pipeline import seed
 
 
 def _source(

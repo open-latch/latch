@@ -15,11 +15,11 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
-import db  # noqa: E402
-import heal  # noqa: E402
-import paths  # noqa: E402
-import schema_version  # noqa: E402
-import versioning  # noqa: E402
+from latch.store import db  # noqa: E402
+from latch.pipeline import heal  # noqa: E402
+from latch.store import paths  # noqa: E402
+from latch.store import schema_version  # noqa: E402
+from latch.install import versioning  # noqa: E402
 
 
 @pytest.fixture()

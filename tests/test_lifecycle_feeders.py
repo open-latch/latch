@@ -17,10 +17,10 @@ SRC = Path(__file__).resolve().parent.parent / "src"
 sys.path.insert(0, str(SRC))
 sys.path.insert(0, str(SRC / "hooks"))
 
-import compactor  # noqa: E402
-import db  # noqa: E402
-import feeders  # noqa: E402
-import project_direction  # noqa: E402
+from latch.pipeline import compactor  # noqa: E402
+from latch.store import db  # noqa: E402
+from latch.retrieval import feeders  # noqa: E402
+from latch.retrieval import project_direction  # noqa: E402
 
 
 def _mk_kb(tmp_path):

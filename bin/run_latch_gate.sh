@@ -29,5 +29,5 @@ fi
 
 PROJECT_DIR=$(pwd -W 2>/dev/null || pwd)
 
-exec "$PY" "${KB_HOME}/src/kb_gate_cli.py" \
+exec "$PY" "${KB_HOME}/src/latch/gate/kb_gate_cli.py" \
   "${PROJECT_DIR}" "$@"
