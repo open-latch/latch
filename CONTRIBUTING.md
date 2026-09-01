@@ -88,6 +88,20 @@ useful for review context; do not put the tool in the commit author,
 - Prefer proof-honest docs: describe what latch does now, and keep planning or
   internal-facing artifacts out of the public tree.
 
+## Python source-layout migration
+
+The deterministic migration in `tools/reorg/` targets a `src/latch/` package
+grouped by subsystem. Once that migration lands, use package-qualified imports
+such as `from latch.store import paths`; do not add flat sibling imports or a
+second import name for the same module. Tests will continue to put the
+repository's `src/` directory on `sys.path` and will not require an editable
+install.
+
+The migration installs a uniform `__package__` guard in files that an installer,
+hook, wrapper, or runbook executes by literal path. When porting a branch after
+the package move, follow `tools/reorg/README.md` rather than moving or renaming
+files by hand.
+
 ## Safety-critical tests
 
 Run tests through pytest only:

@@ -30,6 +30,8 @@ import heal  # noqa: E402
 import lifecycle_signals  # noqa: E402
 import lockfile  # noqa: E402
 import log_utils  # noqa: E402
+import mcp_runtime  # noqa: E402
+import model_backends  # noqa: E402
 import paths  # noqa: E402
 import workstreams  # noqa: E402
 
@@ -39,6 +41,7 @@ import workstreams  # noqa: E402
 CLAUDE_BIN = os.environ.get("CLAUDE_BIN") or shutil.which("claude") or "claude"
 CODEX_BIN = os.environ.get("CODEX_BIN") or shutil.which("codex") or "codex"
 CLAUDE_COMPACTOR_DISALLOWED_TOOLS = "Bash,Edit,Write,NotebookEdit"
+COMPACTOR_CLAUDE_MODEL_ENV = ("LATCH_COMPACTOR_CLAUDE_MODEL",)
 # CREATE_NO_WINDOW: don't flash a console window per claude.cmd call when the
 # parent has no console. 0 on POSIX (no-op). See heal.py for the full rationale.
 CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
@@ -535,6 +538,17 @@ def run_compaction(
             "error": str(e),
             "session_id": session_id,
         }
+    try:
+        model = _summarizer_model(backend)
+    except ValueError as e:
+        return {
+            "ok": False,
+            "reason": "invalid_summarizer_model",
+            "error": str(e),
+            "summarizer_backend": backend,
+            "summarizer_model": None,
+            "session_id": session_id,
+        }
     with _project_lock(project_path) as acquired:
         if not acquired:
             return {"ok": False, "reason": "locked", "session_id": session_id}
@@ -566,6 +580,7 @@ def run_compaction(
         return _run_compaction_locked(
             session_id, project_path, transcript_path, final=final,
             summarizer_backend=backend,
+            summarizer_model=model,
         )
 
 
@@ -576,7 +591,20 @@ def _run_compaction_locked(
     *,
     final: bool = False,
     summarizer_backend: str = "claude",
+    summarizer_model: str | None = None,
 ) -> dict:
+    if summarizer_model is None:
+        try:
+            summarizer_model = _summarizer_model(summarizer_backend)
+        except ValueError as e:
+            return {
+                "ok": False,
+                "reason": "invalid_summarizer_model",
+                "error": str(e),
+                "summarizer_backend": summarizer_backend,
+                "summarizer_model": None,
+                "session_id": session_id,
+            }
     conn = db.connect(project_path)
     try:
         sess = db.get_session(conn, session_id)
@@ -619,6 +647,7 @@ def _run_compaction_locked(
                 "ok": False,
                 "reason": f"{summarizer_backend}_invocation_failed",
                 "summarizer_backend": summarizer_backend,
+                "summarizer_model": summarizer_model,
                 "session_id": session_id,
             }
 
@@ -650,6 +679,7 @@ def _run_compaction_locked(
                 "lifecycle_events": 0,
                 "final": final,
                 "summarizer_backend": summarizer_backend,
+                "summarizer_model": summarizer_model,
             }
         # Slice 2: auto-observe the files this session actually edited (parsed from
         # the raw transcript) and attach them as provenance to the session's nodes
@@ -680,6 +710,7 @@ def _run_compaction_locked(
             "proposals_rejected": apply_result["proposals_rejected"],
             "final": final,
             "summarizer_backend": summarizer_backend,
+            "summarizer_model": summarizer_model,
         }
     finally:
         conn.close()
@@ -698,6 +729,19 @@ def _summarizer_backend(name: str | None, *, default: str = "claude") -> str:
         supported = ", ".join(sorted(SUPPORTED_SUMMARIZER_BACKENDS))
         raise ValueError(f"unsupported summarizer backend {raw!r}; expected one of: {supported}")
     return backend
+
+
+def _summarizer_model(backend: str) -> str | None:
+    if backend == "claude":
+        return model_backends.resolve_claude_model(COMPACTOR_CLAUDE_MODEL_ENV)
+    if backend == "codex":
+        return os.environ.get("CODEX_COMPACTOR_MODEL")
+    if backend == "cursor":
+        return (
+            os.environ.get("LATCH_COMPACTOR_CURSOR_MODEL")
+            or os.environ.get("CURSOR_COMPACTOR_MODEL")
+        )
+    return None
 
 
 def _invoke_claude(payload: dict) -> dict | None:
@@ -845,10 +889,15 @@ def _invoke_claude_once(
     """Runs `claude -p --output-format json` once. Returns (stdout, error_reason).
     stdout is None on subprocess failure (not on parse failure)."""
     bin_path = claude_bin or CLAUDE_BIN
-    env = os.environ.copy()
+    env = mcp_runtime.connection_subprocess_environment("claude")
     # Set CLAUDE_KB_IN_COMPACT on the child so its own hooks (Stop / SessionStart
     # / SessionEnd) no-op and cannot recursively trigger more compactions.
     env["CLAUDE_KB_IN_COMPACT"] = "1"
+    try:
+        model = model_backends.resolve_claude_model(COMPACTOR_CLAUDE_MODEL_ENV)
+    except ValueError as e:
+        return None, str(e)
+    _log(f"compactor invoke backend=claude model={model}")
     try:
         # Pass the prompt via stdin, not argv — large transcripts exceed Windows'
         # ~8KB CreateProcess/CMD command-line limit when using claude.cmd shim.
@@ -861,13 +910,15 @@ def _invoke_claude_once(
                 "json",
                 "--disallowedTools",
                 CLAUDE_COMPACTOR_DISALLOWED_TOOLS,
+                "--model",
+                model,
             ],
             input=user_msg,
             capture_output=True, text=True, encoding="utf-8", timeout=timeout_s,
             env=env,
             creationflags=CREATE_NO_WINDOW,
         )
-    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+    except (OSError, subprocess.TimeoutExpired) as e:
         return None, f"{type(e).__name__}: {e}"
     if proc.returncode != 0:
         detail = (proc.stderr or proc.stdout or "").strip()

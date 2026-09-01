@@ -106,6 +106,7 @@ HEAL_CODEX_MODEL_ENV = (
     "LATCH_MAINTENANCE_CODEX_MODEL",
     "CODEX_MAINTENANCE_MODEL",
 )
+HEAL_CLAUDE_MODEL_ENV = ("LATCH_HEAL_CLAUDE_MODEL",)
 
 
 # ---------- artifact evidence (the evidence contract) ----------
@@ -292,12 +293,16 @@ def arbitrate(
         env_names=model_backends.MAINTENANCE_BACKEND_ENV,
         timeout_s=ARBITRATE_TIMEOUT_S,
         purpose="arbitrate",
+        claude_model_env=HEAL_CLAUDE_MODEL_ENV,
         codex_model_env=HEAL_CODEX_MODEL_ENV,
     )
     if result.error is not None or result.text is None:
         if result.timed_out:
             _note_arbitrate_timeout()
-        _log(f"arbitrate {result.backend} subprocess failed: {result.error}")
+        _log(
+            f"arbitrate backend={result.backend} model={result.model or 'default'} "
+            f"subprocess failed: {result.error}"
+        )
         return {
             "decision": "keep_both",
             "reason": f"arbitrator failed ({result.backend}): {result.error}",
@@ -306,6 +311,11 @@ def arbitrate(
     _note_arbitrate_success()
     verdict = _parse_arbitrate_output(result.text)
     verdict["backend"] = result.backend
+    verdict["model"] = result.model
+    _log(
+        f"arbitrate backend={result.backend} model={result.model or 'default'} "
+        f"decision={verdict['decision']}"
+    )
     return verdict
 
 
@@ -427,12 +437,16 @@ def _arbitrate_nightly(
         env_names=model_backends.MAINTENANCE_BACKEND_ENV,
         timeout_s=ARBITRATE_TIMEOUT_S,
         purpose="arbitrate_nightly",
+        claude_model_env=HEAL_CLAUDE_MODEL_ENV,
         codex_model_env=HEAL_CODEX_MODEL_ENV,
     )
     if result.error is not None or result.text is None:
         if result.timed_out:
             _note_arbitrate_timeout()
-        _log(f"arbitrate_nightly {result.backend} subprocess failed: {result.error}")
+        _log(
+            f"arbitrate_nightly backend={result.backend} "
+            f"model={result.model or 'default'} subprocess failed: {result.error}"
+        )
         return {
             "decision": "keep_both",
             "reason": f"arbitrator failed ({result.backend}): {result.error}",
@@ -441,6 +455,11 @@ def _arbitrate_nightly(
     _note_arbitrate_success()
     verdict = _parse_arbitrate_nightly_output(result.text)
     verdict["backend"] = result.backend
+    verdict["model"] = result.model
+    _log(
+        f"arbitrate_nightly backend={result.backend} "
+        f"model={result.model or 'default'} decision={verdict['decision']}"
+    )
     return verdict
 
 
@@ -1541,8 +1560,32 @@ def nightly_heal(
     if paths.is_disabled():
         return {"ok": False, "reason": "disabled"}
 
+    try:
+        resolved_backend = model_backends.resolve_backend(
+            env_names=model_backends.MAINTENANCE_BACKEND_ENV,
+        )
+    except ValueError:
+        resolved_backend = "invalid"
+    if resolved_backend == "claude":
+        try:
+            resolved_model = model_backends.resolve_claude_model(
+                HEAL_CLAUDE_MODEL_ENV,
+            )
+            model_error = None
+        except ValueError as exc:
+            resolved_model = None
+            model_error = str(exc)
+    elif resolved_backend == "codex":
+        resolved_model = model_backends.first_env_value(HEAL_CODEX_MODEL_ENV)
+        model_error = None
+    else:
+        resolved_model = None
+        model_error = None
+
     summary: dict = {
         "ok": True,
+        "backend": resolved_backend,
+        "model": resolved_model,
         "integrity": None,
         "examined": 0,
         "collisions": 0,
@@ -1586,6 +1629,12 @@ def nightly_heal(
     completed = False
     error: str | None = None
     try:
+        if model_error is not None:
+            summary["ok"] = False
+            summary["reason"] = "invalid_claude_model"
+            summary["model_error"] = model_error
+            error = "invalid_claude_model"
+            return summary
         result = _nightly_heal_sweep(
             conn, summary, project_path,
             use_llm=use_llm, integrity=integrity, contradictions=contradictions,
@@ -2210,16 +2259,17 @@ def _log_run_summary(summary: dict, project_path: str | None, *,
                      ok: bool, error: str | None = None) -> None:
     """Emit one `heal_run` row per nightly sweep, success or failure.
 
-    heal.log's other writers are all error paths, so a stale or absent file
-    reads the same as a healer that silently stopped running. This row is the
-    positive heartbeat. It goes to the project-scoped daily stream rather than
-    KB_ROOT/heal.log because KB_ROOT is a module-level constant that test runs
-    do not isolate — writing run rows there would mix real sweeps with pytest
-    output. Counts only: no node text or titles.
+    heal.log contains per-arbitration model/decision diagnostics, not one
+    completion record per sweep. This row is the positive run heartbeat. It
+    goes to the project-scoped daily stream rather than KB_ROOT/heal.log because
+    KB_ROOT is a module-level constant that test runs do not isolate — writing
+    run rows there would mix real sweeps with pytest output. Counts only: no
+    node text or titles.
     """
     fields = ("examined", "collisions", "superseded", "kept_both",
               "reconciled", "deferred", "budget_blocked",
-              "priority_llm", "priority_deferred", "human_referrals")
+              "priority_llm", "priority_deferred", "human_referrals",
+              "backend", "model")
     row = {k: summary.get(k, 0) for k in fields}
     row["by_path"] = summary.get("by_path", {})
     row["integrity"] = summary.get("integrity", {})
