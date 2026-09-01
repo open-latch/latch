@@ -23,6 +23,28 @@ CURSOR_AGENT_BIN = (
     or "agent"
 )
 CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
+DEFAULT_CURSOR_MODEL = "gpt-5"
+
+
+def resolve_model(model: str | None = None) -> str:
+    """Resolve Cursor's generic model without inheriting the CLI default."""
+    raw = model
+    if raw is None:
+        for name in (
+            "LATCH_MAINTENANCE_CURSOR_MODEL",
+            "LATCH_CURSOR_MODEL",
+            "CURSOR_MODEL",
+        ):
+            candidate = mcp_runtime.connection_env_value(name)
+            if candidate is not None:
+                raw = candidate
+                break
+    if raw is None:
+        raw = DEFAULT_CURSOR_MODEL
+    resolved = str(raw).strip()
+    if not resolved:
+        raise ValueError("Cursor model resolved to an empty value")
+    return resolved
 
 
 def invoke_prompt(
@@ -34,11 +56,10 @@ def invoke_prompt(
     model: str | None = None,
 ) -> tuple[str | None, str | None, bool]:
     """Return ``(final_text, error, timed_out)`` from Cursor headless mode."""
-    model = (
-        model
-        or mcp_runtime.connection_env_value("LATCH_CURSOR_MODEL")
-        or mcp_runtime.connection_env_value("CURSOR_MODEL")
-    )
+    try:
+        model = resolve_model(model)
+    except ValueError as e:
+        return None, str(e), False
     env = mcp_runtime.connection_subprocess_environment("cursor")
     env["CLAUDE_KB_IN_COMPACT"] = "1"
     try:
@@ -54,8 +75,7 @@ def invoke_prompt(
                 "--trust",
                 "--workspace", tmp,
             ]
-            if model:
-                args.extend(["--model", model])
+            args.extend(["--model", model])
             proc = subprocess.run(
                 args,
                 input=prompt,

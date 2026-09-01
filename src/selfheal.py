@@ -211,13 +211,13 @@ def spawn_detached(project_path: str | None) -> None:
         )
         env["LATCH_MAINTENANCE_BACKEND"] = backend
         env[paths.MAINTENANCE_EXECUTABLE_ENV[backend]] = executable
-        if backend == "claude":
-            # Model selectors are policy, not credentials. Preserve them across
-            # the detached boundary while continuing to exclude private auth.
-            for name in mcp_runtime.CLAUDE_MODEL_ENV_VARS:
-                value = mcp_runtime.connection_env_value(name)
-                if value is not None:
-                    env[name] = value
+        # Model selectors are policy, not credentials. Preserve the selected
+        # backend's complete policy across the detached boundary while
+        # continuing to exclude private authentication material.
+        for name in mcp_runtime.MODEL_ENV_VARS_BY_BACKEND[backend]:
+            value = mcp_runtime.connection_env_value(name)
+            if value is not None:
+                env[name] = value
         env["HOME"] = maintenance_home
         env["PATH"] = maintenance_path
         if sys.platform == "win32":
@@ -322,11 +322,17 @@ def run_selfheal(project_path: str | None) -> dict:
             _log(f"heal blocked for {project_path}: required protected backup failed")
         elif heal_due:
             try:
-                maintenance.run_nightly_heal(
+                heal_result = maintenance.run_nightly_heal(
                     project_path, already_locked=True,
                 )  # budget-gated internally
-                state["last_heal_at"] = now.isoformat()
-                ran.append("heal")
+                if heal_result is None or heal_result.get("ok") is not False:
+                    state["last_heal_at"] = now.isoformat()
+                    ran.append("heal")
+                else:
+                    _log(
+                        f"heal incomplete for {project_path}: "
+                        f"{heal_result.get('reason', 'unknown')}"
+                    )
             except Exception as e:
                 _log(f"heal failed for {project_path}: {e}")
 

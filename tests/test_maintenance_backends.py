@@ -314,6 +314,38 @@ def test_claude_model_resolution_prefers_purpose_then_maintenance_then_generic(m
     )
 
 
+def test_codex_and_cursor_models_have_latch_owned_defaults(monkeypatch):
+    for name in (
+        "LATCH_CODEX_MODEL",
+        "LATCH_MAINTENANCE_CODEX_MODEL",
+        "LATCH_CURSOR_MODEL",
+        "LATCH_MAINTENANCE_CURSOR_MODEL",
+        "CURSOR_MODEL",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    _assert(model_backends.DEFAULT_CODEX_MODEL == "gpt-5", "Codex default drifted")
+    _assert(model_backends.DEFAULT_CURSOR_MODEL == "gpt-5", "Cursor default drifted")
+    _assert(model_backends.resolve_codex_model() == "gpt-5", "Codex inherited CLI default")
+    _assert(model_backends.resolve_cursor_model() == "gpt-5", "Cursor inherited CLI default")
+
+    monkeypatch.setenv("LATCH_CODEX_MODEL", "gpt-generic")
+    monkeypatch.setenv("LATCH_MAINTENANCE_CODEX_MODEL", "gpt-maintenance")
+    _assert(
+        model_backends.resolve_codex_model(("LATCH_TREE_CODEX_MODEL",))
+        == "gpt-maintenance",
+        "Codex maintenance selector lost",
+    )
+
+    monkeypatch.setenv("LATCH_CURSOR_MODEL", "cursor-generic")
+    monkeypatch.setenv("LATCH_MAINTENANCE_CURSOR_MODEL", "cursor-maintenance")
+    _assert(
+        model_backends.resolve_cursor_model(("LATCH_TREE_CURSOR_MODEL",))
+        == "cursor-maintenance",
+        "Cursor maintenance selector lost",
+    )
+
+
 def test_tree_claude_model_override_reaches_argv(monkeypatch, tmp_path):
     captured = {}
 
@@ -363,6 +395,38 @@ def test_invalid_claude_model_fails_structured_without_launch(monkeypatch):
     _assert("empty" in str(result.error).lower(), result)
 
 
+def test_empty_model_selectors_fail_before_launch_for_all_backends(monkeypatch):
+    monkeypatch.setattr(
+        model_backends.subprocess,
+        "run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("empty model must fail before subprocess launch")
+        ),
+    )
+    monkeypatch.setattr(
+        model_backends.cursor_backend,
+        "invoke_prompt",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("empty Cursor model must fail before invocation")
+        ),
+    )
+
+    for backend, selector in (
+        ("claude", "LATCH_CLAUDE_MODEL"),
+        ("codex", "LATCH_CODEX_MODEL"),
+        ("cursor", "LATCH_CURSOR_MODEL"),
+    ):
+        monkeypatch.setenv(selector, "")
+        result = model_backends.invoke_prompt(
+            "summarize",
+            backend=backend,
+            timeout_s=1,
+            purpose="maintenance",
+        )
+        _assert(result.text is None and result.model is None, result)
+        _assert("empty" in str(result.error).lower(), result)
+
+
 def test_all_claude_model_selectors_are_allowlisted_but_not_sensitive():
     expected = {
         "LATCH_GATE_CLAUDE_MODEL",
@@ -381,6 +445,42 @@ def test_all_claude_model_selectors_are_allowlisted_but_not_sensitive():
         expected.isdisjoint(mcp_runtime.SENSITIVE_CHILD_ENV_VARS),
         "model selectors must not be treated as credentials",
     )
+
+
+def test_all_backend_model_selectors_are_allowlisted_but_not_sensitive():
+    expected = {
+        "claude": set(mcp_runtime.CLAUDE_MODEL_ENV_VARS),
+        "codex": {
+            "LATCH_GATE_CODEX_MODEL", "CODEX_GATE_MODEL",
+            "LATCH_COMPACTOR_CODEX_MODEL", "CODEX_COMPACTOR_MODEL",
+            "LATCH_HEAL_CODEX_MODEL", "CODEX_HEAL_MODEL",
+            "LATCH_TREE_CODEX_MODEL", "CODEX_TREE_MODEL",
+            "LATCH_MAINTENANCE_CODEX_MODEL", "CODEX_MAINTENANCE_MODEL",
+            "LATCH_CODEX_MODEL",
+        },
+        "cursor": {
+            "LATCH_GATE_CURSOR_MODEL", "CURSOR_GATE_MODEL",
+            "LATCH_COMPACTOR_CURSOR_MODEL", "CURSOR_COMPACTOR_MODEL",
+            "LATCH_HEAL_CURSOR_MODEL", "CURSOR_HEAL_MODEL",
+            "LATCH_TREE_CURSOR_MODEL", "CURSOR_TREE_MODEL",
+            "LATCH_MAINTENANCE_CURSOR_MODEL",
+            "LATCH_CURSOR_MODEL", "CURSOR_MODEL",
+        },
+    }
+    _assert(
+        {name: set(values) for name, values in mcp_runtime.MODEL_ENV_VARS_BY_BACKEND.items()}
+        == expected,
+        "backend selector policy drifted",
+    )
+    for backend, selectors in expected.items():
+        _assert(
+            selectors <= set(mcp_runtime.CONNECTION_CHILD_BACKEND_ENV_VARS[backend]),
+            f"shared connections drop {backend} model selectors",
+        )
+        _assert(
+            selectors.isdisjoint(mcp_runtime.SENSITIVE_CHILD_ENV_VARS),
+            f"{backend} model selectors were classified as credentials",
+        )
 
 
 def test_no_claude_subprocess_invocation_omits_model_flag():

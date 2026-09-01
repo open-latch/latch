@@ -123,6 +123,7 @@ def test_invoke_codex_once_uses_isolated_exec_shape():
         _assert("--ephemeral" in args, args)
         _assert("--skip-git-repo-check" in args, args)
         _assert("--sandbox" in args and "read-only" in args, args)
+        _assert(args[-3:-1] == ["--model", "gpt-5"], args)
         _assert(args[-1] == "-", args)
     finally:
         if old_response is None:
@@ -185,6 +186,7 @@ def test_invoke_cursor_once_uses_isolated_ask_shape():
         _assert(err is None and raw == COMPACTION_JSON, (raw, err))
         args = (d / "args.txt").read_text(encoding="utf-8").splitlines()
         _assert("--mode" in args and "ask" in args, args)
+        _assert(args[-2:] == ["--model", "gpt-5"], args)
         _assert("--force" not in args and "--yolo" not in args, args)
         compactor.cursor_backend.CURSOR_AGENT_BIN = str(fake)
         payload = {

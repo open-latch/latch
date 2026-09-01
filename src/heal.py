@@ -107,6 +107,10 @@ HEAL_CODEX_MODEL_ENV = (
     "CODEX_MAINTENANCE_MODEL",
 )
 HEAL_CLAUDE_MODEL_ENV = ("LATCH_HEAL_CLAUDE_MODEL",)
+HEAL_CURSOR_MODEL_ENV = (
+    "LATCH_HEAL_CURSOR_MODEL",
+    "CURSOR_HEAL_MODEL",
+)
 
 
 # ---------- artifact evidence (the evidence contract) ----------
@@ -295,6 +299,7 @@ def arbitrate(
         purpose="arbitrate",
         claude_model_env=HEAL_CLAUDE_MODEL_ENV,
         codex_model_env=HEAL_CODEX_MODEL_ENV,
+        cursor_model_env=HEAL_CURSOR_MODEL_ENV,
     )
     if result.error is not None or result.text is None:
         if result.timed_out:
@@ -439,6 +444,7 @@ def _arbitrate_nightly(
         purpose="arbitrate_nightly",
         claude_model_env=HEAL_CLAUDE_MODEL_ENV,
         codex_model_env=HEAL_CODEX_MODEL_ENV,
+        cursor_model_env=HEAL_CURSOR_MODEL_ENV,
     )
     if result.error is not None or result.text is None:
         if result.timed_out:
@@ -1444,26 +1450,13 @@ def nightly_heal(
         )
     except ValueError:
         resolved_backend = "invalid"
-    if resolved_backend == "claude":
-        try:
-            resolved_model = model_backends.resolve_claude_model(
-                HEAL_CLAUDE_MODEL_ENV,
-            )
-            model_error = None
-        except ValueError as exc:
-            resolved_model = None
-            model_error = str(exc)
-    elif resolved_backend == "codex":
-        resolved_model = model_backends.first_env_value(HEAL_CODEX_MODEL_ENV)
-        model_error = None
-    else:
-        resolved_model = None
-        model_error = None
-
     summary: dict = {
         "ok": True,
         "backend": resolved_backend,
-        "model": resolved_model,
+        # Set only when an LLM-bound pair reaches the invocation boundary.
+        # Deterministic integrity/reconciliation must not depend on model
+        # configuration, and a no-LLM run did not actually select a model.
+        "model": None,
         "integrity": None,
         "examined": 0,
         "collisions": 0,
@@ -1506,19 +1499,15 @@ def nightly_heal(
     completed = False
     error: str | None = None
     try:
-        if model_error is not None:
-            summary["ok"] = False
-            summary["reason"] = "invalid_claude_model"
-            summary["model_error"] = model_error
-            error = "invalid_claude_model"
-            return summary
         result = _nightly_heal_sweep(
             conn, summary, project_path,
             use_llm=use_llm, integrity=integrity, contradictions=contradictions,
             high_threshold=high_threshold, low_threshold=low_threshold,
             top_k=top_k,
         )
-        completed = True
+        completed = result.get("ok") is not False
+        if not completed:
+            error = str(result.get("reason") or "incomplete")
         return result
     except BaseException as exc:
         error = type(exc).__name__
@@ -1955,8 +1944,25 @@ def _nightly_heal_sweep(
                     or classified["record"]["priority"] != selected_priority):
                 continue
             record = classified["record"]
-            reserved_slots -= 1
             account_cross_scope(classified)
+            try:
+                resolved_model = model_backends.resolve_model(
+                    summary["backend"],
+                    {
+                        "claude": HEAL_CLAUDE_MODEL_ENV,
+                        "codex": HEAL_CODEX_MODEL_ENV,
+                        "cursor": HEAL_CURSOR_MODEL_ENV,
+                    }.get(summary["backend"], ()),
+                )
+            except ValueError as exc:
+                summary["ok"] = False
+                summary["reason"] = "invalid_model"
+                summary["model_error"] = str(exc)
+                budget_stop_reason = "invalid_model"
+                budget_stop_state = {"error": "invalid_model"}
+                break
+            summary["model"] = resolved_model
+            reserved_slots -= 1
             summary["llm_invocations"] += 1
             summary["priority_llm"] += record["priority"]
             _debug(f"    invoking LLM arbitrator (tier={record['tier']})")

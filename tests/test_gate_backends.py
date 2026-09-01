@@ -145,6 +145,7 @@ def test_codex_backend_does_not_call_claude_classifier():
         _assert("--ignore-rules" in args, args)
         _assert("--ephemeral" in args, args)
         _assert("--sandbox" in args and "read-only" in args, args)
+        _assert(args[-3:-1] == ["--model", "gpt-5"], args)
         _assert(args[-1] == "-", args)
     finally:
         gate.CODEX_BIN = old_codex
