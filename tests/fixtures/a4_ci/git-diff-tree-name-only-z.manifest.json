@@ -1,0 +1,35 @@
+{
+  "candidate_floor": 6,
+  "contract": "latch-parser-corpus-fixture-v1",
+  "encoding": "hex",
+  "expected_paths": [
+    "delete-source.txt",
+    "rename-source.txt",
+    "renamed file.txt",
+    "src/private-policy-target.py",
+    "src/safe.py",
+    "tab\tname.txt"
+  ],
+  "payload_bytes": 107,
+  "payload_file": "git-diff-tree-name-only-z.hex",
+  "payload_sha256": "72b2277ce418ba0cea1e72ce2403d7eebf924218449f8a36c88e936e5a0456f9",
+  "provenance": {
+    "captured_at": "2026-09-02",
+    "capture_kind": "sanitized-disposable-git-repository",
+    "command_argv": [
+      "git",
+      "diff-tree",
+      "-r",
+      "--no-commit-id",
+      "--name-only",
+      "-z",
+      "--no-renames",
+      "--no-ext-diff",
+      "--no-textconv",
+      "BASE_SHA",
+      "HEAD_SHA",
+      "--"
+    ],
+    "producer": "git version 2.42.0"
+  }
+}
