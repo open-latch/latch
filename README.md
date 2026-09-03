@@ -650,6 +650,7 @@ licensed under Apache 2.0; see [TRADEMARK.md](./TRADEMARK.md) and [CONTRIBUTING.
 | [Public proof packet](./proof/README.md) | [Benchmarks](./benchmarks/README.md) |
 | [Cursor reference](./runbooks/cursor.md) | [Cursor gate smoke](./runbooks/cursor_gate_smoke.md) |
 | [Architecture](./ARCHITECTURE.md) | [Shared MCP runtime](./docs/mcp_resource_architecture.md) |
+| [Policy enforcement reference](./docs/policy_enforcement_reference.md) | [Predicate policy snapshot](./docs/predicate_policy_snapshot_v1.md) |
 | [Outcome audit](./runbooks/outcome_audit.md) | [KB durability](./runbooks/kb_durability.md) |
 
 Install internals, per-surface manual install, and maintenance machinery live in
