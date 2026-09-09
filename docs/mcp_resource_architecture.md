@@ -11,10 +11,10 @@ Measurements were collected on macOS 13.5, Apple Silicon, on 2026-07-10.
 
 ## Decision
 
-Use one lazily elected, warm MCP daemon per pinned latch vault and runtime
-fingerprint. Keep the existing stdio configuration, but make each host-created
-stdio process a standard-library-only proxy that forwards MCP JSON-RPC to that
-daemon.
+Use one lazily elected, warm MCP daemon per pinned latch vault, runtime
+fingerprint, and OS-account authority scope. Keep the existing stdio
+configuration, but make each host-created stdio process a
+standard-library-only proxy that forwards MCP JSON-RPC to that daemon.
 
 This gives latch two resource bounds:
 
@@ -129,9 +129,9 @@ sections.
   the proxy's transport protocol and explicit lifecycle-capability epoch. A
   newer incompatible proxy receives an actionable fresh-task failure. A daemon
   then acquires an OS-released process-lifetime fence for its vault/current
-  runtime key. Broker death or a slow-start timeout can launch a contender, but
-  the contender exits before model loading; only the fenced owner may warm or
-  publish normal discovery.
+  runtime-and-authority key. Broker death or a slow-start timeout can launch a
+  contender, but the contender exits before model loading; only the fenced
+  owner may warm or publish normal discovery.
 - Capability epoch 3 includes the connection-owned environment contract.
   Epoch 2 proved registry-wide lease participation but did not carry the typed
   compact/disable state, backend policy, or private model-child environment
@@ -143,10 +143,19 @@ sections.
   Current and alias discovery are published only after synchronous runtime and
   model initialization completes, so probes cannot observe a listener that is
   bound but not ready to serve.
-- A runtime key content-fingerprints the internal transport version, relevant
-  source and tokenizer/config files, plus model size. It deliberately excludes
-  mtimes, so identical trees have identical keys. The 90 MB model is not hashed
-  by every proxy; a same-size incompatible model replacement must bump the
+- A runtime key fingerprints the internal transport version, relevant source
+  and tokenizer/config files, model size, canonical install root, and the
+  normalized roots that define the launching account's vault authority. Raw
+  roots are never published. Explicit vault-root overrides use the same
+  canonical form before and after daemon spawn, so a symlink, junction, short
+  name, or substituted-drive spelling cannot create a phantom upgrade alias.
+  Separating authority scopes lets two OS accounts use one writable vault
+  concurrently without colliding on discovery and then failing the daemon's
+  vault-context check. On Windows, missing `HOME` and
+  `HOME=USERPROFILE` normalize to the same scope for one account. The key
+  deliberately excludes mtimes, so identical trees, canonical install roots,
+  and authority roots have identical keys. The 90 MB model is not hashed by
+  every proxy; a same-size incompatible model replacement must bump the
   protocol version. During an in-place compatible upgrade, retained old-key
   capability-epoch proxies receive an authenticated discovery alias to the
   single current owner. They adopt `owner_runtime_key` and migrate their lease
@@ -158,6 +167,13 @@ sections.
   request before FastMCP, so no mutation has an unknown outcome.
   Cleanup scans aliases and removes only records whose PID and token still
   match, so an old owner cannot erase a newer owner's record.
+- Authority-scoped election first ships at proxy capability epoch 5. Retained
+  epoch-4 proxies used one account-agnostic alias namespace, so a scope-version
+  preflight gives them the existing fresh-task-required response instead of
+  migrating them. This avoids two accounts racing to overwrite the same legacy
+  discovery/embed alias during rollout. Once both sides use epoch 5, compatible
+  upgrades alias only keys that were already derived from that account's
+  authority scope.
 - POSIX startup double-forks before heavyweight imports and the proxy waits for
   the bootstrap child. This prevents reclaimed daemons becoming zombies under
   long-lived proxies. On Windows, the broker bypasses the venv executable
@@ -477,9 +493,12 @@ set `LATCH_MCP_ALLOW_LEGACY_FALLBACK=1` for an explicit temporary fallback;
 
 ## Remaining boundary
 
-One heavyweight owner is keyed per pinned vault and current runtime fingerprint;
-capability-epoch retained keys are discovery aliases and one aggregate lease
-pool, not additional model owners or hidden capacity pools.
+One heavyweight owner is keyed per pinned vault, current runtime fingerprint,
+and OS-account authority scope. Capability-epoch retained keys within that
+scope are discovery aliases and one aggregate lease pool, not additional model
+owners or hidden capacity pools. Distinct account scopes intentionally use
+distinct owners while SQLite and the project writer lock coordinate the shared
+vault.
 Explicitly running many named vaults can still load several models. That is a
 deliberate isolation boundary. If real multi-vault use makes this material, the
 next step is a host-wide pure-embedding service keyed by model fingerprint with

@@ -479,6 +479,133 @@ def test_parallel_clients_share_one_heavy_owner_and_keep_context_isolated() -> N
         _stop_daemon(kb_dir)
 
 
+def test_clients_with_different_authority_roots_use_distinct_owners() -> None:
+    kb_dir = _temp_vault()
+    clients: list[McpClient] = []
+    try:
+        first_profile = kb_dir / "profiles" / "first-user"
+        second_profile = kb_dir / "profiles" / "second-user"
+        clients.append(
+            McpClient(
+                kb_dir,
+                "first-user-session",
+                env_overrides={
+                    "USERPROFILE": str(first_profile),
+                    "USERNAME": "first-user",
+                    "USER": "first-user",
+                },
+            )
+        )
+        first = clients[0].status()
+        clients.append(
+            McpClient(
+                kb_dir,
+                "second-user-session",
+                env_overrides={
+                    "USERPROFILE": str(second_profile),
+                    "USERNAME": "second-user",
+                    "USER": "second-user",
+                },
+            )
+        )
+
+        second = clients[1].status()
+        _assert(first["mode"] == "shared_daemon", str(first))
+        _assert(second["mode"] == "shared_daemon", str(second))
+        _assert(
+            first["daemon"]["runtime_key"] != second["daemon"]["runtime_key"],
+            "different authority roots collided on one runtime key",
+        )
+        _assert(
+            first["process_pid"] != second["process_pid"],
+            "different authority roots reused one daemon owner",
+        )
+
+        # Starting the second authority-scoped owner must not evict or poison
+        # the first account's live connection.
+        first_after = clients[0].status()
+        _assert(first_after["process_pid"] == first["process_pid"], str(first_after))
+
+        discoveries = list(
+            (kb_dir / "runtime" / "mcp-runtimes").glob("*/mcp-daemon.json")
+        )
+        owner_pids = {
+            int(json.loads(path.read_text(encoding="utf-8"))["pid"])
+            for path in discoveries
+        }
+        _assert(
+            owner_pids == {first["process_pid"], second["process_pid"]},
+            str(owner_pids),
+        )
+
+        titles = (
+            "First authority concurrent write",
+            "Second authority concurrent write",
+        )
+        bodies = (
+            "Orange telescope ownership probe.",
+            "Purple submarine ownership probe.",
+        )
+        barrier = threading.Barrier(3)
+        write_results: dict[str, dict[str, Any]] = {}
+        write_errors: list[BaseException] = []
+        result_lock = threading.Lock()
+
+        def write_from(client: McpClient, title: str, body: str) -> None:
+            try:
+                barrier.wait(timeout=5.0)
+                result = client.call_tool(
+                    "latch_insert",
+                    {"kind": "fact", "title": title, "body": body},
+                )
+                with result_lock:
+                    write_results[title] = result
+            except BaseException as exc:
+                with result_lock:
+                    write_errors.append(exc)
+
+        writers = [
+            threading.Thread(
+                target=write_from,
+                args=(client, title, body),
+                daemon=True,
+            )
+            for client, title, body in zip(clients, titles, bodies)
+        ]
+        for writer in writers:
+            writer.start()
+        barrier.wait(timeout=5.0)
+        for writer in writers:
+            writer.join(timeout=30.0)
+
+        _assert(not any(writer.is_alive() for writer in writers), "writes hung")
+        _assert(not write_errors, repr(write_errors))
+        _assert(set(write_results) == set(titles), repr(write_results))
+
+        with sqlite3.connect(kb_dir / "kb.db") as conn:
+            observed = {
+                title: (created_by, session_id)
+                for title, created_by, session_id in conn.execute(
+                    "SELECT title, created_by, session_id FROM nodes "
+                    "WHERE title IN (?, ?)",
+                    titles,
+                )
+            }
+            integrity = conn.execute("PRAGMA integrity_check").fetchone()[0]
+        _assert(
+            observed == {
+                titles[0]: ("first-user", "first-user-session"),
+                titles[1]: ("second-user", "second-user-session"),
+            },
+            repr(observed),
+        )
+        _assert(integrity == "ok", str(integrity))
+    finally:
+        for client in clients:
+            client.close()
+        _stop_daemon(kb_dir)
+
+
 def test_second_client_invokes_backend_from_its_own_path() -> None:
     kb_dir = _temp_vault()
     clients: list[McpClient] = []

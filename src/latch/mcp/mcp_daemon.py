@@ -114,6 +114,16 @@ def _requested_proxy_capability_epoch() -> int:
         return -1
 
 
+def _requested_runtime_authority_scope_version() -> int:
+    raw = os.environ.get(mcp_broker.RUNTIME_AUTHORITY_SCOPE_ENV)
+    if raw is None:
+        return 0
+    try:
+        return int(raw)
+    except ValueError:
+        return -1
+
+
 def _publish_upgrade_alias(
     runtime_key: str,
     payload: dict[str, Any],
@@ -203,6 +213,26 @@ if __name__ == "__main__":
             "daemon_upgrade_incompatible",
             requested_proxy_capability_epoch=requested_capability,
             current_proxy_capability_epoch=mcp_broker.PROXY_CAPABILITY_EPOCH,
+        )
+        raise SystemExit(1)
+    requested_scope = _requested_runtime_authority_scope_version()
+    if (
+        requested_capability
+        >= mcp_broker.PRE_AUTHORITY_SCOPE_CAPABILITY_EPOCH
+        and requested_scope != mcp_broker.RUNTIME_AUTHORITY_SCOPE_VERSION
+    ):
+        message = (
+            "Latch's shared-runtime authority scope changed. Start a fresh "
+            "task so each OS account launches its own compatible owner."
+        )
+        mcp_broker.publish_start_failure(_REQUESTED_RUNTIME_KEY, message)
+        mcp_broker.emit_lifecycle(
+            "daemon_upgrade_incompatible",
+            requested_proxy_capability_epoch=requested_capability,
+            requested_runtime_authority_scope_version=requested_scope,
+            current_runtime_authority_scope_version=(
+                mcp_broker.RUNTIME_AUTHORITY_SCOPE_VERSION
+            ),
         )
         raise SystemExit(1)
     requested_capable = requested_capability >= mcp_broker.PROXY_CAPABILITY_EPOCH

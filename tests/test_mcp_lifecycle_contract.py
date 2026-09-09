@@ -430,6 +430,9 @@ def test_daemon_environment_is_closed_and_shared_by_both_start_paths(
     helper_env = captured[1][1]
     assert "LATCH_MCP_DAEMON_START_TIMEOUT_SEC" not in direct_env
     assert helper_env["LATCH_MCP_DAEMON_START_TIMEOUT_SEC"] == "7"
+    assert direct_env[mcp_broker.RUNTIME_AUTHORITY_SCOPE_ENV] == str(
+        mcp_broker.RUNTIME_AUTHORITY_SCOPE_VERSION
+    )
     forbidden = (
         set(source)
         - set(mcp_broker.DAEMON_OS_ENV_VARS)
@@ -529,6 +532,27 @@ def test_daemon_environment_rejects_invalid_vault_context(tmp_path):
         })
 
 
+def test_invalid_vault_root_reaches_proxy_diagnostic_without_import_traceback():
+    env = os.environ.copy()
+    env.update({
+        "LATCH_HOME": str(ROOT),
+        "LATCH_DURABILITY_ROOT": "relative/backups",
+        "PYTHONPATH": str(ROOT / "src"),
+    })
+
+    result = subprocess.run(
+        [sys.executable, "-m", "latch.mcp.mcp_proxy"],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=5.0,
+    )
+
+    assert result.returncode == 2
+    assert "invalid MCP connection configuration" in result.stderr
+    assert "Traceback" not in result.stderr
+
+
 @pytest.mark.parametrize(
     "name",
     mcp_broker.DAEMON_VAULT_ROOT_ENV_VARS,
@@ -546,6 +570,96 @@ def test_vault_context_digest_changes_with_root_authority(
 
     assert mcp_broker.vault_context_digest(first) != (
         mcp_broker.vault_context_digest(second)
+    )
+
+
+def test_runtime_key_changes_with_os_account_authority(monkeypatch, tmp_path):
+    first = tmp_path / "first-user"
+    second = tmp_path / "second-user"
+    monkeypatch.setenv("USERPROFILE", str(first))
+    initial = mcp_broker._runtime_key()
+    monkeypatch.setenv("USERPROFILE", str(second))
+    changed = mcp_broker._runtime_key()
+
+    assert changed != initial
+
+
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="creating directory symlinks is not reliable on Windows CI",
+)
+@pytest.mark.parametrize(
+    "name",
+    mcp_broker.DAEMON_VAULT_ROOT_ENV_VARS,
+)
+def test_runtime_authority_scope_matches_canonical_daemon_roots(
+    tmp_path, name
+):
+    target = tmp_path / f"canonical-{name.lower()}"
+    target.mkdir()
+    alias = tmp_path / f"{name.lower()}-alias"
+    alias.symlink_to(target, target_is_directory=True)
+    source = os.environ.copy()
+    source[name] = str(alias)
+
+    proxy_scope = mcp_broker._runtime_authority_scope(source)
+    daemon_scope = mcp_broker._runtime_authority_scope(
+        mcp_broker._daemon_environment(source)
+    )
+
+    assert proxy_scope == daemon_scope
+
+
+def test_runtime_key_changes_with_install_root(monkeypatch, tmp_path):
+    first = tmp_path / "first-install"
+    second = tmp_path / "second-install"
+    first.mkdir()
+    second.mkdir()
+    monkeypatch.setattr(mcp_broker, "_runtime_content_files", lambda: ())
+
+    monkeypatch.setattr(mcp_broker.paths, "KB_ROOT", first)
+    initial = mcp_broker._runtime_key()
+    monkeypatch.setattr(mcp_broker.paths, "KB_ROOT", first / ".." / first.name)
+    equivalent = mcp_broker._runtime_key()
+    monkeypatch.setattr(mcp_broker.paths, "KB_ROOT", second)
+    changed = mcp_broker._runtime_key()
+
+    assert equivalent == initial
+    assert changed != initial
+
+
+def test_windows_missing_home_matches_same_userprofile_authority(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(mcp_broker.sys, "platform", "win32")
+    profile = str(tmp_path / "windows-user")
+    other_profile = str(tmp_path / "other-windows-user")
+    without_home = {"USERPROFILE": profile}
+    with_matching_home = {"USERPROFILE": profile, "HOME": profile}
+
+    assert mcp_broker._runtime_authority_scope(without_home) == (
+        mcp_broker._runtime_authority_scope(with_matching_home)
+    )
+    assert mcp_broker.vault_context_digest(without_home) == (
+        mcp_broker.vault_context_digest(with_matching_home)
+    )
+    assert mcp_broker._runtime_authority_scope(without_home) != (
+        mcp_broker._runtime_authority_scope({"USERPROFILE": other_profile})
+    )
+    assert mcp_broker.vault_context_digest(without_home) != (
+        mcp_broker.vault_context_digest({"USERPROFILE": other_profile})
+    )
+    assert mcp_broker._runtime_authority_scope(without_home) != (
+        mcp_broker._runtime_authority_scope({
+            "USERPROFILE": profile,
+            "HOME": other_profile,
+        })
+    )
+    assert mcp_broker.vault_context_digest(without_home) != (
+        mcp_broker.vault_context_digest({
+            "USERPROFILE": profile,
+            "HOME": other_profile,
+        })
     )
 
 
@@ -778,11 +892,7 @@ def test_daemon_owner_fence_survives_broker_death_and_releases_with_owner(
     fence.close()
 
 
-def test_incompatible_upgrade_fails_before_owner_fence_and_heavy_imports(
-    monkeypatch, tmp_path
-):
-    vault = mcp_broker.paths.project_dir(str(tmp_path / "incompatible-upgrade"))
-    site_dir = tmp_path / "site"
+def _write_heavy_import_blocker(site_dir: Path) -> None:
     site_dir.mkdir()
     (site_dir / "sitecustomize.py").write_text(
         "import sys\n"
@@ -794,6 +904,14 @@ def test_incompatible_upgrade_fails_before_owner_fence_and_heavy_imports(
         "sys.meta_path.insert(0, BlockHeavy())\n",
         encoding="utf-8",
     )
+
+
+def test_incompatible_upgrade_fails_before_owner_fence_and_heavy_imports(
+    monkeypatch, tmp_path
+):
+    vault = mcp_broker.paths.project_dir(str(tmp_path / "incompatible-upgrade"))
+    site_dir = tmp_path / "site"
+    _write_heavy_import_blocker(site_dir)
     requested_key = "retained-runtime-v1"
     env = os.environ.copy()
     env.update({
@@ -834,6 +952,55 @@ def test_incompatible_upgrade_fails_before_owner_fence_and_heavy_imports(
         / "runtime"
         / "mcp-runtimes"
         / current_key
+        / mcp_broker.OWNER_FENCE_FILE
+    ).exists()
+    assert "heavy import crossed upgrade preflight" not in result.stderr
+
+
+def test_pre_authority_scope_proxy_requires_fresh_task_before_owner_fence(
+    tmp_path,
+):
+    vault = mcp_broker.paths.project_dir(str(tmp_path / "authority-upgrade"))
+    site_dir = tmp_path / "site"
+    _write_heavy_import_blocker(site_dir)
+    requested_key = "account-agnostic-epoch-4"
+    env = os.environ.copy()
+    env.update({
+        "LATCH_HOME": str(ROOT),
+        "LATCH_KB_DIR": str(vault),
+        "LATCH_MCP_RUNTIME_KEY": requested_key,
+        "LATCH_MCP_PROTOCOL_VERSION": str(mcp_broker.PROTOCOL_VERSION),
+        "LATCH_MCP_PROXY_CAPABILITY_EPOCH": str(
+            mcp_broker.PRE_AUTHORITY_SCOPE_CAPABILITY_EPOCH
+        ),
+        "PYTHONPATH": os.pathsep.join((str(site_dir), str(ROOT / "src"))),
+    })
+    env.pop(mcp_broker.RUNTIME_AUTHORITY_SCOPE_ENV, None)
+
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "src" / "latch" / "mcp" / "mcp_daemon.py")],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=5.0,
+    )
+
+    assert result.returncode == 1
+    marker = (
+        vault
+        / "runtime"
+        / "mcp-runtimes"
+        / requested_key
+        / mcp_broker.DISCOVERY_FILE
+    )
+    payload = json.loads(marker.read_text(encoding="utf-8"))
+    assert "authority scope changed" in payload["error"]
+    assert "Start a fresh task" in payload["error"]
+    assert not (
+        vault
+        / "runtime"
+        / "mcp-runtimes"
+        / mcp_broker.RUNTIME_KEY
         / mcp_broker.OWNER_FENCE_FILE
     ).exists()
     assert "heavy import crossed upgrade preflight" not in result.stderr

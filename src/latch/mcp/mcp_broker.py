@@ -29,7 +29,12 @@ from latch.store import paths
 
 
 PROTOCOL_VERSION = 1
-PROXY_CAPABILITY_EPOCH = 4
+# Epoch 5 proves the proxy uses authority-scoped runtime election. Epoch 4
+# keys were account-agnostic and cannot be safely adopted as upgrade aliases.
+PROXY_CAPABILITY_EPOCH = 5
+PRE_AUTHORITY_SCOPE_CAPABILITY_EPOCH = 4
+RUNTIME_AUTHORITY_SCOPE_VERSION = 1
+RUNTIME_AUTHORITY_SCOPE_ENV = "LATCH_MCP_RUNTIME_AUTHORITY_SCOPE_VERSION"
 DISCOVERY_FILE = "mcp-daemon.json"
 START_LOCK_FILE = "mcp-daemon.start.lock"
 OWNER_FENCE_FILE = "mcp-daemon.owner.lock"
@@ -100,12 +105,11 @@ def _canonical_context_path(value: str, *, name: str) -> str | None:
     return str(candidate.resolve())
 
 
-def vault_context_digest(
+def _authority_context_payload(
     source: dict[str, str] | os._Environ[str] | None = None,
-) -> str:
-    """Fingerprint path authority without exposing paths or test capability."""
+) -> dict[str, dict[str, str | None]]:
+    """Return the roots that define one OS account's vault authority scope."""
     values = os.environ if source is None else source
-    test_root = paths.validated_test_root(values)
     roots: dict[str, str | None] = {}
     for name in DAEMON_VAULT_ROOT_ENV_VARS:
         raw = values.get(name)
@@ -124,18 +128,89 @@ def vault_context_digest(
             )
         else:
             platform_inputs[name] = None
+    if sys.platform == "win32":
+        # Native Windows launchers are inconsistent about exporting HOME.
+        # Python/Node still resolve the same account home from USERPROFILE, so
+        # absent HOME and HOME=USERPROFILE are equivalent authority. Normalize
+        # only the missing side; genuinely different explicit roots stay
+        # distinct and continue to fail closed.
+        if platform_inputs["HOME"] is None:
+            platform_inputs["HOME"] = platform_inputs["USERPROFILE"]
+        if platform_inputs["USERPROFILE"] is None:
+            platform_inputs["USERPROFILE"] = platform_inputs["HOME"]
+    return {
+        "root_overrides": roots,
+        "platform_root_inputs": platform_inputs,
+    }
+
+
+def vault_context_digest(
+    source: dict[str, str] | os._Environ[str] | None = None,
+) -> str:
+    """Fingerprint path authority without exposing paths or test capability."""
+    values = os.environ if source is None else source
+    test_root = paths.validated_test_root(values)
+    authority = _authority_context_payload(values)
     payload = {
         "format": 1,
         "platform": sys.platform,
         "install_root": str(paths.KB_ROOT.resolve()),
         "vault_dir": str(runtime_dir().resolve()),
-        "root_overrides": roots,
-        "platform_root_inputs": platform_inputs,
+        **authority,
         "test_root": str(test_root) if test_root is not None else None,
     }
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
+
+
+def _runtime_authority_scope(
+    source: dict[str, str] | os._Environ[str] | None = None,
+) -> dict[str, str | None]:
+    """Stable authority discriminator for the import-time runtime key.
+
+    The full connection digest above keeps strict resolved-path validation.
+    Configured vault-root overrides must use that same canonical form because
+    ``_daemon_environment`` canonicalizes them before spawning the owner; this
+    keeps the proxy and daemon runtime keys identical. The account/platform
+    roots are forwarded verbatim, so keep their cheaper lexical normalization
+    in this latency-sensitive prompt-hook import path.
+    """
+    values = os.environ if source is None else source
+    scoped: dict[str, str | None] = {}
+    for name in DAEMON_VAULT_ROOT_ENV_VARS:
+        raw = values.get(name)
+        if raw is None:
+            scoped[name] = None
+        elif not isinstance(raw, str):
+            scoped[name] = "<invalid-non-string-root>"
+        else:
+            try:
+                scoped[name] = _canonical_context_path(raw, name=name)
+            except BrokerError:
+                # RUNTIME_KEY is computed at import time. Preserve a stable
+                # discriminator for malformed input so the import succeeds;
+                # connection_metadata/_daemon_environment then emits the
+                # normal bounded configuration diagnostic instead of an
+                # uncaught import traceback.
+                scoped[name] = (
+                    os.path.normcase(os.path.normpath(os.path.expanduser(raw)))
+                    if raw
+                    else None
+                )
+    for name in VAULT_CONTEXT_PLATFORM_ENV_VARS:
+        raw = values.get(name)
+        scoped[name] = (
+            os.path.normcase(os.path.normpath(os.path.expanduser(raw)))
+            if isinstance(raw, str) and raw
+            else None
+        )
+    if sys.platform == "win32":
+        if scoped["HOME"] is None:
+            scoped["HOME"] = scoped["USERPROFILE"]
+        if scoped["USERPROFILE"] is None:
+            scoped["USERPROFILE"] = scoped["HOME"]
+    return scoped
 
 
 def _utc_now() -> str:
@@ -176,7 +251,7 @@ def _runtime_content_files() -> tuple[Path, ...]:
 
 
 def _runtime_key() -> str:
-    """Content-fingerprint protocol-sensitive code and model compatibility.
+    """Fingerprint protocol-sensitive code, install, model, and authority.
 
     A changed key causes a blue/green owner transition: new proxies start a new
     daemon while already-connected proxies can finish against the old one.  The
@@ -186,6 +261,13 @@ def _runtime_key() -> str:
     by its size plus the versioned tokenizer/config contents so proxy startup
     does not read gigabytes when many host contexts start together; replacing a
     model with a same-size incompatible artifact requires a protocol bump.
+
+    Install identity and the authority suffix are load-bearing whenever one
+    vault is shared. Discovery and owner locks live inside that vault, but one
+    daemon may only serve the install and registry/durability/profile roots in
+    its vault-context digest. Including them in the runtime key gives each
+    compatible install and OS account its own daemon slot instead of making a
+    different context collide with (and be rejected by) the first owner.
     """
     h = hashlib.sha256(f"protocol={PROTOCOL_VERSION}".encode())
     for path in _runtime_content_files():
@@ -202,6 +284,14 @@ def _runtime_key() -> str:
     except OSError:
         model_size = -1
     h.update(f"\0model.onnx:size={model_size}".encode())
+    h.update(f"\0install-root={paths.KB_ROOT.resolve()}".encode())
+    authority = _runtime_authority_scope()
+    h.update(b"\0authority-context\0")
+    h.update(
+        json.dumps(authority, sort_keys=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
+    )
     return h.hexdigest()[:20]
 
 
@@ -1056,6 +1146,7 @@ def _spawn_daemon(
     env["LATCH_MCP_RUNTIME_KEY"] = RUNTIME_KEY
     env["LATCH_MCP_PROTOCOL_VERSION"] = str(PROTOCOL_VERSION)
     env["LATCH_MCP_PROXY_CAPABILITY_EPOCH"] = str(PROXY_CAPABILITY_EPOCH)
+    env[RUNTIME_AUTHORITY_SCOPE_ENV] = str(RUNTIME_AUTHORITY_SCOPE_VERSION)
     env["LATCH_MCP_INITIAL_PROJECT_CWD"] = project_cwd
     env["LATCH_MCP_START_REASON"] = _start_reason(start_reason)
     env["LATCH_MCP_START_REQUEST_EPOCH"] = str(time.time())
