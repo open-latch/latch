@@ -29,12 +29,10 @@ from latch.store import paths
 
 
 PROTOCOL_VERSION = 1
-# Epoch 5 proves the proxy uses authority-scoped runtime election. Epoch 4
-# keys were account-agnostic and cannot be safely adopted as upgrade aliases.
-PROXY_CAPABILITY_EPOCH = 5
-PRE_AUTHORITY_SCOPE_CAPABILITY_EPOCH = 4
-RUNTIME_AUTHORITY_SCOPE_VERSION = 1
-RUNTIME_AUTHORITY_SCOPE_ENV = "LATCH_MCP_RUNTIME_AUTHORITY_SCOPE_VERSION"
+# Epoch 7 proves the proxy uses kernel-principal-scoped runtime election.
+# Public/off-main builds already used epochs 5 and 6 with account-agnostic
+# keys, so neither value is a safe compatibility boundary.
+PROXY_CAPABILITY_EPOCH = 7
 DISCOVERY_FILE = "mcp-daemon.json"
 START_LOCK_FILE = "mcp-daemon.start.lock"
 OWNER_FENCE_FILE = "mcp-daemon.owner.lock"
@@ -61,24 +59,11 @@ WINDOWS_CREATE_NO_WINDOW = 0x08000000
 WINDOWS_CREATE_NEW_PROCESS_GROUP = 0x00000200
 DAEMON_OS_ENV_VARS = mcp_runtime.PROCESS_OS_ENV_VARS
 DAEMON_OWNER_ENV_VARS: tuple[str, ...] = ()
-DAEMON_VAULT_ROOT_ENV_VARS = (
-    "LATCH_PRODUCTION_DATA_ROOT",
-    "LATCH_VAULT_REGISTRY_ROOT",
-    "LATCH_DURABILITY_ROOT",
-    "XDG_DATA_HOME",
-    "XDG_STATE_HOME",
-)
 DAEMON_HELPER_ENV_VARS = (
     "LATCH_MCP_DAEMON_START_TIMEOUT_SEC",
 )
-VAULT_CONTEXT_PLATFORM_ENV_VARS = (
-    "HOME",
-    "USERPROFILE",
-    "HOMEDRIVE",
-    "HOMEPATH",
-    "APPDATA",
-    "LOCALAPPDATA",
-)
+_INVALID_AUTHORITY_PATH = "<invalid>"
+_PRINCIPAL_DOMAIN = b"latch-mcp-principal-v1\0"
 
 
 class BrokerError(RuntimeError):
@@ -99,118 +84,280 @@ def _canonical_context_path(value: str, *, name: str) -> str | None:
         return None
     if not value.strip() or "\0" in value:
         raise BrokerError(f"{name} must name a non-empty absolute directory")
-    candidate = Path(value).expanduser()
-    if not candidate.is_absolute():
-        raise BrokerError(f"{name} must name an absolute directory")
-    return str(candidate.resolve())
+    try:
+        candidate = Path(value).expanduser()
+        if not candidate.is_absolute():
+            raise BrokerError(f"{name} must name an absolute directory")
+        resolved = str(candidate.resolve())
+    except BrokerError:
+        raise
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise BrokerError(
+            f"{name} must name an accessible absolute directory"
+        ) from exc
+    # Do not case-fold Windows paths: NTFS can enable case sensitivity per
+    # directory, where differently cased names are distinct authorities.
+    return resolved
+
+
+def _windows_process_user_sid_bytes() -> bytes:
+    """Return the current process token's validated binary user SID."""
+    import ctypes
+    from ctypes import wintypes
+
+    token_query = 0x0008
+    token_user_class = 1
+    error_insufficient_buffer = 122
+
+    class _SidAndAttributes(ctypes.Structure):
+        _fields_ = [
+            ("Sid", ctypes.c_void_p),
+            ("Attributes", wintypes.DWORD),
+        ]
+
+    class _TokenUser(ctypes.Structure):
+        _fields_ = [("User", _SidAndAttributes)]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    get_current_process = kernel32.GetCurrentProcess
+    get_current_process.argtypes = []
+    get_current_process.restype = wintypes.HANDLE
+    open_process_token = advapi32.OpenProcessToken
+    open_process_token.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.HANDLE),
+    ]
+    open_process_token.restype = wintypes.BOOL
+    get_token_information = advapi32.GetTokenInformation
+    get_token_information.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_int,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    get_token_information.restype = wintypes.BOOL
+    is_valid_sid = advapi32.IsValidSid
+    is_valid_sid.argtypes = [ctypes.c_void_p]
+    is_valid_sid.restype = wintypes.BOOL
+    get_length_sid = advapi32.GetLengthSid
+    get_length_sid.argtypes = [ctypes.c_void_p]
+    get_length_sid.restype = wintypes.DWORD
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = [wintypes.HANDLE]
+    close_handle.restype = wintypes.BOOL
+
+    token = wintypes.HANDLE()
+    if not open_process_token(
+        get_current_process(), token_query, ctypes.byref(token)
+    ):
+        raise OSError(ctypes.get_last_error(), "OpenProcessToken failed")
+    try:
+        needed = wintypes.DWORD()
+        ctypes.set_last_error(0)
+        first = get_token_information(
+            token, token_user_class, None, 0, ctypes.byref(needed)
+        )
+        if (
+            first
+            or ctypes.get_last_error() != error_insufficient_buffer
+            or needed.value < ctypes.sizeof(_TokenUser)
+        ):
+            raise OSError(
+                ctypes.get_last_error(), "GetTokenInformation sizing failed"
+            )
+        buffer = ctypes.create_string_buffer(needed.value)
+        if not get_token_information(
+            token,
+            token_user_class,
+            buffer,
+            needed.value,
+            ctypes.byref(needed),
+        ):
+            raise OSError(
+                ctypes.get_last_error(), "GetTokenInformation failed"
+            )
+        token_user = ctypes.cast(
+            buffer, ctypes.POINTER(_TokenUser)
+        ).contents
+        sid_address = int(token_user.User.Sid or 0)
+        if not sid_address or not is_valid_sid(token_user.User.Sid):
+            raise OSError("process token contains an invalid user SID")
+        sid_length = int(get_length_sid(token_user.User.Sid))
+        buffer_start = ctypes.addressof(buffer)
+        buffer_end = buffer_start + ctypes.sizeof(buffer)
+        if (
+            sid_length <= 0
+            or sid_address < buffer_start
+            or sid_address + sid_length > buffer_end
+        ):
+            raise OSError("process token user SID is outside its buffer")
+        return ctypes.string_at(sid_address, sid_length)
+    finally:
+        close_handle(token)
+
+
+def _capture_os_principal() -> dict[str, str]:
+    """Return an opaque fingerprint of the process's effective OS principal."""
+    if sys.platform == "win32":
+        kind = "windows-token-user-sid"
+        try:
+            raw = _windows_process_user_sid_bytes()
+        except (AttributeError, OSError, RuntimeError, ValueError) as exc:
+            raise BrokerError(
+                "current OS principal is unavailable; refusing shared MCP "
+                "runtime startup"
+            ) from exc
+    else:
+        kind = "posix-euid"
+        getter = getattr(os, "geteuid", None)
+        if not callable(getter):
+            raise BrokerError(
+                "current OS principal is unavailable; refusing shared MCP "
+                "runtime startup"
+            )
+        try:
+            effective_uid = getter()
+            if not isinstance(effective_uid, int) or effective_uid < 0:
+                raise ValueError("invalid effective UID")
+            raw = str(effective_uid).encode("ascii")
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            raise BrokerError(
+                "current OS principal is unavailable; refusing shared MCP "
+                "runtime startup"
+            ) from exc
+    fingerprint = hashlib.sha256(
+        _PRINCIPAL_DOMAIN + kind.encode("ascii") + b"\0" + raw
+    ).hexdigest()
+    return {"kind": kind, "sha256": fingerprint}
+
+
+try:
+    _PROCESS_PRINCIPAL = _capture_os_principal()
+except BrokerError:
+    # RUNTIME_KEY is computed during lightweight hook imports. Preserve that
+    # import path, but every discovery/start path validates this sentinel and
+    # fails closed before creating an owner.
+    _PROCESS_PRINCIPAL = {"kind": "unavailable", "sha256": ""}
+
+
+def _authority_path(
+    value: object,
+    *,
+    name: str,
+    strict: bool,
+) -> str | None:
+    if value is None or value == "":
+        return None
+    try:
+        if not isinstance(value, (str, os.PathLike)):
+            raise BrokerError(
+                f"{name} must name a non-empty absolute directory"
+            )
+        return _canonical_context_path(os.fspath(value), name=name)
+    except BrokerError:
+        if strict:
+            raise
+        return _INVALID_AUTHORITY_PATH
 
 
 def _authority_context_payload(
     source: dict[str, str] | os._Environ[str] | None = None,
-) -> dict[str, dict[str, str | None]]:
-    """Return the roots that define one OS account's vault authority scope."""
+    *,
+    strict: bool = True,
+    principal: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Return one canonical principal/root payload for election and checks.
+
+    Only effective roots that influence vault identity or backups are retained.
+    Irrelevant cross-platform environment spellings therefore cannot fork a
+    heavyweight owner. In import-safe mode malformed inputs become opaque
+    sentinels; discovery and startup call this helper strictly and fail closed.
+    """
     values = os.environ if source is None else source
-    roots: dict[str, str | None] = {}
-    for name in DAEMON_VAULT_ROOT_ENV_VARS:
-        raw = values.get(name)
-        roots[name] = (
-            _canonical_context_path(raw, name=name)
-            if isinstance(raw, str)
-            else None
+    selected_principal = _PROCESS_PRINCIPAL if principal is None else principal
+    kind = (
+        selected_principal.get("kind")
+        if isinstance(selected_principal, dict)
+        else None
+    )
+    principal_hash = (
+        selected_principal.get("sha256")
+        if isinstance(selected_principal, dict)
+        else None
+    )
+    if (
+        kind not in {"posix-euid", "windows-token-user-sid"}
+        or not isinstance(principal_hash, str)
+        or len(principal_hash) != 64
+        or any(
+            character not in "0123456789abcdef"
+            for character in principal_hash
         )
-    platform_inputs: dict[str, str | None] = {}
-    for name in VAULT_CONTEXT_PLATFORM_ENV_VARS:
-        raw = values.get(name)
-        if isinstance(raw, str) and raw:
-            candidate = Path(raw).expanduser()
-            platform_inputs[name] = str(
-                candidate.resolve() if candidate.is_absolute() else candidate
+    ):
+        if strict:
+            raise BrokerError(
+                "current OS principal is unavailable; refusing shared MCP "
+                "runtime startup"
             )
-        else:
-            platform_inputs[name] = None
-    if sys.platform == "win32":
-        # Native Windows launchers are inconsistent about exporting HOME.
-        # Python/Node still resolve the same account home from USERPROFILE, so
-        # absent HOME and HOME=USERPROFILE are equivalent authority. Normalize
-        # only the missing side; genuinely different explicit roots stay
-        # distinct and continue to fail closed.
-        if platform_inputs["HOME"] is None:
-            platform_inputs["HOME"] = platform_inputs["USERPROFILE"]
-        if platform_inputs["USERPROFILE"] is None:
-            platform_inputs["USERPROFILE"] = platform_inputs["HOME"]
+        selected_principal = {"kind": "unavailable", "sha256": ""}
+
+    install_root = _authority_path(
+        paths.KB_ROOT, name="Latch install root", strict=strict
+    )
+    try:
+        resolved_roots = {
+            "production_data": paths.platform_production_root(values),
+            "vault_registry": paths.platform_vault_registry_root(values),
+            "durability": paths.platform_durability_root(values),
+        }
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        if strict:
+            raise BrokerError(
+                "Latch vault root configuration could not be resolved"
+            ) from exc
+        resolved_roots = {
+            name: _INVALID_AUTHORITY_PATH
+            for name in ("production_data", "vault_registry", "durability")
+        }
+    effective_roots = {
+        name: _authority_path(root, name=name, strict=strict)
+        for name, root in resolved_roots.items()
+    }
+
     return {
-        "root_overrides": roots,
-        "platform_root_inputs": platform_inputs,
+        "format": 1,
+        "platform": "windows" if os.name == "nt" else sys.platform,
+        "install_root": install_root or _INVALID_AUTHORITY_PATH,
+        "principal": selected_principal,
+        "effective_roots": effective_roots,
     }
 
 
 def vault_context_digest(
     source: dict[str, str] | os._Environ[str] | None = None,
+    *,
+    principal: dict[str, str] | None = None,
 ) -> str:
     """Fingerprint path authority without exposing paths or test capability."""
     values = os.environ if source is None else source
     test_root = paths.validated_test_root(values)
-    authority = _authority_context_payload(values)
+    authority = _authority_context_payload(
+        values, strict=True, principal=principal
+    )
     payload = {
-        "format": 1,
-        "platform": sys.platform,
-        "install_root": str(paths.KB_ROOT.resolve()),
+        "format": 2,
+        "authority": authority,
         "vault_dir": str(runtime_dir().resolve()),
-        **authority,
         "test_root": str(test_root) if test_root is not None else None,
     }
     return hashlib.sha256(
-        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()
-
-
-def _runtime_authority_scope(
-    source: dict[str, str] | os._Environ[str] | None = None,
-) -> dict[str, str | None]:
-    """Stable authority discriminator for the import-time runtime key.
-
-    The full connection digest above keeps strict resolved-path validation.
-    Configured vault-root overrides must use that same canonical form because
-    ``_daemon_environment`` canonicalizes them before spawning the owner; this
-    keeps the proxy and daemon runtime keys identical. The account/platform
-    roots are forwarded verbatim, so keep their cheaper lexical normalization
-    in this latency-sensitive prompt-hook import path.
-    """
-    values = os.environ if source is None else source
-    scoped: dict[str, str | None] = {}
-    for name in DAEMON_VAULT_ROOT_ENV_VARS:
-        raw = values.get(name)
-        if raw is None:
-            scoped[name] = None
-        elif not isinstance(raw, str):
-            scoped[name] = "<invalid-non-string-root>"
-        else:
-            try:
-                scoped[name] = _canonical_context_path(raw, name=name)
-            except BrokerError:
-                # RUNTIME_KEY is computed at import time. Preserve a stable
-                # discriminator for malformed input so the import succeeds;
-                # connection_metadata/_daemon_environment then emits the
-                # normal bounded configuration diagnostic instead of an
-                # uncaught import traceback.
-                scoped[name] = (
-                    os.path.normcase(os.path.normpath(os.path.expanduser(raw)))
-                    if raw
-                    else None
-                )
-    for name in VAULT_CONTEXT_PLATFORM_ENV_VARS:
-        raw = values.get(name)
-        scoped[name] = (
-            os.path.normcase(os.path.normpath(os.path.expanduser(raw)))
-            if isinstance(raw, str) and raw
-            else None
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode(
+            "utf-8"
         )
-    if sys.platform == "win32":
-        if scoped["HOME"] is None:
-            scoped["HOME"] = scoped["USERPROFILE"]
-        if scoped["USERPROFILE"] is None:
-            scoped["USERPROFILE"] = scoped["HOME"]
-    return scoped
+    ).hexdigest()
 
 
 def _utc_now() -> str:
@@ -250,7 +397,11 @@ def _runtime_content_files() -> tuple[Path, ...]:
     )
 
 
-def _runtime_key() -> str:
+def _runtime_key(
+    source: dict[str, str] | os._Environ[str] | None = None,
+    *,
+    principal: dict[str, str] | None = None,
+) -> str:
     """Fingerprint protocol-sensitive code, install, model, and authority.
 
     A changed key causes a blue/green owner transition: new proxies start a new
@@ -264,17 +415,17 @@ def _runtime_key() -> str:
 
     Install identity and the authority suffix are load-bearing whenever one
     vault is shared. Discovery and owner locks live inside that vault, but one
-    daemon may only serve the install and registry/durability/profile roots in
-    its vault-context digest. Including them in the runtime key gives each
-    compatible install and OS account its own daemon slot instead of making a
-    different context collide with (and be rejected by) the first owner.
+    daemon may only serve the install, OS principal, and effective vault roots
+    in its vault-context digest. Including that same canonical payload in the
+    runtime key gives each compatible authority its own daemon slot instead of
+    making a different context collide with the first owner.
     """
     h = hashlib.sha256(f"protocol={PROTOCOL_VERSION}".encode())
     for path in _runtime_content_files():
         h.update(f"\0{path.name}\0".encode())
         try:
-            with path.open("rb") as source:
-                while chunk := source.read(1024 * 1024):
+            with path.open("rb") as handle:
+                while chunk := handle.read(1024 * 1024):
                     h.update(chunk)
         except OSError:
             h.update(b"missing")
@@ -284,8 +435,9 @@ def _runtime_key() -> str:
     except OSError:
         model_size = -1
     h.update(f"\0model.onnx:size={model_size}".encode())
-    h.update(f"\0install-root={paths.KB_ROOT.resolve()}".encode())
-    authority = _runtime_authority_scope()
+    authority = _authority_context_payload(
+        source, strict=False, principal=principal
+    )
     h.update(b"\0authority-context\0")
     h.update(
         json.dumps(authority, sort_keys=True, separators=(",", ":")).encode(
@@ -354,6 +506,11 @@ def proxy_lease_dir(runtime_key: str | None = None) -> Path:
 def legacy_discovery_path() -> Path:
     """Discovery location used before the runtime-key registry existed."""
     return runtime_dir() / DISCOVERY_FILE
+
+
+def legacy_embed_discovery_path() -> Path:
+    """Embed discovery location used by pre-registry epoch-zero hooks."""
+    return runtime_dir() / EMBED_DISCOVERY_FILE
 
 
 def legacy_proxy_lease_dir() -> Path:
@@ -892,12 +1049,22 @@ def probe_discovery(
                 and response.get("vault_context_digest")
                 == payload.get("vault_context_digest")
             )
-    except (OSError, ValueError, KeyError, AttributeError, TypeError):
+    except (
+        BrokerError,
+        OSError,
+        ValueError,
+        KeyError,
+        AttributeError,
+        TypeError,
+    ):
         return False
 
 
 def publish_start_failure(runtime_key: str, message: str) -> Path:
     """Publish a short-lived actionable startup failure for a retained proxy."""
+    # A retained account-agnostic embed endpoint must never survive an
+    # authority-boundary failure and route work to another account's owner.
+    remove_legacy_embed_discovery(runtime_key=runtime_key)
     path = discovery_path(runtime_key)
     _atomic_json(path, {
         "runtime_key": runtime_key,
@@ -1112,26 +1279,30 @@ def _daemon_environment(
             for name in names
             if isinstance(values.get(name), str)
         }
-    for name in DAEMON_VAULT_ROOT_ENV_VARS:
-        raw = values.get(name)
-        if raw is None:
-            continue
-        if not isinstance(raw, str):
-            raise BrokerError(f"{name} must name a non-empty absolute directory")
-        canonical = _canonical_context_path(raw, name=name)
-        if canonical is None:
-            # An empty override is unset. Drop it rather than donating a blank
-            # value the child would read back as a configured root.
-            env.pop(name, None)
-            continue
-        env[name] = canonical
+    authority = _authority_context_payload(values, strict=True)
+    effective_roots = authority["effective_roots"]
+    assert isinstance(effective_roots, dict)
+    env.update({
+        "LATCH_PRODUCTION_DATA_ROOT": str(
+            effective_roots["production_data"]
+        ),
+        "LATCH_VAULT_REGISTRY_ROOT": str(
+            effective_roots["vault_registry"]
+        ),
+        "LATCH_DURABILITY_ROOT": str(effective_roots["durability"]),
+    })
 
     test_root = paths.validated_test_root(values)
     if test_root is not None:
         env[paths.TEST_ROOT_ENV] = str(test_root)
         env[paths.TEST_CAPABILITY_ENV] = values[paths.TEST_CAPABILITY_ENV]
-    env["LATCH_HOME"] = str(paths.KB_ROOT)
-    env["LATCH_KB_DIR"] = str(runtime_dir())
+    env["LATCH_HOME"] = str(authority["install_root"])
+    vault_dir = _canonical_context_path(
+        str(runtime_dir()), name="LATCH_KB_DIR"
+    )
+    if vault_dir is None:
+        raise BrokerError("LATCH_KB_DIR could not be resolved")
+    env["LATCH_KB_DIR"] = vault_dir
     return env
 
 
@@ -1143,10 +1314,14 @@ def _spawn_daemon(
 ) -> int:
     daemon_py = Path(__file__).resolve().parent / "mcp_daemon.py"
     env = _daemon_environment()
+    if _authority_context_payload(env) != _authority_context_payload():
+        raise BrokerError(
+            "shared MCP authority context changed while preparing the daemon "
+            "environment; refusing startup"
+        )
     env["LATCH_MCP_RUNTIME_KEY"] = RUNTIME_KEY
     env["LATCH_MCP_PROTOCOL_VERSION"] = str(PROTOCOL_VERSION)
     env["LATCH_MCP_PROXY_CAPABILITY_EPOCH"] = str(PROXY_CAPABILITY_EPOCH)
-    env[RUNTIME_AUTHORITY_SCOPE_ENV] = str(RUNTIME_AUTHORITY_SCOPE_VERSION)
     env["LATCH_MCP_INITIAL_PROJECT_CWD"] = project_cwd
     env["LATCH_MCP_START_REASON"] = _start_reason(start_reason)
     env["LATCH_MCP_START_REQUEST_EPOCH"] = str(time.time())
@@ -1236,7 +1411,11 @@ def request_daemon_start(project_cwd: str) -> bool:
     payload = read_discovery()
     if payload is not None and probe_discovery(payload, timeout=0.02):
         return False
-    env = _daemon_environment(for_helper=True)
+    try:
+        env = _daemon_environment(for_helper=True)
+    except BrokerError as exc:
+        emit_lifecycle("daemon_start_failed", reason=str(exc))
+        return False
     kwargs: dict[str, Any] = {
         "stdin": subprocess.DEVNULL,
         "stdout": subprocess.DEVNULL,
@@ -1385,6 +1564,10 @@ def read_live_embed_discovery(
     this check keeps hook clients and alias publication from independently
     trusting a stale ``embed.sock.json``.
     """
+    try:
+        _authority_context_payload(strict=True)
+    except BrokerError:
+        return None
     key = runtime_key or RUNTIME_KEY
     try:
         payload = json.loads(
@@ -1446,6 +1629,7 @@ def remove_embed_discovery_if_owner(*, pid: int, token: str) -> None:
         paths_to_check = list(registry.glob(f"*/{EMBED_DISCOVERY_FILE}"))
     except OSError:
         paths_to_check = []
+    paths_to_check.append(legacy_embed_discovery_path())
     for path in paths_to_check:
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
@@ -1458,6 +1642,18 @@ def remove_embed_discovery_if_owner(*, pid: int, token: str) -> None:
                 path.unlink()
             except OSError:
                 pass
+
+
+def remove_legacy_embed_discovery(*, runtime_key: str | None = None) -> None:
+    """Quarantine embed records that predate principal-scoped election."""
+    candidates = [legacy_embed_discovery_path()]
+    if runtime_key is not None:
+        candidates.append(embed_discovery_path(runtime_key))
+    for path in candidates:
+        try:
+            path.unlink()
+        except OSError:
+            pass
 
 
 def publish_embed_alias(

@@ -85,6 +85,111 @@ _PINNED_DIR: "Path | None | bool" = False
 TEST_ROOT_ENV = "LATCH_TEST_ROOT"
 TEST_CAPABILITY_ENV = "LATCH_TEST_CAPABILITY"
 TEST_SENTINEL = ".latch-test-root.json"
+PRODUCTION_DATA_ROOT_ENV = "LATCH_PRODUCTION_DATA_ROOT"
+VAULT_REGISTRY_ROOT_ENV = "LATCH_VAULT_REGISTRY_ROOT"
+DURABILITY_ROOT_ENV = "LATCH_DURABILITY_ROOT"
+
+
+def _platform_root_environment(
+    env: "dict[str, str] | os._Environ[str] | None" = None,
+) -> "dict[str, str] | os._Environ[str]":
+    values = os.environ if env is None else env
+    if os.name == "nt":
+        return {str(key).upper(): value for key, value in values.items()}
+    return values
+
+
+def _platform_home(
+    values: "dict[str, str] | os._Environ[str]",
+) -> Path:
+    if os.name == "nt":
+        profile = values.get("USERPROFILE")
+        if profile:
+            return Path(profile)
+        drive = values.get("HOMEDRIVE")
+        tail = values.get("HOMEPATH")
+        if drive and tail:
+            return Path(drive + tail)
+    else:
+        home = values.get("HOME")
+        if home:
+            return Path(home)
+    return Path.home()
+
+
+def platform_production_root(
+    env: "dict[str, str] | os._Environ[str] | None" = None,
+) -> Path:
+    """Return the effective production-data root for an environment."""
+    values = _platform_root_environment(env)
+    configured = values.get(PRODUCTION_DATA_ROOT_ENV)
+    if configured:
+        return Path(configured).expanduser()
+    if os.name == "nt":
+        base = values.get("LOCALAPPDATA") or values.get("APPDATA")
+        return (
+            Path(base)
+            if base
+            else _platform_home(values) / "AppData" / "Local"
+        ) / "Latch"
+    if sys.platform == "darwin":
+        return (
+            _platform_home(values)
+            / "Library"
+            / "Application Support"
+            / "Latch"
+        )
+    base = values.get("XDG_DATA_HOME")
+    return (
+        Path(base) if base else _platform_home(values) / ".local" / "share"
+    ) / "latch"
+
+
+def platform_default_durability_root(
+    env: "dict[str, str] | os._Environ[str] | None" = None,
+) -> Path:
+    """Return the platform default protected-backup root."""
+    values = _platform_root_environment(env)
+    if os.name == "nt":
+        base = values.get("LOCALAPPDATA") or values.get("APPDATA")
+        return (
+            Path(base)
+            if base
+            else _platform_home(values) / "AppData" / "Local"
+        ) / "LatchBackups"
+    if sys.platform == "darwin":
+        return (
+            _platform_home(values)
+            / "Library"
+            / "Application Support"
+            / "LatchBackups"
+        )
+    base = values.get("XDG_STATE_HOME")
+    return (
+        Path(base) if base else _platform_home(values) / ".local" / "state"
+    ) / "latch" / "backups"
+
+
+def platform_durability_root(
+    env: "dict[str, str] | os._Environ[str] | None" = None,
+) -> Path:
+    """Return the effective protected-backup root for an environment."""
+    values = _platform_root_environment(env)
+    configured = values.get(DURABILITY_ROOT_ENV)
+    if configured:
+        return Path(configured).expanduser()
+    return platform_default_durability_root(values)
+
+
+def platform_vault_registry_root(
+    env: "dict[str, str] | os._Environ[str] | None" = None,
+) -> Path:
+    """Return the effective production vault-identity registry root."""
+    values = _platform_root_environment(env)
+    configured = values.get(VAULT_REGISTRY_ROOT_ENV)
+    if configured:
+        return Path(configured).expanduser()
+    return platform_production_root(values) / "registry"
 
 
 class UnsafeTestExecutionError(RuntimeError):

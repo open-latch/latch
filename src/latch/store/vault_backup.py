@@ -26,7 +26,7 @@ from typing import Any
 from latch.store import paths
 from latch.store import vault_identity
 
-DURABILITY_ROOT_ENV = "LATCH_DURABILITY_ROOT"
+DURABILITY_ROOT_ENV = paths.DURABILITY_ROOT_ENV
 FREQUENT_RETENTION_DAYS = 5
 DAILY_RETENTION_DAYS = 30
 _REASON_RE = re.compile(r"[^a-z0-9_-]+")

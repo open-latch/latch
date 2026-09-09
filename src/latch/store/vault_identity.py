@@ -20,7 +20,6 @@ import re
 import secrets
 import shutil
 import sqlite3
-import sys
 import uuid
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -31,8 +30,8 @@ from latch.store import paths
 CLASS_PRODUCTION = "production"
 CLASS_TEST = "test"
 CLASSIFICATIONS = (CLASS_PRODUCTION, CLASS_TEST)
-REGISTRY_ENV = "LATCH_VAULT_REGISTRY_ROOT"
-PRODUCTION_ROOT_ENV = "LATCH_PRODUCTION_DATA_ROOT"
+REGISTRY_ENV = paths.VAULT_REGISTRY_ROOT_ENV
+PRODUCTION_ROOT_ENV = paths.PRODUCTION_DATA_ROOT_ENV
 
 
 class VaultSafetyError(RuntimeError):
@@ -64,18 +63,7 @@ def _is_relative_to(path: Path, parent: Path) -> bool:
 
 
 def platform_production_root() -> Path:
-    configured = os.environ.get(PRODUCTION_ROOT_ENV)
-    if configured:
-        return Path(configured).expanduser()
-    if os.name == "nt":
-        base = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA")
-        if base:
-            return Path(base) / "Latch"
-        return Path.home() / "AppData" / "Local" / "Latch"
-    if sys.platform == "darwin":
-        return Path.home() / "Library" / "Application Support" / "Latch"
-    base = os.environ.get("XDG_DATA_HOME")
-    return (Path(base) if base else Path.home() / ".local" / "share") / "latch"
+    return paths.platform_production_root()
 
 
 def default_production_vault() -> Path:
@@ -85,15 +73,7 @@ def default_production_vault() -> Path:
 
 def platform_durability_root() -> Path:
     """Independent default root for protected production backups."""
-    if os.name == "nt":
-        base = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA")
-        if base:
-            return Path(base) / "LatchBackups"
-        return Path.home() / "AppData" / "Local" / "LatchBackups"
-    if sys.platform == "darwin":
-        return Path.home() / "Library" / "Application Support" / "LatchBackups"
-    base = os.environ.get("XDG_STATE_HOME")
-    return (Path(base) if base else Path.home() / ".local" / "state") / "latch" / "backups"
+    return paths.platform_default_durability_root()
 
 
 def _classification_for_path(vault_dir: Path) -> str:
@@ -119,8 +99,7 @@ def _registry_root(classification: str) -> Path:
     # in the user's real production registry.
     if test_root is not None:
         return test_root / "production-registry-shadow"
-    configured = os.environ.get(REGISTRY_ENV)
-    return Path(configured).expanduser() if configured else platform_production_root() / "registry"
+    return paths.platform_vault_registry_root()
 
 
 def _registry_path(identity: VaultIdentity) -> Path:

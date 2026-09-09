@@ -12,7 +12,7 @@ Measurements were collected on macOS 13.5, Apple Silicon, on 2026-07-10.
 ## Decision
 
 Use one lazily elected, warm MCP daemon per pinned latch vault, runtime
-fingerprint, and OS-account authority scope. Keep the existing stdio
+fingerprint, and OS-principal authority scope. Keep the existing stdio
 configuration, but make each host-created stdio process a
 standard-library-only proxy that forwards MCP JSON-RPC to that daemon.
 
@@ -139,22 +139,27 @@ sections.
   fresh-task path rather than joining with first-spawner semantics.
 - Discovery and election locks live in a runtime-keyed registry beneath the
   pinned vault. Files are atomically replaced and mode 0600. The daemon binds
-  only `127.0.0.1`; connections authenticate with a 256-bit random token.
+  only `127.0.0.1`; connections present a 256-bit random discovery token. These
+  controls isolate runtime coordination and reduce accidental cross-owner
+  attachment. They are not an authorization or security boundary between OS
+  accounts that can write the same vault.
   Current and alias discovery are published only after synchronous runtime and
   model initialization completes, so probes cannot observe a listener that is
   bound but not ready to serve.
 - A runtime key fingerprints the internal transport version, relevant source
-  and tokenizer/config files, model size, canonical install root, and the
-  normalized roots that define the launching account's vault authority. Raw
-  roots are never published. Explicit vault-root overrides use the same
-  canonical form before and after daemon spawn, so a symlink, junction, short
-  name, or substituted-drive spelling cannot create a phantom upgrade alias.
-  Separating authority scopes lets two OS accounts use one writable vault
+  and tokenizer/config files, model size, canonical install root, and one
+  canonical authority payload. That payload contains a kernel-backed process
+  principal (the effective UID on POSIX or process-token SID identity on
+  Windows) plus the canonical effective production-data, registry, and
+  durability roots. Raw principals and roots are never published. The same
+  platform-aware payload is computed before and after daemon spawn, so an
+  irrelevant cross-platform environment spelling or canonically equivalent
+  root cannot create a phantom upgrade alias. Separating
+  authority scopes lets mutually trusted OS accounts use one writable vault
   concurrently without colliding on discovery and then failing the daemon's
-  vault-context check. On Windows, missing `HOME` and
-  `HOME=USERPROFILE` normalize to the same scope for one account. The key
-  deliberately excludes mtimes, so identical trees, canonical install roots,
-  and authority roots have identical keys. The 90 MB model is not hashed by
+  vault-context check. The key deliberately excludes mtimes, so identical
+  trees, canonical install roots, principals, and effective authority roots
+  have identical keys. The 90 MB model is not hashed by
   every proxy; a same-size incompatible model replacement must bump the
   protocol version. During an in-place compatible upgrade, retained old-key
   capability-epoch proxies receive an authenticated discovery alias to the
@@ -167,11 +172,13 @@ sections.
   request before FastMCP, so no mutation has an unknown outcome.
   Cleanup scans aliases and removes only records whose PID and token still
   match, so an old owner cannot erase a newer owner's record.
-- Authority-scoped election first ships at proxy capability epoch 5. Retained
-  epoch-4 proxies used one account-agnostic alias namespace, so a scope-version
-  preflight gives them the existing fresh-task-required response instead of
-  migrating them. This avoids two accounts racing to overwrite the same legacy
-  discovery/embed alias during rollout. Once both sides use epoch 5, compatible
+- Authority-scoped election first ships at proxy capability epoch 7. Public
+  and off-main builds already used epochs 5 and 6 with account-agnostic keys,
+  so retained epoch-1 through epoch-6 proxies receive the existing
+  fresh-task-required startup response instead of migrating. Epoch-zero
+  proxies, which cannot read startup-failure records, receive a live MCP
+  rejection endpoint but never an embedding alias. This prevents legacy work
+  from crossing the authority boundary. Once both sides use epoch 7, compatible
   upgrades alias only keys that were already derived from that account's
   authority scope.
 - POSIX startup double-forks before heavyweight imports and the proxy waits for
@@ -417,6 +424,9 @@ window.
 The production-representative tests cover:
 
 - concurrent clients sharing exactly one model owner;
+- same-principal clients with distinct canonical authority roots electing
+  distinct owners while preserving concurrent writes, session attribution, and
+  actor attribution;
 - connection-local session attribution, guards, gate policy, proxy policy, and
   model backend execution;
 - a compact Claude first client followed by a Codex client whose CLI and
@@ -477,6 +487,9 @@ Recommended rollout after review:
    concurrency, not process-leak counts.
 5. Keep legacy startup explicit-only; do not silently restore the old heavy
    topology when shared-owner startup fails.
+6. Run a native two-account Windows canary against the deployment target. The
+   same-process integration test exercises authority-root partitioning but
+   cannot substitute for validating two real kernel principals.
 
 Reversal is immediate and local:
 
@@ -494,11 +507,13 @@ set `LATCH_MCP_ALLOW_LEGACY_FALLBACK=1` for an explicit temporary fallback;
 ## Remaining boundary
 
 One heavyweight owner is keyed per pinned vault, current runtime fingerprint,
-and OS-account authority scope. Capability-epoch retained keys within that
+and OS-principal authority scope. Capability-epoch retained keys within that
 scope are discovery aliases and one aggregate lease pool, not additional model
 owners or hidden capacity pools. Distinct account scopes intentionally use
 distinct owners while SQLite and the project writer lock coordinate the shared
-vault.
+vault. Sharing write access to a vault therefore assumes mutually trusted OS
+accounts in one local trust domain; neither the runtime registry nor its
+discovery token provides tenant isolation or access control.
 Explicitly running many named vaults can still load several models. That is a
 deliberate isolation boundary. If real multi-vault use makes this material, the
 next step is a host-wide pure-embedding service keyed by model fingerprint with

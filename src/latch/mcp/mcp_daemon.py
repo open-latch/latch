@@ -114,16 +114,6 @@ def _requested_proxy_capability_epoch() -> int:
         return -1
 
 
-def _requested_runtime_authority_scope_version() -> int:
-    raw = os.environ.get(mcp_broker.RUNTIME_AUTHORITY_SCOPE_ENV)
-    if raw is None:
-        return 0
-    try:
-        return int(raw)
-    except ValueError:
-        return -1
-
-
 def _publish_upgrade_alias(
     runtime_key: str,
     payload: dict[str, Any],
@@ -140,22 +130,26 @@ def _publish_upgrade_alias(
         "owner_runtime_key": mcp_broker.RUNTIME_KEY,
         "compatibility": compatibility,
     }
-    # Stage the embed alias first.  MCP discovery is the transition commit
-    # point: once a retained proxy can observe the new MCP owner, the matching
-    # embed alias has either already been published or the degraded state has
-    # been made explicit in lifecycle telemetry.
-    embed_alias = mcp_broker.publish_embed_alias(
-        runtime_key,
-        owner_payload=payload,
-    )
-    if embed_alias is None:
-        mcp_broker.emit_lifecycle(
-            "embed_alias_unavailable",
-            requested_runtime_key=runtime_key,
-            owner_runtime_key=(
-                payload.get("owner_runtime_key") or payload.get("runtime_key")
-            ),
+    # Only current capability epochs may inherit an embed endpoint. Epoch-zero
+    # proxies need a live MCP rejection owner because they cannot parse startup
+    # markers, but no embedding work may cross their account-agnostic key.
+    embed_alias = None
+    if capable:
+        embed_alias = mcp_broker.publish_embed_alias(
+            runtime_key,
+            owner_payload=payload,
         )
+        if embed_alias is None:
+            mcp_broker.emit_lifecycle(
+                "embed_alias_unavailable",
+                requested_runtime_key=runtime_key,
+                owner_runtime_key=(
+                    payload.get("owner_runtime_key")
+                    or payload.get("runtime_key")
+                ),
+            )
+    else:
+        mcp_broker.remove_legacy_embed_discovery(runtime_key=runtime_key)
     mcp_broker.publish_discovery(**values)
     if not capable:
         mcp_broker.publish_discovery(**values, legacy_path=True)
@@ -185,6 +179,11 @@ def _alias_ready_owner(runtime_key: str, *, capable: bool) -> bool:
 
 if __name__ == "__main__":
     try:
+        mcp_broker._authority_context_payload(strict=True)
+    except mcp_broker.BrokerError as exc:
+        sys.stderr.write(f"[latch] invalid MCP authority context: {exc}\n")
+        raise SystemExit(1)
+    try:
         mcp_broker.runtime_key_dir(_REQUESTED_RUNTIME_KEY)
     except ValueError as exc:
         sys.stderr.write(f"[latch] invalid requested MCP runtime key: {exc}\n")
@@ -203,10 +202,14 @@ if __name__ == "__main__":
         )
         raise SystemExit(1)
     requested_capability = _requested_proxy_capability_epoch()
-    if requested_capability > mcp_broker.PROXY_CAPABILITY_EPOCH:
+    if (
+        requested_capability < 0
+        or requested_capability > mcp_broker.PROXY_CAPABILITY_EPOCH
+    ):
         message = (
-            "Latch proxy capability is newer than this runtime. Reinstall Latch "
-            "and start a fresh task so the host launches a matching proxy."
+            "Latch proxy capability is incompatible with this runtime. "
+            "Reinstall Latch and start a fresh task so the host launches a "
+            "matching proxy."
         )
         mcp_broker.publish_start_failure(_REQUESTED_RUNTIME_KEY, message)
         mcp_broker.emit_lifecycle(
@@ -215,27 +218,27 @@ if __name__ == "__main__":
             current_proxy_capability_epoch=mcp_broker.PROXY_CAPABILITY_EPOCH,
         )
         raise SystemExit(1)
-    requested_scope = _requested_runtime_authority_scope_version()
     if (
-        requested_capability
-        >= mcp_broker.PRE_AUTHORITY_SCOPE_CAPABILITY_EPOCH
-        and requested_scope != mcp_broker.RUNTIME_AUTHORITY_SCOPE_VERSION
+        0 < requested_capability < mcp_broker.PROXY_CAPABILITY_EPOCH
+        and _REQUESTED_RUNTIME_KEY != mcp_broker.RUNTIME_KEY
     ):
         message = (
             "Latch's shared-runtime authority scope changed. Start a fresh "
-            "task so each OS account launches its own compatible owner."
+            "task so each OS account launches its own compatible owner; the "
+            "request was not executed."
         )
         mcp_broker.publish_start_failure(_REQUESTED_RUNTIME_KEY, message)
         mcp_broker.emit_lifecycle(
             "daemon_upgrade_incompatible",
             requested_proxy_capability_epoch=requested_capability,
-            requested_runtime_authority_scope_version=requested_scope,
-            current_runtime_authority_scope_version=(
-                mcp_broker.RUNTIME_AUTHORITY_SCOPE_VERSION
-            ),
+            current_proxy_capability_epoch=mcp_broker.PROXY_CAPABILITY_EPOCH,
+            reason="authority_scope_changed",
         )
         raise SystemExit(1)
     requested_capable = requested_capability >= mcp_broker.PROXY_CAPABILITY_EPOCH
+    # Epoch-zero hooks read a vault-root embed record without an authority key.
+    # Remove it before any current owner crosses the heavyweight import fence.
+    mcp_broker.remove_legacy_embed_discovery()
     _OWNER_FENCE = mcp_broker.acquire_owner_fence()
     if _OWNER_FENCE is None:
         if (
