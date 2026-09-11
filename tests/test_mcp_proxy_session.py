@@ -44,9 +44,24 @@ def _clean_env(**overrides):
     the test runner's own ``CLAUDE_CODE_SESSION_ID`` (present when this suite is
     run from inside a Claude Code session) from leaking into the fallback cases.
     """
+    authority_home_names = (
+        (
+            "USERPROFILE",
+            "HOMEDRIVE",
+            "HOMEPATH",
+            "LOCALAPPDATA",
+            "APPDATA",
+        )
+        if mcp_proxy.os.name == "nt"
+        else ("HOME",)
+    )
     isolated = {
         name: mcp_proxy.os.environ[name]
-        for name in (paths.TEST_ROOT_ENV, paths.TEST_CAPABILITY_ENV)
+        for name in (
+            paths.TEST_ROOT_ENV,
+            paths.TEST_CAPABILITY_ENV,
+            *authority_home_names,
+        )
         if name in mcp_proxy.os.environ
     }
     isolated.update(overrides)

@@ -1379,7 +1379,6 @@ def test_prompt_after_idle_exit_wakes_owner_and_emits_truthful_bounded_receipt()
         _assert("temporarily unavailable" in context, context)
         _assert("not similarity-scored" in context, context)
         _assert("none auto-retrieved (sim below floor)" not in context.lower(), context)
-        _assert(wall_ms < 250, f"idle prompt hook blocked for {wall_ms:.1f} ms")
 
         deadline = time.monotonic() + 35.0
         new_pid = None
@@ -1389,6 +1388,10 @@ def test_prompt_after_idle_exit_wakes_owner_and_emits_truthful_bounded_receipt()
                 break
             time.sleep(0.05)
         _assert(new_pid is not None and new_pid != old_pid, "hook wake did not start a new owner")
+        # Discover the replacement before enforcing the hook budget so a
+        # timing failure cannot strand an asynchronously starting Windows
+        # owner beyond the test's cleanup path.
+        _assert(wall_ms < 250, f"idle prompt hook blocked for {wall_ms:.1f} ms")
         # Discovery is published immediately before the daemon appends its
         # startup receipt.  Wait for that asynchronous receipt instead of
         # racing the two adjacent startup steps on faster CI runners.

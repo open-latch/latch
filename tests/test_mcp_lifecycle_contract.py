@@ -370,9 +370,17 @@ def test_windows_site_packages_cli_handoff_reaches_ensure_daemon(
 def test_daemon_environment_is_closed_and_shared_by_both_start_paths(
     monkeypatch, tmp_path
 ):
+    if os.name == "nt":
+        home_environment = {
+            "USERPROFILE": str(tmp_path / "safe-home"),
+            "LOCALAPPDATA": str(tmp_path / "safe-local-data"),
+            "APPDATA": str(tmp_path / "safe-roaming-data"),
+        }
+    else:
+        home_environment = {"HOME": str(tmp_path / "safe-home")}
     source = {
         "PATH": "/safe/bin",
-        "HOME": "/safe/home",
+        **home_environment,
         "TEMP": "/safe/tmp",
         "LATCH_MCP_DAEMON_IDLE_TTL_SEC": "41",
         "LATCH_MCP_DAEMON_START_TIMEOUT_SEC": "7",
@@ -423,7 +431,7 @@ def test_daemon_environment_is_closed_and_shared_by_both_start_paths(
     ]
     assert built == {
         "PATH": "/safe/bin",
-        "HOME": "/safe/home",
+        **home_environment,
         "TEMP": "/safe/tmp",
         "LATCH_HOME": str(install),
         "LATCH_KB_DIR": str(vault),
@@ -537,7 +545,19 @@ def test_daemon_environment_rejects_invalid_vault_context(tmp_path):
 
 @pytest.mark.parametrize(
     "invalid_root",
-    ("relative/backups", "~latch-user-that-does-not-exist/backups"),
+    (
+        "relative/backups",
+        pytest.param(
+            "~latch-user-that-does-not-exist/backups",
+            marks=pytest.mark.skipif(
+                os.name == "nt",
+                reason=(
+                    "Windows expands named-user shorthand to an absolute "
+                    "sibling profile path"
+                ),
+            ),
+        ),
+    ),
 )
 def test_invalid_vault_root_reaches_proxy_diagnostic_without_import_traceback(
     invalid_root,
@@ -568,7 +588,7 @@ def test_invalid_authority_direct_daemon_fails_before_owner_fence(tmp_path):
     env.update({
         "LATCH_HOME": str(ROOT),
         "LATCH_KB_DIR": str(vault),
-        "LATCH_DURABILITY_ROOT": "~latch-user-that-does-not-exist/backups",
+        "LATCH_DURABILITY_ROOT": "relative/backups",
         "LATCH_MCP_RUNTIME_KEY": "invalid-authority-context",
         "LATCH_MCP_PROTOCOL_VERSION": str(mcp_broker.PROTOCOL_VERSION),
         "PYTHONPATH": str(ROOT / "src"),
