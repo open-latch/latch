@@ -383,8 +383,11 @@ but the file's confidentiality rests on the permissions of the vault directory i
 vault somewhere only you can read.
 
 **Overhead.** The per-prompt retrieval hook runs locally against the KB —
-roughly 120–150 ms on an Apple Silicon reference machine, inside a 250 ms
-budget — and injects at most five compact KB pointers. A healthy session start
+roughly 120–150 ms in earlier Apple Silicon reference measurements — and
+injects at most five compact KB pointers. The cooperative budget defaults to
+250 ms on macOS/Linux and 750 ms on Windows; full process latency also includes
+interpreter startup and shutdown. See [configuration and measurement](docs/mcp_resource_architecture.md#prompt-hook-deadlines-and-measurement).
+A healthy session start
 injects no standing project brief. Freshening a plan uses a surgical append
 (~34 tokens) rather than a full-body rewrite (~9,900 tokens). The gate itself
 is a model call, so it runs only on write-shaped changes, not on every prompt.

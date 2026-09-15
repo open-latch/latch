@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import sqlite3
 import time
@@ -274,6 +275,74 @@ def connect_readonly(cwd: str | None = None) -> sqlite3.Connection:
             conn, path.parent
         )
         _load_vec(conn)
+        return conn
+    except Exception:
+        conn.close()
+        raise
+
+
+def connect_current(
+    cwd: str | None = None,
+    *,
+    timeout: float = 0.05,
+    deadline: float | None = None,
+) -> sqlite3.Connection:
+    """Open a prepared KB for bounded foreground reads and session writes.
+
+    This never creates a vault, adopts an identity, migrates or repairs schema,
+    or stamps metadata. Normal ``connect`` remains responsible for setup and
+    its backup safeguards; an old schema is explicitly refused here. The
+    current schema and immutable vault identity are validated on every open.
+
+    ``deadline`` uses ``time.perf_counter()``. Each lock wait is capped by
+    ``timeout`` and the allowance remaining when this connection is opened;
+    callers must still check their deadline between operations. SQLite's
+    progress handler interrupts long statements when that deadline passes.
+    Native extension loading cannot be preempted; its elapsed time is checked
+    before returning.
+    """
+    if not math.isfinite(timeout) or timeout < 0:
+        raise ValueError("KB connection timeout must be finite and non-negative")
+    if deadline is not None and not math.isfinite(deadline):
+        raise ValueError("KB connection deadline must be finite")
+
+    def remaining_timeout() -> float:
+        if deadline is None:
+            return timeout
+        remaining = deadline - time.perf_counter()
+        if remaining <= 0:
+            raise TimeoutError("KB connection deadline exhausted")
+        return min(timeout, remaining)
+
+    remaining_timeout()
+    path = Path(db_path(cwd)).expanduser().resolve()
+    conn = sqlite3.connect(
+        path.as_uri() + "?mode=rw",
+        uri=True,
+        factory=_Connection,
+        timeout=remaining_timeout(),
+    )
+    conn.row_factory = sqlite3.Row
+    try:
+        if deadline is not None:
+            conn.set_progress_handler(
+                lambda: int(time.perf_counter() >= deadline), 1000
+            )
+        conn.execute("PRAGMA foreign_keys = ON")
+        installed_schema = schema_version.ensure_supported(conn)
+        if installed_schema < schema_version.KB_SCHEMA_VERSION:
+            raise schema_version.SchemaMigrationRequiredError(
+                f"KB schema {installed_schema} must be migrated to "
+                f"{schema_version.KB_SCHEMA_VERSION} before foreground access"
+            )
+        conn._kb_vault_identity = vault_identity.validate_existing_identity(
+            conn, path.parent
+        )
+        remaining_timeout()
+        _load_vec(conn)
+        # Initialization may have consumed part of the lock-wait allowance.
+        # Round down so the returned connection never grants a longer wait.
+        conn.execute(f"PRAGMA busy_timeout = {int(remaining_timeout() * 1000)}")
         return conn
     except Exception:
         conn.close()

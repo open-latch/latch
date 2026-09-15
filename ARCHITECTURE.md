@@ -309,8 +309,11 @@ acceptance.
   `agent mcp list` / `agent mcp list-tools latch`.
 - In a new session on a supported prompt-hook host, tail
   `<selected-kb-dir>/retrieve.log`; expect `path="vector"`/`"graph"` when
-  retrieval runs. A first prompt may record `skip="embed_daemon_unavailable"`
-  while the shared owner starts. Healthy SessionStart bookkeeping should emit
+  retrieval runs. A first prompt may record `skip="discovery_missing"` or
+  `"owner_starting"` while the shared owner starts. `"local_budget_exhausted"`
+  identifies a hook deadline failure separately from runtime availability.
+  See [prompt-hook deadlines](docs/mcp_resource_architecture.md#prompt-hook-deadlines-and-measurement).
+  Healthy SessionStart bookkeeping should emit
   no model-visible payload. Calling `kb_recent` in-session should return nodes
   (or an empty list).
 
