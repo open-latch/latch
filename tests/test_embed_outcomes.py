@@ -271,6 +271,26 @@ def test_hook_without_ready_owner_does_not_use_standalone_embed_socket(discovery
     assert result.metadata is None
 
 
+@pytest.mark.parametrize("payload", ["not json", "[]", '{"runtime_key":"wrong"}'])
+def test_hook_rejects_invalid_mcp_readiness_instead_of_treating_it_as_missing(discovery_files, payload):
+    _write_embed_discovery(discovery_files)
+    (discovery_files / "mcp.json").write_text(payload)
+    result = mcp_broker.inspect_live_embed_discovery(require_owner_ready=True)
+    assert result.status == "discovery_rejected"
+    assert result.metadata is None
+
+
+def test_expired_start_failure_can_retry_as_missing(discovery_files):
+    (discovery_files / "mcp.json").write_text(json.dumps({
+        "runtime_key": mcp_broker.RUNTIME_KEY,
+        "created_epoch": time.time() - 2 * mcp_broker.START_FAILURE_MAX_AGE_S,
+        "error": "startup failed",
+    }))
+    result = mcp_broker.inspect_live_embed_discovery(require_owner_ready=True)
+    assert result.status == "discovery_missing"
+    assert not (discovery_files / "mcp.json").exists()
+
+
 def test_hook_start_failure_takes_priority_over_leftover_embed_socket(discovery_files):
     _write_embed_discovery(discovery_files)
     (discovery_files / "mcp.json").write_text(json.dumps({

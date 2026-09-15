@@ -1615,6 +1615,17 @@ def inspect_live_embed_discovery(
                 return EmbedDiscoveryResult("context_rejected")
     if require_owner_ready:
         if recorded_owner is None:
+            # read_discovery's legacy API collapses malformed/incompatible
+            # records and absence. Keep those outcomes distinct for hooks;
+            # an invalid readiness record is not evidence to start an owner.
+            try:
+                discovery_path(key).stat()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                return EmbedDiscoveryResult("discovery_rejected")
+            else:
+                return EmbedDiscoveryResult("discovery_rejected")
             return EmbedDiscoveryResult(_missing_embed_status(key, None))
         if isinstance(recorded_owner.get("error"), str):
             return EmbedDiscoveryResult("owner_start_failed")

@@ -75,7 +75,7 @@ MAX_BUDGET_MS = 2000
 OUTPUT_RESERVE_MS = 10
 # Mission-control and cite-nudge safety reads may each encounter the writer.
 # Fifty milliseconds tolerates ordinary short transactions while bounding the
-# two-read worst case to 100 ms inside the prompt hook's 250 ms wall.
+# two-read worst case to 100 ms of the prompt hook's cooperative budget.
 LIGHT_DB_BUSY_TIMEOUT_SECONDS = 0.05
 LOG_STREAM = "retrieve"
 
