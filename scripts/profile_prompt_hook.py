@@ -57,8 +57,25 @@ def child(args):
 
     def load():
         nonlocal instrumented_runtime
+        import builtins
+        original_import = builtins.__import__
+
+        def timed_import(name, globals=None, locals=None, fromlist=(), level=0):
+            measure = name in {"numpy", "latch.retrieval", "latch.store"}
+            tick = time.perf_counter()
+            try:
+                return original_import(name, globals, locals, fromlist, level)
+            finally:
+                if measure:
+                    label = "import_" + name + ("." + ",".join(fromlist) if fromlist else "")
+                    stages[label] = stages.get(label, 0) + (time.perf_counter() - tick) * 1000
+
         begin = time.perf_counter()
-        original_load()
+        builtins.__import__ = timed_import
+        try:
+            original_load()
+        finally:
+            builtins.__import__ = original_import
         stages["retrieval_imports"] = stages.get("retrieval_imports", 0) + (time.perf_counter() - begin) * 1000
         if instrumented_runtime:
             return
@@ -86,8 +103,17 @@ def child(args):
 
     hook._write_log = record
     buf = io.StringIO()
+
+    class RecordingStdout:
+        def write(self, value):
+            buf.write(value)
+            return sys.__stdout__.write(value)
+
+        def flush(self):
+            return sys.__stdout__.flush()
+
     main_started = time.perf_counter()
-    with redirect_stdout(buf):
+    with redirect_stdout(RecordingStdout()):
         code = hook.main()
     stages["main"] = (time.perf_counter() - main_started) * 1000
     output = buf.getvalue()
@@ -223,7 +249,7 @@ def parent(args):
                    "output": proc.stdout, "retrieval_log": records[-1] if records else {},
                    "instrumented": False}
         else:
-            row = json.loads(proc.stdout)
+            row = json.loads(proc.stdout.splitlines()[-1])
             row["interpreter_startup_ms"] = (row.pop("first_python_tick") - begin) * 1000
             row["instrumented"] = True
         row["total_process_ms"] = elapsed
