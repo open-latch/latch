@@ -130,9 +130,9 @@ def _publish_upgrade_alias(
         "owner_runtime_key": mcp_broker.RUNTIME_KEY,
         "compatibility": compatibility,
     }
-    # Only current capability epochs may inherit an embed endpoint. Epoch-zero
-    # proxies need a live MCP rejection owner because they cannot parse startup
-    # markers, but no embedding work may cross their account-agnostic key.
+    # Only current capability epochs may inherit an embed endpoint. Older
+    # callers keep their existing record until their required fresh restart;
+    # this owner neither aliases nor deletes another runtime's endpoint.
     embed_alias = None
     if capable:
         embed_alias = mcp_broker.publish_embed_alias(
@@ -148,8 +148,6 @@ def _publish_upgrade_alias(
                     or payload.get("runtime_key")
                 ),
             )
-    else:
-        mcp_broker.remove_legacy_embed_discovery(runtime_key=runtime_key)
     mcp_broker.publish_discovery(**values)
     if not capable:
         mcp_broker.publish_discovery(**values, legacy_path=True)
@@ -236,9 +234,6 @@ if __name__ == "__main__":
         )
         raise SystemExit(1)
     requested_capable = requested_capability >= mcp_broker.PROXY_CAPABILITY_EPOCH
-    # Epoch-zero hooks read a vault-root embed record without an authority key.
-    # Remove it before any current owner crosses the heavyweight import fence.
-    mcp_broker.remove_legacy_embed_discovery()
     _OWNER_FENCE = mcp_broker.acquire_owner_fence()
     if _OWNER_FENCE is None:
         if (

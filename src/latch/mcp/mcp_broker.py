@@ -29,10 +29,10 @@ from latch.store import paths
 
 
 PROTOCOL_VERSION = 1
-# Epoch 7 proves the proxy uses kernel-principal-scoped runtime election.
-# Public/off-main builds already used epochs 5 and 6 with account-agnostic
-# keys, so neither value is a safe compatibility boundary.
-PROXY_CAPABILITY_EPOCH = 7
+# Epoch 8 proves install-and-principal-only runtime election. Public/off-main
+# builds already used epochs 5 through 7 with incompatible authority keys, so
+# none is a safe compatibility boundary.
+PROXY_CAPABILITY_EPOCH = 8
 DISCOVERY_FILE = "mcp-daemon.json"
 START_LOCK_FILE = "mcp-daemon.start.lock"
 OWNER_FENCE_FILE = "mcp-daemon.owner.lock"
@@ -402,7 +402,7 @@ def _runtime_key(
     *,
     principal: dict[str, str] | None = None,
 ) -> str:
-    """Fingerprint protocol-sensitive code, install, model, and authority.
+    """Fingerprint protocol-sensitive code, install, model, and principal.
 
     A changed key causes a blue/green owner transition: new proxies start a new
     daemon while already-connected proxies can finish against the old one.  The
@@ -413,12 +413,12 @@ def _runtime_key(
     does not read gigabytes when many host contexts start together; replacing a
     model with a same-size incompatible artifact requires a protocol bump.
 
-    Install identity and the authority suffix are load-bearing whenever one
-    vault is shared. Discovery and owner locks live inside that vault, but one
-    daemon may only serve the install, OS principal, and effective vault roots
-    in its vault-context digest. Including that same canonical payload in the
-    runtime key gives each compatible authority its own daemon slot instead of
-    making a different context collide with the first owner.
+    Discovery and owner locks are already namespaced by the pinned vault. The
+    election identity therefore includes the canonical install plus the opaque
+    kernel principal, but not configurable data roots: two OS accounts need
+    separate owners, while root spelling or materialization changes must never
+    create parallel heavyweight owners for one account. Root disagreements
+    remain in ``vault_context_digest`` and fail closed before work is served.
     """
     h = hashlib.sha256(f"protocol={PROTOCOL_VERSION}".encode())
     for path in _runtime_content_files():
@@ -438,11 +438,16 @@ def _runtime_key(
     authority = _authority_context_payload(
         source, strict=False, principal=principal
     )
-    h.update(b"\0authority-context\0")
+    election_identity = {
+        "format": 1,
+        "install_root": authority["install_root"],
+        "principal": authority["principal"],
+    }
+    h.update(b"\0runtime-election-identity\0")
     h.update(
-        json.dumps(authority, sort_keys=True, separators=(",", ":")).encode(
-            "utf-8"
-        )
+        json.dumps(
+            election_identity, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
     )
     return h.hexdigest()[:20]
 
@@ -1062,9 +1067,6 @@ def probe_discovery(
 
 def publish_start_failure(runtime_key: str, message: str) -> Path:
     """Publish a short-lived actionable startup failure for a retained proxy."""
-    # A retained account-agnostic embed endpoint must never survive an
-    # authority-boundary failure and route work to another account's owner.
-    remove_legacy_embed_discovery(runtime_key=runtime_key)
     path = discovery_path(runtime_key)
     _atomic_json(path, {
         "runtime_key": runtime_key,
@@ -1642,18 +1644,6 @@ def remove_embed_discovery_if_owner(*, pid: int, token: str) -> None:
                 path.unlink()
             except OSError:
                 pass
-
-
-def remove_legacy_embed_discovery(*, runtime_key: str | None = None) -> None:
-    """Quarantine embed records that predate principal-scoped election."""
-    candidates = [legacy_embed_discovery_path()]
-    if runtime_key is not None:
-        candidates.append(embed_discovery_path(runtime_key))
-    for path in candidates:
-        try:
-            path.unlink()
-        except OSError:
-            pass
 
 
 def publish_embed_alias(

@@ -147,18 +147,15 @@ sections.
   model initialization completes, so probes cannot observe a listener that is
   bound but not ready to serve.
 - A runtime key fingerprints the internal transport version, relevant source
-  and tokenizer/config files, model size, canonical install root, and one
-  canonical authority payload. That payload contains a kernel-backed process
-  principal (the effective UID on POSIX or process-token SID identity on
-  Windows) plus the canonical effective production-data, registry, and
-  durability roots. Raw principals and roots are never published. The same
-  platform-aware payload is computed before and after daemon spawn, so an
-  irrelevant cross-platform environment spelling or canonically equivalent
-  root cannot create a phantom upgrade alias. Separating
-  authority scopes lets mutually trusted OS accounts use one writable vault
-  concurrently without colliding on discovery and then failing the daemon's
-  vault-context check. The key deliberately excludes mtimes, so identical
-  trees, canonical install roots, principals, and effective authority roots
+  and tokenizer/config files, model size, canonical install root, and an opaque
+  kernel-backed process principal (the effective UID on POSIX or process-token
+  SID identity on Windows). Effective production-data, registry, and durability
+  roots remain in the authenticated vault-context digest, not the election key.
+  This gives distinct accounts separate owner slots while a spelling or
+  materialization change in one account's roots cannot silently create a second
+  heavyweight owner; a real root disagreement fails closed at the context
+  check. Raw principals and roots are never published. The key deliberately
+  excludes mtimes, so identical trees, canonical install roots, and principals
   have identical keys. The 90 MB model is not hashed by
   every proxy; a same-size incompatible model replacement must bump the
   protocol version. During an in-place compatible upgrade, retained old-key
@@ -172,15 +169,15 @@ sections.
   request before FastMCP, so no mutation has an unknown outcome.
   Cleanup scans aliases and removes only records whose PID and token still
   match, so an old owner cannot erase a newer owner's record.
-- Authority-scoped election first ships at proxy capability epoch 7. Public
-  and off-main builds already used epochs 5 and 6 with account-agnostic keys,
-  so retained epoch-1 through epoch-6 proxies receive the existing
+- Install-and-principal-only election first ships at proxy capability epoch 8.
+  Public and off-main builds already used epochs 5 through 7 with incompatible
+  authority keys, so retained epoch-1 through epoch-7 proxies receive the
   fresh-task-required startup response instead of migrating. Epoch-zero
   proxies, which cannot read startup-failure records, receive a live MCP
-  rejection endpoint but never an embedding alias. This prevents legacy work
-  from crossing the authority boundary. Once both sides use epoch 7, compatible
-  upgrades alias only keys that were already derived from that account's
-  authority scope.
+  rejection endpoint but never a new embedding alias. The new owner does not
+  delete an existing retained-key embed record; existing pre-epoch-8 tasks must
+  be restarted at cutover. Once both sides use epoch 8, compatible upgrades
+  alias only keys already derived from that account's principal scope.
 - POSIX startup double-forks before heavyweight imports and the proxy waits for
   the bootstrap child. This prevents reclaimed daemons becoming zombies under
   long-lived proxies. On Windows, the broker bypasses the venv executable
@@ -421,12 +418,25 @@ a live `latch_recent(limit=1)` call from Cursor, Codex CLI, and Claude Code.
 Each host connected to the shared runtime without opening a Python console
 window.
 
+### PBE-108 multi-account acceptance boundary
+
+This patch is limited to local owner isolation for trusted Windows accounts
+sharing one writable vault. Pre-merge acceptance requires distinct opaque
+principals to derive distinct owner keys, one principal to retain one owner key
+across root configurations, root disagreements to fail closed without a second
+owner, epochs 1-7 to require a fresh task before heavy imports, epoch-zero to
+receive its compatibility rejection without a new embed alias, and old-task
+failure handling to preserve existing keyed embed records. Native
+acceptance remains the post-merge PBE-108 canary: both accounts must hold
+distinct live owners and each complete retrieval plus a write without new
+context-mismatch or embed-daemon-unavailable events. POSIX multi-account
+filesystem provisioning is outside this incident patch.
+
 The production-representative tests cover:
 
 - concurrent clients sharing exactly one model owner;
-- same-principal clients with distinct canonical authority roots electing
-  distinct owners while preserving concurrent writes, session attribution, and
-  actor attribution;
+- same-principal clients with inconsistent effective roots receiving a bounded
+  context rejection without electing a second owner;
 - connection-local session attribution, guards, gate policy, proxy policy, and
   model backend execution;
 - a compact Claude first client followed by a Codex client whose CLI and
@@ -488,8 +498,8 @@ Recommended rollout after review:
 5. Keep legacy startup explicit-only; do not silently restore the old heavy
    topology when shared-owner startup fails.
 6. Run a native two-account Windows canary against the deployment target. The
-   same-process integration test exercises authority-root partitioning but
-   cannot substitute for validating two real kernel principals.
+   unit tests exercise opaque-principal partitioning, while one local test
+   process cannot substitute for validating two real Windows token SIDs.
 
 Reversal is immediate and local:
 

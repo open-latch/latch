@@ -627,6 +627,7 @@ def test_vault_context_digest_changes_with_root_authority(
     first[name] = str(tmp_path / "first" / name.lower())
     second[name] = str(tmp_path / "second" / name.lower())
 
+    assert mcp_broker._runtime_key(first) == mcp_broker._runtime_key(second)
     assert mcp_broker.vault_context_digest(first) != (
         mcp_broker.vault_context_digest(second)
     )
@@ -1130,11 +1131,11 @@ def test_incompatible_upgrade_fails_before_owner_fence_and_heavy_imports(
     assert "heavy import crossed upgrade preflight" not in result.stderr
 
 
-@pytest.mark.parametrize("capability_epoch", range(1, 7))
+@pytest.mark.parametrize("capability_epoch", range(1, 8))
 def test_mismatched_pre_principal_proxy_rejects_before_owner_and_heavy_imports(
     tmp_path, capability_epoch
 ):
-    assert mcp_broker.PROXY_CAPABILITY_EPOCH == 7
+    assert mcp_broker.PROXY_CAPABILITY_EPOCH == 8
     requested_key = f"pre-principal-epoch-{capability_epoch}"
     vault, result = _run_daemon_through_upgrade_preflight(
         tmp_path,
@@ -1182,11 +1183,11 @@ def test_epoch_zero_mismatch_retains_rejection_owner_compatibility(tmp_path):
 
 
 def test_current_epoch_direct_launch_needs_no_extra_scope_marker(tmp_path):
-    assert mcp_broker.PROXY_CAPABILITY_EPOCH == 7
+    assert mcp_broker.PROXY_CAPABILITY_EPOCH == 8
     vault, result = _run_daemon_through_upgrade_preflight(
         tmp_path,
         requested_key=mcp_broker.RUNTIME_KEY,
-        capability_epoch=7,
+        capability_epoch=mcp_broker.PROXY_CAPABILITY_EPOCH,
     )
 
     assert result.returncode == 1
@@ -1198,6 +1199,39 @@ def test_current_epoch_direct_launch_needs_no_extra_scope_marker(tmp_path):
         / mcp_broker.RUNTIME_KEY
         / mcp_broker.OWNER_FENCE_FILE
     ).exists()
+
+
+def test_incapable_upgrade_preserves_existing_embed_discovery(
+    monkeypatch, tmp_path
+):
+    vault = tmp_path / "preserved-retained-embed"
+    vault.mkdir()
+    monkeypatch.setattr(mcp_broker, "runtime_dir", lambda: vault)
+    retained_key = "retained-pre-principal-owner"
+    embed_path = mcp_broker.embed_discovery_path(retained_key)
+    existing = {
+        "runtime_key": retained_key,
+        "host": "127.0.0.1",
+        "port": 43123,
+        "token": "retained-owner-token",
+        "pid": os.getpid(),
+    }
+    mcp_broker._atomic_json(embed_path, existing)
+
+    published = mcp_daemon._publish_upgrade_alias(
+        retained_key,
+        {
+            "host": "127.0.0.1",
+            "port": 43124,
+            "token": "current-owner-token",
+            "pid": os.getpid() + 1,
+            "started_at": "now",
+        },
+        capable=False,
+    )
+
+    assert published is False
+    assert json.loads(embed_path.read_text(encoding="utf-8")) == existing
 
 
 def test_live_pid_with_stale_heartbeat_does_not_hold_proxy_capacity(

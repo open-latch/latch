@@ -479,162 +479,86 @@ def test_parallel_clients_share_one_heavy_owner_and_keep_context_isolated() -> N
         _stop_daemon(kb_dir)
 
 
-def test_clients_with_different_authority_roots_use_distinct_owners() -> None:
+def test_same_principal_root_mismatch_is_bounded_without_second_owner() -> None:
     kb_dir = _temp_vault()
     clients: list[McpClient] = []
     try:
-        first_profile = kb_dir / "profiles" / "first-user"
-        second_profile = kb_dir / "profiles" / "second-user"
+        first_profile = kb_dir / "profiles" / "first-context"
+        second_profile = kb_dir / "profiles" / "second-context"
         first_authority_env = {
-            "USERNAME": "first-user",
-            "USER": "first-user",
+            "USERNAME": "same-kernel-user",
+            "USER": "same-kernel-user",
         }
-        second_authority_env = {
-            "USERNAME": "second-user",
-            "USER": "second-user",
-        }
+        second_authority_env = dict(first_authority_env)
         if os.name == "nt":
-            first_authority_env.update(
-                {
-                    "USERPROFILE": str(first_profile),
-                    "LOCALAPPDATA": str(first_profile / "AppData" / "Local"),
-                    "APPDATA": str(first_profile / "AppData" / "Roaming"),
-                }
-            )
-            second_authority_env.update(
-                {
-                    "USERPROFILE": str(second_profile),
-                    "LOCALAPPDATA": str(second_profile / "AppData" / "Local"),
-                    "APPDATA": str(second_profile / "AppData" / "Roaming"),
-                }
-            )
+            first_authority_env.update({
+                "USERPROFILE": str(first_profile),
+                "LOCALAPPDATA": str(first_profile / "AppData" / "Local"),
+                "APPDATA": str(first_profile / "AppData" / "Roaming"),
+            })
+            second_authority_env.update({
+                "USERPROFILE": str(second_profile),
+                "LOCALAPPDATA": str(second_profile / "AppData" / "Local"),
+                "APPDATA": str(second_profile / "AppData" / "Roaming"),
+            })
         else:
-            first_authority_env.update(
-                {
-                    "HOME": str(first_profile),
-                    "XDG_DATA_HOME": str(first_profile / ".local" / "share"),
-                    "XDG_STATE_HOME": str(first_profile / ".local" / "state"),
-                }
-            )
-            second_authority_env.update(
-                {
-                    "HOME": str(second_profile),
-                    "XDG_DATA_HOME": str(second_profile / ".local" / "share"),
-                    "XDG_STATE_HOME": str(second_profile / ".local" / "state"),
-                }
-            )
-        clients.append(
-            McpClient(
-                kb_dir,
-                "first-user-session",
-                env_overrides=first_authority_env,
-            )
+            first_authority_env.update({
+                "HOME": str(first_profile),
+                "XDG_DATA_HOME": str(first_profile / ".local" / "share"),
+                "XDG_STATE_HOME": str(first_profile / ".local" / "state"),
+            })
+            second_authority_env.update({
+                "HOME": str(second_profile),
+                "XDG_DATA_HOME": str(second_profile / ".local" / "share"),
+                "XDG_STATE_HOME": str(second_profile / ".local" / "state"),
+            })
+
+        first_client = McpClient(
+            kb_dir,
+            "first-context-session",
+            env_overrides=first_authority_env,
         )
-        first = clients[0].status()
-        clients.append(
-            McpClient(
+        clients.append(first_client)
+        first = first_client.status()
+
+        # Both subprocesses retain this test runner's real kernel principal.
+        # A root disagreement for that principal must be rejected by the
+        # authenticated context digest instead of electing another owner.
+        second_client = McpClient.__new__(McpClient)
+        clients.append(second_client)
+        try:
+            McpClient.__init__(
+                second_client,
                 kb_dir,
-                "second-user-session",
+                "second-context-session",
                 env_overrides=second_authority_env,
             )
-        )
+        except AssertionError as exc:
+            failure = str(exc)
+        else:
+            raise AssertionError(
+                "same principal started a second root context instead of "
+                "receiving a bounded mismatch"
+            )
 
-        second = clients[1].status()
         _assert(first["mode"] == "shared_daemon", str(first))
-        _assert(second["mode"] == "shared_daemon", str(second))
-        _assert(
-            first["daemon"]["runtime_key"] != second["daemon"]["runtime_key"],
-            "different authority roots collided on one runtime key",
-        )
-        _assert(
-            first["process_pid"] != second["process_pid"],
-            "different authority roots reused one daemon owner",
-        )
-
-        # Starting the second authority-scoped owner must not evict or poison
-        # the first authority context's live connection. Both subprocesses use
-        # the test runner's kernel principal; native multi-account validation is
-        # a deployment canary rather than something one pytest process can fake.
-        first_after = clients[0].status()
+        _assert("vault context differs" in failure, failure)
+        _assert("Traceback" not in failure, failure)
+        first_after = first_client.status()
         _assert(first_after["process_pid"] == first["process_pid"], str(first_after))
 
-        discoveries = list(
-            (kb_dir / "runtime" / "mcp-runtimes").glob("*/mcp-daemon.json")
-        )
-        owner_pids = {
-            int(json.loads(path.read_text(encoding="utf-8"))["pid"])
-            for path in discoveries
-        }
-        _assert(
-            owner_pids == {first["process_pid"], second["process_pid"]},
-            str(owner_pids),
-        )
-
-        titles = (
-            "First authority concurrent write",
-            "Second authority concurrent write",
-        )
-        bodies = (
-            "Orange telescope ownership probe.",
-            "Purple submarine ownership probe.",
-        )
-        barrier = threading.Barrier(3)
-        write_results: dict[str, dict[str, Any]] = {}
-        write_errors: list[BaseException] = []
-        result_lock = threading.Lock()
-
-        def write_from(client: McpClient, title: str, body: str) -> None:
-            try:
-                barrier.wait(timeout=5.0)
-                result = client.call_tool(
-                    "latch_insert",
-                    {"kind": "fact", "title": title, "body": body},
-                )
-                with result_lock:
-                    write_results[title] = result
-            except BaseException as exc:
-                with result_lock:
-                    write_errors.append(exc)
-
-        writers = [
-            threading.Thread(
-                target=write_from,
-                args=(client, title, body),
-                daemon=True,
-            )
-            for client, title, body in zip(clients, titles, bodies)
-        ]
-        for writer in writers:
-            writer.start()
-        barrier.wait(timeout=5.0)
-        for writer in writers:
-            writer.join(timeout=30.0)
-
-        _assert(not any(writer.is_alive() for writer in writers), "writes hung")
-        _assert(not write_errors, repr(write_errors))
-        _assert(set(write_results) == set(titles), repr(write_results))
-
-        with sqlite3.connect(kb_dir / "kb.db") as conn:
-            observed = {
-                title: (created_by, session_id)
-                for title, created_by, session_id in conn.execute(
-                    "SELECT title, created_by, session_id FROM nodes "
-                    "WHERE title IN (?, ?)",
-                    titles,
-                )
-            }
-            integrity = conn.execute("PRAGMA integrity_check").fetchone()[0]
-        _assert(
-            observed == {
-                titles[0]: ("first-user", "first-user-session"),
-                titles[1]: ("second-user", "second-user-session"),
-            },
-            repr(observed),
-        )
-        _assert(integrity == "ok", str(integrity))
+        owner_pids = set()
+        for path in (kb_dir / "runtime" / "mcp-runtimes").glob(
+            "*/mcp-daemon.json"
+        ):
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(payload.get("pid"), int):
+                owner_pids.add(int(payload["pid"]))
+        _assert(owner_pids == {first["process_pid"]}, str(owner_pids))
     finally:
         for client in clients:
-            client.close()
+            if hasattr(client, "process"):
+                client.close()
         _stop_daemon(kb_dir)
 
 
@@ -1162,9 +1086,19 @@ def test_historical_transport_receives_fresh_task_error_cross_platform(
                 not heavy_import_marker.exists(),
                 "capability rejection crossed heavyweight imports",
             )
+            embed_records = list(
+                kb_dir.rglob(mcp_broker.EMBED_DISCOVERY_FILE)
+            )
             _assert(
-                not list(kb_dir.rglob(mcp_broker.EMBED_DISCOVERY_FILE)),
-                "capability rejection published an embed alias",
+                embed_records == [legacy_embed],
+                f"capability rejection changed embed records: {embed_records}",
+            )
+            _assert(
+                json.loads(legacy_embed.read_text(encoding="utf-8"))[
+                    "token"
+                ]
+                == "stale-pre-principal-token",
+                "capability rejection replaced the retained embed record",
             )
             _assert(
                 not any(
@@ -1183,8 +1117,13 @@ def test_historical_transport_receives_fresh_task_error_cross_platform(
             time.sleep(0.05)
         _assert(legacy_discovery.exists(), "pre-registry discovery was not published")
         _assert(
-            not legacy_embed.exists(),
-            "epoch-zero owner retained a vault-root embed route",
+            legacy_embed.exists(),
+            "epoch-zero transition deleted the retained embed route",
+        )
+        _assert(
+            json.loads(legacy_embed.read_text(encoding="utf-8"))["token"]
+            == "stale-pre-principal-token",
+            "epoch-zero transition replaced the retained embed route",
         )
         payload = json.loads(legacy_discovery.read_text(encoding="utf-8"))
         with socket.create_connection(
