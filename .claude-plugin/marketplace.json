@@ -1,0 +1,40 @@
+{
+  "name": "open-latch",
+  "owner": {
+    "name": "open-latch",
+    "url": "https://github.com/open-latch"
+  },
+  "description": "Decision continuity for coding agents.",
+  "plugins": [
+    {
+      "name": "latch",
+      "displayName": "latch",
+      "source": "./",
+      "description": "Run more agents with less babysitting. latch holds every agent to your own ratified decisions — and the paths you've ruled out. Ships the latch workflow commands only; run install.sh to wire the MCP tools and the pre-edit gate.",
+      "version": "1.0.0",
+      "author": {
+        "name": "open-latch",
+        "url": "https://github.com/open-latch"
+      },
+      "homepage": "https://github.com/open-latch/latch",
+      "repository": "https://github.com/open-latch/latch",
+      "license": "Apache-2.0",
+      "keywords": [
+        "decision-continuity",
+        "project-judgment",
+        "claude-code",
+        "codex",
+        "cursor",
+        "agent-workflows"
+      ],
+      "category": "developer-tools",
+      "tags": [
+        "workflow",
+        "gating",
+        "local-first"
+      ],
+      "strict": false,
+      "commands": "./commands/"
+    }
+  ]
+}
