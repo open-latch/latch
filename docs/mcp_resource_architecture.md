@@ -11,10 +11,10 @@ Measurements were collected on macOS 13.5, Apple Silicon, on 2026-07-10.
 
 ## Decision
 
-Use one lazily elected, warm MCP daemon per pinned latch vault and runtime
-fingerprint. Keep the existing stdio configuration, but make each host-created
-stdio process a standard-library-only proxy that forwards MCP JSON-RPC to that
-daemon.
+Use one lazily elected, warm MCP daemon per pinned latch vault, runtime
+fingerprint, and OS-principal authority scope. Keep the existing stdio
+configuration, but make each host-created stdio process a
+standard-library-only proxy that forwards MCP JSON-RPC to that daemon.
 
 This gives latch two resource bounds:
 
@@ -129,9 +129,9 @@ sections.
   the proxy's transport protocol and explicit lifecycle-capability epoch. A
   newer incompatible proxy receives an actionable fresh-task failure. A daemon
   then acquires an OS-released process-lifetime fence for its vault/current
-  runtime key. Broker death or a slow-start timeout can launch a contender, but
-  the contender exits before model loading; only the fenced owner may warm or
-  publish normal discovery.
+  runtime-and-authority key. Broker death or a slow-start timeout can launch a
+  contender, but the contender exits before model loading; only the fenced
+  owner may warm or publish normal discovery.
 - Capability epoch 3 includes the connection-owned environment contract.
   Epoch 2 proved registry-wide lease participation but did not carry the typed
   compact/disable state, backend policy, or private model-child environment
@@ -139,14 +139,25 @@ sections.
   fresh-task path rather than joining with first-spawner semantics.
 - Discovery and election locks live in a runtime-keyed registry beneath the
   pinned vault. Files are atomically replaced and mode 0600. The daemon binds
-  only `127.0.0.1`; connections authenticate with a 256-bit random token.
+  only `127.0.0.1`; connections present a 256-bit random discovery token. These
+  controls isolate runtime coordination and reduce accidental cross-owner
+  attachment. They are not an authorization or security boundary between OS
+  accounts that can write the same vault.
   Current and alias discovery are published only after synchronous runtime and
   model initialization completes, so probes cannot observe a listener that is
   bound but not ready to serve.
-- A runtime key content-fingerprints the internal transport version, relevant
-  source and tokenizer/config files, plus model size. It deliberately excludes
-  mtimes, so identical trees have identical keys. The 90 MB model is not hashed
-  by every proxy; a same-size incompatible model replacement must bump the
+- A runtime key fingerprints the internal transport version, relevant source
+  and tokenizer/config files, model size, canonical install root, and an opaque
+  kernel-backed process principal (the effective UID on POSIX or process-token
+  SID identity on Windows). Effective production-data, registry, and durability
+  roots remain in the authenticated vault-context digest, not the election key.
+  This gives distinct accounts separate owner slots while a spelling or
+  materialization change in one account's roots cannot silently create a second
+  heavyweight owner; a real root disagreement fails closed at the context
+  check. Raw principals and roots are never published. The key deliberately
+  excludes mtimes, so identical trees, canonical install roots, and principals
+  have identical keys. The 90 MB model is not hashed by
+  every proxy; a same-size incompatible model replacement must bump the
   protocol version. During an in-place compatible upgrade, retained old-key
   capability-epoch proxies receive an authenticated discovery alias to the
   single current owner. They adopt `owner_runtime_key` and migrate their lease
@@ -158,6 +169,15 @@ sections.
   request before FastMCP, so no mutation has an unknown outcome.
   Cleanup scans aliases and removes only records whose PID and token still
   match, so an old owner cannot erase a newer owner's record.
+- Install-and-principal-only election first ships at proxy capability epoch 8.
+  Public and off-main builds already used epochs 5 through 7 with incompatible
+  authority keys, so retained epoch-1 through epoch-7 proxies receive the
+  fresh-task-required startup response instead of migrating. Epoch-zero
+  proxies, which cannot read startup-failure records, receive a live MCP
+  rejection endpoint but never a new embedding alias. The new owner does not
+  delete an existing retained-key embed record; existing pre-epoch-8 tasks must
+  be restarted at cutover. Once both sides use epoch 8, compatible upgrades
+  alias only keys already derived from that account's principal scope.
 - POSIX startup double-forks before heavyweight imports and the proxy waits for
   the bootstrap child. This prevents reclaimed daemons becoming zombies under
   long-lived proxies. On Windows, the broker bypasses the venv executable
@@ -398,9 +418,25 @@ a live `latch_recent(limit=1)` call from Cursor, Codex CLI, and Claude Code.
 Each host connected to the shared runtime without opening a Python console
 window.
 
+### PBE-108 multi-account acceptance boundary
+
+This patch is limited to local owner isolation for trusted Windows accounts
+sharing one writable vault. Pre-merge acceptance requires distinct opaque
+principals to derive distinct owner keys, one principal to retain one owner key
+across root configurations, root disagreements to fail closed without a second
+owner, epochs 1-7 to require a fresh task before heavy imports, epoch-zero to
+receive its compatibility rejection without a new embed alias, and old-task
+failure handling to preserve existing keyed embed records. Native
+acceptance remains the post-merge PBE-108 canary: both accounts must hold
+distinct live owners and each complete retrieval plus a write without new
+context-mismatch or embed-daemon-unavailable events. POSIX multi-account
+filesystem provisioning is outside this incident patch.
+
 The production-representative tests cover:
 
 - concurrent clients sharing exactly one model owner;
+- same-principal clients with inconsistent effective roots receiving a bounded
+  context rejection without electing a second owner;
 - connection-local session attribution, guards, gate policy, proxy policy, and
   model backend execution;
 - a compact Claude first client followed by a Codex client whose CLI and
@@ -461,6 +497,9 @@ Recommended rollout after review:
    concurrency, not process-leak counts.
 5. Keep legacy startup explicit-only; do not silently restore the old heavy
    topology when shared-owner startup fails.
+6. Run a native two-account Windows canary against the deployment target. The
+   unit tests exercise opaque-principal partitioning, while one local test
+   process cannot substitute for validating two real Windows token SIDs.
 
 Reversal is immediate and local:
 
@@ -477,9 +516,14 @@ set `LATCH_MCP_ALLOW_LEGACY_FALLBACK=1` for an explicit temporary fallback;
 
 ## Remaining boundary
 
-One heavyweight owner is keyed per pinned vault and current runtime fingerprint;
-capability-epoch retained keys are discovery aliases and one aggregate lease
-pool, not additional model owners or hidden capacity pools.
+One heavyweight owner is keyed per pinned vault, current runtime fingerprint,
+and OS-principal authority scope. Capability-epoch retained keys within that
+scope are discovery aliases and one aggregate lease pool, not additional model
+owners or hidden capacity pools. Distinct account scopes intentionally use
+distinct owners while SQLite and the project writer lock coordinate the shared
+vault. Sharing write access to a vault therefore assumes mutually trusted OS
+accounts in one local trust domain; neither the runtime registry nor its
+discovery token provides tenant isolation or access control.
 Explicitly running many named vaults can still load several models. That is a
 deliberate isolation boundary. If real multi-vault use makes this material, the
 next step is a host-wide pure-embedding service keyed by model fingerprint with
