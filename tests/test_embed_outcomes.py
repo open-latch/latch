@@ -202,6 +202,21 @@ def test_only_current_live_start_lock_proves_startup(discovery_files, monkeypatc
     assert mcp_broker.inspect_live_embed_discovery().status == status
 
 
+@pytest.mark.parametrize("future_seconds, status", [
+    (0.0000003, "owner_starting"),
+    (0.0005, "owner_starting"),
+    (0.01, "discovery_missing"),
+    (1.0, "discovery_missing"),
+])
+def test_start_lock_allows_only_bounded_filesystem_clock_rounding(discovery_files, monkeypatch, future_seconds, status):
+    now = 1800000000.0
+    lock = discovery_files / "start.lock"
+    lock.write_text(json.dumps({"pid": os.getpid(), "runtime_key": mcp_broker.RUNTIME_KEY}))
+    os.utime(lock, (now + future_seconds, now + future_seconds))
+    monkeypatch.setattr(mcp_broker.time, "time", lambda: now)
+    assert mcp_broker.inspect_live_embed_discovery().status == status
+
+
 def test_published_start_failure_is_not_pending_startup(discovery_files):
     (discovery_files / "mcp.json").write_text(json.dumps({
         "runtime_key": mcp_broker.RUNTIME_KEY,

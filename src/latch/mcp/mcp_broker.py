@@ -1567,7 +1567,8 @@ def _missing_embed_status(runtime_key: str, owner: dict[str, Any] | None) -> str
     lock_path = start_lock_path(runtime_key)
     try:
         lock = json.loads(lock_path.read_text(encoding="utf-8"))
-        age = time.time() - lock_path.stat().st_mtime
+        modified = lock_path.stat().st_mtime
+        age = time.time() - modified
     except (OSError, ValueError):
         return "discovery_missing"
     if not isinstance(lock, dict):
@@ -1577,7 +1578,10 @@ def _missing_embed_status(runtime_key: str, owner: dict[str, Any] | None) -> str
         lock.get("runtime_key") == runtime_key
         and isinstance(pid, int)
         and not isinstance(pid, bool)
-        and 0 <= age <= 2 * _start_timeout()
+        # Windows can round a fresh filesystem timestamp slightly ahead of
+        # time.time() (observed one float ULP). Allow at most 1 ms of skew,
+        # still requiring a matching live owner and the unchanged stale bound.
+        and -0.001 <= age <= 2 * _start_timeout()
         and _pid_alive(pid)
     ):
         return "owner_starting"
