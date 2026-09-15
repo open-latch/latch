@@ -130,22 +130,24 @@ def _publish_upgrade_alias(
         "owner_runtime_key": mcp_broker.RUNTIME_KEY,
         "compatibility": compatibility,
     }
-    # Stage the embed alias first.  MCP discovery is the transition commit
-    # point: once a retained proxy can observe the new MCP owner, the matching
-    # embed alias has either already been published or the degraded state has
-    # been made explicit in lifecycle telemetry.
-    embed_alias = mcp_broker.publish_embed_alias(
-        runtime_key,
-        owner_payload=payload,
-    )
-    if embed_alias is None:
-        mcp_broker.emit_lifecycle(
-            "embed_alias_unavailable",
-            requested_runtime_key=runtime_key,
-            owner_runtime_key=(
-                payload.get("owner_runtime_key") or payload.get("runtime_key")
-            ),
+    # Only current capability epochs may inherit an embed endpoint. Older
+    # callers keep their existing record until their required fresh restart;
+    # this owner neither aliases nor deletes another runtime's endpoint.
+    embed_alias = None
+    if capable:
+        embed_alias = mcp_broker.publish_embed_alias(
+            runtime_key,
+            owner_payload=payload,
         )
+        if embed_alias is None:
+            mcp_broker.emit_lifecycle(
+                "embed_alias_unavailable",
+                requested_runtime_key=runtime_key,
+                owner_runtime_key=(
+                    payload.get("owner_runtime_key")
+                    or payload.get("runtime_key")
+                ),
+            )
     mcp_broker.publish_discovery(**values)
     if not capable:
         mcp_broker.publish_discovery(**values, legacy_path=True)
@@ -175,6 +177,11 @@ def _alias_ready_owner(runtime_key: str, *, capable: bool) -> bool:
 
 if __name__ == "__main__":
     try:
+        mcp_broker._authority_context_payload(strict=True)
+    except mcp_broker.BrokerError as exc:
+        sys.stderr.write(f"[latch] invalid MCP authority context: {exc}\n")
+        raise SystemExit(1)
+    try:
         mcp_broker.runtime_key_dir(_REQUESTED_RUNTIME_KEY)
     except ValueError as exc:
         sys.stderr.write(f"[latch] invalid requested MCP runtime key: {exc}\n")
@@ -193,16 +200,37 @@ if __name__ == "__main__":
         )
         raise SystemExit(1)
     requested_capability = _requested_proxy_capability_epoch()
-    if requested_capability > mcp_broker.PROXY_CAPABILITY_EPOCH:
+    if (
+        requested_capability < 0
+        or requested_capability > mcp_broker.PROXY_CAPABILITY_EPOCH
+    ):
         message = (
-            "Latch proxy capability is newer than this runtime. Reinstall Latch "
-            "and start a fresh task so the host launches a matching proxy."
+            "Latch proxy capability is incompatible with this runtime. "
+            "Reinstall Latch and start a fresh task so the host launches a "
+            "matching proxy."
         )
         mcp_broker.publish_start_failure(_REQUESTED_RUNTIME_KEY, message)
         mcp_broker.emit_lifecycle(
             "daemon_upgrade_incompatible",
             requested_proxy_capability_epoch=requested_capability,
             current_proxy_capability_epoch=mcp_broker.PROXY_CAPABILITY_EPOCH,
+        )
+        raise SystemExit(1)
+    if (
+        0 < requested_capability < mcp_broker.PROXY_CAPABILITY_EPOCH
+        and _REQUESTED_RUNTIME_KEY != mcp_broker.RUNTIME_KEY
+    ):
+        message = (
+            "Latch's shared-runtime authority scope changed. Start a fresh "
+            "task so each OS account launches its own compatible owner; the "
+            "request was not executed."
+        )
+        mcp_broker.publish_start_failure(_REQUESTED_RUNTIME_KEY, message)
+        mcp_broker.emit_lifecycle(
+            "daemon_upgrade_incompatible",
+            requested_proxy_capability_epoch=requested_capability,
+            current_proxy_capability_epoch=mcp_broker.PROXY_CAPABILITY_EPOCH,
+            reason="authority_scope_changed",
         )
         raise SystemExit(1)
     requested_capable = requested_capability >= mcp_broker.PROXY_CAPABILITY_EPOCH
