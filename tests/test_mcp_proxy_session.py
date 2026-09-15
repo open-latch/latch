@@ -44,9 +44,24 @@ def _clean_env(**overrides):
     the test runner's own ``CLAUDE_CODE_SESSION_ID`` (present when this suite is
     run from inside a Claude Code session) from leaking into the fallback cases.
     """
+    authority_home_names = (
+        (
+            "USERPROFILE",
+            "HOMEDRIVE",
+            "HOMEPATH",
+            "LOCALAPPDATA",
+            "APPDATA",
+        )
+        if mcp_proxy.os.name == "nt"
+        else ("HOME",)
+    )
     isolated = {
         name: mcp_proxy.os.environ[name]
-        for name in (paths.TEST_ROOT_ENV, paths.TEST_CAPABILITY_ENV)
+        for name in (
+            paths.TEST_ROOT_ENV,
+            paths.TEST_CAPABILITY_ENV,
+            *authority_home_names,
+        )
         if name in mcp_proxy.os.environ
     }
     isolated.update(overrides)
@@ -279,7 +294,14 @@ def test_empty_vault_root_override_reads_as_unset():
     ``XDG_DATA_HOME`` / ``XDG_STATE_HOME``), so the daemon fence must agree —
     otherwise a legitimate environment cannot start the proxy at all.
     """
-    for name in mcp_broker.DAEMON_VAULT_ROOT_ENV_VARS:
+    names = (
+        "LATCH_PRODUCTION_DATA_ROOT",
+        "LATCH_VAULT_REGISTRY_ROOT",
+        "LATCH_DURABILITY_ROOT",
+        "XDG_DATA_HOME",
+        "XDG_STATE_HOME",
+    )
+    for name in names:
         with _clean_env():
             absent = mcp_broker.vault_context_digest()
         with _clean_env(**{name: ""}):
@@ -297,14 +319,23 @@ def test_malformed_vault_root_override_is_a_diagnostic_not_a_traceback():
     escaped ``main``'s ``ValueError`` handler as a traceback and the operator
     never reached the legacy-fallback guidance.
     """
+    root_name = (
+        "LOCALAPPDATA"
+        if sys.platform == "win32"
+        else "HOME"
+        if sys.platform == "darwin"
+        else "XDG_DATA_HOME"
+    )
     for value in ("relative/data", "   "):
-        with _clean_env(XDG_DATA_HOME=value):
+        with _clean_env(**{root_name: value}):
             try:
                 mcp_broker.vault_context_digest()
             except mcp_broker.BrokerError:
                 pass
             else:
-                raise AssertionError(f"XDG_DATA_HOME={value!r} must be refused")
+                raise AssertionError(
+                    f"{root_name}={value!r} must be refused"
+                )
             stderr = io.StringIO()
             with redirect_stderr(stderr):
                 code = mcp_proxy.main()
@@ -318,9 +349,19 @@ def test_malformed_vault_root_override_is_a_diagnostic_not_a_traceback():
 
 
 def test_daemon_environment_never_donates_a_blank_vault_root():
-    for name in mcp_broker.DAEMON_VAULT_ROOT_ENV_VARS:
+    names = (
+        "LATCH_PRODUCTION_DATA_ROOT",
+        "LATCH_VAULT_REGISTRY_ROOT",
+        "LATCH_DURABILITY_ROOT",
+    )
+    for name in names:
         env = mcp_broker._daemon_environment({name: ""})
-        _assert(name not in env, (name, env))
+        _assert(env[name], (name, env))
+        _assert(
+            mcp_broker._authority_context_payload(env)
+            == mcp_broker._authority_context_payload({name: ""}),
+            (name, env),
+        )
         # os.environ itself refuses an embedded NUL, so this rejection is only
         # reachable through an explicit source mapping.
         try:
