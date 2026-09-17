@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -15,6 +16,7 @@ from latch.hooks import user_prompt_submit as ups  # noqa: E402
 
 def _stub_main(monkeypatch, tmp_path: Path, *, prompt: str) -> list[dict]:
     logs: list[dict] = []
+    monkeypatch.setattr(ups, "_PROCESS_STARTED", time.perf_counter())
     monkeypatch.setattr(ups, "is_unlatched_mode", lambda: False)
     monkeypatch.setattr(ups, "is_disabled", lambda: False)
     monkeypatch.setattr(ups, "is_in_compact", lambda: False)
@@ -55,7 +57,7 @@ def test_every_eligible_prompt_runs_retrieval_and_keeps_guideline_nudge(
         tmp_path,
         prompt="always keep our database migrations backward compatible",
     )
-    monkeypatch.setattr(ups.mcp_broker, "read_discovery", lambda: {"ready": True})
+    monkeypatch.setattr(ups.mcp_broker, "inspect_live_embed_discovery", lambda **kw: SimpleNamespace(status="ready"))
     calls: list[str] = []
 
     def retrieve(cwd, _sid, _prompt, _row, **_kwargs):
@@ -81,7 +83,7 @@ def test_degraded_notice_is_visible_and_repeats_while_unscored(
         tmp_path,
         prompt="continue with another eligible deployment prompt",
     )
-    monkeypatch.setattr(ups.mcp_broker, "read_discovery", lambda: None)
+    monkeypatch.setattr(ups.mcp_broker, "inspect_live_embed_discovery", lambda **kw: SimpleNamespace(status="discovery_missing"))
     monkeypatch.setattr(ups.mcp_broker, "request_daemon_start", lambda _cwd: True)
     monkeypatch.setattr(ups.mcp_broker, "emit_lifecycle", lambda *_args, **_kwargs: None)
 
@@ -92,7 +94,7 @@ def test_degraded_notice_is_visible_and_repeats_while_unscored(
         assert context.startswith("## KB auto-retrieval temporarily unavailable")
         assert "not similarity-scored" in context
         assert len(logs) == expected_rows
-        assert logs[-1]["skip"] == "embed_daemon_unavailable"
+        assert logs[-1]["skip"] == "discovery_missing"
         assert logs[-1]["context_chars"] == len(context)
 
 
@@ -113,7 +115,7 @@ def test_degraded_path_keeps_profile_and_citation_nudges(
             render_cite_correction_directive=lambda count: f"CITE-{count}"
         ),
     )
-    monkeypatch.setattr(ups.mcp_broker, "read_discovery", lambda: None)
+    monkeypatch.setattr(ups.mcp_broker, "inspect_live_embed_discovery", lambda **kw: SimpleNamespace(status="discovery_missing"))
     monkeypatch.setattr(ups.mcp_broker, "request_daemon_start", lambda _cwd: True)
     monkeypatch.setattr(ups.mcp_broker, "emit_lifecycle", lambda *_args, **_kwargs: None)
 
@@ -133,7 +135,7 @@ def test_no_hits_receipt_remains_visible(monkeypatch, tmp_path: Path, capsys) ->
         tmp_path,
         prompt="please review this implementation plan now",
     )
-    monkeypatch.setattr(ups.mcp_broker, "read_discovery", lambda: {"ready": True})
+    monkeypatch.setattr(ups.mcp_broker, "inspect_live_embed_discovery", lambda **kw: SimpleNamespace(status="ready"))
     monkeypatch.setattr(ups, "_retrieve_and_inject", lambda *_args, **_kwargs: [])
 
     assert ups.main() == 0
@@ -163,7 +165,7 @@ def test_retrieval_error_keeps_independent_safety_context(
             render_cite_correction_directive=lambda count: f"CITE-{count}"
         ),
     )
-    monkeypatch.setattr(ups.mcp_broker, "read_discovery", lambda: {"ready": True})
+    monkeypatch.setattr(ups.mcp_broker, "inspect_live_embed_discovery", lambda **kw: SimpleNamespace(status="ready"))
     monkeypatch.setattr(ups.mcp_broker, "emit_lifecycle", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
         ups,
@@ -190,7 +192,7 @@ def test_retrieval_error_without_nudges_is_still_visible(
         prompt="please review the selected database schema compatibility",
     )
     lifecycle_events: list[tuple[tuple, dict]] = []
-    monkeypatch.setattr(ups.mcp_broker, "read_discovery", lambda: {"ready": True})
+    monkeypatch.setattr(ups.mcp_broker, "inspect_live_embed_discovery", lambda **kw: SimpleNamespace(status="ready"))
     monkeypatch.setattr(
         ups.mcp_broker,
         "emit_lifecycle",

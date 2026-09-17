@@ -13,12 +13,19 @@ C2 — drill-down path:
   from the active set's most recently-injected node and surface neighbors
   not yet in the active set. Falls back to C1 if traversal yields nothing.
 
-Hard wall HARD_BUDGET_MS — emits empty stdout + log line on overrun.
+The cooperative budget starts at this module's first clock read. It includes
+imports, input, safety nudges and retrieval, but excludes interpreter startup
+and shutdown. Blocking filesystem/native calls cannot be preempted here;
+external fresh-process measurements report the full user-visible latency.
 JSONL retrieval log lives in the selected KB directory as ``retrieve.log``;
 every prompt writes one line so SIM_FLOOR / TOPIC_SAME_THRESHOLD / depth regex
 can be empirically tuned after ~100 prompts.
 """
 from __future__ import annotations
+import time
+
+_PROCESS_STARTED = time.perf_counter()
+
 if __package__ in (None, ""):
     import sys, pathlib
     sys.path.insert(0, str(next(p for p in pathlib.Path(__file__).resolve().parents if p.name == "src")))
@@ -29,7 +36,6 @@ import os
 import re
 import sqlite3
 import sys
-import time
 from datetime import datetime, timezone
 
 from latch.hooks._common import hook_field, log, project_cwd, read_hook_input, session_id
@@ -41,10 +47,11 @@ from latch.store.paths import (
     is_in_compact,
     is_unlatched_mode,
     db_path,
+    project_dir,
 )
 
 
-_PROCESS_STARTED = time.perf_counter()
+_IMPORTS_READY = time.perf_counter()
 
 TOP_K = 5
 MAX_INJECT = 5
@@ -60,14 +67,15 @@ DEPTH_KEYWORDS = re.compile(
     r"\b(why|more|detail|details|how|continue|deeper|explain|show|further|elaborate|tell\s+me\s+more)\b",
     re.IGNORECASE,
 )
-HARD_BUDGET_MS = 250
-# Windows process/DLL startup is materially slower than POSIX on the supported
-# hosts. Reserve it from the user-visible wall instead of letting the in-hook
-# retrieval deadline consume the entire 250 ms contract.
-SUBPROCESS_BUDGET_RESERVE_MS = 125 if os.name == "nt" else 25
+HARD_BUDGET_MS = 750 if os.name == "nt" else 250
+MIN_BUDGET_MS = 100
+MAX_BUDGET_MS = 2000
+# Reserve a small output/logging tail within the measured module budget.
+# Interpreter startup is measured externally, never guessed and subtracted.
+OUTPUT_RESERVE_MS = 10
 # Mission-control and cite-nudge safety reads may each encounter the writer.
 # Fifty milliseconds tolerates ordinary short transactions while bounding the
-# two-read worst case to 100 ms inside the prompt hook's 250 ms wall.
+# two-read worst case to 100 ms of the prompt hook's cooperative budget.
 LIGHT_DB_BUSY_TIMEOUT_SECONDS = 0.05
 LOG_STREAM = "retrieve"
 
@@ -79,6 +87,56 @@ profiles = None
 search = None
 _LIGHT_RUNTIME_LOADED = False
 _RUNTIME_LOADED = False
+
+
+def _configured_budget(cwd: str) -> tuple[int, str]:
+    """Read an upgrade-safe, bounded budget; invalid values use the default."""
+    raw = os.environ.get("LATCH_PROMPT_BUDGET_MS")
+    source = "environment"
+    if raw is None:
+        source = "vault"
+        try:
+            path = project_dir(cwd) / "runtime_settings.json"
+            if path.is_symlink():
+                return HARD_BUDGET_MS, "default_invalid_setting"
+            data = json.loads(path.read_text(encoding="utf-8"))
+            raw = data.get("prompt_hook_budget_ms") if isinstance(data, dict) else None
+        except FileNotFoundError:
+            raw = None
+        except (OSError, ValueError):
+            return HARD_BUDGET_MS, "default_invalid_setting"
+    if raw is None:
+        return HARD_BUDGET_MS, "default"
+    try:
+        # Only integer milliseconds: no bool, truncation, infinity or NaN.
+        value = int(raw) if isinstance(raw, str) else raw
+        if type(value) is not int or not MIN_BUDGET_MS <= value <= MAX_BUDGET_MS:
+            raise ValueError
+    except (TypeError, ValueError, OverflowError):
+        return HARD_BUDGET_MS, "default_invalid_setting"
+    return value, source
+
+
+class _BudgetExhausted(TimeoutError):
+    def __init__(self, stage: str):
+        super().__init__(stage)
+        self.stage = stage
+
+
+def _check_deadline(deadline: float, stage: str) -> None:
+    if time.perf_counter() >= deadline:
+        raise _BudgetExhausted(stage)
+
+
+def _degraded(log_entry: dict, reason: str, *, stage: str | None = None) -> None:
+    log_entry["skip"] = reason
+    log_entry.pop("injected", None)
+    if stage is not None:
+        log_entry["deadline_stage"] = stage
+    mcp_broker.emit_lifecycle(
+        "prompt_retrieval_degraded", reason=reason,
+        wake_requested=bool(log_entry.get("daemon_wake_requested")),
+    )
 
 
 def _load_log_runtime() -> None:
@@ -153,6 +211,8 @@ def main() -> int:
     sid = session_id(payload)
     cwd = project_cwd(payload)
     prompt = (hook_field(payload, "prompt", "user_prompt") or "").strip()
+    budget_ms, budget_source = _configured_budget(cwd)
+    deadline = _PROCESS_STARTED + (budget_ms - OUTPUT_RESERVE_MS) / 1000.0
 
     correction_signal = bool(CORRECTION_SIGNAL.search(prompt))
     guideline_signal = (
@@ -171,42 +231,6 @@ def main() -> int:
         profiles.render_cite_correction_directive(cite_count) if cite_count else ""
     )
 
-    # On the ordinary post-idle path, return before retrieval runtime loading. A
-    # Windows sqlite-vec DLL load can exceed the entire visible hook budget,
-    # while there is no vector to retrieve with until the owner is warm anyway.
-    if (
-        sid
-        and prompt
-        and len(prompt.split()) >= MIN_PROMPT_WORDS
-        and mcp_broker.read_discovery() is None
-    ):
-        log_entry = {
-            "mission_control": bool(mc_directive),
-            "ts": _now(),
-            "sid": sid,
-            "prompt_hash": _phash(prompt),
-            "prompt_words": len(prompt.split()),
-            "cwd": cwd,
-            "correction_signal": correction_signal,
-            "guideline_signal": guideline_signal,
-            "cite_nudge": cite_count,
-            "skip": "embed_daemon_unavailable",
-        }
-        log_entry["daemon_wake_requested"] = mcp_broker.request_daemon_start(cwd)
-        mcp_broker.emit_lifecycle(
-            "prompt_retrieval_degraded",
-            reason="embed_daemon_unavailable",
-            wake_requested=bool(log_entry["daemon_wake_requested"]),
-        )
-        context = _format_runtime_unavailable()
-        nudge = _extra_nudges(
-            correction_signal, guideline_signal, mc_directive, cite_directive,
-        )
-        if nudge:
-            context = nudge + "\n\n" + context
-        _emit_and_log(cwd, log_entry, context)
-        return 0
-
     # Slice 3-B: surface the advisory cite-correction nudge queued by last turn's
     # Stop-hook detector (mission-control actors only; marker is 0 for everyone
     # else). Consumed (read + reset) here regardless of the current prompt — it
@@ -221,6 +245,10 @@ def main() -> int:
         "correction_signal": correction_signal,
         "guideline_signal": guideline_signal,
         "cite_nudge": cite_count,
+        "budget_ms": budget_ms,
+        "budget_source": budget_source,
+        "imports_ms": round((_IMPORTS_READY - _PROCESS_STARTED) * 1000, 3),
+        "pre_retrieval_ms": round((time.perf_counter() - _PROCESS_STARTED) * 1000, 3),
     }
 
     # Cheap early-outs that need no DB or model. The correction nudge is
@@ -239,12 +267,33 @@ def main() -> int:
 
     t0 = time.perf_counter()
     try:
-        injected = _retrieve_and_inject(
-            cwd, sid, prompt, log_entry,
-            deadline=_PROCESS_STARTED + (
-                HARD_BUDGET_MS - SUBPROCESS_BUDGET_RESERVE_MS
-            ) / 1000.0,
+        _check_deadline(deadline, "before_discovery")
+        discovery = mcp_broker.inspect_live_embed_discovery(require_owner_ready=True)
+        _check_deadline(deadline, "discovery")
+        if discovery.status != "ready":
+            if discovery.status == "discovery_missing":
+                log_entry["daemon_wake_requested"] = mcp_broker.request_daemon_start(cwd)
+            _degraded(log_entry, discovery.status)
+            injected = []
+        else:
+            injected = _retrieve_and_inject(
+                cwd, sid, prompt, log_entry, deadline=deadline,
+            )
+    except _BudgetExhausted as e:
+        _degraded(log_entry, "local_budget_exhausted", stage=e.stage)
+        injected = []
+    except TimeoutError:
+        _degraded(log_entry, "local_budget_exhausted", stage="sqlite_initialization")
+        injected = []
+    except sqlite3.OperationalError as e:
+        code = getattr(e, "sqlite_errorcode", None)
+        reason = (
+            "local_budget_exhausted" if time.perf_counter() >= deadline
+            else "sqlite_busy" if code in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
+            else "retrieval_error"
         )
+        _degraded(log_entry, reason, stage="sqlite" if reason == "local_budget_exhausted" else None)
+        injected = []
     except Exception as e:
         log_entry["error"] = f"{type(e).__name__}: {e}"
         # Similarity is fail-open, but independent correction/profile/citation
@@ -266,14 +315,14 @@ def main() -> int:
     elapsed_ms = (time.perf_counter() - t0) * 1000
     log_entry["elapsed_ms"] = round(elapsed_ms, 1)
 
-    if elapsed_ms > HARD_BUDGET_MS:
+    if time.perf_counter() - _PROCESS_STARTED > budget_ms / 1000.0:
         log_entry["overran_budget"] = True
         # Already past budget — still emit the result we computed, since the
         # damage (latency) is already done. Future tuning can decide whether
         # to drop the result instead.
 
-    if log_entry.get("skip") == "embed_daemon_unavailable":
-        context = _format_runtime_unavailable()
+    if log_entry.get("skip"):
+        context = _format_runtime_unavailable(log_entry["skip"], bool(log_entry.get("daemon_wake_requested")))
     else:
         context = _format_injection(injected) if injected else _format_no_hits()
     # Include mc_directive + cite_directive on the main path too — previously
@@ -299,9 +348,14 @@ def _print_context(context: str) -> None:
 def _emit_and_log(cwd: str, log_entry: dict, context: str) -> None:
     """Record the exact prompt-context cost, then emit only non-empty context."""
     log_entry["context_chars"] = len(context)
-    _write_log(cwd, log_entry)
+    started = time.perf_counter()
     if context:
         _print_context(context)
+    log_entry["output_ms"] = round((time.perf_counter() - started) * 1000, 3)
+    log_entry["hook_elapsed_ms"] = round((time.perf_counter() - _PROCESS_STARTED) * 1000, 3)
+    if log_entry["hook_elapsed_ms"] > log_entry.get("budget_ms", HARD_BUDGET_MS):
+        log_entry["overran_budget"] = True
+    _write_log(cwd, log_entry)
 
 
 def _select_candidates(
@@ -335,32 +389,31 @@ def _retrieve_and_inject(
     *,
     deadline: float | None = None,
 ) -> list[dict]:
+    if deadline is None:
+        deadline = time.perf_counter() + HARD_BUDGET_MS / 1000.0
+    _check_deadline(deadline, "before_runtime_imports")
+    started = time.perf_counter()
     _load_runtime()
-    conn = db.connect(cwd)
+    log_entry["runtime_imports_ms"] = round((time.perf_counter() - started) * 1000, 3)
+    _check_deadline(deadline, "runtime_imports")
+
+    # Obtain the vector before native SQLite setup. A missing owner must not
+    # force every prompt to load sqlite-vec or enter schema initialization.
+    started = time.perf_counter()
+    qvec = _embed_with_bounded_wake(prompt, cwd, deadline, log_entry)
+    log_entry["embedding_rpc_ms"] = round((time.perf_counter() - started) * 1000, 3)
+    if qvec is None:
+        _degraded(log_entry, log_entry.get("embed_status", "rpc_failed"))
+        return []
+    _check_deadline(deadline, "embedding_rpc")
+    started = time.perf_counter()
+    conn = db.connect_current(cwd, deadline=deadline)
+    log_entry["sqlite_initialization_ms"] = round((time.perf_counter() - started) * 1000, 3)
     try:
-        # Determine current turn — sessions row may not yet exist if the Stop
-        # hook is gated off. Default to 0; turns are still meaningful for TTL
-        # because TTL just compares to last_injected_turn (also 0).
+        _check_deadline(deadline, "sqlite_initialization")
         sess = db.get_session(conn, sid)
         turn = sess["turn_count"] if sess else 0
         log_entry["turn"] = turn
-
-        # Embed once; reused for retrieval AND topic-shift detection.
-        # Talk to the per-session MCP server's embed listener — the local
-        # `embeddings.embed()` path costs ~15s of torch cold-load per
-        # subprocess, so falling through to it would blow HARD_BUDGET_MS
-        # by ~80x. If the daemon is unreachable or still warming, skip
-        # retrieval for this turn rather than block the user's prompt.
-        deadline = deadline or (time.perf_counter() + HARD_BUDGET_MS / 1000.0)
-        qvec = _embed_with_bounded_wake(prompt, cwd, deadline, log_entry)
-        if qvec is None:
-            log_entry["skip"] = "embed_daemon_unavailable"
-            mcp_broker.emit_lifecycle(
-                "prompt_retrieval_degraded",
-                reason="embed_daemon_unavailable",
-                wake_requested=bool(log_entry.get("daemon_wake_requested")),
-            )
-            return []
         qblob = embeddings.to_blob(qvec)
 
         last_blob = db.get_last_prompt_embedding(conn, sid)
@@ -382,6 +435,17 @@ def _retrieve_and_inject(
         active_set = db.get_active_set(conn, session_id=sid, current_turn=turn)
         log_entry["active_set_size"] = len(active_set)
 
+        # Complete session bookkeeping before committing dedupe markers.
+        # Once hits are recorded, return them without another fallible write:
+        # a late interruption must not suppress hits the user never received.
+        _check_deadline(deadline, "before_session_update")
+        started = time.perf_counter()
+        db.upsert_session(conn, sid, cwd, None)
+        db.update_last_prompt_embedding(conn, sid, qblob)
+        log_entry["session_update_ms"] = round((time.perf_counter() - started) * 1000, 3)
+
+        _check_deadline(deadline, "before_vector_retrieval")
+        started = time.perf_counter()
         injected: list[dict] = []
         if is_drill:
             injected = _graph_path(
@@ -403,10 +467,8 @@ def _retrieve_and_inject(
                 sim_floor=SIM_FLOOR,
             )
 
-        # Stash this prompt's embedding for next-turn topic-shift detection.
-        # No-op if upsert_session is needed first.
-        db.upsert_session(conn, sid, cwd, None)
-        db.update_last_prompt_embedding(conn, sid, qblob)
+        log_entry["vector_retrieval_ms"] = round((time.perf_counter() - started) * 1000, 3)
+
 
         return injected
     finally:
@@ -414,29 +476,24 @@ def _retrieve_and_inject(
 
 
 def _embed_with_bounded_wake(prompt: str, cwd: str, deadline: float, log_entry: dict):
-    """Use the warm owner or request one without exceeding the hook wall."""
+    """One bounded RPC; an expired local deadline never wakes a healthy owner."""
     remaining = deadline - time.perf_counter()
     if remaining <= 0:
-        log_entry["daemon_wake_requested"] = mcp_broker.request_daemon_start(cwd)
+        log_entry["embed_status"] = "local_budget_exhausted"
+        log_entry["deadline_stage"] = "before_embedding_rpc"
         return None
-
-    # Only call the embed endpoint when the MCP owner has published readiness;
-    # its embed listener appears before model pre-warm completes.
-    if mcp_broker.read_discovery() is not None:
-        qvec = embeddings.embed_remote(prompt, cwd, timeout=max(0.005, min(0.05, remaining)))
-        if qvec is not None:
-            return qvec
-
-    log_entry["daemon_wake_requested"] = mcp_broker.request_daemon_start(cwd)
-    # Poll the tiny discovery file, not the warming embed endpoint. Reserve a
-    # small tail for one bounded embed RPC if startup completes in time.
-    while time.perf_counter() < deadline - 0.06:
-        if mcp_broker.read_discovery() is not None:
-            remaining = deadline - time.perf_counter()
-            return embeddings.embed_remote(
-                prompt, cwd, timeout=max(0.005, min(0.05, remaining))
-            )
-        time.sleep(0.01)
+    result = embeddings.embed_remote_result(
+        prompt, cwd, timeout=remaining, require_owner_ready=True,
+    )
+    log_entry["embed_status"] = result.status
+    if result.status == "ready":
+        return result.vector
+    if result.status == "local_budget_exhausted":
+        log_entry["deadline_stage"] = "embedding_rpc"
+    elif result.status in {"discovery_missing", "rpc_failed"}:
+        # request_daemon_start probes the existing owner before electing a new
+        # one. Authentication/context rejection must never trigger replacement.
+        log_entry["daemon_wake_requested"] = mcp_broker.request_daemon_start(cwd)
     return None
 
 
@@ -593,12 +650,26 @@ def _format_no_hits() -> str:
     )
 
 
-def _format_runtime_unavailable() -> str:
+def _format_runtime_unavailable(reason: str = "discovery_missing", wake_requested: bool = False) -> str:
+    explanations = {
+        "local_budget_exhausted": "The prompt hook exhausted its local retrieval budget.",
+        "discovery_missing": "No usable runtime discovery record was available.",
+        "owner_starting": "The shared Latch runtime is still starting.",
+        "owner_start_failed": "The shared Latch runtime reported a startup failure.",
+        "context_rejected": "The runtime rejected the selected vault context.",
+        "discovery_rejected": "The runtime discovery record failed validation.",
+        "authentication_rejected": "The runtime rejected the embedding request credentials.",
+        "rpc_failed": "The embedding request failed to return a valid response.",
+        "sqlite_busy": "The selected KB was busy beyond the prompt's bounded wait.",
+        "retrieval_error": "The selected KB could not be read for this prompt.",
+    }
+    explanation = explanations.get(reason, "Automatic retrieval could not complete.")
+    wake = " Latch requested a background wake." if wake_requested else ""
     return (
         "## KB auto-retrieval temporarily unavailable\n\n"
-        "The shared latch runtime was idle, starting, or unreachable, so this "
-        "prompt was **not similarity-scored**. This is not a below-threshold "
-        "result. Latch requested a background wake; actively query "
+        f"{explanation} No KB hits were injected; this prompt was "
+        "**not similarity-scored to completion**. This is not a below-threshold "
+        f"result.{wake} Actively query "
         "(`latch_search` / `latch_get` / `latch_recent`) before responding."
     )
 

@@ -8,9 +8,12 @@ from_blob / cosine_topk / embed_remote / DIM / DISCOVERY_FILE).
 from __future__ import annotations
 
 import json as _json
+import math as _math
 import os as _os
 import socket as _socket
 import threading as _threading
+import time as _time
+from dataclasses import dataclass as _dataclass
 
 import numpy as np
 
@@ -135,44 +138,104 @@ def cosine_topk(
     return idx, scores[idx]
 
 
-def embed_remote(
+@_dataclass(frozen=True)
+class RemoteEmbedResult:
+    """Observed outcome; failures never assert that the owner is dead."""
+
+    status: str
+    vector: np.ndarray | None = None
+
+
+def embed_remote_result(
     text: str,
     project_cwd: "str | _os.PathLike",
     timeout: float = DEFAULT_REMOTE_TIMEOUT,
-) -> "np.ndarray | None":
+    *,
+    require_owner_ready: bool = False,
+) -> RemoteEmbedResult:
     """Call the pinned vault's shared embed listener over loopback TCP.
 
     The shared MCP daemon owns the model; hook subprocesses only see vectors.
-    Returns None on any failure.
+    ``timeout`` is one elapsed-time allowance covering discovery, connection,
+    sending, receiving, and decoding. It must be finite. A response arriving
+    after that deadline is rejected. Discovery is validated here, after any
+    caller's imports or preflight: a cached endpoint may belong to an owner
+    that has since exited. Hooks require full MCP readiness; standalone embed
+    clients retain their existing compatibility path.
     """
     # Discovery is runtime-keyed so blue/green daemons cannot overwrite each
     # other's embed endpoint.  Import locally to keep module initialization
     # ordering simple (mcp_broker itself remains stdlib-only).
     from latch.mcp import mcp_broker
-    meta = mcp_broker.read_live_embed_discovery()
-    if meta is None:
-        return None
+    timeout = float(timeout)
+    if not _math.isfinite(timeout):
+        raise ValueError("remote embedding timeout must be finite")
+    deadline = _time.monotonic() + timeout
+
+    def remaining() -> float:
+        seconds = deadline - _time.monotonic()
+        if seconds <= 0:
+            raise TimeoutError("remote embedding budget exhausted")
+        return seconds
+
+    try:
+        remaining()
+        inspected = mcp_broker.inspect_live_embed_discovery(
+            require_owner_ready=require_owner_ready,
+        )
+        remaining()
+    except TimeoutError:
+        return RemoteEmbedResult("local_budget_exhausted")
+    if inspected.metadata is None:
+        return RemoteEmbedResult(inspected.status)
+    meta = inspected.metadata
     host, port, token = meta.get("host"), meta.get("port"), meta.get("token")
     try:
-        with _socket.create_connection((host, int(port)), timeout=timeout) as s:
-            s.settimeout(timeout)
+        with _socket.create_connection((host, int(port)), timeout=remaining()) as s:
             payload = _json.dumps({"op": "embed", "text": text, "token": token}).encode("utf-8")
+            s.settimeout(remaining())
             s.sendall(payload + b"\n")
             buf = bytearray()
             while b"\n" not in buf:
+                s.settimeout(remaining())
                 chunk = s.recv(65536)
                 if not chunk:
                     break
                 buf.extend(chunk)
                 if len(buf) > 4 * 1024 * 1024:
-                    return None
+                    return RemoteEmbedResult("rpc_failed")
+        remaining()
         line = bytes(buf).split(b"\n", 1)[0]
         if not line:
-            return None
+            return RemoteEmbedResult("rpc_failed")
         resp = _json.loads(line.decode("utf-8"))
+        if not isinstance(resp, dict):
+            return RemoteEmbedResult("rpc_failed")
+        if resp.get("error") == "bad_token":
+            return RemoteEmbedResult("authentication_rejected")
+        if "error" in resp:
+            return RemoteEmbedResult("rpc_failed")
         vec = resp.get("vec")
         if not isinstance(vec, list) or len(vec) != DIM:
-            return None
-        return np.asarray(vec, dtype=np.float32)
-    except (OSError, _socket.timeout, ValueError):
+            return RemoteEmbedResult("rpc_failed")
+        vector = np.asarray(vec, dtype=np.float32)
+        if vector.shape != (DIM,) or not np.isfinite(vector).all():
+            return RemoteEmbedResult("rpc_failed")
+        remaining()
+        return RemoteEmbedResult("ready", vector)
+    except TimeoutError:
+        return RemoteEmbedResult("local_budget_exhausted")
+    except (OSError, TypeError, ValueError):
+        return RemoteEmbedResult("rpc_failed")
+
+
+def embed_remote(
+    text: str,
+    project_cwd: "str | _os.PathLike",
+    timeout: float = DEFAULT_REMOTE_TIMEOUT,
+) -> "np.ndarray | None":
+    """Compatibility API: return the remote vector, or None on failure."""
+    try:
+        return embed_remote_result(text, project_cwd, timeout).vector
+    except (TypeError, ValueError):
         return None
