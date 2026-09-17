@@ -256,6 +256,12 @@ def parent(args):
         _profile(args, source, output, test_root, env)
 
 
+def _write_report(output, report):
+    temporary = output / "results.json.tmp"
+    temporary.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    temporary.replace(output / "results.json")
+
+
 def _profile(args, source, output, test_root, env):
     from concurrent.futures import ThreadPoolExecutor
     import socket
@@ -322,31 +328,46 @@ def _profile(args, source, output, test_root, env):
             cold_rows.append(sample(raw=True))
             report["owner_readiness"].append(owner.wait_ready())
     report["groups"]["owner_cold"] = cold_rows
-    with _FixtureOwner(broker, source, vault) as owner:
-        report["owner_readiness"].append(owner.wait_ready())
-        report["groups"]["owner_warm"] = [sample() for _ in range(args.samples)]
-        report["groups"]["owner_warm_raw"] = [sample(raw=True) for _ in range(args.samples)]
-        if os.name == "nt":
-            report["groups"]["owner_warm_base"] = [sample(base=True) for _ in range(args.samples)]
-            report["groups"]["owner_warm_base_raw"] = [sample(base=True, raw=True) for _ in range(args.samples)]
-        with ThreadPoolExecutor(max_workers=args.concurrency) as pool:
-            report["groups"]["concurrent_hooks"] = list(pool.map(lambda _: sample(), range(args.samples)))
-            report["groups"]["concurrent_hooks_raw"] = list(pool.map(lambda _: sample(raw=True), range(args.samples)))
-        locked_rows = []
-        for _ in range(args.cold_samples):
-            lock = sqlite3.connect(test_root / "vaults" / "profile" / "kb.db", check_same_thread=False)
-            lock.execute("BEGIN IMMEDIATE")
-            release = threading.Timer(1.0, lock.rollback)
-            release.start()
+    measurements_saved = False
+    try:
+        with _FixtureOwner(broker, source, vault) as owner:
+            report["owner_readiness"].append(owner.wait_ready())
+            report["groups"]["owner_warm"] = [sample() for _ in range(args.samples)]
+            report["groups"]["owner_warm_raw"] = [sample(raw=True) for _ in range(args.samples)]
+            if os.name == "nt":
+                report["groups"]["owner_warm_base"] = [sample(base=True) for _ in range(args.samples)]
+                report["groups"]["owner_warm_base_raw"] = [sample(base=True, raw=True) for _ in range(args.samples)]
+            with ThreadPoolExecutor(max_workers=args.concurrency) as pool:
+                report["groups"]["concurrent_hooks"] = list(pool.map(lambda _: sample(), range(args.samples)))
+                report["groups"]["concurrent_hooks_raw"] = list(pool.map(lambda _: sample(raw=True), range(args.samples)))
+            locked_rows = []
+            for _ in range(args.cold_samples):
+                lock = sqlite3.connect(test_root / "vaults" / "profile" / "kb.db", check_same_thread=False)
+                lock.execute("BEGIN IMMEDIATE")
+                release = threading.Timer(1.0, lock.rollback)
+                release.start()
+                try:
+                    locked_rows.append(sample(raw=True))
+                finally:
+                    release.join()
+                    lock.close()
+            report["groups"]["sqlite_writer_contention_raw"] = locked_rows
+            report["sqlite_writer_lock_duration_ms"] = 1000
+            report["summary"] = {key: summary(rows) for key, rows in report["groups"].items()}
+            report["cleanup_status"] = "pending"
+            _write_report(output, report)
+            measurements_saved = True
+    except BaseException:
+        if measurements_saved:
+            report["cleanup_status"] = "failed"
             try:
-                locked_rows.append(sample(raw=True))
-            finally:
-                release.join()
-                lock.close()
-        report["groups"]["sqlite_writer_contention_raw"] = locked_rows
-        report["sqlite_writer_lock_duration_ms"] = 1000
-        report["summary"] = {key: summary(rows) for key, rows in report["groups"].items()}
-    (output / "results.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+                _write_report(output, report)
+            except OSError:
+                # Keep the original cleanup error and the saved pending report.
+                pass
+        raise
+    report["cleanup_status"] = "succeeded"
+    _write_report(output, report)
     print(json.dumps({"output": str(output / "results.json"), "summary": report["summary"]}, indent=2))
 
 

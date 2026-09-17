@@ -78,7 +78,8 @@ def args_for(tmp_path):
                            budget_ms=750, samples=1, cold_samples=1, concurrency=1)
 
 
-def test_parent_and_workers_use_exact_sanitized_environment_and_restore_it(tmp_path, monkeypatch):
+@pytest.mark.parametrize("cleanup_fails", [False, True])
+def test_parent_keeps_measurements_and_restores_environment(tmp_path, monkeypatch, capsys, cleanup_fails):
     args = args_for(tmp_path)
     monkeypatch.setenv("LATCH_MCP_RUNTIME_KEY", "inherited-runtime")
     monkeypatch.setenv("LATCH_PROMPT_BUDGET_MS", "100")
@@ -97,7 +98,17 @@ def test_parent_and_workers_use_exact_sanitized_environment_and_restore_it(tmp_p
 
     module.__getattr__ = get_attribute
     monkeypatch.setitem(sys.modules, "latch.mcp", module)
-    monkeypatch.setattr(profiler.os, "kill", broker.kill)
+
+    def kill(pid, sig):
+        if broker.stopped:
+            pending = json.loads((Path(args.output_dir) / "results.json").read_text())
+            assert pending["cleanup_status"] == "pending"
+            assert pending["summary"]["owner_warm"]["actual_fixture_context"] == 1
+            if cleanup_fails:
+                raise TimeoutError("final cleanup failed")
+        broker.kill(pid, sig)
+
+    monkeypatch.setattr(profiler.os, "kill", kill)
 
     def run(command, **kwargs):
         child_envs.append(kwargs["env"].copy())
@@ -129,7 +140,13 @@ def test_parent_and_workers_use_exact_sanitized_environment_and_restore_it(tmp_p
             pass
 
     monkeypatch.setattr(threading, "Timer", Timer)
-    profiler.parent(args)
+    if cleanup_fails:
+        with pytest.raises(TimeoutError, match="final cleanup failed"):
+            profiler.parent(args)
+        assert capsys.readouterr().out == ""
+    else:
+        profiler.parent(args)
+        assert json.loads(capsys.readouterr().out)["output"].endswith("results.json")
 
     assert imported_with and child_envs
     expected = child_envs[0]
@@ -139,12 +156,16 @@ def test_parent_and_workers_use_exact_sanitized_environment_and_restore_it(tmp_p
     assert expected["LATCH_PROMPT_BUDGET_MS"] == "750"
     assert Path(expected["LATCH_KB_DIR"]).is_relative_to(Path(args.output_dir))
     assert dict(os.environ) == original
-    assert broker.stopped == [4321, 4321]
+    stopped_count = 1 if cleanup_fails else 2
+    assert broker.stopped == [4321] * stopped_count
     assert broker.removed == [
         (kind, {"pid": 4321, "token": f"fixture-{kind}-token"})
-        for _ in range(2) for kind in ("mcp", "embed")
+        for _ in range(stopped_count) for kind in ("mcp", "embed")
     ]
     report = json.loads((Path(args.output_dir) / "results.json").read_text())
+    assert report["cleanup_status"] == ("failed" if cleanup_fails else "succeeded")
+    assert report["summary"]["owner_warm"]["actual_fixture_context"] == 1
+    assert report["groups"]["owner_warm"][0]["actual_fixture_context"]
     assert [row["pid"] for row in report["owner_readiness"]] == [4321, 4321]
     assert "fixture-mcp-token" not in json.dumps(report)
     assert "fixture-embed-token" not in json.dumps(report)

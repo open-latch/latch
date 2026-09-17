@@ -15,6 +15,7 @@ on:
       - "scripts/profile_prompt_hook.py"
       - "tests/test_embed_outcomes.py"
       - "tests/test_profile_prompt_hook.py"
+      - "tests/test_prompt_hook_context.py"
       - "src/latch/hosts/codex_session.py"
       - "src/latch/hooks/user_prompt_submit.py"
       - "src/latch/install/doctor.py"
