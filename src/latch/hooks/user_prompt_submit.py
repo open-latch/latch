@@ -277,7 +277,7 @@ def main() -> int:
             injected = []
         else:
             injected = _retrieve_and_inject(
-                cwd, sid, prompt, log_entry, deadline=deadline, discovery=discovery,
+                cwd, sid, prompt, log_entry, deadline=deadline,
             )
     except _BudgetExhausted as e:
         _degraded(log_entry, "local_budget_exhausted", stage=e.stage)
@@ -388,7 +388,6 @@ def _retrieve_and_inject(
     log_entry: dict,
     *,
     deadline: float | None = None,
-    discovery=None,
 ) -> list[dict]:
     if deadline is None:
         deadline = time.perf_counter() + HARD_BUDGET_MS / 1000.0
@@ -401,7 +400,7 @@ def _retrieve_and_inject(
     # Obtain the vector before native SQLite setup. A missing owner must not
     # force every prompt to load sqlite-vec or enter schema initialization.
     started = time.perf_counter()
-    qvec = _embed_with_bounded_wake(prompt, cwd, deadline, log_entry, discovery=discovery)
+    qvec = _embed_with_bounded_wake(prompt, cwd, deadline, log_entry)
     log_entry["embedding_rpc_ms"] = round((time.perf_counter() - started) * 1000, 3)
     if qvec is None:
         _degraded(log_entry, log_entry.get("embed_status", "rpc_failed"))
@@ -476,14 +475,16 @@ def _retrieve_and_inject(
         conn.close()
 
 
-def _embed_with_bounded_wake(prompt: str, cwd: str, deadline: float, log_entry: dict, *, discovery=None):
+def _embed_with_bounded_wake(prompt: str, cwd: str, deadline: float, log_entry: dict):
     """One bounded RPC; an expired local deadline never wakes a healthy owner."""
     remaining = deadline - time.perf_counter()
     if remaining <= 0:
         log_entry["embed_status"] = "local_budget_exhausted"
         log_entry["deadline_stage"] = "before_embedding_rpc"
         return None
-    result = embeddings.embed_remote_result(prompt, cwd, timeout=remaining, discovery=discovery)
+    result = embeddings.embed_remote_result(
+        prompt, cwd, timeout=remaining, require_owner_ready=True,
+    )
     log_entry["embed_status"] = result.status
     if result.status == "ready":
         return result.vector

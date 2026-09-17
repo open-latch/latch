@@ -7,13 +7,14 @@ import sys
 import time
 from pathlib import Path
 
-import numpy as np
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from latch.mcp import mcp_broker
 from latch.retrieval import embeddings
+from latch.hooks import user_prompt_submit as ups
+from test_prompt_hook_context import _stub_main
 
 
 class _Clock:
@@ -55,7 +56,7 @@ def client(monkeypatch):
     discovery = mcp_broker.EmbedDiscoveryResult(
         "ready", {"host": "127.0.0.1", "port": 12345, "token": "private"}
     )
-    monkeypatch.setattr(mcp_broker, "inspect_live_embed_discovery", lambda: discovery)
+    monkeypatch.setattr(mcp_broker, "inspect_live_embed_discovery", lambda **kw: discovery)
     return clock, discovery
 
 
@@ -73,7 +74,7 @@ def test_healthy_owner_with_exhausted_deadline_does_not_attempt_rpc(client, monk
 def test_discovery_time_counts_toward_same_deadline(client, monkeypatch):
     clock, discovery = client
 
-    def inspect():
+    def inspect(**kwargs):
         clock.now += 0.2
         return discovery
 
@@ -162,18 +163,6 @@ def test_invalid_vector_is_rejected(client, monkeypatch, value):
     assert embeddings.embed_remote_result("prompt", ".").status == "rpc_failed"
 
 
-def test_preflight_discovery_can_be_reused(client, monkeypatch):
-    clock, discovery = client
-    sock = _Socket(json.dumps({"vec": [1.0] * embeddings.DIM}).encode() + b"\n", clock)
-    monkeypatch.setattr(embeddings._socket, "create_connection", lambda *a, **k: sock)
-    monkeypatch.setattr(
-        mcp_broker, "inspect_live_embed_discovery",
-        lambda: pytest.fail("validated preflight should not repeat discovery"),
-    )
-    result = embeddings.embed_remote_result("prompt", ".", discovery=discovery)
-    np.testing.assert_array_equal(result.vector, np.ones(embeddings.DIM, dtype=np.float32))
-
-
 @pytest.fixture
 def discovery_files(tmp_path, monkeypatch):
     monkeypatch.setattr(mcp_broker, "embed_discovery_path", lambda key=None: tmp_path / "embed.json")
@@ -181,6 +170,55 @@ def discovery_files(tmp_path, monkeypatch):
     monkeypatch.setattr(mcp_broker, "start_lock_path", lambda key=None: tmp_path / "start.lock")
     monkeypatch.setattr(mcp_broker, "vault_context_digest", lambda: "a" * 64)
     return tmp_path
+
+
+@pytest.mark.parametrize("transition, expected", [
+    ("owner_exited", "discovery_missing"),
+    ("readiness_removed", "discovery_missing"),
+    ("context_changed", "context_rejected"),
+])
+def test_hook_revalidates_endpoint_after_runtime_imports(
+    discovery_files, monkeypatch, capsys, transition, expected,
+):
+    logs = _stub_main(monkeypatch, discovery_files, prompt="retrieve the stored fixture decision")
+    monkeypatch.setenv("LATCH_PROMPT_BUDGET_MS", "2000")
+    ups._load_runtime()
+    owner = {
+        "runtime_key": mcp_broker.RUNTIME_KEY,
+        "protocol": mcp_broker.PROTOCOL_VERSION,
+        "vault_context_digest": "a" * 64,
+        "host": "127.0.0.1", "port": 12345, "token": "fixture-token",
+        "pid": os.getpid(),
+    }
+    readiness = discovery_files / "mcp.json"
+    readiness.write_text(json.dumps(owner))
+    (discovery_files / "embed.json").write_text(json.dumps(owner))
+    live = [True]
+    monkeypatch.setattr(mcp_broker, "_pid_alive", lambda pid: live[0])
+    assert mcp_broker.inspect_live_embed_discovery(require_owner_ready=True).status == "ready"
+
+    def change_owner_during_imports():
+        if transition == "owner_exited":
+            live[0] = False
+        elif transition == "readiness_removed":
+            readiness.unlink()
+        else:
+            readiness.write_text(json.dumps({**owner, "vault_context_digest": "b" * 64}))
+
+    monkeypatch.setattr(ups, "_load_runtime", change_owner_during_imports)
+    monkeypatch.setattr(
+        embeddings._socket, "create_connection",
+        lambda *a, **kw: pytest.fail("stale preflight endpoint could receive the prompt and token"),
+    )
+    wakes = []
+    monkeypatch.setattr(mcp_broker, "request_daemon_start", lambda cwd: wakes.append(cwd) or True)
+    monkeypatch.setattr(mcp_broker, "emit_lifecycle", lambda *a, **kw: None)
+
+    assert ups.main() == 0
+    context = json.loads(capsys.readouterr().out)["hookSpecificOutput"]["additionalContext"]
+    assert "temporarily unavailable" in context
+    assert logs[-1]["skip"] == expected
+    assert bool(wakes) == (expected == "discovery_missing")
 
 
 def test_missing_discovery_is_not_assumed_to_be_starting(discovery_files):

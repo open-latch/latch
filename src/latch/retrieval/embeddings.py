@@ -14,14 +14,10 @@ import socket as _socket
 import threading as _threading
 import time as _time
 from dataclasses import dataclass as _dataclass
-from typing import TYPE_CHECKING as _TYPE_CHECKING
 
 import numpy as np
 
 from latch.store import paths as _paths
-
-if _TYPE_CHECKING:
-    from latch.mcp.mcp_broker import EmbedDiscoveryResult
 
 DIM = 384
 DISCOVERY_FILE = "embed.sock.json"
@@ -155,16 +151,17 @@ def embed_remote_result(
     project_cwd: "str | _os.PathLike",
     timeout: float = DEFAULT_REMOTE_TIMEOUT,
     *,
-    discovery: "EmbedDiscoveryResult | None" = None,
+    require_owner_ready: bool = False,
 ) -> RemoteEmbedResult:
     """Call the pinned vault's shared embed listener over loopback TCP.
 
     The shared MCP daemon owns the model; hook subprocesses only see vectors.
     ``timeout`` is one elapsed-time allowance covering discovery, connection,
     sending, receiving, and decoding. It must be finite. A response arriving
-    after that deadline is rejected. Optional ``discovery`` is a validated
-    broker inspection from the same call, allowing lightweight hook preflight
-    to avoid repeating discovery after importing this NumPy-backed module.
+    after that deadline is rejected. Discovery is validated here, after any
+    caller's imports or preflight: a cached endpoint may belong to an owner
+    that has since exited. Hooks require full MCP readiness; standalone embed
+    clients retain their existing compatibility path.
     """
     # Discovery is runtime-keyed so blue/green daemons cannot overwrite each
     # other's embed endpoint.  Import locally to keep module initialization
@@ -183,7 +180,9 @@ def embed_remote_result(
 
     try:
         remaining()
-        inspected = discovery or mcp_broker.inspect_live_embed_discovery()
+        inspected = mcp_broker.inspect_live_embed_discovery(
+            require_owner_ready=require_owner_ready,
+        )
         remaining()
     except TimeoutError:
         return RemoteEmbedResult("local_budget_exhausted")

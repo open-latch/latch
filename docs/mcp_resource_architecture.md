@@ -519,7 +519,9 @@ similarity thresholds, excluded kinds, session dedupe and account isolation.
 failure does not request a daemon restart. Failed discovery may request a
 background wake; the context message states that only when requested. A live
 embedding listener is not readiness proof: the hook waits for the owner's MCP
-readiness record before attempting RPC.
+readiness record before loading retrieval libraries, then revalidates discovery
+immediately before the embedding RPC. The early readiness check is not reused
+as authority to send a prompt after potentially slow imports.
 
 Timing fields separate `imports_ms`, `pre_retrieval_ms`, `runtime_imports_ms`,
 `embedding_rpc_ms`, `sqlite_initialization_ms`, `session_update_ms`,

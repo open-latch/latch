@@ -12,6 +12,9 @@ on:
       - "src/latch/hooks/cursor_post_tool_use.py"
       - "src/latch/mcp/windows_stdio.py"
       - "src/latch/retrieval/embeddings.py"
+      - "scripts/profile_prompt_hook.py"
+      - "tests/test_embed_outcomes.py"
+      - "tests/test_profile_prompt_hook.py"
       - "src/latch/hosts/codex_session.py"
       - "src/latch/hooks/user_prompt_submit.py"
       - "src/latch/install/doctor.py"
@@ -74,3 +77,5 @@ jobs:
           tests/test_hook_input.py
           tests/test_wiring_version.py::test_windows_cursor_bundle_repair_preserves_console_interpreter
           tests/test_embed_daemon.py
+          tests/test_embed_outcomes.py
+          tests/test_profile_prompt_hook.py

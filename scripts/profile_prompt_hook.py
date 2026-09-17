@@ -11,12 +11,16 @@ includes process creation and interpreter initialization. Instrumentation adds
 bootstrap imports, reported separately. Cold means owner-process cold, not OS
 filesystem-cache cold. Concurrency uses one OS account and is not a multi-account
 canary. Fixture embeddings and retrieval both use the actual ONNX model.
+Owner readiness is measured from the broker election request. Cleanup waits
+for that bounded election, even when sampling fails. If startup times out before
+publishing any authenticated owner record, a warming process cannot be safely
+identified for termination; inspect the private fixture's mcp-daemon.log.
 """
 import time
 
 _FIRST_PYTHON_TICK = time.perf_counter()
 
-from contextlib import redirect_stdout
+from contextlib import contextmanager, redirect_stdout
 import io
 import json
 import os
@@ -144,14 +148,89 @@ def summary(rows):
                                  "max": max(totals)}}
 
 
+@contextmanager
+def _using_environment(env):
+    """Use the exact child configuration for controller imports and broker calls."""
+    original = os.environ.copy()
+    try:
+        os.environ.clear()
+        os.environ.update(env)
+        yield
+    finally:
+        os.environ.clear()
+        os.environ.update(original)
+
+
+def _stop_fixture_owner(broker, vault):
+    """Stop only a live, authenticated owner of this newly created fixture."""
+    import signal
+
+    if broker.runtime_dir().resolve() != vault.resolve():
+        raise RuntimeError("Refusing to stop an owner outside the profile fixture")
+    owner = broker._checked_discovery()
+    if owner is None or not broker._pid_alive(owner["pid"]):
+        return
+    if not broker.probe_discovery(owner):
+        raise RuntimeError("Cannot authenticate fixture owner for cleanup")
+    embed = broker.read_live_embed_discovery(owner_payload=owner)
+    pid = owner["pid"]
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    deadline = time.monotonic() + 15
+    while broker._pid_alive(pid):
+        if time.monotonic() >= deadline:
+            raise TimeoutError("Fixture owner did not exit during cleanup")
+        time.sleep(.05)
+    # Windows termination cannot execute the owner's Python finally block.
+    # MCP and embedding listeners have different tokens; remove each exact pair.
+    broker.remove_discovery_aliases_if_owner(pid=pid, token=owner["token"])
+    if embed is not None:
+        broker.remove_embed_discovery_if_owner(pid=pid, token=embed["token"])
+
+
+class _FixtureOwner:
+    """Track broker election, including an owner ready after a sample fails."""
+
+    def __init__(self, broker, source, vault):
+        self.broker = broker
+        self.source = source
+        self.vault = vault
+
+    def __enter__(self):
+        from concurrent.futures import ThreadPoolExecutor
+
+        if self.broker.runtime_dir().resolve() != self.vault.resolve():
+            raise RuntimeError("Broker configuration differs from the profile fixture")
+        self.started = time.perf_counter()
+        self.executor = ThreadPoolExecutor(max_workers=1)
+        self.future = self.executor.submit(self._start)
+        return self
+
+    def _start(self):
+        owner = self.broker.ensure_daemon(str(self.source), start_reason="prompt_hook")
+        return {"ready_ms": (time.perf_counter() - self.started) * 1000,
+                "pid": owner["pid"]}
+
+    def wait_ready(self):
+        return self.future.result()
+
+    def __exit__(self, exc_type, exc, traceback):
+        try:
+            # A failed hook sample must not abandon a still-starting owner.
+            # Wait for the broker's bounded election before discovering cleanup.
+            try:
+                self.future.result()
+            finally:
+                _stop_fixture_owner(self.broker, self.vault)
+        finally:
+            self.executor.shutdown(wait=True)
+
+
 def parent(args):
-    from concurrent.futures import ThreadPoolExecutor
     import hashlib
     import secrets
-    import socket
-    import sqlite3
-    import subprocess
-    import threading
     import uuid
     source = Path(args.source).resolve()
     output = Path(args.output_dir).resolve()
@@ -171,50 +250,26 @@ def parent(args):
     env.update({"LATCH_HOME": str(source), "LATCH_TEST_ROOT": str(test_root),
                 "LATCH_TEST_CAPABILITY": capability, "LATCH_KB_DIR": str(test_root / "vaults" / "profile"),
                 "PYTHONPATH": str(source / "src")})
+    if args.budget_ms is not None:
+        env["LATCH_PROMPT_BUDGET_MS"] = str(args.budget_ms)
+    with _using_environment(env):
+        _profile(args, source, output, test_root, env)
+
+
+def _profile(args, source, output, test_root, env):
+    from concurrent.futures import ThreadPoolExecutor
+    import socket
+    import sqlite3
+    import subprocess
+    import threading
+    import uuid
+
     command = [sys.executable, str(Path(__file__).resolve()), "--source", str(source)]
     init = subprocess.run(command + ["--mode", "setup"], env=env, capture_output=True, text=True, timeout=120)
     if init.returncode:
         raise RuntimeError(init.stderr)
-    os.environ.update(env)
     sys.path.insert(0, str(source / "src"))
     from latch.mcp import mcp_broker as broker
-    owner = None
-    owner_log = (output / "owner.log").open("w", encoding="utf-8")
-
-    def start_owner():
-        owner_env = broker._daemon_environment()
-        executable = sys.executable
-        if os.name == "nt":
-            executable = broker._windows_base_command(owner_env)
-        owner_env.update({"LATCH_MCP_RUNTIME_KEY": broker.RUNTIME_KEY,
-                          "LATCH_MCP_PROTOCOL_VERSION": str(broker.PROTOCOL_VERSION),
-                          "LATCH_MCP_PROXY_CAPABILITY_EPOCH": str(broker.PROXY_CAPABILITY_EPOCH),
-                          "LATCH_MCP_INITIAL_PROJECT_CWD": str(source)})
-        return subprocess.Popen([executable, str(source / "src/latch/mcp/mcp_daemon.py")],
-                                env=owner_env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                stderr=owner_log, cwd=source)
-
-    def wait_ready(process):
-        begin = time.perf_counter()
-        while time.perf_counter() - begin < 90:
-            discovery = broker.read_discovery()
-            if discovery and discovery.get("pid") == process.pid:
-                return {"ready_ms": (time.perf_counter() - begin) * 1000, "pid": process.pid}
-            if process.poll() is not None:
-                raise RuntimeError("Fixture owner exited; see private owner.log")
-            time.sleep(.05)
-        raise TimeoutError("Fixture owner did not become ready")
-
-    def stop_owner(process):
-        discovery = broker.read_discovery()
-        if process.poll() is None:
-            process.terminate()
-            process.wait(timeout=15)
-        # Windows TerminateProcess cannot run the owner's Python finally block.
-        # Remove only this owned fixture's matching discovery files.
-        if discovery and discovery.get("pid") == process.pid:
-            broker.remove_discovery_aliases_if_owner(pid=process.pid, token=discovery["token"])
-            broker.remove_embed_discovery_if_owner(pid=process.pid, token=discovery["token"])
 
     def sample(*, raw=False, base=False):
         child_env = env.copy()
@@ -260,16 +315,15 @@ def parent(args):
     report = {"source": str(source), "host": socket.gethostname(), "account": os.environ.get("USERNAME"),
               "python": sys.version, "budget_override_ms": args.budget_ms, "fixture": json.loads(init.stdout),
               "boundaries": __doc__, "groups": {}, "owner_readiness": []}
-    try:
-        cold_rows = []
-        for _ in range(args.cold_samples):
-            owner = start_owner()
+    vault = test_root / "vaults" / "profile"
+    cold_rows = []
+    for _ in range(args.cold_samples):
+        with _FixtureOwner(broker, source, vault) as owner:
             cold_rows.append(sample(raw=True))
-            report["owner_readiness"].append(wait_ready(owner))
-            stop_owner(owner)
-        report["groups"]["owner_cold"] = cold_rows
-        owner = start_owner()
-        report["owner_readiness"].append(wait_ready(owner))
+            report["owner_readiness"].append(owner.wait_ready())
+    report["groups"]["owner_cold"] = cold_rows
+    with _FixtureOwner(broker, source, vault) as owner:
+        report["owner_readiness"].append(owner.wait_ready())
         report["groups"]["owner_warm"] = [sample() for _ in range(args.samples)]
         report["groups"]["owner_warm_raw"] = [sample(raw=True) for _ in range(args.samples)]
         if os.name == "nt":
@@ -292,12 +346,8 @@ def parent(args):
         report["groups"]["sqlite_writer_contention_raw"] = locked_rows
         report["sqlite_writer_lock_duration_ms"] = 1000
         report["summary"] = {key: summary(rows) for key, rows in report["groups"].items()}
-        (output / "results.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
-        print(json.dumps({"output": str(output / "results.json"), "summary": report["summary"]}, indent=2))
-    finally:
-        if owner is not None:
-            stop_owner(owner)
-        owner_log.close()
+    (output / "results.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+    print(json.dumps({"output": str(output / "results.json"), "summary": report["summary"]}, indent=2))
 
 
 if __name__ == "__main__":
