@@ -10,9 +10,14 @@ import sys
 import tempfile
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
+from latch.gate import predicate
+from latch.gate import predicate_policy
 from latch.pipeline import compactor as c
+from latch.pipeline import heal
 from latch.store import db
 from latch.store import paths
 
@@ -278,6 +283,211 @@ def test_compactor_hard_allowlist_and_lifecycle_relation_boundary():
         conn.close()
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+
+# ---------- authority edges against ratified judgments ----------
+
+_POLICY_DOMAIN = "domain:synthetic-compactor"
+_BLOCKED_PATH = "src/blocked.py"
+
+
+@pytest.fixture()
+def policy_conn(tmp_path):
+    connection = db.connect(str(tmp_path))
+    try:
+        yield connection
+    finally:
+        connection.close()
+
+
+def _policy_owner(conn, *, ratified: bool) -> int:
+    """A canonical decision owning one declared, domain-bound rejection."""
+    owner_id = db.insert_node(
+        conn,
+        kind="decision",
+        title="Synthetic ruling: never edit the blocked module",
+        body="Synthetic authority fixture for compactor edge writes.",
+        status="canonical",
+    )
+    if ratified:
+        db.insert_ratification_nc(
+            conn,
+            owner_id,
+            ratifier="fixture:founder",
+            decided_at="2026-08-27 08:00:00",
+            action="ratify",
+            source="capture_decision",
+        )
+    row_id = db.insert_rejected_path_nc(
+        conn,
+        owner_id,
+        option="synthetic option: edit the blocked module",
+        reason="synthetic reason: the module is retired",
+        ratifier="fixture:founder",
+        decided_at="2026-08-27 08:00:00",
+        scope_predicate=f"file:{_BLOCKED_PATH}",
+        source="declared",
+        policy_domain_id=_POLICY_DOMAIN,
+    )
+    assert row_id is not None
+    conn.commit()
+    return owner_id
+
+
+def _blocked_path_verdict(conn) -> tuple[object, str]:
+    projection = predicate_policy.project_policy_domain(conn, _POLICY_DOMAIN)
+    verdict = predicate.evaluate(
+        predicate.compile_predicates(projection.binding_rows),
+        predicate.ToolCallContext(
+            policy_domain_id=_POLICY_DOMAIN,
+            project_root="/repo/synthetic-compactor",
+            cwd="/repo/synthetic-compactor",
+            tool_name="synthetic-edit",
+            proposed_file_paths=(_BLOCKED_PATH,),
+            diff_paths=(),
+            staged_paths=(),
+            import_names=(),
+            api_names=(),
+            evidence_complete=True,
+            evidence_provenance={"fixture": "test_compactor_hardening"},
+        ),
+    )
+    return projection, str(verdict["decision"])
+
+
+def _compact_with_link(conn, owner_id: int, relation: str) -> dict:
+    return c._apply_compaction(
+        conn,
+        "authority-edge-session",
+        {
+            "session_summary": {"title": "No summary", "body": ""},
+            "extracted_nodes": [{
+                "kind": "decision",
+                "title": "Replacement ruling",
+                "body": "Synthetic replacement proposed by the summarizer.",
+            }],
+            "links": [{
+                "src_title": "Replacement ruling",
+                "dst_id": owner_id,
+                "relation": relation,
+            }],
+        },
+        final=False,
+        prior_summary_id=None,
+    )
+
+
+def _replacement_id(conn) -> int:
+    row = conn.execute(
+        "SELECT id FROM nodes WHERE title = 'Replacement ruling'"
+    ).fetchone()
+    assert row is not None
+    return int(row["id"])
+
+
+def _authority_edges(conn, left_id: int, right_id: int) -> list[tuple]:
+    rows = conn.execute(
+        "SELECT src, dst, relation FROM edges "
+        "WHERE status = 'active' "
+        "AND relation IN ('supersedes', 'replaces', 'reconciled_by') "
+        "AND ((src = ? AND dst = ?) OR (src = ? AND dst = ?))",
+        (left_id, right_id, right_id, left_id),
+    ).fetchall()
+    return [(int(r["src"]), int(r["dst"]), r["relation"]) for r in rows]
+
+
+def _referral_ids(conn, left_id: int, right_id: int) -> list[int]:
+    rows = conn.execute(
+        """
+        SELECT DISTINCT q.id
+        FROM nodes q
+        JOIN edges a ON a.src = q.id AND a.dst = ?
+             AND a.relation = 'related_to' AND a.status = 'active'
+        JOIN edges b ON b.src = q.id AND b.dst = ?
+             AND b.relation = 'related_to' AND b.status = 'active'
+        WHERE q.kind = 'open_question' AND q.status = 'staging'
+        ORDER BY q.id
+        """,
+        (left_id, right_id),
+    ).fetchall()
+    return [int(r["id"]) for r in rows]
+
+
+@pytest.mark.parametrize("relation", ["supersedes", "replaces", "replaced_by"])
+def test_compactor_link_cannot_demote_ratified_policy(policy_conn, relation):
+    conn = policy_conn
+    owner_id = _policy_owner(conn, ratified=True)
+    before, before_decision = _blocked_path_verdict(conn)
+    assert len(before.binding_rows) == 1, before
+    assert before_decision == "block"
+
+    result = _compact_with_link(conn, owner_id, relation)
+
+    after, after_decision = _blocked_path_verdict(conn)
+    assert after.advisory_rows == (), after
+    assert [row.rejected_path_id for row in after.binding_rows] == [
+        row.rejected_path_id for row in before.binding_rows
+    ], after
+    assert after_decision == "block"
+    assert db.node_is_ratified(conn, owner_id)
+    replacement_id = _replacement_id(conn)
+    assert _authority_edges(conn, replacement_id, owner_id) == []
+    assert result["linked_edges"] == 0, result
+
+
+@pytest.mark.parametrize(
+    "relation, canonical",
+    [
+        ("supersedes", "supersedes"),
+        ("replaces", "replaces"),
+        ("reconciled_by", "reconciled_by"),
+    ],
+)
+def test_compactor_link_to_ratified_judgment_refers_to_human(
+    policy_conn, monkeypatch, relation, canonical,
+):
+    conn = policy_conn
+    events: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        heal.log_utils,
+        "emit_event",
+        lambda event_type, row, **_kwargs: events.append((event_type, row)),
+    )
+    owner_id = _policy_owner(conn, ratified=True)
+
+    result = _compact_with_link(conn, owner_id, relation)
+
+    replacement_id = _replacement_id(conn)
+    assert _authority_edges(conn, replacement_id, owner_id) == []
+    assert result["human_referrals"] == 1, result
+    referrals = _referral_ids(conn, *sorted((replacement_id, owner_id)))
+    assert len(referrals) == 1, referrals
+    referral_events = [
+        row for event_type, row in events
+        if event_type == "heal_human_referral"
+    ]
+    assert len(referral_events) == 1, events
+    assert referral_events[0]["trigger"] == f"compactor_{canonical}"
+    assert referral_events[0]["ratified_node_ids"] == [owner_id]
+    # The referral's parking edge keeps nightly heal from arbitrating the
+    # pair without the human.
+    assert heal.edge_exists_between(conn, replacement_id, owner_id)
+
+
+def test_compactor_link_to_unratified_judgment_still_writes_edge(policy_conn):
+    conn = policy_conn
+    owner_id = _policy_owner(conn, ratified=False)
+
+    result = _compact_with_link(conn, owner_id, "supersedes")
+
+    replacement_id = _replacement_id(conn)
+    assert _authority_edges(conn, replacement_id, owner_id) == [
+        (replacement_id, owner_id, "supersedes"),
+    ]
+    assert result["linked_edges"] == 1, result
+    assert result["human_referrals"] == 0, result
+    assert _referral_ids(conn, *sorted((replacement_id, owner_id))) == []
 
 
 if __name__ == "__main__":
