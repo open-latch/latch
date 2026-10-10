@@ -180,7 +180,7 @@ def test_seed_command_includes_project_source_sessions_and_apply():
     _assert("--last-sessions" in args and "50" in args, args)
     _assert("--apply" in args, args)
     formatted = qs.format_command(args)
-    _assert("'/tmp/example project'" in formatted,
+    _assert(f"'{project}'" in formatted,
             f"formatted command should quote project paths with spaces: {formatted}")
     print("PASS seed_command_includes_project_source_sessions_and_apply")
 

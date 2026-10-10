@@ -547,7 +547,10 @@ def test_pin_kb_dir_persists_nonexistent_relative_target_as_absolute():
         os.chdir(launch_dir)
         level, _message = ie.pin_kb_dir("relative vault", False)
         recorded = json.loads(ie.KB_LOCATION_PATH.read_text(encoding="utf-8"))["kb_dir"]
-        expected = str(Path("relative vault").absolute()).replace("\\", "/")
+        # resolve(), not absolute(): the pin is persisted resolved, and on
+        # Windows getcwd() keeps mkdtemp's 8.3 spelling (C:\Users\RUNNER~1)
+        # that resolve() expands to the long name.
+        expected = str(Path("relative vault").resolve()).replace("\\", "/")
         _assert(level == "OK" and recorded == expected,
                 f"relative KB targets must be persisted absolutely: {recorded!r}")
     finally:
@@ -688,7 +691,7 @@ def test_seed_command_args_use_llm_apply_and_project():
     _assert("--apply" in args,
             f"install-time seed should preview then offer staging writes: {args}")
     formatted = ie.format_command(args)
-    _assert("'/tmp/example project'" in formatted,
+    _assert(f"'{project}'" in formatted,
             f"formatted command should quote paths with spaces: {formatted}")
     print("PASS seed_command_args_use_llm_apply_and_project")
 
