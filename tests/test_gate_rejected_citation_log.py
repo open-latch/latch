@@ -30,6 +30,8 @@ from latch.retrieval import embeddings  # noqa: E402
 from latch.gate import gate        # noqa: E402
 from latch.common import log_utils   # noqa: E402
 
+import _win_fakeexe  # noqa: E402
+
 # Stop the default-ON adversary from firing a second real backend call
 # (same module-level convention as test_gate_classify.py).
 gate.ADVERSARY_ENABLED = False
@@ -73,6 +75,12 @@ def _force_seed(conn, node_id):
 
 
 def _fake_claude(path: Path) -> Path:
+    if os.name == "nt":
+        return _win_fakeexe.write_cmd_fake(
+            path,
+            "drain_stdin()\n"
+            'emit(os.environ["FAKE_GATE_RESPONSE"])\n',
+        )
     path.write_text(
         "#!/usr/bin/env bash\n"
         "cat >/dev/null\n"
