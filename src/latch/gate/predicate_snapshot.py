@@ -16,6 +16,7 @@ from pathlib import Path
 import re
 import stat
 import tempfile
+import time
 from typing import Any, Callable, Mapping, Sequence
 
 from latch.gate import predicate
@@ -27,6 +28,10 @@ _PUBLIC_SOURCE_ROOT = next(p for p in Path(__file__).resolve().parents if p.name
 _MAX_TOKEN_BYTES = 64 * 1024
 _SAFE_OPAQUE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$")
 _SAFE_REASON_CODE_RE = re.compile(r"^[a-z][a-z0-9_]*(?::[a-z][a-z0-9_]*)?$")
+# Windows retries for a replace refused by an open consumer handle: about two
+# seconds of 1 ms doubling to 4 ms backoff before the PermissionError stands.
+_WINDOWS_REPLACE_RETRIES = 500
+_WINDOWS_REPLACE_MAX_DELAY = 0.004
 
 
 class SnapshotPublicationError(RuntimeError):
@@ -627,7 +632,7 @@ def _atomic_private_json(path: Path, document: Mapping[str, object]) -> None:
             stream.write(payload)
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temporary, path)
+        _replace(temporary, path)
         try:
             os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
         except OSError:
@@ -646,6 +651,29 @@ def _atomic_private_json(path: Path, document: Mapping[str, object]) -> None:
             temporary.unlink()
         except FileNotFoundError:
             pass
+
+
+def _replace(temporary: Path, path: Path) -> None:
+    """Atomically replace ``path``, waiting out Windows consumer handles.
+
+    Windows refuses to replace a file while another handle holds it open
+    (Python's ``open`` grants no delete sharing), so a consumer mid-read makes
+    the replace fail with ``PermissionError`` (WinError 5) until it closes.
+    Consumers hold the file for one read, so a bounded retry publishes once
+    they close.  POSIX rename never waits on readers and keeps one attempt.
+    """
+    if os.name != "nt":
+        os.replace(temporary, path)
+        return
+    delay = 0.001
+    for _ in range(_WINDOWS_REPLACE_RETRIES):
+        try:
+            os.replace(temporary, path)
+            return
+        except PermissionError:
+            time.sleep(delay)
+            delay = min(delay * 2, _WINDOWS_REPLACE_MAX_DELAY)
+    os.replace(temporary, path)
 
 
 def _fsync_directory(directory: Path) -> None:
