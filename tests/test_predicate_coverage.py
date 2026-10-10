@@ -148,7 +148,8 @@ def test_aggregates_only_and_total_accounting(tmp_path):
     assert report["read_only_verified"] is True
 
     proc = subprocess.run(
-        ["bash", str(_ROOT / "bin" / "predicate_coverage.sh"), str(vault_path)],
+        [bash(), str(_ROOT / "bin" / "predicate_coverage.sh"), str(vault_path)],
+        env={**os.environ, "LATCH_PYTHON": sys.executable},
         check=True,
         capture_output=True,
         text=True,

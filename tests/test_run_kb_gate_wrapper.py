@@ -10,6 +10,8 @@ import os
 import subprocess
 from pathlib import Path
 
+from _win_gitbash import bash, output_mentions_path
+
 KB_HOME = Path(__file__).resolve().parent.parent
 SCRIPTS = [
     KB_HOME / "bin" / "run_latch_gate.sh",
@@ -28,7 +30,7 @@ def test_gate_wrappers_honor_configured_python():
     env["CLAUDE_KB_PYTHON"] = "echo"
     for script in SCRIPTS:
         r = subprocess.run(
-            ["bash", str(script), "Revive this rejected path"],
+            [bash(), str(script), "Revive this rejected path"],
             env=env,
             capture_output=True,
             text=True,
@@ -36,9 +38,9 @@ def test_gate_wrappers_honor_configured_python():
             cwd=str(KB_HOME),
         )
         _assert(r.returncode == 0, f"{script.name} exit {r.returncode}: {r.stderr}")
-        _assert(str(KB_HOME / "src" / "latch" / "gate" / "kb_gate_cli.py") in r.stdout,
+        _assert(output_mentions_path(r.stdout, KB_HOME / "src" / "latch" / "gate" / "kb_gate_cli.py"),
                 f"{script.name} should exec kb_gate_cli.py, got: {r.stdout}")
-        _assert(str(KB_HOME) in r.stdout,
+        _assert(output_mentions_path(r.stdout, KB_HOME),
                 f"{script.name} should pass the current project dir, got: {r.stdout}")
         _assert("Revive this rejected path" in r.stdout,
                 f"{script.name} should preserve the request args, got: {r.stdout}")
@@ -55,7 +57,7 @@ def test_legacy_wrapper_does_not_require_latch_wrapper_executable_bit():
     try:
         target.chmod(original_mode & ~0o111)
         r = subprocess.run(
-            ["bash", str(legacy), "Revive this rejected path"],
+            [bash(), str(legacy), "Revive this rejected path"],
             env=env,
             capture_output=True,
             text=True,
@@ -65,7 +67,7 @@ def test_legacy_wrapper_does_not_require_latch_wrapper_executable_bit():
     finally:
         target.chmod(original_mode)
     _assert(r.returncode == 0, f"{legacy.name} exit {r.returncode}: {r.stderr}")
-    _assert(str(KB_HOME / "src" / "latch" / "gate" / "kb_gate_cli.py") in r.stdout,
+    _assert(output_mentions_path(r.stdout, KB_HOME / "src" / "latch" / "gate" / "kb_gate_cli.py"),
             f"{legacy.name} should still delegate through bash: {r.stdout}")
     print("PASS legacy_wrapper_does_not_require_latch_wrapper_executable_bit")
 

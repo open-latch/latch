@@ -120,6 +120,13 @@ def _run_probe(code, ok_token, timeout, arch_hint):
 def make_fake_uv(tmp_path: Path) -> Path:
     fake_uv = tmp_path / "fake-uv"
     python = shlex.quote(sys.executable)
+    if os.name == "nt":
+        # A python.exe linked or copied out of its install tree cannot find
+        # its standard library, so build a real pip-less venv; install.sh
+        # finds its interpreter at .venv/Scripts/python.exe.
+        make_venv = f'{python} -m venv --without-pip "$target"'
+    else:
+        make_venv = f'mkdir -p "$target/bin"\n    ln -sf {python} "$target/bin/python"'
     fake_uv.write_text(
         f"""#!/usr/bin/env bash
 set -eu
@@ -128,8 +135,7 @@ case "$1" in
   venv)
     if [ "${{FAKE_UV_FAIL:-}}" = "venv" ]; then exit 41; fi
     target="${{@:$#}}"
-    mkdir -p "$target/bin"
-    ln -sf {python} "$target/bin/python"
+    {make_venv}
     ;;
   pip)
     if [ "${{FAKE_UV_FAIL:-}}" = "pip" ]; then exit 42; fi
@@ -141,9 +147,24 @@ case "$1" in
 esac
 """,
         encoding="utf-8",
+        newline="\n",
     )
     fake_uv.chmod(0o755)
     return fake_uv
+
+
+def installed_path(app: Path, *parts: str) -> str:
+    """A path under the install dir, spelled as install.sh reports it."""
+    if os.name == "nt":
+        # install.sh respells a native C:\... install dir as C:/...
+        return "/".join((app.as_posix(), *parts))
+    return str(app.joinpath(*parts))
+
+
+def runtime_python(app: Path) -> str:
+    if os.name == "nt":
+        return installed_path(app, ".venv", "Scripts", "python.exe")
+    return installed_path(app, ".venv", "bin", "python")
 
 
 def installer_env(tmp_path: Path, origin: Path, fake_uv: Path) -> dict[str, str]:
@@ -167,7 +188,7 @@ def invoke_installer(
     extra: tuple[str, ...] = (),
     env_extra: dict[str, str] | None = None,
     use_existing_uv: bool = True,
-    shell: str = "bash",
+    shell: str | None = None,
 ):
     project = tmp_path / "project"
     project.mkdir(exist_ok=True)
@@ -177,7 +198,7 @@ def invoke_installer(
         env.pop("LATCH_UV")
     env.update(env_extra or {})
     result = run(
-        shell,
+        shell or bash(),
         str(INSTALL_SH),
         "--install-dir",
         str(app),
@@ -210,8 +231,8 @@ def test_posix_bootstrap_fresh_then_idempotent_reconcile(tmp_path: Path):
     assert calls[0]["argv"][0] == "--project"
     assert Path(calls[0]["argv"][1]).resolve() == project.resolve()
     assert calls[0]["argv"][2:] == ["--agents", "codex", "--no-seed"]
-    assert calls[0]["latch_home"] == str(app)
-    assert calls[0]["latch_python"] == str(app / ".venv" / "bin" / "python")
+    assert calls[0]["latch_home"] == installed_path(app)
+    assert calls[0]["latch_python"] == runtime_python(app)
     uv_first = Path(env["FAKE_UV_LOG"]).read_text(encoding="utf-8").splitlines()
     assert sum(line.startswith("venv ") for line in uv_first) == 1
     assert sum(line.startswith("pip install ") for line in uv_first) == 1
@@ -318,7 +339,7 @@ def test_posix_sqlite_vec_preflight_blocks_before_configuration_writes(tmp_path:
     assert failed.returncode != 0
     assert "sqlite-vec capability preflight failed" in failed.stderr
     assert "without SQLite extension loading support" in failed.stderr
-    assert str(app / ".venv" / "bin" / "python") in failed.stderr
+    assert runtime_python(app) in failed.stderr
     assert "No project or agent configuration was written" in failed.stderr
     assert (app / ".git").is_dir()
     assert not (app / "src" / "__pycache__").exists()
@@ -336,6 +357,13 @@ def test_posix_sqlite_vec_preflight_blocks_before_configuration_writes(tmp_path:
     assert config_file.read_text(encoding="utf-8") == "configured\n"
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason=(
+        "shadows curl by PATH order under a POSIX system PATH, but Git Bash's "
+        "bash.exe launcher puts its own mingw64/bin, which ships curl, first"
+    ),
+)
 def test_posix_uv_bootstrap_noise_does_not_pollute_executable_path(tmp_path: Path):
     origin = make_origin(tmp_path)
     fake_uv = make_fake_uv(tmp_path)
@@ -531,10 +559,12 @@ def test_git_bash_default_converges_on_windows_local_app_data(tmp_path: Path):
     (fake_bin / "uname").write_text(
         "#!/usr/bin/env bash\nprintf '%s\\n' MINGW64_NT\n",
         encoding="utf-8",
+        newline="\n",
     )
     (fake_bin / "cygpath").write_text(
         "#!/usr/bin/env bash\nprintf '%s\\n' '/c/Users/Test User/AppData/Local'\n",
         encoding="utf-8",
+        newline="\n",
     )
     (fake_bin / "uname").chmod(0o755)
     (fake_bin / "cygpath").chmod(0o755)
@@ -548,7 +578,7 @@ def test_git_bash_default_converges_on_windows_local_app_data(tmp_path: Path):
     })
 
     result = run(
-        "bash", str(INSTALL_SH), "--dry-run", "--project", str(project),
+        bash(), str(INSTALL_SH), "--dry-run", "--project", str(project),
         cwd=project, env=env,
     )
 
@@ -560,7 +590,7 @@ def test_git_bash_drive_letter_install_dir_stays_absolute(tmp_path: Path):
     project = tmp_path / "project"
     project.mkdir()
     result = run(
-        "bash",
+        bash(),
         str(INSTALL_SH),
         "--dry-run",
         "--project",
@@ -629,6 +659,7 @@ case "$2" in
 esac
 """,
         encoding="utf-8",
+        newline="\n",
     )
     fake_cygpath.chmod(0o755)
 
@@ -648,7 +679,7 @@ esac
 
 
 def test_bootstrap_script_contracts_and_syntax():
-    syntax = run("bash", "-n", str(INSTALL_SH))
+    syntax = run(bash(), "-n", str(INSTALL_SH))
     assert syntax.returncode == 0, syntax.stderr
     shell = INSTALL_SH.read_text(encoding="utf-8")
     powershell = INSTALL_PS1.read_text(encoding="utf-8")
@@ -748,13 +779,13 @@ def test_posix_truncated_bootstrap_without_entrypoint_has_no_side_effect(tmp_pat
     marker = '\nmain "$@"\n'
     assert source.endswith(marker)
     truncated = tmp_path / "truncated-install.sh"
-    truncated.write_text(source[:-len(marker)] + "\n", encoding="utf-8")
+    truncated.write_text(source[:-len(marker)] + "\n", encoding="utf-8", newline="\n")
     project = tmp_path / "project"
     project.mkdir()
     app = tmp_path / "app"
 
     result = run(
-        "bash",
+        bash(),
         str(truncated),
         "--install-dir",
         str(app),
