@@ -15,6 +15,9 @@ import sys
 import pytest
 from filelock import FileLock
 
+# The bin/*.sh entrypoint runs under Git Bash on Windows, never the WSL launcher.
+from _win_gitbash import bash as _bash
+
 from latch.store import db
 from latch.gate import gate
 from latch.common import log_utils
@@ -36,31 +39,6 @@ COMMIT = "a" * 40
 # owner-only; the checkpoint's privacy there rests on the vault's ACLs (the
 # WINDOWS GAP stated in ``latch.gate.request_text_store``).
 POSIX_MODES = os.name == "posix"
-
-
-def _bash() -> str:
-    """The bash that runs the ``bin/*.sh`` entrypoint on this host.
-
-    POSIX keeps plain ``bash``. On Windows ``CreateProcess`` searches System32
-    before PATH, so a bare ``bash`` reaches the WSL launcher stub, which runs
-    nothing without an installed distribution. Resolve Git Bash explicitly:
-    from PATH, else beside the Git for Windows ``git`` this suite already
-    requires (``<root>\\cmd`` or ``<root>\\bin``, with bash in ``<root>\\bin``),
-    and never anything under %SystemRoot%.
-    """
-
-    if os.name != "nt":
-        return "bash"
-    system_root = Path(os.environ.get("SystemRoot", r"C:\Windows")).resolve()
-    git = shutil.which("git")
-    for candidate in (
-        shutil.which("bash"),
-        git and str(Path(git).parent.parent / "bin" / "bash.exe"),
-    ):
-        if candidate and Path(candidate).is_file():
-            if not Path(candidate).resolve().is_relative_to(system_root):
-                return candidate
-    pytest.skip("no Git Bash on this Windows host (only the WSL stub, or none)")
 
 
 def _fixture_bytes() -> dict[str, bytes]:
