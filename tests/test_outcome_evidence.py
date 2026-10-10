@@ -118,6 +118,15 @@ def _censor_reason(evidence: om.OutcomeEvidence, project: Path) -> str | None:
     return om._classify_outcome(observations)[1]
 
 
+def _repo_coordinate(project: Path) -> str:
+    """The documented canonical repo coordinate the artifact join reports.
+
+    On Windows that is ``C:/...`` (forward slashes, upper-case drive), not the
+    native ``str(tmp_path)``; a POSIX tmp_path passes through unchanged.
+    """
+    return artifacts.canonicalize_repo(str(project))
+
+
 def _resolve(conn, project: Path, receipts, stable):
     return outcome_evidence.resolve_receipt_evidence(
         receipts,
@@ -664,7 +673,7 @@ def test_cross_tool_call_id_collision_is_scoped_to_the_receipt_window(
     else:
         assert artifacts.observe_session_artifacts_in_window_bytes(
             data, str(tmp_path), START, END, session_id=SESSION,
-        ) == [{"repo": str(tmp_path), "path": "src/a.py"}]
+        ) == [{"repo": _repo_coordinate(tmp_path), "path": "src/a.py"}]
 
 
 @pytest.mark.parametrize("adapter", ["claude", "codex"])
@@ -700,7 +709,7 @@ def test_artifact_results_join_the_ordered_same_id_call_occurrence(
 ):
     (tmp_path / ".git").mkdir()
     shared_id = "reused-call-id"
-    expected = [{"repo": str(tmp_path), "path": "src/inside.py"}]
+    expected = [{"repo": _repo_coordinate(tmp_path), "path": "src/inside.py"}]
     if adapter == "claude":
         rows = [
             {
@@ -909,7 +918,7 @@ def test_call_local_codex_completion_does_not_create_result_debt(tmp_path: Path)
         START,
         END,
         session_id=SESSION,
-    ) == [{"repo": str(tmp_path), "path": "src/inside.py"}]
+    ) == [{"repo": _repo_coordinate(tmp_path), "path": "src/inside.py"}]
 
 
 def test_call_local_codex_completion_ignores_ambiguous_old_output(tmp_path: Path):
@@ -963,7 +972,7 @@ def test_call_local_codex_completion_ignores_ambiguous_old_output(tmp_path: Path
         START,
         END,
         session_id=SESSION,
-    ) == [{"repo": str(tmp_path), "path": "src/inside.py"}]
+    ) == [{"repo": _repo_coordinate(tmp_path), "path": "src/inside.py"}]
 
 
 def test_codex_result_envelopes_realign_matching_call_families(tmp_path: Path):
@@ -1043,7 +1052,7 @@ def test_codex_result_envelopes_realign_matching_call_families(tmp_path: Path):
         START,
         END,
         session_id=SESSION,
-    ) == [{"repo": str(tmp_path), "path": "src/inside.py"}]
+    ) == [{"repo": _repo_coordinate(tmp_path), "path": "src/inside.py"}]
 
 
 def test_artifact_result_just_after_window_still_joins_its_call(tmp_path: Path):
@@ -1080,7 +1089,7 @@ def test_artifact_result_just_after_window_still_joins_its_call(tmp_path: Path):
         START,
         END,
         session_id=SESSION,
-    ) == [{"repo": str(tmp_path), "path": "src/edge.py"}]
+    ) == [{"repo": _repo_coordinate(tmp_path), "path": "src/edge.py"}]
 
 
 def test_resolver_builds_stable_segment_index_once_per_invocation(
@@ -1167,7 +1176,7 @@ def test_bytes_helper_reads_successful_codex_patch_from_exact_session(tmp_path: 
         START,
         END,
         session_id=SESSION,
-    ) == [{"repo": str(tmp_path), "path": "src/codex.py"}]
+    ) == [{"repo": _repo_coordinate(tmp_path), "path": "src/codex.py"}]
 
 
 def test_corpus_shaped_outer_exec_apply_patch_matches_direct_and_resolver(
@@ -1186,7 +1195,7 @@ def test_corpus_shaped_outer_exec_apply_patch_matches_direct_and_resolver(
         "text(result);"
     )
     data = _codex_outer_exec_bytes(tmp_path, script)
-    expected = [{"repo": str(tmp_path), "path": "src/outer.py"}]
+    expected = [{"repo": _repo_coordinate(tmp_path), "path": "src/outer.py"}]
     assert artifacts.observe_session_artifacts_in_window_bytes(
         data,
         str(tmp_path),
@@ -1359,7 +1368,7 @@ def test_bytes_helper_ignores_broken_edit_outside_exact_window(tmp_path: Path):
         START,
         END,
         session_id=SESSION,
-    ) == [{"repo": str(tmp_path), "path": "src/inside.py"}]
+    ) == [{"repo": _repo_coordinate(tmp_path), "path": "src/inside.py"}]
 
 
 @pytest.mark.parametrize(
