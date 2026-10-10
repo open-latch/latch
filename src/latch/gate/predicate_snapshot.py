@@ -17,7 +17,7 @@ import re
 import stat
 import tempfile
 import time
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence, TypeVar
 
 from latch.gate import predicate
 
@@ -28,10 +28,13 @@ _PUBLIC_SOURCE_ROOT = next(p for p in Path(__file__).resolve().parents if p.name
 _MAX_TOKEN_BYTES = 64 * 1024
 _SAFE_OPAQUE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$")
 _SAFE_REASON_CODE_RE = re.compile(r"^[a-z][a-z0-9_]*(?::[a-z][a-z0-9_]*)?$")
-# Windows retries for a replace refused by an open consumer handle: about two
-# seconds of 1 ms doubling to 4 ms backoff before the PermissionError stands.
+# Windows retries for a sharing refusal, with 1 ms backoff doubling to 4 ms.
+# A replace waits out consumer reads for about two seconds; a read waits out
+# the replace's own handle for about 0.2 seconds.  Then the refusal stands.
 _WINDOWS_REPLACE_RETRIES = 500
-_WINDOWS_REPLACE_MAX_DELAY = 0.004
+_WINDOWS_READ_RETRIES = 50
+_WINDOWS_RETRY_MAX_DELAY = 0.004
+_T = TypeVar("_T")
 
 
 class SnapshotPublicationError(RuntimeError):
@@ -200,7 +203,7 @@ def load_policy_snapshot(
     """
     path = Path(snapshot_path)
     try:
-        raw = path.read_bytes()
+        raw = _windows_sharing_retry(path.read_bytes, _WINDOWS_READ_RETRIES)
     except FileNotFoundError:
         return _load_failure("snapshot_missing")
     except OSError:
@@ -662,18 +665,32 @@ def _replace(temporary: Path, path: Path) -> None:
     Consumers hold the file for one read, so a bounded retry publishes once
     they close.  POSIX rename never waits on readers and keeps one attempt.
     """
+    _windows_sharing_retry(
+        lambda: os.replace(temporary, path), _WINDOWS_REPLACE_RETRIES
+    )
+
+
+def _windows_sharing_retry(operation: Callable[[], _T], retries: int) -> _T:
+    """Run ``operation``, retrying a Windows sharing refusal ``retries`` times.
+
+    Python opens files without delete sharing, so on Windows a replace and a
+    read of the same file refuse each other with ``PermissionError`` while the
+    other's handle is open: a reader blocks the replace, and the replace keeps
+    the renamed file open for delete until its handle closes, which refuses a
+    reader that arrives just after the rename.  Each handle is held briefly,
+    so a bounded retry waits it out and then lets the refusal stand.  POSIX
+    has no such refusal and keeps one attempt.
+    """
     if os.name != "nt":
-        os.replace(temporary, path)
-        return
+        return operation()
     delay = 0.001
-    for _ in range(_WINDOWS_REPLACE_RETRIES):
+    for _ in range(retries):
         try:
-            os.replace(temporary, path)
-            return
+            return operation()
         except PermissionError:
             time.sleep(delay)
-            delay = min(delay * 2, _WINDOWS_REPLACE_MAX_DELAY)
-    os.replace(temporary, path)
+            delay = min(delay * 2, _WINDOWS_RETRY_MAX_DELAY)
+    return operation()
 
 
 def _fsync_directory(directory: Path) -> None:

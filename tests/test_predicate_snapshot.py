@@ -432,6 +432,102 @@ def test_posix_publish_does_not_retry_a_refused_replace(tmp_path, monkeypatch):
     assert not list(private_dir.glob("*.tmp"))
 
 
+def _refuse_reads_of(target: Path, monkeypatch, refusals: int) -> list[str]:
+    """Make the first ``refusals`` reads of ``target`` hit a sharing refusal."""
+    real_read_bytes = Path.read_bytes
+    attempts: list[str] = []
+
+    def read_bytes(self):
+        if os.fspath(self) == os.fspath(target):
+            attempts.append(os.fspath(self))
+            if len(attempts) <= refusals:
+                raise PermissionError(
+                    13,
+                    "The process cannot access the file because it is being "
+                    "used by another process",
+                )
+        return real_read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", read_bytes)
+    return attempts
+
+
+def test_windows_load_waits_out_the_replace_still_holding_the_snapshot(
+    tmp_path, monkeypatch
+):
+    # After MoveFileExW renames the new snapshot into place, its handle still
+    # holds the file with DELETE access until it closes.  Python opens files
+    # without FILE_SHARE_DELETE, so a reader arriving in that window gets a
+    # sharing violation (PermissionError) instead of the published snapshot.
+    # Simulate that window on any OS by refusing the first reads while
+    # predicate_snapshot sees os.name == "nt".
+    snapshot = _module("predicate_snapshot")
+    token_path = tmp_path / "source-generation.txt"
+    token_path.write_text("stable-generation\n", encoding="utf-8")
+    private_dir = tmp_path / "private"
+    private_dir.mkdir()
+    target = private_dir / "policy.snapshot.json"
+    domain = "synthetic-project-a"
+    published = snapshot.publish_policy_snapshot(
+        target,
+        policy_domain_id=domain,
+        projector=_projection,
+        freshness_token_path=token_path,
+    )
+    sleeps: list[float] = []
+    monkeypatch.setattr(snapshot, "os", _OsAs("nt", os.replace))
+    monkeypatch.setattr(time, "sleep", sleeps.append)
+    attempts = _refuse_reads_of(target, monkeypatch, refusals=2)
+
+    loaded = snapshot.load_policy_snapshot(target, policy_domain_id=domain)
+
+    assert loaded.reason_codes == ()
+    assert loaded.snapshot is not None
+    assert loaded.snapshot.digest == published["digest"]
+    assert attempts == [str(target)] * 3
+    assert len(sleeps) == 2
+
+    # A refusal that never clears still fails closed, after a bounded wait.
+    sleeps.clear()
+    attempts = _refuse_reads_of(target, monkeypatch, refusals=10**6)
+
+    loaded = snapshot.load_policy_snapshot(target, policy_domain_id=domain)
+
+    assert loaded.snapshot is None
+    assert loaded.reason_codes == ("snapshot_unreadable",)
+    assert len(attempts) == snapshot._WINDOWS_READ_RETRIES + 1 == len(sleeps) + 1
+    assert sum(sleeps) < 0.5
+
+
+def test_posix_load_does_not_retry_a_refused_read(tmp_path, monkeypatch):
+    # POSIX readers never collide with a rename, so a refused read there is a
+    # real permission failure and fails closed at once, as it always has.
+    snapshot = _module("predicate_snapshot")
+    token_path = tmp_path / "source-generation.txt"
+    token_path.write_text("stable-generation\n", encoding="utf-8")
+    private_dir = tmp_path / "private"
+    private_dir.mkdir()
+    target = private_dir / "policy.snapshot.json"
+    domain = "synthetic-project-a"
+    snapshot.publish_policy_snapshot(
+        target,
+        policy_domain_id=domain,
+        projector=_projection,
+        freshness_token_path=token_path,
+    )
+    sleeps: list[float] = []
+    monkeypatch.setattr(snapshot, "os", _OsAs("posix", os.replace))
+    monkeypatch.setattr(time, "sleep", sleeps.append)
+    attempts = _refuse_reads_of(target, monkeypatch, refusals=1)
+
+    loaded = snapshot.load_policy_snapshot(target, policy_domain_id=domain)
+
+    assert loaded.snapshot is None
+    assert loaded.reason_codes == ("snapshot_unreadable",)
+    assert attempts == [str(target)]
+    assert sleeps == []
+
+
 def test_missing_corrupt_or_wrong_domain_snapshot_flags(tmp_path):
     consumer = _module("predicate_consumer")
     snapshot = _module("predicate_snapshot")
