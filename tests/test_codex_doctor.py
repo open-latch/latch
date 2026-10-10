@@ -14,6 +14,8 @@ from latch.hosts import agents_md_sync  # noqa: E402
 from latch.hosts import codex_doctor as cd  # noqa: E402
 from latch.install import install_codex as ic  # noqa: E402
 
+import _win_fakeexe  # noqa: E402
+
 SID = "019ed000-0000-7000-8000-000000000001"
 
 
@@ -37,7 +39,9 @@ def _write_rollout(home: Path, sid: str = SID) -> Path:
     return p
 
 
-def _fake_exe(path: Path, body: str) -> Path:
+def _fake_exe(path: Path, body: str, win_source: str) -> Path:
+    if os.name == "nt":
+        return _win_fakeexe.write_cmd_fake(path, win_source)
     path.write_text("#!/usr/bin/env bash\n" + body, encoding="utf-8")
     path.chmod(0o755)
     return path
@@ -441,6 +445,10 @@ def test_check_summarizer_backend():
             "done\n"
             "printf '%s\\n' '{\"ok\": true}' > \"$out\"\n"
             "printf '%s\\n' '{\"ok\": true}'\n",
+            win_source=(
+                "write_last_message('{\"ok\": true}')\n"
+                "emit('{\"ok\": true}')\n"
+            ),
         )
         codex = cd.check_summarizer_backend(
             backend="codex", codex_bin=str(codex_ok), timeout_s=1,
@@ -450,6 +458,7 @@ def test_check_summarizer_backend():
         ok_bin = _fake_exe(
             d / "claude-ok",
             "printf '%s\\n' '{\"type\":\"result\",\"result\":\"{\\\"ok\\\": true}\"}'\n",
+            win_source="emit(r'{\"type\":\"result\",\"result\":\"{\\\"ok\\\": true}\"}')\n",
         )
         ok = cd.check_summarizer_backend(
             backend="claude", claude_bin=str(ok_bin), timeout_s=1,
@@ -460,6 +469,10 @@ def test_check_summarizer_backend():
             d / "claude-fail",
             "printf '%s\\n' '{\"api_error_status\":400,\"result\":\"Credit balance is too low\"}'\n"
             "exit 1\n",
+            win_source=(
+                "emit('{\"api_error_status\":400,\"result\":\"Credit balance is too low\"}')\n"
+                "sys.exit(1)\n"
+            ),
         )
         fail = cd.check_summarizer_backend(
             backend="claude", claude_bin=str(fail_bin), timeout_s=1,
