@@ -14,10 +14,10 @@ import _isolation  # noqa: F401,E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-import db  # noqa: E402
-import gate_report  # noqa: E402
-import log_utils  # noqa: E402
-import paths  # noqa: E402
+from latch.store import db  # noqa: E402
+from latch.gate import gate_report  # noqa: E402
+from latch.common import log_utils  # noqa: E402
+from latch.store import paths  # noqa: E402
 
 
 def _assert(cond, msg):
@@ -210,6 +210,7 @@ def test_gate_report_ignores_raw_query_debug_fields():
             {
                 "query_hash": "aaa111bbb222",
                 "query_excerpt": "SECRET RAW PROMPT",
+                "request_text": "SECRET VERBATIM REQUEST",
                 "uncovered_claim_texts": ["SECRET CLAIM"],
                 "recommendation": "PROCEED",
                 "evidence_ids": [node],
@@ -221,6 +222,7 @@ def test_gate_report_ignores_raw_query_debug_fields():
         encoded = json.dumps(report)
         text = gate_report.format_text(report)
         _assert("SECRET RAW PROMPT" not in encoded + text, encoded + text)
+        _assert("SECRET VERBATIM REQUEST" not in encoded + text, encoded + text)
         _assert("SECRET CLAIM" not in encoded + text, encoded + text)
         _assert("Secret body" not in encoded + text, encoded + text)
         _assert("Safe visible title" in text, text)
@@ -270,9 +272,34 @@ def test_gate_report_cli_json_output():
         _cleanup(tmp, conn)
 
 
+def test_measurement_block_is_prominently_noncanonical_and_invalidated():
+    lines: list[str] = []
+    gate_report._append_measurement(lines, {
+        "measurement_protocol_version": "outcome-v2.6.0",
+        "invalidated": True,
+        "invalidation_reasons": [
+            "source_roots_missing:S2",
+            "candidate_enumeration_incomplete:S1",
+        ],
+        "o1": True,
+        "o2": "indeterminate",
+        "o3_status": "diagnostic-fail",
+        "o3_subordinated_to_o2": True,
+    })
+    text = "\n".join(lines)
+    _assert("Diagnostic (Noncanonical)" in text, text)
+    _assert("Status: INVALIDATED" in text, text)
+    _assert("no canonical authority" in text, text)
+    _assert("source_roots_missing:S2" in text, text)
+    _assert("candidate_enumeration_incomplete:S1" in text, text)
+    _assert("B18" not in text, text)
+    print("PASS measurement_block_is_prominently_noncanonical_and_invalidated")
+
+
 if __name__ == "__main__":
     test_gate_report_summarizes_structural_logs_and_current_nodes()
     test_gate_report_does_not_infer_triggers_from_structural_logs()
     test_gate_report_ignores_raw_query_debug_fields()
     test_gate_report_cli_json_output()
+    test_measurement_block_is_prominently_noncanonical_and_invalidated()
     print("\nAll gate report tests pass.")

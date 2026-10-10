@@ -14,10 +14,11 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
-import mcp_broker  # noqa: E402
-import mcp_daemon  # noqa: E402
-import mcp_proxy  # noqa: E402
-import mcp_runtime  # noqa: E402
+from latch.mcp import mcp_broker  # noqa: E402
+from latch.mcp import mcp_daemon  # noqa: E402
+from latch.mcp import mcp_launcher_win  # noqa: E402
+from latch.mcp import mcp_proxy  # noqa: E402
+from latch.mcp import mcp_runtime  # noqa: E402
 
 
 def test_windows_daemon_creation_flags_suppress_console_without_detaching():
@@ -28,6 +29,9 @@ def test_windows_daemon_creation_flags_suppress_console_without_detaching():
 
 
 def test_windows_base_command_bypasses_venv_redirector(monkeypatch, tmp_path):
+    monkeypatch.delenv(
+        mcp_runtime.WINDOWS_VENV_SITE_PACKAGES_ENV, raising=False
+    )
     base_dir = tmp_path / "base"
     base_dir.mkdir()
     base_python = base_dir / "python.exe"
@@ -48,6 +52,39 @@ def test_windows_base_command_bypasses_venv_redirector(monkeypatch, tmp_path):
     env = {"PYTHONPATH": "/poison"}
     assert mcp_broker._windows_base_command(env) == str(base_python)
     assert env["PYTHONPATH"] == str(site_packages)
+
+
+@pytest.mark.parametrize("stale_exists", [False, True])
+def test_windows_base_command_prefers_live_venv_over_stale_handoff(
+    monkeypatch, tmp_path, stale_exists
+):
+    base_dir = tmp_path / "base"
+    base_dir.mkdir()
+    base_python = base_dir / "python.exe"
+    base_python.write_bytes(b"")
+    venv_dir = tmp_path / "venv"
+    site_packages = venv_dir / "Lib" / "site-packages"
+    site_packages.mkdir(parents=True)
+    stale = tmp_path / "missing-site-packages"
+    if stale_exists:
+        stale.mkdir()
+
+    monkeypatch.setattr(
+        mcp_broker.sys, "_base_executable", str(base_python), raising=False
+    )
+    monkeypatch.setattr(mcp_broker.sys, "base_prefix", str(base_dir))
+    monkeypatch.setattr(mcp_broker.sys, "prefix", str(venv_dir))
+    monkeypatch.setenv(
+        mcp_runtime.WINDOWS_VENV_SITE_PACKAGES_ENV, str(stale)
+    )
+
+    env = {}
+    assert mcp_broker._windows_base_command(env) == str(base_python)
+    assert env["PYTHONPATH"] == str(site_packages)
+    assert (
+        env[mcp_runtime.WINDOWS_VENV_SITE_PACKAGES_ENV]
+        == str(site_packages)
+    )
 
 
 def test_windows_base_helper_reinjects_explicit_venv_site_packages(
@@ -77,6 +114,224 @@ def test_windows_base_helper_reinjects_explicit_venv_site_packages(
         mcp_broker._windows_base_command(
             {}, site_packages=str(tmp_path / "missing")
         )
+
+
+def test_windows_launcher_exports_private_venv_site_packages(monkeypatch, tmp_path):
+    venv_dir = tmp_path / "venv"
+    site_packages = venv_dir / "Lib" / "site-packages"
+    site_packages.mkdir(parents=True)
+
+    monkeypatch.setattr(mcp_launcher_win.sys, "prefix", str(venv_dir))
+    child_env = mcp_launcher_win._child_environment({
+        "PYTHONPATH": "/caller/poison",
+        mcp_runtime.WINDOWS_VENV_SITE_PACKAGES_ENV: "/stale/handoff",
+    })
+    assert child_env["PYTHONPATH"].split(os.pathsep)[0] == str(site_packages)
+    assert (
+        child_env[mcp_runtime.WINDOWS_VENV_SITE_PACKAGES_ENV]
+        == str(site_packages)
+    )
+
+
+def test_windows_launcher_drops_stale_handoff_without_live_venv(monkeypatch):
+    monkeypatch.setattr(mcp_launcher_win, "_venv_site_packages", lambda: None)
+    child_env = mcp_launcher_win._child_environment({
+        "PYTHONPATH": "/caller/path",
+        mcp_runtime.WINDOWS_VENV_SITE_PACKAGES_ENV: "/stale/handoff",
+    })
+    assert child_env["PYTHONPATH"] == "/caller/path"
+    assert mcp_runtime.WINDOWS_VENV_SITE_PACKAGES_ENV not in child_env
+
+
+def test_windows_base_proxy_handoff_reaches_daemon_environment(
+    monkeypatch, tmp_path
+):
+    base_dir = tmp_path / "base"
+    base_dir.mkdir()
+    base_python = base_dir / "python.exe"
+    base_python.write_bytes(b"")
+    site_packages = tmp_path / "venv" / "Lib" / "site-packages"
+    site_packages.mkdir(parents=True)
+
+    monkeypatch.setattr(
+        mcp_broker.sys, "_base_executable", str(base_python), raising=False
+    )
+    monkeypatch.setattr(mcp_broker.sys, "base_prefix", str(base_dir))
+    monkeypatch.setattr(mcp_broker.sys, "prefix", str(base_dir))
+    monkeypatch.setattr(mcp_broker.sys, "executable", str(base_python))
+    monkeypatch.setenv(
+        mcp_runtime.WINDOWS_VENV_SITE_PACKAGES_ENV, str(site_packages)
+    )
+    daemon_env = {"PYTHONPATH": "/proxy/poison"}
+    assert mcp_broker._windows_base_command(daemon_env) == str(base_python)
+    assert daemon_env["PYTHONPATH"] == str(site_packages)
+    assert (
+        daemon_env[mcp_runtime.WINDOWS_VENV_SITE_PACKAGES_ENV]
+        == str(site_packages)
+    )
+
+
+def test_windows_daemon_processes_private_venv_pth_before_anyio(
+    monkeypatch, tmp_path
+):
+    site_packages = tmp_path / "venv" / "Lib" / "site-packages"
+    site_packages.mkdir(parents=True)
+    monkeypatch.setenv(
+        mcp_runtime.WINDOWS_VENV_SITE_PACKAGES_ENV, str(site_packages)
+    )
+    activated = []
+    import site
+
+    monkeypatch.setattr(site, "addsitedir", activated.append)
+    assert (
+        mcp_runtime.activate_windows_venv_site_packages(str(site_packages))
+        == str(site_packages)
+    )
+    assert activated == [str(site_packages)]
+
+    source = (ROOT / "src" / "latch" / "mcp" / "mcp_daemon.py").read_text(encoding="utf-8")
+    windows_main = source.index(
+        'if os.name == "nt" and __name__ == "__main__":'
+    )
+    activation_call = source.index(
+        "        _activate_windows_venv_site_packages()", windows_main
+    )
+    assert windows_main < activation_call < source.index("import anyio")
+    legacy_source = (ROOT / "src" / "latch" / "mcp" / "mcp_server.py").read_text(encoding="utf-8")
+    legacy_guard = legacy_source.index('    if os.name == "nt":')
+    legacy_call = legacy_source.index(
+        "mcp_runtime.activate_windows_venv_site_packages", legacy_guard
+    )
+    assert legacy_guard < legacy_call < legacy_source.index(
+        "from mcp.server.fastmcp"
+    )
+
+
+def test_windows_activation_rejects_unvalidated_handoff(
+    monkeypatch, tmp_path
+):
+    stale = tmp_path / "missing-site-packages"
+    activated = []
+    import site
+
+    monkeypatch.setattr(site, "addsitedir", activated.append)
+    with pytest.raises(ValueError, match="invalid Windows venv"):
+        mcp_runtime.activate_windows_venv_site_packages(str(stale))
+    assert activated == []
+
+
+def test_windows_daemon_invalid_handoff_publishes_start_failure(
+    monkeypatch, tmp_path
+):
+    base_dir = tmp_path / "base"
+    base_dir.mkdir()
+    stale = tmp_path / "missing-site-packages"
+    monkeypatch.setattr(mcp_broker.sys, "base_prefix", str(base_dir))
+    monkeypatch.setattr(mcp_broker.sys, "prefix", str(base_dir))
+    monkeypatch.setenv(
+        mcp_runtime.WINDOWS_VENV_SITE_PACKAGES_ENV, str(stale)
+    )
+    published = []
+    events = []
+    monkeypatch.setattr(
+        mcp_daemon.mcp_broker,
+        "publish_start_failure",
+        lambda runtime_key, message: published.append((runtime_key, message)),
+    )
+    monkeypatch.setattr(
+        mcp_daemon.mcp_broker,
+        "emit_lifecycle",
+        lambda event, **fields: events.append((event, fields)),
+    )
+
+    with pytest.raises(
+        mcp_broker.BrokerError,
+        match="invalid Windows venv handoff",
+    ):
+        mcp_daemon._activate_windows_venv_site_packages()
+    assert published == [(
+        mcp_daemon._REQUESTED_RUNTIME_KEY,
+        "Latch received an invalid Windows venv handoff. Reinstall Latch "
+        "and start a fresh task.",
+    )]
+    assert events == [(
+        "daemon_start_failed",
+        {"reason": published[0][1]},
+    )]
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows import contract")
+def test_windows_plain_daemon_import_ignores_stale_handoff(tmp_path):
+    env = os.environ.copy()
+    env.pop("LATCH_MCP_DAEMONIZE", None)
+    env[mcp_runtime.WINDOWS_VENV_SITE_PACKAGES_ENV] = str(
+        tmp_path / "missing-site-packages"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", "from latch.mcp import mcp_daemon"],
+        cwd=str(ROOT / "src"),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows startup contract")
+def test_windows_daemon_execution_publishes_invalid_handoff(tmp_path):
+    base_python = Path(
+        getattr(sys, "_base_executable", "") or sys.base_prefix
+    )
+    if base_python.is_dir():
+        base_python /= "python.exe"
+    assert base_python.is_file()
+    test_root = mcp_broker.paths.validated_test_root()
+    assert test_root is not None
+    vault = (
+        test_root
+        / "vaults"
+        / f"invalid-handoff-{os.getpid()}-{time.time_ns()}"
+    )
+    vault.mkdir(parents=True)
+    runtime_key = "invalid-handoff-test"
+    env = os.environ.copy()
+    env.pop("LATCH_MCP_DAEMONIZE", None)
+    env["LATCH_HOME"] = str(ROOT)
+    env["LATCH_KB_DIR"] = str(vault)
+    env["PYTHONPATH"] = str(ROOT / "src")
+    env["LATCH_MCP_RUNTIME_KEY"] = runtime_key
+    env[mcp_runtime.WINDOWS_VENV_SITE_PACKAGES_ENV] = str(
+        tmp_path / "missing-site-packages"
+    )
+
+    started = time.monotonic()
+    proc = subprocess.run(
+        [str(base_python), str(ROOT / "src" / "latch" / "mcp" / "mcp_daemon.py")],
+        cwd=str(ROOT / "src"),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    elapsed = time.monotonic() - started
+    assert proc.returncode != 0
+    assert elapsed < 5
+    message = (
+        "Latch received an invalid Windows venv handoff. Reinstall Latch "
+        "and start a fresh task."
+    )
+    assert message in proc.stderr
+    receipt = (
+        vault
+        / "runtime"
+        / mcp_broker.RUNTIME_REGISTRY_DIR
+        / runtime_key
+        / mcp_broker.DISCOVERY_FILE
+    )
+    assert json.loads(receipt.read_text(encoding="utf-8"))["error"] == message
 
 
 def test_windows_site_packages_cli_handoff_reaches_ensure_daemon(
@@ -115,9 +370,17 @@ def test_windows_site_packages_cli_handoff_reaches_ensure_daemon(
 def test_daemon_environment_is_closed_and_shared_by_both_start_paths(
     monkeypatch, tmp_path
 ):
+    if os.name == "nt":
+        home_environment = {
+            "USERPROFILE": str(tmp_path / "safe-home"),
+            "LOCALAPPDATA": str(tmp_path / "safe-local-data"),
+            "APPDATA": str(tmp_path / "safe-roaming-data"),
+        }
+    else:
+        home_environment = {"HOME": str(tmp_path / "safe-home")}
     source = {
         "PATH": "/safe/bin",
-        "HOME": "/safe/home",
+        **home_environment,
         "TEMP": "/safe/tmp",
         "LATCH_MCP_DAEMON_IDLE_TTL_SEC": "41",
         "LATCH_MCP_DAEMON_START_TIMEOUT_SEC": "7",
@@ -163,12 +426,18 @@ def test_daemon_environment_is_closed_and_shared_by_both_start_paths(
         mcp_broker._spawn_daemon(str(ROOT), start_reason="proxy_connect")
         assert mcp_broker.request_daemon_start(str(ROOT)) is True
 
+    effective_roots = mcp_broker._authority_context_payload(source)[
+        "effective_roots"
+    ]
     assert built == {
         "PATH": "/safe/bin",
-        "HOME": "/safe/home",
+        **home_environment,
         "TEMP": "/safe/tmp",
         "LATCH_HOME": str(install),
         "LATCH_KB_DIR": str(vault),
+        "LATCH_PRODUCTION_DATA_ROOT": effective_roots["production_data"],
+        "LATCH_VAULT_REGISTRY_ROOT": effective_roots["vault_registry"],
+        "LATCH_DURABILITY_ROOT": effective_roots["durability"],
     }
     assert len(captured) == 2
     direct_env = captured[0][1]
@@ -224,13 +493,13 @@ def test_daemon_and_children_preserve_validated_vault_context(
         "LATCH_PRODUCTION_DATA_ROOT",
         "LATCH_VAULT_REGISTRY_ROOT",
         "LATCH_DURABILITY_ROOT",
-        "XDG_DATA_HOME",
-        "XDG_STATE_HOME",
         mcp_broker.paths.TEST_ROOT_ENV,
         mcp_broker.paths.TEST_CAPABILITY_ENV,
     )
     for name in expected_names:
         assert built[name] == source[name]
+    assert "XDG_DATA_HOME" not in built
+    assert "XDG_STATE_HOME" not in built
     assert "LATCH_ARBITRARY_POISON" not in built
 
     with monkeypatch.context() as environment:
@@ -275,8 +544,77 @@ def test_daemon_environment_rejects_invalid_vault_context(tmp_path):
 
 
 @pytest.mark.parametrize(
+    "invalid_root",
+    (
+        "relative/backups",
+        pytest.param(
+            "~latch-user-that-does-not-exist/backups",
+            marks=pytest.mark.skipif(
+                os.name == "nt",
+                reason=(
+                    "Windows expands named-user shorthand to an absolute "
+                    "sibling profile path"
+                ),
+            ),
+        ),
+    ),
+)
+def test_invalid_vault_root_reaches_proxy_diagnostic_without_import_traceback(
+    invalid_root,
+):
+    env = os.environ.copy()
+    env.update({
+        "LATCH_HOME": str(ROOT),
+        "LATCH_DURABILITY_ROOT": invalid_root,
+        "PYTHONPATH": str(ROOT / "src"),
+    })
+
+    result = subprocess.run(
+        [sys.executable, "-m", "latch.mcp.mcp_proxy"],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=5.0,
+    )
+
+    assert result.returncode == 2
+    assert "invalid MCP connection configuration" in result.stderr
+    assert "Traceback" not in result.stderr
+
+
+def test_invalid_authority_direct_daemon_fails_before_owner_fence(tmp_path):
+    vault = mcp_broker.paths.project_dir(str(tmp_path / "invalid-authority"))
+    env = os.environ.copy()
+    env.update({
+        "LATCH_HOME": str(ROOT),
+        "LATCH_KB_DIR": str(vault),
+        "LATCH_DURABILITY_ROOT": "relative/backups",
+        "LATCH_MCP_RUNTIME_KEY": "invalid-authority-context",
+        "LATCH_MCP_PROTOCOL_VERSION": str(mcp_broker.PROTOCOL_VERSION),
+        "PYTHONPATH": str(ROOT / "src"),
+    })
+
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "src" / "latch" / "mcp" / "mcp_daemon.py")],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=5.0,
+    )
+
+    assert result.returncode == 1
+    assert "invalid MCP authority context" in result.stderr
+    assert "Traceback" not in result.stderr
+    assert not list(vault.rglob(mcp_broker.OWNER_FENCE_FILE))
+
+
+@pytest.mark.parametrize(
     "name",
-    mcp_broker.DAEMON_VAULT_ROOT_ENV_VARS,
+    (
+        "LATCH_PRODUCTION_DATA_ROOT",
+        "LATCH_VAULT_REGISTRY_ROOT",
+        "LATCH_DURABILITY_ROOT",
+    ),
 )
 def test_vault_context_digest_changes_with_root_authority(
     monkeypatch, tmp_path, name
@@ -289,9 +627,182 @@ def test_vault_context_digest_changes_with_root_authority(
     first[name] = str(tmp_path / "first" / name.lower())
     second[name] = str(tmp_path / "second" / name.lower())
 
+    assert mcp_broker._runtime_key(first) == mcp_broker._runtime_key(second)
     assert mcp_broker.vault_context_digest(first) != (
         mcp_broker.vault_context_digest(second)
     )
+
+
+def test_distinct_os_principals_partition_same_root_authority(tmp_path):
+    home = tmp_path / "shared-home"
+    home.mkdir()
+    source = {"HOME": str(home), "USERPROFILE": str(home)}
+    captured = mcp_broker._capture_os_principal()
+    first = {**captured, "sha256": "1" * 64}
+    second = {**captured, "sha256": "2" * 64}
+
+    assert mcp_broker._authority_context_payload(
+        source, principal=first
+    ) != mcp_broker._authority_context_payload(source, principal=second)
+    assert mcp_broker._runtime_key(
+        source, principal=first
+    ) != mcp_broker._runtime_key(source, principal=second)
+    assert mcp_broker.vault_context_digest(
+        source, principal=first
+    ) != mcp_broker.vault_context_digest(source, principal=second)
+
+
+def test_os_principal_capture_is_stable_and_opaque():
+    first = mcp_broker._capture_os_principal()
+    second = mcp_broker._capture_os_principal()
+
+    assert first == second
+    assert first["kind"] in {"posix-euid", "windows-token-user-sid"}
+    assert len(first["sha256"]) == 64
+    assert set(first["sha256"]) <= set("0123456789abcdef")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX effective-UID contract")
+def test_posix_principal_uses_effective_uid_without_exposing_it(monkeypatch):
+    def real_uid_not_used():
+        raise AssertionError("real UID was consulted")
+
+    monkeypatch.setattr(mcp_broker.os, "geteuid", lambda: 12001)
+    monkeypatch.setattr(mcp_broker.os, "getuid", real_uid_not_used)
+    first = mcp_broker._capture_os_principal()
+    monkeypatch.setattr(mcp_broker.os, "geteuid", lambda: 12002)
+    second = mcp_broker._capture_os_principal()
+
+    assert first != second
+    assert "12001" not in json.dumps(first)
+    assert "12002" not in json.dumps(second)
+
+
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="creating directory symlinks is not reliable on Windows CI",
+)
+def test_symlink_equivalent_home_has_one_posix_authority_context(tmp_path):
+    target = tmp_path / "canonical-home"
+    target.mkdir()
+    alias = tmp_path / "home-alias"
+    alias.symlink_to(target, target_is_directory=True)
+    principal = mcp_broker._capture_os_principal()
+    canonical = {"HOME": str(target)}
+    via_alias = {"HOME": str(alias)}
+
+    assert mcp_broker._authority_context_payload(
+        canonical, principal=principal
+    ) == mcp_broker._authority_context_payload(via_alias, principal=principal)
+    assert mcp_broker._runtime_key(
+        canonical, principal=principal
+    ) == mcp_broker._runtime_key(via_alias, principal=principal)
+    assert mcp_broker.vault_context_digest(
+        canonical, principal=principal
+    ) == mcp_broker.vault_context_digest(via_alias, principal=principal)
+
+
+def test_canonical_authority_path_preserves_case(tmp_path):
+    mixed_case = tmp_path / "MixedCaseAuthorityRoot"
+    mixed_case.mkdir()
+
+    resolved = mcp_broker._canonical_context_path(
+        str(mixed_case), name="test authority root"
+    )
+
+    assert resolved is not None
+    assert Path(resolved).name == "MixedCaseAuthorityRoot"
+
+
+def test_irrelevant_platform_roots_do_not_partition_current_platform(tmp_path):
+    principal = mcp_broker._capture_os_principal()
+    home = tmp_path / "home"
+    local = tmp_path / "local-app-data"
+    roaming = tmp_path / "roaming-app-data"
+    for path in (home, local, roaming):
+        path.mkdir()
+    if sys.platform == "win32":
+        baseline = {
+            "USERPROFILE": str(home),
+            "LOCALAPPDATA": str(local),
+            "APPDATA": str(roaming),
+        }
+        changed = {
+            **baseline,
+            "HOME": str(tmp_path / "irrelevant-home"),
+            "XDG_DATA_HOME": str(tmp_path / "irrelevant-xdg-data"),
+            "XDG_STATE_HOME": str(tmp_path / "irrelevant-xdg-state"),
+        }
+    else:
+        baseline = {"HOME": str(home)}
+        changed = {
+            **baseline,
+            "USERPROFILE": str(tmp_path / "irrelevant-profile"),
+            "HOMEDRIVE": "Z:",
+            "HOMEPATH": "/irrelevant-homepath",
+            "APPDATA": str(tmp_path / "irrelevant-app-data"),
+            "LOCALAPPDATA": str(tmp_path / "irrelevant-local-app-data"),
+        }
+
+    assert mcp_broker._authority_context_payload(
+        baseline, principal=principal
+    ) == mcp_broker._authority_context_payload(changed, principal=principal)
+    assert mcp_broker._runtime_key(
+        baseline, principal=principal
+    ) == mcp_broker._runtime_key(changed, principal=principal)
+
+
+def test_proxy_and_daemon_runtime_key_have_full_authority_fixed_point(
+    tmp_path,
+):
+    roots = {
+        name: tmp_path / name.lower()
+        for name in (
+            "HOME",
+            "USERPROFILE",
+            "APPDATA",
+            "LOCALAPPDATA",
+            "LATCH_PRODUCTION_DATA_ROOT",
+            "LATCH_VAULT_REGISTRY_ROOT",
+            "LATCH_DURABILITY_ROOT",
+            "XDG_DATA_HOME",
+            "XDG_STATE_HOME",
+        )
+    }
+    for path in roots.values():
+        path.mkdir()
+    source = {name: str(path) for name, path in roots.items()}
+    source.update({"PATH": os.environ.get("PATH", ""), "TEMP": str(tmp_path)})
+    principal = mcp_broker._capture_os_principal()
+    daemon = mcp_broker._daemon_environment(source)
+
+    assert mcp_broker._authority_context_payload(
+        source, principal=principal
+    ) == mcp_broker._authority_context_payload(daemon, principal=principal)
+    assert mcp_broker._runtime_key(
+        source, principal=principal
+    ) == mcp_broker._runtime_key(daemon, principal=principal)
+    assert mcp_broker.vault_context_digest(
+        source, principal=principal
+    ) == mcp_broker.vault_context_digest(daemon, principal=principal)
+
+
+def test_runtime_key_changes_with_install_root(monkeypatch, tmp_path):
+    first = tmp_path / "first-install"
+    second = tmp_path / "second-install"
+    first.mkdir()
+    second.mkdir()
+    monkeypatch.setattr(mcp_broker, "_runtime_content_files", lambda: ())
+
+    monkeypatch.setattr(mcp_broker.paths, "KB_ROOT", first)
+    initial = mcp_broker._runtime_key()
+    monkeypatch.setattr(mcp_broker.paths, "KB_ROOT", first / ".." / first.name)
+    equivalent = mcp_broker._runtime_key()
+    monkeypatch.setattr(mcp_broker.paths, "KB_ROOT", second)
+    changed = mcp_broker._runtime_key()
+
+    assert equivalent == initial
+    assert changed != initial
 
 
 def test_vault_context_digest_is_normalized_and_discovery_is_opaque(
@@ -446,7 +957,7 @@ def test_windows_daemon_creation_flags_are_defense_in_depth():
 
 
 def test_windows_launcher_diagnostic_records_process_lineage():
-    source = (ROOT / "src" / "mcp_launcher_win.py").read_text(encoding="utf-8")
+    source = (ROOT / "src" / "latch" / "mcp" / "mcp_launcher_win.py").read_text(encoding="utf-8")
     for field in ("parent_pid=", "executable=", "argv=", "launching child="):
         assert field in source
 
@@ -487,7 +998,7 @@ def test_daemon_owner_fence_survives_broker_death_and_releases_with_owner(
             sys.executable,
             "-c",
             (
-                "import mcp_broker,time; "
+                "from latch.mcp import mcp_broker; import time; "
                 "h=mcp_broker.acquire_owner_fence(); "
                 "print('held' if h else 'failed', flush=True); time.sleep(30)"
             ),
@@ -505,7 +1016,7 @@ def test_daemon_owner_fence_survives_broker_death_and_releases_with_owner(
         )
         assert mcp_broker._acquire_start_lock() is True
         contender = subprocess.run(
-            [sys.executable, str(ROOT / "src" / "mcp_daemon.py")],
+            [sys.executable, str(ROOT / "src" / "latch" / "mcp" / "mcp_daemon.py")],
             env=env,
             capture_output=True,
             timeout=5,
@@ -523,11 +1034,7 @@ def test_daemon_owner_fence_survives_broker_death_and_releases_with_owner(
     fence.close()
 
 
-def test_incompatible_upgrade_fails_before_owner_fence_and_heavy_imports(
-    monkeypatch, tmp_path
-):
-    vault = mcp_broker.paths.project_dir(str(tmp_path / "incompatible-upgrade"))
-    site_dir = tmp_path / "site"
+def _write_heavy_import_blocker(site_dir: Path) -> None:
     site_dir.mkdir()
     (site_dir / "sitecustomize.py").write_text(
         "import sys\n"
@@ -539,6 +1046,46 @@ def test_incompatible_upgrade_fails_before_owner_fence_and_heavy_imports(
         "sys.meta_path.insert(0, BlockHeavy())\n",
         encoding="utf-8",
     )
+
+
+def _run_daemon_through_upgrade_preflight(
+    tmp_path: Path,
+    *,
+    requested_key: str,
+    capability_epoch: int | None,
+) -> tuple[Path, subprocess.CompletedProcess[str]]:
+    vault = mcp_broker.paths.project_dir(str(tmp_path / "upgrade-preflight"))
+    site_dir = tmp_path / "site"
+    _write_heavy_import_blocker(site_dir)
+    env = os.environ.copy()
+    env.update({
+        "LATCH_HOME": str(ROOT),
+        "LATCH_KB_DIR": str(vault),
+        "LATCH_MCP_DAEMON_PROCESS": "1",
+        "LATCH_MCP_RUNTIME_KEY": requested_key,
+        "LATCH_MCP_PROTOCOL_VERSION": str(mcp_broker.PROTOCOL_VERSION),
+        "PYTHONPATH": os.pathsep.join((str(site_dir), str(ROOT / "src"))),
+    })
+    if capability_epoch is None:
+        env.pop("LATCH_MCP_PROXY_CAPABILITY_EPOCH", None)
+    else:
+        env["LATCH_MCP_PROXY_CAPABILITY_EPOCH"] = str(capability_epoch)
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "src" / "latch" / "mcp" / "mcp_daemon.py")],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=5.0,
+    )
+    return vault, result
+
+
+def test_incompatible_upgrade_fails_before_owner_fence_and_heavy_imports(
+    monkeypatch, tmp_path
+):
+    vault = mcp_broker.paths.project_dir(str(tmp_path / "incompatible-upgrade"))
+    site_dir = tmp_path / "site"
+    _write_heavy_import_blocker(site_dir)
     requested_key = "retained-runtime-v1"
     env = os.environ.copy()
     env.update({
@@ -549,7 +1096,7 @@ def test_incompatible_upgrade_fails_before_owner_fence_and_heavy_imports(
         "PYTHONPATH": os.pathsep.join((str(site_dir), str(ROOT / "src"))),
     })
     result = subprocess.run(
-        [sys.executable, str(ROOT / "src" / "mcp_daemon.py")],
+        [sys.executable, str(ROOT / "src" / "latch" / "mcp" / "mcp_daemon.py")],
         env=env,
         capture_output=True,
         text=True,
@@ -582,6 +1129,109 @@ def test_incompatible_upgrade_fails_before_owner_fence_and_heavy_imports(
         / mcp_broker.OWNER_FENCE_FILE
     ).exists()
     assert "heavy import crossed upgrade preflight" not in result.stderr
+
+
+@pytest.mark.parametrize("capability_epoch", range(1, 8))
+def test_mismatched_pre_principal_proxy_rejects_before_owner_and_heavy_imports(
+    tmp_path, capability_epoch
+):
+    assert mcp_broker.PROXY_CAPABILITY_EPOCH == 8
+    requested_key = f"pre-principal-epoch-{capability_epoch}"
+    vault, result = _run_daemon_through_upgrade_preflight(
+        tmp_path,
+        requested_key=requested_key,
+        capability_epoch=capability_epoch,
+    )
+
+    assert result.returncode == 1
+    marker = (
+        vault
+        / "runtime"
+        / "mcp-runtimes"
+        / requested_key
+        / mcp_broker.DISCOVERY_FILE
+    )
+    payload = json.loads(marker.read_text(encoding="utf-8"))
+    assert "Start a fresh task" in payload["error"]
+    assert not (
+        vault
+        / "runtime"
+        / "mcp-runtimes"
+        / mcp_broker.RUNTIME_KEY
+        / mcp_broker.OWNER_FENCE_FILE
+    ).exists()
+    assert "heavy import crossed upgrade preflight" not in result.stderr
+
+
+def test_epoch_zero_mismatch_retains_rejection_owner_compatibility(tmp_path):
+    requested_key = "epoch-zero-rejection-owner"
+    vault, result = _run_daemon_through_upgrade_preflight(
+        tmp_path,
+        requested_key=requested_key,
+        capability_epoch=None,
+    )
+
+    assert result.returncode == 1
+    assert "heavy import crossed upgrade preflight" in result.stderr
+    assert (
+        vault
+        / "runtime"
+        / "mcp-runtimes"
+        / mcp_broker.RUNTIME_KEY
+        / mcp_broker.OWNER_FENCE_FILE
+    ).exists()
+
+
+def test_current_epoch_direct_launch_needs_no_extra_scope_marker(tmp_path):
+    assert mcp_broker.PROXY_CAPABILITY_EPOCH == 8
+    vault, result = _run_daemon_through_upgrade_preflight(
+        tmp_path,
+        requested_key=mcp_broker.RUNTIME_KEY,
+        capability_epoch=mcp_broker.PROXY_CAPABILITY_EPOCH,
+    )
+
+    assert result.returncode == 1
+    assert "heavy import crossed upgrade preflight" in result.stderr
+    assert (
+        vault
+        / "runtime"
+        / "mcp-runtimes"
+        / mcp_broker.RUNTIME_KEY
+        / mcp_broker.OWNER_FENCE_FILE
+    ).exists()
+
+
+def test_incapable_upgrade_preserves_existing_embed_discovery(
+    monkeypatch, tmp_path
+):
+    vault = tmp_path / "preserved-retained-embed"
+    vault.mkdir()
+    monkeypatch.setattr(mcp_broker, "runtime_dir", lambda: vault)
+    retained_key = "retained-pre-principal-owner"
+    embed_path = mcp_broker.embed_discovery_path(retained_key)
+    existing = {
+        "runtime_key": retained_key,
+        "host": "127.0.0.1",
+        "port": 43123,
+        "token": "retained-owner-token",
+        "pid": os.getpid(),
+    }
+    mcp_broker._atomic_json(embed_path, existing)
+
+    published = mcp_daemon._publish_upgrade_alias(
+        retained_key,
+        {
+            "host": "127.0.0.1",
+            "port": 43124,
+            "token": "current-owner-token",
+            "pid": os.getpid() + 1,
+            "started_at": "now",
+        },
+        capable=False,
+    )
+
+    assert published is False
+    assert json.loads(embed_path.read_text(encoding="utf-8")) == existing
 
 
 def test_live_pid_with_stale_heartbeat_does_not_hold_proxy_capacity(
@@ -1308,6 +1958,62 @@ def test_forced_legacy_precedes_shared_connection_validation(monkeypatch):
     assert events == ["legacy_fallback"]
 
 
+def test_windows_legacy_transition_continues_without_execve(monkeypatch):
+    exec_calls = []
+    monkeypatch.setattr(mcp_proxy, "_WINDOWS_EXECVE_UNSAFE", True)
+    monkeypatch.delenv("LATCH_MCP_LEGACY", raising=False)
+    monkeypatch.setattr(
+        mcp_proxy.os,
+        "execve",
+        lambda *args: exec_calls.append(args),
+    )
+
+    assert (
+        mcp_proxy._exec_legacy_server()
+        is mcp_proxy.ProxyResult.RUN_LEGACY_IN_PROCESS
+    )
+    assert "LATCH_MCP_LEGACY" not in os.environ
+    assert exec_calls == []
+
+
+def test_posix_legacy_transition_preserves_execve(monkeypatch):
+    calls = []
+
+    class ExecCalled(RuntimeError):
+        pass
+
+    def fake_execve(executable, argv, env):
+        calls.append((executable, argv, env))
+        raise ExecCalled()
+
+    monkeypatch.setattr(mcp_proxy, "_WINDOWS_EXECVE_UNSAFE", False)
+    monkeypatch.setattr(mcp_proxy.os, "execve", fake_execve)
+    with pytest.raises(ExecCalled):
+        mcp_proxy._exec_legacy_server()
+    assert len(calls) == 1
+    executable, argv, env = calls[0]
+    assert argv[0] == executable == sys.executable
+    assert argv[1].endswith("mcp_server.py")
+    assert env["LATCH_MCP_LEGACY"] == "1"
+
+
+def test_mcp_entrypoint_falls_through_for_windows_legacy_transition(monkeypatch):
+    from latch.mcp import mcp_server
+
+    # Register the key with monkeypatch before production control flow mutates
+    # os.environ so teardown cannot leak legacy mode into later subprocesses.
+    monkeypatch.setenv("LATCH_MCP_LEGACY", "pre-transition")
+    monkeypatch.setattr(
+        mcp_proxy,
+        "main",
+        lambda: mcp_proxy.ProxyResult.RUN_LEGACY_IN_PROCESS,
+    )
+    assert mcp_server._run_proxy_or_continue_legacy() is None
+    assert os.environ["LATCH_MCP_LEGACY"] == "1"
+    monkeypatch.setattr(mcp_proxy, "main", lambda: 7)
+    assert mcp_server._run_proxy_or_continue_legacy() == 7
+
+
 def test_explicit_legacy_fallback_emits_lifecycle_signal(monkeypatch):
     events: list[str] = []
     monkeypatch.setenv("LATCH_MCP_ALLOW_LEGACY_FALLBACK", "1")
@@ -1341,8 +2047,45 @@ def test_explicit_legacy_fallback_emits_lifecycle_signal(monkeypatch):
     assert "legacy_fallback" in events
 
 
+def test_windows_explicit_fallback_returns_before_failure_signal(
+    monkeypatch, capsys
+):
+    events: list[str] = []
+    monkeypatch.setenv("LATCH_MCP_ALLOW_LEGACY_FALLBACK", "1")
+    monkeypatch.delenv("LATCH_MCP_FORCE_LEGACY", raising=False)
+    monkeypatch.setattr(
+        mcp_proxy,
+        "connection_metadata",
+        lambda: {"project_cwd": "/synthetic"},
+    )
+    monkeypatch.setattr(
+        mcp_broker,
+        "ensure_daemon",
+        lambda _cwd, **_kwargs: (_ for _ in ()).throw(
+            mcp_broker.BrokerError("synthetic failure")
+        ),
+    )
+    monkeypatch.setattr(
+        mcp_broker,
+        "emit_lifecycle",
+        lambda event, **_kwargs: events.append(event),
+    )
+    monkeypatch.setattr(
+        mcp_proxy,
+        "_exec_legacy_server",
+        lambda: mcp_proxy.ProxyResult.RUN_LEGACY_IN_PROCESS,
+    )
+
+    assert (
+        mcp_proxy.main()
+        is mcp_proxy.ProxyResult.RUN_LEGACY_IN_PROCESS
+    )
+    assert events == ["legacy_fallback"]
+    assert "explicit legacy fallback enabled" in capsys.readouterr().err
+
+
 def test_fastmcp_private_boundary_is_pinned_and_available():
-    import mcp_server
+    from latch.mcp import mcp_server
 
     server = getattr(mcp_server.mcp, "_mcp_server", None)
     assert callable(getattr(server, "run", None))

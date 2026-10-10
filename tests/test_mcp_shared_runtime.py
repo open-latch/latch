@@ -22,12 +22,12 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parent.parent
-SERVER = ROOT / "src" / "mcp_server.py"
-PROMPT_HOOK = ROOT / "src" / "hooks" / "user_prompt_submit.py"
+SERVER = ROOT / "src" / "latch" / "mcp" / "mcp_server.py"
+PROMPT_HOOK = ROOT / "src" / "latch" / "hooks" / "user_prompt_submit.py"
 EPOCH_2_COMMIT = "5c9f39cdc558b98e4736ba15a7e6f5011168c7c1"
 sys.path.insert(0, str(ROOT / "src"))
-import mcp_broker  # noqa: E402
-import paths  # noqa: E402
+from latch.mcp import mcp_broker  # noqa: E402
+from latch.store import paths  # noqa: E402
 
 
 def _assert(condition: Any, message: str) -> None:
@@ -479,6 +479,89 @@ def test_parallel_clients_share_one_heavy_owner_and_keep_context_isolated() -> N
         _stop_daemon(kb_dir)
 
 
+def test_same_principal_root_mismatch_is_bounded_without_second_owner() -> None:
+    kb_dir = _temp_vault()
+    clients: list[McpClient] = []
+    try:
+        first_profile = kb_dir / "profiles" / "first-context"
+        second_profile = kb_dir / "profiles" / "second-context"
+        first_authority_env = {
+            "USERNAME": "same-kernel-user",
+            "USER": "same-kernel-user",
+        }
+        second_authority_env = dict(first_authority_env)
+        if os.name == "nt":
+            first_authority_env.update({
+                "USERPROFILE": str(first_profile),
+                "LOCALAPPDATA": str(first_profile / "AppData" / "Local"),
+                "APPDATA": str(first_profile / "AppData" / "Roaming"),
+            })
+            second_authority_env.update({
+                "USERPROFILE": str(second_profile),
+                "LOCALAPPDATA": str(second_profile / "AppData" / "Local"),
+                "APPDATA": str(second_profile / "AppData" / "Roaming"),
+            })
+        else:
+            first_authority_env.update({
+                "HOME": str(first_profile),
+                "XDG_DATA_HOME": str(first_profile / ".local" / "share"),
+                "XDG_STATE_HOME": str(first_profile / ".local" / "state"),
+            })
+            second_authority_env.update({
+                "HOME": str(second_profile),
+                "XDG_DATA_HOME": str(second_profile / ".local" / "share"),
+                "XDG_STATE_HOME": str(second_profile / ".local" / "state"),
+            })
+
+        first_client = McpClient(
+            kb_dir,
+            "first-context-session",
+            env_overrides=first_authority_env,
+        )
+        clients.append(first_client)
+        first = first_client.status()
+
+        # Both subprocesses retain this test runner's real kernel principal.
+        # A root disagreement for that principal must be rejected by the
+        # authenticated context digest instead of electing another owner.
+        second_client = McpClient.__new__(McpClient)
+        clients.append(second_client)
+        try:
+            McpClient.__init__(
+                second_client,
+                kb_dir,
+                "second-context-session",
+                env_overrides=second_authority_env,
+            )
+        except AssertionError as exc:
+            failure = str(exc)
+        else:
+            raise AssertionError(
+                "same principal started a second root context instead of "
+                "receiving a bounded mismatch"
+            )
+
+        _assert(first["mode"] == "shared_daemon", str(first))
+        _assert("vault context differs" in failure, failure)
+        _assert("Traceback" not in failure, failure)
+        first_after = first_client.status()
+        _assert(first_after["process_pid"] == first["process_pid"], str(first_after))
+
+        owner_pids = set()
+        for path in (kb_dir / "runtime" / "mcp-runtimes").glob(
+            "*/mcp-daemon.json"
+        ):
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(payload.get("pid"), int):
+                owner_pids.add(int(payload["pid"]))
+        _assert(owner_pids == {first["process_pid"]}, str(owner_pids))
+    finally:
+        for client in clients:
+            if hasattr(client, "process"):
+                client.close()
+        _stop_daemon(kb_dir)
+
+
 def test_second_client_invokes_backend_from_its_own_path() -> None:
     kb_dir = _temp_vault()
     clients: list[McpClient] = []
@@ -589,21 +672,25 @@ def test_retained_proxy_recovers_after_in_place_compatible_upgrade() -> None:
 
         def runtime_key() -> str:
             return subprocess.check_output(
-                [sys.executable, "-c", "import mcp_broker; print(mcp_broker.RUNTIME_KEY)"],
+                [
+                    sys.executable,
+                    "-c",
+                    "from latch.mcp import mcp_broker; print(mcp_broker.RUNTIME_KEY)",
+                ],
                 env=env,
                 text=True,
                 timeout=10.0,
             ).strip()
 
         current_key = runtime_key()
-        runtime_module = install_src / "mcp_runtime.py"
+        runtime_module = install_src / "latch" / "mcp" / "mcp_runtime.py"
         stat = runtime_module.stat()
         os.utime(runtime_module, (stat.st_atime + 60, stat.st_mtime + 60))
         _assert(runtime_key() == current_key, "runtime key changed from mtime only")
 
         # Produce an older content key while retaining the explicit capability
         # epoch. This is the supported future in-place-upgrade path.
-        broker_path = install_src / "mcp_broker.py"
+        broker_path = install_src / "latch" / "mcp" / "mcp_broker.py"
         broker_source = broker_path.read_text(encoding="utf-8")
         broker_path.write_text(
             broker_source + "\n# compatible-upgrade-test-fingerprint\n",
@@ -615,7 +702,7 @@ def test_retained_proxy_recovers_after_in_place_compatible_upgrade() -> None:
         bootstrap = McpClient(
             kb_dir,
             "in-place-upgrade-bootstrap",
-            server_path=install_src / "mcp_server.py",
+            server_path=install_src / "latch" / "mcp" / "mcp_server.py",
             env_overrides={
                 "LATCH_HOME": str(ROOT),
                 "PYTHONPATH": str(install_src),
@@ -625,7 +712,7 @@ def test_retained_proxy_recovers_after_in_place_compatible_upgrade() -> None:
         client = McpClient(
             kb_dir,
             "in-place-upgrade-session",
-            server_path=install_src / "mcp_server.py",
+            server_path=install_src / "latch" / "mcp" / "mcp_server.py",
             env_overrides={
                 "LATCH_HOME": str(ROOT),
                 "PYTHONPATH": str(install_src),
@@ -639,7 +726,7 @@ def test_retained_proxy_recovers_after_in_place_compatible_upgrade() -> None:
         # Replace the same live install path, then kill the old owner. The
         # retained proxy still has old_key cached in memory and must be aliased
         # to one owner started from the updated source.
-        shutil.copy2(ROOT / "src" / "mcp_broker.py", broker_path)
+        shutil.copy2(ROOT / "src" / "latch" / "mcp" / "mcp_broker.py", broker_path)
         _assert(runtime_key() == current_key, "updated install key is not content-stable")
         os.kill(old_pid, signal.SIGTERM)
         _wait_for_pid_exit(old_pid)
@@ -736,6 +823,7 @@ def _assert_historical_proxy_requires_fresh_task(commit: str) -> None:
     install = Path(tempfile.mkdtemp(prefix=f"latch-{safe_commit}-install-"))
     install_src = install / "src"
     client: McpClient | None = None
+    replacement_owner: subprocess.Popen[bytes] | None = None
     try:
         _copy_git_src(commit, install_src)
         overrides = {
@@ -749,11 +837,82 @@ def _assert_historical_proxy_requires_fresh_task(commit: str) -> None:
             server_path=install_src / "mcp_server.py",
             env_overrides=overrides,
         )
-        old_pid = client.status()["process_pid"]
+        before = client.status()
+        old_pid = int(before["process_pid"])
+        requested_key = str(before["daemon"]["runtime_key"])
         shutil.rmtree(install_src)
         _copy_current_install_src(install_src)
         os.kill(old_pid, signal.SIGTERM)
         _wait_for_pid_exit(old_pid)
+
+        # The pure package move deliberately leaves no flat compatibility
+        # launcher.  Per the accepted manual-repair residual, model a repaired
+        # current launcher explicitly while retaining the real old proxy and
+        # its wire behavior.
+        _assert(
+            not (install_src / "mcp_daemon.py").exists(),
+            "legacy launcher unexpectedly survived",
+        )
+        owner_env = os.environ.copy()
+        owner_env.update({
+            "LATCH_HOME": str(ROOT),
+            "LATCH_KB_DIR": str(kb_dir),
+            "LATCH_MCP_DAEMON_PROCESS": "1",
+            "LATCH_MCP_RUNTIME_KEY": requested_key,
+            "LATCH_MCP_PROTOCOL_VERSION": "1",
+            "LATCH_MCP_INITIAL_PROJECT_CWD": str(ROOT),
+            "CLAUDE_KB_IN_MAINTENANCE": "1",
+            "PYTHONPATH": str(install_src),
+            "PYTHONDONTWRITEBYTECODE": "1",
+        })
+        owner_env.pop("LATCH_MCP_PROXY_CAPABILITY_EPOCH", None)
+        replacement_owner = subprocess.Popen(
+            [
+                sys.executable,
+                str(install_src / "latch" / "mcp" / "mcp_daemon.py"),
+            ],
+            env=owner_env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
+        alias_paths = (
+            kb_dir / "mcp-daemon.json",
+            kb_dir
+            / "runtime"
+            / "mcp-runtimes"
+            / requested_key
+            / "mcp-daemon.json",
+        )
+        deadline = time.monotonic() + 15.0
+        aliases_ready = False
+        while time.monotonic() < deadline:
+            if replacement_owner.poll() is not None:
+                detail = (
+                    replacement_owner.stderr.read().decode(errors="replace")
+                    if replacement_owner.stderr is not None
+                    else ""
+                )
+                raise AssertionError(
+                    f"replacement compatibility owner exited: {detail}"
+                )
+            try:
+                payloads = [
+                    json.loads(path.read_text(encoding="utf-8"))
+                    for path in alias_paths
+                ]
+            except (OSError, ValueError):
+                time.sleep(0.05)
+                continue
+            aliases_ready = all(
+                payload.get("pid") != old_pid
+                and payload.get("runtime_key") == requested_key
+                and payload.get("compatibility") == "fresh_task_required"
+                for payload in payloads
+            )
+            if aliases_ready:
+                break
+            time.sleep(0.05)
+        _assert(aliases_ready, f"replacement aliases not ready: {alias_paths}")
 
         started = time.monotonic()
         for attempt in range(2):
@@ -789,6 +948,14 @@ def _assert_historical_proxy_requires_fresh_task(commit: str) -> None:
         if client is not None:
             client.close()
         _stop_daemon(kb_dir)
+        if replacement_owner is not None and replacement_owner.poll() is None:
+            replacement_owner.terminate()
+        if replacement_owner is not None:
+            try:
+                replacement_owner.wait(timeout=5.0)
+            except subprocess.TimeoutExpired:
+                replacement_owner.kill()
+                replacement_owner.wait(timeout=5.0)
         shutil.rmtree(install, ignore_errors=True)
 
 
@@ -813,11 +980,20 @@ def test_fa162bd_pre_registry_proxy_requires_fresh_task_after_upgrade() -> None:
 
 @pytest.mark.parametrize(
     ("pre_registry", "capability_epoch"),
-    ((False, None), (False, 1), (False, 2), (True, None)),
+    (
+        (False, None),
+        (False, 1),
+        (False, 2),
+        (False, 3),
+        (False, 4),
+        (True, None),
+    ),
     ids=(
         "keyed-pre-capability",
         "keyed-epoch-1",
         "keyed-epoch-2",
+        "keyed-epoch-3",
+        "keyed-epoch-4",
         "fa162bd-pre-registry",
     ),
 )
@@ -825,8 +1001,18 @@ def test_historical_transport_receives_fresh_task_error_cross_platform(
     pre_registry: bool,
     capability_epoch: int | None,
 ) -> None:
-    """Exercise both historical discovery layouts and epoch-less wire contract."""
+    """Exercise bounded markers and both epoch-less live rejection layouts."""
     kb_dir = _temp_vault()
+    legacy_embed = kb_dir / mcp_broker.EMBED_DISCOVERY_FILE
+    legacy_embed.write_text(
+        json.dumps({
+            "host": "127.0.0.1",
+            "port": 9,
+            "token": "stale-pre-principal-token",
+            "pid": os.getpid(),
+        }),
+        encoding="utf-8",
+    )
     env = os.environ.copy()
     env.update({
         "LATCH_HOME": str(ROOT),
@@ -837,12 +1023,31 @@ def test_historical_transport_receives_fresh_task_error_cross_platform(
         "CLAUDE_KB_IN_MAINTENANCE": "1",
         "PYTHONPATH": str(ROOT / "src"),
     })
+    heavy_import_marker = kb_dir / "heavy-import-crossed"
+    if capability_epoch is not None:
+        blocker_dir = kb_dir / "preflight-import-blocker"
+        blocker_dir.mkdir()
+        (blocker_dir / "sitecustomize.py").write_text(
+            "import sys\n"
+            "class _RejectHeavyImport:\n"
+            " def find_spec(self, fullname, path=None, target=None):\n"
+            "  if fullname.split('.')[0] in {'anyio','mcp','numpy','onnxruntime'}:\n"
+            f"   open({str(heavy_import_marker)!r}, 'w', encoding='utf-8').write(fullname)\n"
+            "   raise RuntimeError('heavy import crossed capability preflight')\n"
+            "  return None\n"
+            "sys.meta_path.insert(0, _RejectHeavyImport())\n",
+            encoding="utf-8",
+        )
+        env["PYTHONPATH"] = os.pathsep.join(
+            (str(blocker_dir), str(ROOT / "src"))
+        )
     if capability_epoch is None:
         env.pop("LATCH_MCP_PROXY_CAPABILITY_EPOCH", None)
     else:
         env["LATCH_MCP_PROXY_CAPABILITY_EPOCH"] = str(capability_epoch)
+    started = time.monotonic()
     process = subprocess.Popen(
-        [sys.executable, str(ROOT / "src" / "mcp_daemon.py")],
+        [sys.executable, str(ROOT / "src" / "latch" / "mcp" / "mcp_daemon.py")],
         env=env,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
@@ -858,6 +1063,51 @@ def test_historical_transport_receives_fresh_task_error_cross_platform(
             / requested_key
             / "mcp-daemon.json"
         )
+        if capability_epoch is not None:
+            process.wait(timeout=5.0)
+            _assert(process.returncode == 1, f"unexpected exit {process.returncode}")
+            _assert(
+                time.monotonic() - started < 5.0,
+                "fresh-task startup marker was not bounded",
+            )
+            _assert(legacy_discovery.exists(), "startup-error marker was not published")
+            payload = json.loads(legacy_discovery.read_text(encoding="utf-8"))
+            message = str(payload.get("error", "")).lower()
+            _assert("start a fresh task" in message, str(payload))
+            _assert("request was not executed" in message, str(payload))
+            _assert("host" not in payload, str(payload))
+            _assert("port" not in payload, str(payload))
+            _assert("token" not in payload, str(payload))
+            _assert(
+                not list(kb_dir.rglob(mcp_broker.OWNER_FENCE_FILE)),
+                "capability rejection crossed the owner fence",
+            )
+            _assert(
+                not heavy_import_marker.exists(),
+                "capability rejection crossed heavyweight imports",
+            )
+            embed_records = list(
+                kb_dir.rglob(mcp_broker.EMBED_DISCOVERY_FILE)
+            )
+            _assert(
+                embed_records == [legacy_embed],
+                f"capability rejection changed embed records: {embed_records}",
+            )
+            _assert(
+                json.loads(legacy_embed.read_text(encoding="utf-8"))[
+                    "token"
+                ]
+                == "stale-pre-principal-token",
+                "capability rejection replaced the retained embed record",
+            )
+            _assert(
+                not any(
+                    row.get("event") == "daemon_started"
+                    for row in _lifecycle_rows(kb_dir)
+                ),
+                "capability rejection started a heavyweight owner",
+            )
+            return
         deadline = time.monotonic() + 15.0
         while time.monotonic() < deadline and not legacy_discovery.exists():
             if process.poll() is not None:
@@ -866,6 +1116,15 @@ def test_historical_transport_receives_fresh_task_error_cross_platform(
                 )
             time.sleep(0.05)
         _assert(legacy_discovery.exists(), "pre-registry discovery was not published")
+        _assert(
+            legacy_embed.exists(),
+            "epoch-zero transition deleted the retained embed route",
+        )
+        _assert(
+            json.loads(legacy_embed.read_text(encoding="utf-8"))["token"]
+            == "stale-pre-principal-token",
+            "epoch-zero transition replaced the retained embed route",
+        )
         payload = json.loads(legacy_discovery.read_text(encoding="utf-8"))
         with socket.create_connection(
             (payload["host"], int(payload["port"])), timeout=5.0
@@ -1005,7 +1264,7 @@ def test_prompt_embed_activity_keeps_owner_warm() -> None:
         env = os.environ.copy()
         env.update({"LATCH_KB_DIR": str(kb_dir), "PYTHONPATH": str(ROOT / "src")})
         code = (
-            "import embeddings,time\n"
+            "from latch.retrieval import embeddings; import time\n"
             "for _ in range(4):\n"
             " assert embeddings.embed_remote('keep warm', '.', timeout=1) is not None\n"
             " time.sleep(.35)\n"
@@ -1059,7 +1318,6 @@ def test_prompt_after_idle_exit_wakes_owner_and_emits_truthful_bounded_receipt()
         _assert("temporarily unavailable" in context, context)
         _assert("not similarity-scored" in context, context)
         _assert("none auto-retrieved (sim below floor)" not in context.lower(), context)
-        _assert(wall_ms < 250, f"idle prompt hook blocked for {wall_ms:.1f} ms")
 
         deadline = time.monotonic() + 35.0
         new_pid = None
@@ -1069,6 +1327,10 @@ def test_prompt_after_idle_exit_wakes_owner_and_emits_truthful_bounded_receipt()
                 break
             time.sleep(0.05)
         _assert(new_pid is not None and new_pid != old_pid, "hook wake did not start a new owner")
+        # Discover the replacement before enforcing the hook budget so a
+        # timing failure cannot strand an asynchronously starting Windows
+        # owner beyond the test's cleanup path.
+        _assert(wall_ms < 250, f"idle prompt hook blocked for {wall_ms:.1f} ms")
         # Discovery is published immediately before the daemon appends its
         # startup receipt.  Wait for that asynchronous receipt instead of
         # racing the two adjacent startup steps on faster CI runners.
@@ -1141,15 +1403,3 @@ def test_over_cap_idle_proxy_retires_itself_without_killing_peers() -> None:
         for client in clients:
             client.close()
         _stop_daemon(kb_dir)
-
-
-if __name__ == "__main__":
-    test_parallel_clients_share_one_heavy_owner_and_keep_context_isolated()
-    test_owner_crash_restarts_on_next_call_without_replaying_inflight_work()
-    test_retained_proxy_recovers_after_in_place_compatible_upgrade()
-    test_committed_mutation_with_lost_response_is_not_replayed_or_called_retryable()
-    test_idle_owner_is_reclaimed_and_lazily_recreated()
-    test_prompt_embed_activity_keeps_owner_warm()
-    test_prompt_after_idle_exit_wakes_owner_and_emits_truthful_bounded_receipt()
-    test_over_cap_idle_proxy_retires_itself_without_killing_peers()
-    print("\nAll shared MCP runtime tests pass.")

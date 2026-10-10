@@ -26,5 +26,5 @@ PROJECT_DIR=$(pwd -W 2>/dev/null || pwd)
 SUB="${1:-list}"
 shift || true
 
-exec python "${KB_HOME}/src/kb_focus_cli.py" \
+exec python "${KB_HOME}/src/latch/store/kb_focus_cli.py" \
   "${PROJECT_DIR}" "${SUB}" "$@"

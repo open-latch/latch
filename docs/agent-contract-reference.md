@@ -8,8 +8,8 @@ the stronger operational surfaces.
 ## Managed region lifecycle
 
 `claude_md_snippet.md` is the shared source for the managed contract.
-`src/claude_md_sync.py` renders it into `CLAUDE.md`, while
-`src/agents_md_sync.py` renders it into `AGENTS.md` with target-specific file,
+`src/latch/hosts/claude_md_sync.py` renders it into `CLAUDE.md`, while
+`src/latch/hosts/agents_md_sync.py` renders it into `AGENTS.md` with target-specific file,
 installer, and compaction wording. Do not edit generated regions by hand.
 
 The files are project wiring artifacts. The portable source is the snippet,

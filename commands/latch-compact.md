@@ -11,7 +11,7 @@ in the background so the main session stays interactive while compaction
 runs.
 
 This combines/overwrites the prior session_summary node with the latest
-state (see `src/compactor.py`).
+state (see `src/latch/pipeline/compactor.py`).
 
 Steps:
 

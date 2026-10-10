@@ -21,5 +21,5 @@ $Py = if ($env:LATCH_PYTHON) {
   "python"
 }
 
-& $Py (Join-Path $KbHome "src/cursor_compact.py") @args
+& $Py (Join-Path $KbHome "src/latch/hosts/cursor_compact.py") @args
 exit $LASTEXITCODE

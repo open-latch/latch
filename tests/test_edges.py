@@ -24,11 +24,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-import db  # noqa: E402
-import gate  # noqa: E402
-import heal  # noqa: E402
-import log_utils  # noqa: E402
-import paths  # noqa: E402
+from latch.store import db  # noqa: E402
+from latch.gate import gate  # noqa: E402
+from latch.pipeline import heal  # noqa: E402
+from latch.common import log_utils  # noqa: E402
+from latch.store import paths  # noqa: E402
 
 
 def _assert(cond, msg):

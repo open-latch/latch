@@ -8,8 +8,8 @@ from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-import cursor_backend  # noqa: E402
-import mcp_runtime  # noqa: E402
+from latch.hosts import cursor_backend  # noqa: E402
+from latch.mcp import mcp_runtime  # noqa: E402
 
 
 def test_cursor_backend_uses_headless_ask_mode_and_stdin(monkeypatch):

@@ -128,7 +128,7 @@ chk("mcp__latch" in allow,"server-level mcp__latch perm added")
 chk("mcp__claude-kb" in allow,"legacy server-level mcp__claude-kb perm preserved")
 ss=[h.get("command","") for g in hooks.get("SessionStart",[]) for h in g.get("hooks",[])]
 chk(any("NOT-LATCH" in c for c in ss),"non-latch SessionStart hook preserved")
-chk(any("/src/hooks/" in c for c in ss),"latch SessionStart hook added")
+chk(any("/src/latch/hooks/" in c or "/src/hooks/" in c for c in ss),"latch SessionStart hook added")
 chk("PreToolUse" in hooks,"unrelated PreToolUse hook preserved")
 for ev in ("UserPromptSubmit","Stop","SessionEnd"): chk(ev in hooks,"latch hook event "+ev+" added")
 '@
@@ -176,7 +176,7 @@ chk("mcp__latch" not in allow and not any(str(r).startswith("mcp__latch__") for 
 chk("mcp__claude-kb" not in allow and not any(str(r).startswith("mcp__claude-kb__") for r in allow),"legacy latch perms stripped")
 ss=[h.get("command","") for g in hooks.get("SessionStart",[]) for h in g.get("hooks",[])]
 chk(any("NOT-LATCH" in c for c in ss),"non-latch SessionStart hook preserved")
-chk(not any("/src/hooks/" in c for c in ss),"latch SessionStart hook removed")
+chk(not any("/src/latch/hooks/" in c or "/src/hooks/" in c for c in ss),"latch SessionStart hook removed")
 chk("PreToolUse" in hooks,"unrelated PreToolUse hook preserved")
 for ev in ("UserPromptSubmit","Stop","SessionEnd"): chk(ev not in hooks,"latch hook event "+ev+" removed")
 '@

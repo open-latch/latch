@@ -21,7 +21,7 @@ session from the first argument or `$CODEX_THREAD_ID`, validates the matching
 closed when it cannot prove the transcript.
 
 This combines/overwrites the prior session_summary node with the latest
-state (see `src/compactor.py`). By default the Codex wrapper uses the
+state (see `src/latch/pipeline/compactor.py`). By default the Codex wrapper uses the
 Codex-native `codex exec` summarizer backend. Pass `--summarizer claude` only
 when intentionally testing the legacy shared Claude CLI backend.
 
@@ -53,7 +53,7 @@ Steps:
    fi
    if [ -z "$latch_home" ]; then
      candidate="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
-     if [ -f "$candidate/src/mcp_server.py" ] && [ -d "$candidate/commands" ]; then
+     if { [ -f "$candidate/src/latch/mcp/mcp_server.py" ] || [ -f "$candidate/src/mcp_server.py" ]; } && [ -d "$candidate/commands" ]; then
        latch_home="$candidate"
      fi
    fi

@@ -38,7 +38,7 @@ function Invoke-InstructionMask($Action) {
   if (-not $py) {
     throw "unlatch: no Python found; set LATCH_PYTHON (legacy: CLAUDE_KB_PYTHON) and re-run."
   }
-  & $py (Join-Path $KbHome "src/unlatch.py") $Action --project $ProjectDir
+  & $py (Join-Path $KbHome "src/latch/install/unlatch.py") $Action --project $ProjectDir
 }
 
 function Test-Unlatched {

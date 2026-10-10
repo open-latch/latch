@@ -21,7 +21,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-import mcp_proxy  # noqa: E402
+from latch.mcp import mcp_proxy  # noqa: E402
 
 
 def _assert(cond, msg):
@@ -190,7 +190,7 @@ def test_legacy_prune_matches_proxy_hidden_policy():
     except Exception:
         print("SKIP legacy_prune_matches_proxy_hidden_policy (no mcp package)")
         return
-    import mcp_server
+    from latch.mcp import mcp_server
 
     server = FastMCP("probe")
 
@@ -224,7 +224,7 @@ def test_legacy_prune_matches_proxy_hidden_policy():
 
 def test_gate_tool_schema_uses_the_implementation_mutation_boundary():
     try:
-        import mcp_server
+        from latch.mcp import mcp_server
     except Exception:
         print("SKIP gate_tool_schema_uses_the_implementation_mutation_boundary")
         return

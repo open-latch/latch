@@ -1,0 +1,1 @@
+"""latch.hosts package."""

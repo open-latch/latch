@@ -16,6 +16,12 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/open-latch/latch/actions/workflows/public-release-hygiene.yml"><img src="https://github.com/open-latch/latch/actions/workflows/public-release-hygiene.yml/badge.svg?branch=main" alt="Public release hygiene CI"></a>
+  <a href="https://github.com/open-latch/latch/releases"><img src="https://img.shields.io/github/v/release/open-latch/latch" alt="Latest release"></a>
+  <a href="./LICENSE"><img src="https://img.shields.io/github/license/open-latch/latch" alt="License: Apache-2.0"></a>
+</p>
+
+<p align="center">
   <img src="./docs/assets/latch-hero.gif" alt="latch catching a coding agent before it revives a rejected project decision" width="900">
 </p>
 
@@ -29,10 +35,12 @@
 <p align="center">
   <a href="#the-receipt">The receipt</a> &middot;
   <a href="#why-a-gate-not-a-rule">Why a gate</a> &middot;
+  <a href="#how-it-works">How it works</a> &middot;
   <a href="#what-you-get-on-day-one">Day one</a> &middot;
   <a href="#get-started">Get started</a> &middot;
   <a href="#try-it-in-2-minutes">2-minute demo</a> &middot;
   <a href="#supported-agents">Agents</a> &middot;
+  <a href="#proof-and-limits">Results</a> &middot;
   <a href="#safety-and-control">Overhead &amp; safety</a>
 </p>
 
@@ -94,7 +102,7 @@ just context it can talk past. Give it a spec, a rule, or a `CLAUDE.md` and you 
 can ignore — or quote in one breath and violate in the same diff.
 
 latch is the runtime gate that closes that gap. It keeps your project's cited decisions, rejected
-paths, rationale, and evidence in a local KB, then puts a go/no-go verdict in the agent's path
+paths, preferences, rationale, and evidence in a local KB, then puts a go/no-go verdict in the agent's path
 **before files change** — and shows you the receipt. That is decision continuity, not a bigger
 transcript or a generic recall layer.
 
@@ -125,6 +133,25 @@ And the check is cheap: the per-prompt retrieval hook runs locally in roughly 12
 gate itself is a model call that fires only on write-shaped work — never on every prompt. Numbers
 and repro scripts are in [Safety and control](#safety-and-control).
 
+## How it works
+
+Five moving parts, one local engine — the same vocabulary you'll find in
+[ARCHITECTURE.md](./ARCHITECTURE.md):
+
+1. **A typed knowledge graph in one SQLite file.** Decisions, rejected paths, preferences, facts,
+   and open questions are typed nodes linked by edges — local, inspectable, no cloud account.
+2. **Staging before authority.** Newly captured knowledge lands in `staging`; seeding is
+   review-first, so nothing your agents recover becomes project judgment without you.
+3. **Explicit ratification, kept append-only.** Promotion, supersession, and reconciliation are
+   recorded as history rather than rewrites — a ruling gets superseded by a newer decision, never
+   silently edited, and the receipt names each cited node's current status.
+4. **Hybrid retrieval, bounded.** FTS5 keyword search plus vector similarity over local MiniLM
+   embeddings (via sqlite-vec), fused with reciprocal-rank fusion and expanded through bounded
+   graph neighborhoods — all on-device.
+5. **A gate that shows its work.** On write-shaped requests the gate assembles the relevant rulings
+   and returns a go/no-go verdict citing the exact nodes (`id`, kind, status) it relied on — the
+   receipt you saw above.
+
 ## What you get on day one
 
 Install and seed once, and from the next session on:
@@ -151,8 +178,20 @@ decisions you've ratified, and the honest limits are in
 
 ## Get started
 
-**Prerequisites:** Git, and at least one installed agent CLI — **Claude Code**, **Codex**, or
-**Cursor Agent**.
+**Prerequisites:** Git, and a runnable CLI for every agent surface you choose to wire —
+**Claude Code**, **Codex**, or **Cursor Agent**.
+
+**Using Codex Desktop on Windows?** The desktop app does not by itself prove that Latch can launch
+the Codex CLI for model-backed gates, seeding, compaction, and maintenance. In PowerShell,
+`codex --version` must succeed. If it does not, install the standalone CLI, close and reopen
+PowerShell, and rerun the Latch installer:
+
+```powershell
+irm https://chatgpt.com/codex/install.ps1 | iex
+```
+
+Latch's local MCP search/get/insert server is Python-based; this CLI check is for the model-backed
+operations that Latch runs as subprocesses.
 
 **Install in one command.** Open a terminal in the repo you want latch to protect.
 
@@ -169,7 +208,9 @@ irm https://raw.githubusercontent.com/open-latch/latch/main/install.ps1 | iex
 ```
 
 That's the install. The quickstart wires your agent and then prompts you to
-seed. **Restart the agent** afterward so its tools and hooks load.
+seed. **Fully quit and reopen the agent, then create a new task** so its tools and hooks load. An
+already-open task is not a valid MCP check; in a new Codex task, ask it to call
+`latch_recent(limit=1)` for live host-level proof.
 
 **Then seed — this is the real first step, not an optional demo.** From here latch captures decisions
 as you work; seeding is how you skip the wait. It backfills what your project already settled, so the
@@ -301,6 +342,46 @@ never uploads your KB. Data leaves your machine only when you run a model-backed
 compaction, or the nightly heal pass — which may send selected prompts, snippets, and evidence to the
 Claude, Codex, or Cursor backend *you* configured.
 
+**Local outcome records.** latch records structural gate and decision-capture events in
+`outcome_event-YYYY-MM-DD.log` in the selected local vault. Records contain node IDs, closed-set
+labels, timestamps, local project/session identifiers, counts, hashes, and booleans; they do not
+contain requests, prompt text, node titles or bodies, summaries, or decision text. latch does not
+upload these files. When nightly log maintenance runs, it compresses daily files after 30 days and
+deletes them after one year; if that maintenance is disabled, the files remain local until removed.
+
+For the standard shared MCP runtime, opt out by setting `"outcome_events": false` in the
+`runtime_settings.json` vault-policy file printed by quickstart, preserving its other keys. Direct
+CLI processes can instead set the `LATCH_OUTCOME_EVENTS` environment variable to `0`.
+
+**Local request text.** Separately from those structural records, latch writes the verbatim text of
+each gate request to `gate-request-text-YYYY-MM-DD.jsonl` in the same local vault, so a prompt can
+still be read back after the fact — the structural logs keep only a hash. The file holds your prompt
+text in the clear; latch never uploads it and nothing on the public-safe surface reads it. To turn it off for the standard
+shared MCP runtime, set `"request_text_capture": false` in the same `runtime_settings.json`
+vault-policy file, preserving its other keys; direct CLI processes can instead set the
+`LATCH_REQUEST_TEXT_CAPTURE` environment variable to `0`. Either control suppresses the text while
+leaving the structural records untouched, but they are not peers: the environment variable, whenever
+it is set to anything at all, decides on its own for that process and the vault-policy key is not
+consulted — so a process started with `LATCH_REQUEST_TEXT_CAPTURE=1` keeps capturing even where the
+vault key says `false`. Leave the variable unset for the vault-policy key to govern, which is what
+you want for the shared MCP runtime. (This is the same precedence `LATCH_OUTCOME_EVENTS` has over
+`"outcome_events"`.) Nightly maintenance retires these files on the same clock
+as the structural logs — compressed after 30 days, deleted after one year, today's file never
+touched — but through a dedicated sweep whose archives are created owner-only rather than with the
+ambient umask, and never wider than the file they replace; if that maintenance is disabled, the files remain local until removed. If a write is
+ever refused (for example, the file cannot be kept private), latch records a small structural
+entry — a reason code and identifiers, never the prompt — in `request_text_suppression-YYYY-MM-DD.log`
+so the gap is visible.
+
+On macOS and Linux the file is owner-only (mode `0600`), and latch refuses to write prompt text to
+anything it cannot verify private; a compressed archive is created at the owner bits of the file it
+replaces, so maintenance never hands back a wider file than it took. latch also opens the store
+without following symbolic links, so a link left at that filename cannot redirect your prompts to a
+file elsewhere on the disk. Where the vault directory itself lives is your choice and latch does not
+override it. On Windows, file modes are not a permission model — latch requests the same restriction,
+but the file's confidentiality rests on the permissions of the vault directory itself, so put your
+vault somewhere only you can read.
+
 **Overhead.** The per-prompt retrieval hook runs locally against the KB —
 roughly 120–150 ms on an Apple Silicon reference machine, inside a 250 ms
 budget — and injects at most five compact KB pointers. A healthy session start
@@ -318,6 +399,25 @@ Only discrete judgment steps spend a call — the gate (on write-shaped changes)
 ask), and a nightly background *heal* that reconciles contradictions. Per-day caps bound the
 background work (defaults: 100 foreground calls, 33 nightly heal), so a fresh install can't run up a
 surprise; `bin/latch_gate_report.sh` shows recent activity without spending anything.
+
+**Background Claude model.** When the selected backend is Claude, latch always passes an explicit
+`--model`; it never silently inherits the Claude CLI's user default. The public default is `sonnet`
+for every background purpose. Set these environment variables on the latch host/adapter to override
+it, in precedence order:
+
+| Purpose | Purpose-specific override |
+| --- | --- |
+| gate classifier and adversary | `LATCH_GATE_CLAUDE_MODEL` |
+| compaction | `LATCH_COMPACTOR_CLAUDE_MODEL` |
+| heal arbitration | `LATCH_HEAL_CLAUDE_MODEL` |
+| tree summaries | `LATCH_TREE_CLAUDE_MODEL` |
+
+Each purpose then falls back to `LATCH_MAINTENANCE_CLAUDE_MODEL`, then
+`LATCH_CLAUDE_MODEL`, then `sonnet`. For example, `LATCH_CLAUDE_MODEL=opus` selects Opus for every
+Claude-backed background call, while `LATCH_TREE_CLAUDE_MODEL=haiku` changes only tree summaries.
+Detached maintenance carries these non-secret selectors across its autonomous boundary but never
+connection credentials. Structural gate and heal records use the stable field name `model`;
+compaction status uses `summarizer_model`, and the text maintenance logs include `model=...`.
 
 **Kill switch.** Stop latch hooks without uninstalling:
 
@@ -377,6 +477,40 @@ An honest guardrail names its limits.
 
 ## Proof and limits
 
+### The decision-authority evaluation
+
+The headline result. In an internal, owner-amended evaluation over **24 historical decisions** —
+one revival probe and one legitimate control each, five runs per probe and arm — presenting the
+prior decision through latch produced better adherence than placing the same decision text in a
+carefully maintained instruction file, without wrongly refusing legitimate adjacent work:
+
+| Measure | Instruction file | latch |
+| --- | ---: | ---: |
+| Prior decision respected | 101 / 120 | **116 / 120** |
+| Rejected approach revived | 19 / 120 | **4 / 120** |
+| Legitimate work explicitly refused | 4 / 120 | **0 / 120** |
+
+The honest caveat: this is an internal evaluation with disclosed post-result amendments, not an
+independent benchmark, and it does not establish that latch outperforms a complete named product or
+that the result generalizes beyond this corpus. The preregistered method, the raw treatment
+alongside the amended one, both amendments, and the anonymized run ledger are published in
+[benchmarks/decision_authority_v1](./benchmarks/decision_authority_v1/). Every public count
+recomputes from the checked-in ledger:
+
+```bash
+python3 benchmarks/decision_authority_v1/recompute.py
+```
+
+### What CI holds on every merge
+
+The public-release-hygiene workflow runs the full cumulative test suite — 2,302 passed, 14 skipped
+at the time of writing (2026-08) — plus contract jobs on macOS, Ubuntu, and Windows, and a
+proof-packet consistency check that fails any PR whose README claims drift from the captured
+receipt. Stable builds ship as tagged [releases](https://github.com/open-latch/latch/releases)
+(latest: `v1.1.0`).
+
+### The proof packet
+
 The checked-in [V1 public proof packet](./proof/README.md) pairs one observed model-backed receipt
 with two small deterministic fixture suites:
 
@@ -424,14 +558,14 @@ curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/open-lat
 
 **Inspect or pin before you run.** To inspect either installer first, download the script and read it
 locally. The piped command follows `main`; for a stable build, pin both the script and the checkout
-ref to the latest tagged release (currently `v1.0.0`) so the install cannot drift back to `main`:
+ref to the latest tagged release (currently `v1.1.0`) so the install cannot drift back to `main`:
 
 ```bash
-curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/open-latch/latch/v1.0.0/install.sh | LATCH_INSTALL_REF=v1.0.0 bash
+curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/open-latch/latch/v1.1.0/install.sh | LATCH_INSTALL_REF=v1.1.0 bash
 ```
 
 ```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/open-latch/latch/v1.0.0/install.ps1))) -Ref v1.0.0
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/open-latch/latch/v1.1.0/install.ps1))) -Ref v1.1.0
 ```
 
 ### Automatic retrieval and catch-up
@@ -516,6 +650,7 @@ licensed under Apache 2.0; see [TRADEMARK.md](./TRADEMARK.md) and [CONTRIBUTING.
 | [Public proof packet](./proof/README.md) | [Benchmarks](./benchmarks/README.md) |
 | [Cursor reference](./runbooks/cursor.md) | [Cursor gate smoke](./runbooks/cursor_gate_smoke.md) |
 | [Architecture](./ARCHITECTURE.md) | [Shared MCP runtime](./docs/mcp_resource_architecture.md) |
+| [Outcome audit](./runbooks/outcome_audit.md) | [KB durability](./runbooks/kb_durability.md) |
 
 Install internals, per-surface manual install, and maintenance machinery live in
 [ARCHITECTURE.md](./ARCHITECTURE.md). This README stays focused on the local decision-continuity

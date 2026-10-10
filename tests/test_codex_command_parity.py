@@ -74,7 +74,9 @@ def test_latch_decay_codex_skill_invokes_weekly_maintenance():
         / "SKILL.md"
     ).read_text(encoding="utf-8")
 
-    assert 'python "$latch_home/src/maintenance.py" weekly "$(pwd)"' in text
+    assert 'maintenance_script="$latch_home/src/latch/pipeline/maintenance.py"' in text
+    assert 'maintenance_script="$latch_home/src/maintenance.py"' in text
+    assert 'python "$maintenance_script" weekly "$(pwd)"' in text
 
 
 def test_latch_gate_codex_skill_uses_explicit_request_fallback():
@@ -127,6 +129,7 @@ def test_shell_backed_codex_skills_do_not_treat_project_root_as_latch_home():
 
         assert "CLAUDE_KB_HOME" in text
         assert "AGENTS.md" in text
+        assert "src/latch/mcp/mcp_server.py" in text
         assert "src/mcp_server.py" in text
         assert "Could not find latch checkout" in text
         assert 'latch_home="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"' not in text

@@ -10,7 +10,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-import compactor  # noqa: E402
+from latch.pipeline import compactor  # noqa: E402
 
 
 COMPACTION_JSON = (
@@ -62,6 +62,7 @@ def test_invoke_claude_once_disallows_action_tools():
     d = _tmp()
     old_response = os.environ.get("FAKE_CLAUDE_RESPONSE")
     old_args = os.environ.get("FAKE_CLAUDE_ARGS")
+    old_model = os.environ.get("LATCH_COMPACTOR_CLAUDE_MODEL")
     try:
         args_file = d / "args.txt"
         fake = _fake_claude(d / "claude")
@@ -69,6 +70,7 @@ def test_invoke_claude_once_disallows_action_tools():
             '{"type":"result","result":"' + COMPACTION_JSON.replace('"', '\\"') + '"}'
         )
         os.environ["FAKE_CLAUDE_ARGS"] = str(args_file)
+        os.environ["LATCH_COMPACTOR_CLAUDE_MODEL"] = "compact-opus"
         raw, err = compactor._invoke_claude_once(
             "summarize this", claude_bin=str(fake), timeout_s=1,
         )
@@ -79,6 +81,7 @@ def test_invoke_claude_once_disallows_action_tools():
             args[:4] == ["-p", "--no-session-persistence", "--output-format", "json"],
             args,
         )
+        _assert(args[-2:] == ["--model", "compact-opus"], args)
         _assert("--disallowedTools" in args, args)
         denied = args[args.index("--disallowedTools") + 1]
         _assert(denied == compactor.CLAUDE_COMPACTOR_DISALLOWED_TOOLS, args)
@@ -93,6 +96,10 @@ def test_invoke_claude_once_disallows_action_tools():
             os.environ.pop("FAKE_CLAUDE_ARGS", None)
         else:
             os.environ["FAKE_CLAUDE_ARGS"] = old_args
+        if old_model is None:
+            os.environ.pop("LATCH_COMPACTOR_CLAUDE_MODEL", None)
+        else:
+            os.environ["LATCH_COMPACTOR_CLAUDE_MODEL"] = old_model
         shutil.rmtree(d, ignore_errors=True)
     print("PASS invoke_claude_once_disallows_action_tools")
 
@@ -128,6 +135,29 @@ def test_invoke_codex_once_uses_isolated_exec_shape():
             os.environ["FAKE_CODEX_ARGS"] = old_args
         shutil.rmtree(d, ignore_errors=True)
     print("PASS invoke_codex_once_uses_isolated_exec_shape")
+
+
+def test_invoke_codex_once_returns_launch_oserror():
+    original_run = compactor.subprocess.run
+
+    def deny_launch(*_args, **_kwargs):
+        raise PermissionError(
+            5,
+            "Access is denied",
+            "C:/Program Files/WindowsApps/codex.exe",
+        )
+
+    try:
+        compactor.subprocess.run = deny_launch
+        raw, err = compactor._invoke_codex_once(
+            "summarize this", codex_bin="codex.exe", timeout_s=1,
+        )
+        _assert(raw is None, raw)
+        _assert(err and err.startswith("PermissionError:"), err)
+        _assert("Access is denied" in err, err)
+    finally:
+        compactor.subprocess.run = original_run
+    print("PASS invoke_codex_once_returns_launch_oserror")
 
 
 def test_invoke_cursor_once_uses_isolated_ask_shape():
@@ -278,6 +308,7 @@ def test_invoke_summarizer_repairs_parsed_empty_result():
 if __name__ == "__main__":
     test_invoke_claude_once_disallows_action_tools()
     test_invoke_codex_once_uses_isolated_exec_shape()
+    test_invoke_codex_once_returns_launch_oserror()
     test_invoke_cursor_once_uses_isolated_ask_shape()
     test_invoke_summarizer_parses_codex_result()
     test_repair_prompt_is_self_contained_for_isolated_backend()

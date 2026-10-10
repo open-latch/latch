@@ -16,4 +16,4 @@ else
   echo "latch_proof_packet: no Python found (set LATCH_PYTHON)." >&2
   exit 2
 fi
-exec "$PY" "${LATCH_HOME}/src/proof_packet.py" "$@"
+exec "$PY" "${LATCH_HOME}/src/latch/proof/proof_packet.py" "$@"

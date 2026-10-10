@@ -12,11 +12,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-import agents_md_sync  # noqa: E402
-import cursor_rules_sync  # noqa: E402
-import cursor_hooks  # noqa: E402
-import cursor_doctor as cd  # noqa: E402
-import install_cursor as ic  # noqa: E402
+from latch.hosts import agents_md_sync  # noqa: E402
+from latch.hosts import cursor_rules_sync  # noqa: E402
+from latch.hosts import cursor_hooks  # noqa: E402
+from latch.hosts import cursor_doctor as cd  # noqa: E402
+from latch.install import install_cursor as ic  # noqa: E402
 
 
 def _assert(cond, msg):
@@ -39,11 +39,11 @@ def test_check_cursor_config_ok_and_missing():
     try:
         config = d / ".cursor" / "mcp.json"
         config.parent.mkdir(parents=True)
-        body, _changes = ic.merge_mcp_config("", "/py", "/repo/src/mcp_server.py")
+        body, _changes = ic.merge_mcp_config("", "/py", "/repo/src/latch/mcp/mcp_server.py")
         config.write_text(body, encoding="utf-8")
-        ok = cd.check_cursor_config(config, "/py", "/repo/src/mcp_server.py")
+        ok = cd.check_cursor_config(config, "/py", "/repo/src/latch/mcp/mcp_server.py")
         _assert(ok.level == cd.OK, ok)
-        missing = cd.check_cursor_config(d / "missing.json", "/py", "/repo/src/mcp_server.py")
+        missing = cd.check_cursor_config(d / "missing.json", "/py", "/repo/src/latch/mcp/mcp_server.py")
         _assert(missing.level == cd.FAIL, missing)
     finally:
         shutil.rmtree(d, ignore_errors=True)
@@ -306,10 +306,10 @@ def test_run_all_requires_hooks_when_requested():
         hooks = d / ".cursor" / "hooks.json"
         hooks_body, _ = cursor_hooks.merge_hooks(
             "", sys.executable,
-            str(ic.KB_HOME / "src" / "hooks" / "cursor_session_start.py"),
-            str(ic.KB_HOME / "src" / "hooks" / "cursor_before_submit.py"),
-            str(ic.KB_HOME / "src" / "hooks" / "cursor_pre_tool_use.py"),
-            str(ic.KB_HOME / "src" / "hooks" / "cursor_post_tool_use.py"),
+            str(ic.KB_HOME / "src" / "latch" / "hooks" / "cursor_session_start.py"),
+            str(ic.KB_HOME / "src" / "latch" / "hooks" / "cursor_before_submit.py"),
+            str(ic.KB_HOME / "src" / "latch" / "hooks" / "cursor_pre_tool_use.py"),
+            str(ic.KB_HOME / "src" / "latch" / "hooks" / "cursor_post_tool_use.py"),
             path=hooks,
         )
         cursor_hooks.write_hooks(hooks, hooks_body)

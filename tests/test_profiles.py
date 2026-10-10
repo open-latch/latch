@@ -14,8 +14,8 @@ from pathlib import Path
 _SRC = Path(__file__).resolve().parent.parent / "src"
 sys.path.insert(0, str(_SRC))
 
-import db        # noqa: E402
-import profiles  # noqa: E402
+from latch.store import db        # noqa: E402
+from latch.store import profiles  # noqa: E402
 
 
 def _assert(cond, msg):

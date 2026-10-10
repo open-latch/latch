@@ -9,7 +9,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-import install_vscode as iv  # noqa: E402
+from latch.install import install_vscode as iv  # noqa: E402
 
 
 def _assert(cond, msg):
@@ -18,10 +18,10 @@ def _assert(cond, msg):
 
 
 def test_render_mcp_server_uses_vscode_stdio_shape():
-    server = iv.render_mcp_server("/PY", "/repo/src/mcp_server.py", model_backend="codex")
+    server = iv.render_mcp_server("/PY", "/repo/src/latch/mcp/mcp_server.py", model_backend="codex")
     _assert(server["type"] == "stdio", server)
     _assert(server["command"] == "/PY", server)
-    _assert(server["args"] == ["/repo/src/mcp_server.py"], server)
+    _assert(server["args"] == ["/repo/src/latch/mcp/mcp_server.py"], server)
     _assert(server["env"]["LATCH_ADAPTER"] == "vscode-copilot", server)
     _assert(server["env"]["LATCH_MODEL_BACKEND"] == "codex", server)
     _assert(server["env"]["LATCH_GATE_BACKEND"] == "codex", server)

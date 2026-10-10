@@ -20,7 +20,7 @@ from pathlib import Path
 
 KB_HOME = Path(os.environ.get("LATCH_HOME") or os.environ.get("CLAUDE_KB_HOME") or Path(__file__).resolve().parent.parent)
 LOG_PATH = KB_HOME / "mcp_stderr.log"
-MCP_SCRIPT = str(KB_HOME / "src" / "mcp_server.py")
+MCP_SCRIPT = str(KB_HOME / "src" / "latch" / "mcp" / "mcp_server.py")
 
 
 def _slug_for_cwd() -> str:

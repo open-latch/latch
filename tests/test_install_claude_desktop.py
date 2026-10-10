@@ -9,7 +9,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-import install_claude_desktop as icd  # noqa: E402
+from latch.install import install_claude_desktop as icd  # noqa: E402
 
 
 def _assert(cond, msg):
@@ -18,9 +18,9 @@ def _assert(cond, msg):
 
 
 def test_render_desktop_server_uses_claude_desktop_shape():
-    server = icd.render_desktop_server("/PY", "/repo/src/mcp_server.py", model_backend="codex")
+    server = icd.render_desktop_server("/PY", "/repo/src/latch/mcp/mcp_server.py", model_backend="codex")
     _assert(server["command"] == "/PY", server)
-    _assert(server["args"] == ["/repo/src/mcp_server.py"], server)
+    _assert(server["args"] == ["/repo/src/latch/mcp/mcp_server.py"], server)
     _assert(server["env"]["LATCH_ADAPTER"] == "claude-desktop", server)
     _assert(server["env"]["LATCH_MODEL_BACKEND"] == "codex", server)
     _assert(server["env"]["LATCH_GATE_BACKEND"] == "codex", server)

@@ -99,7 +99,7 @@ function Validate-Checkout([string]$App) {
   if ((Normalize-Repository $actual) -ne (Normalize-Repository $Repository)) {
     Fail("existing checkout origin is $actual, expected $Repository; refusing overwrite")
   }
-  foreach ($relative in @("VERSION", "requirements.txt", "src\quickstart.py")) {
+  foreach ($relative in @("VERSION", "requirements.txt", "src\latch\install\quickstart.py")) {
     if (-not (Test-Path -LiteralPath (Join-Path $App $relative) -PathType Leaf)) {
       Fail("checkout is missing required Latch file: $relative")
     }
@@ -154,6 +154,26 @@ function Get-RuntimePython([string]$App) {
   return $null
 }
 
+function Test-SqliteVecCapability([string]$App, [string]$Python) {
+  # Single quotes are load-bearing. Windows PowerShell 5.1 has no
+  # $PSNativeCommandArgumentPassing: it rebuilds a command line and does NOT
+  # escape double quotes inside an argument, so CommandLineToArgvW deletes
+  # them. A double-quoted "VEC_OK" here reaches python.exe as a bare VEC_OK
+  # and dies with NameError, which the caller then misreports as a missing
+  # sqlite-vec capability. Keep this probe free of double quotes; the contract
+  # test test_bootstrap_script_contracts_and_syntax enforces it.
+  $probe = @'
+import sys
+sys.path.insert(0, sys.argv[1])
+from latch.install.doctor import OK, _VEC_PROBE, _run_probe
+level, _ = _run_probe(_VEC_PROBE, 'VEC_OK', 30, arch_hint=True)
+if level != OK:
+    raise SystemExit(1)
+'@
+  & $Python -B -c $probe (Join-Path $App "src")
+  return ($LASTEXITCODE -eq 0)
+}
+
 function Prepare-Runtime([string]$App, [string]$Uv) {
   $python = Get-RuntimePython $App
   $previousNoConfig = $env:UV_NO_CONFIG
@@ -176,7 +196,16 @@ function Prepare-Runtime([string]$App, [string]$Uv) {
       # Compatibility for pre-runtime-lock releases.
       & $Uv pip install --python $python -r (Join-Path $App "requirements.txt") | Out-Host
     }
-    return ($LASTEXITCODE -eq 0)
+    if ($LASTEXITCODE -ne 0) { return $false }
+    if (-not (Test-SqliteVecCapability $App $python)) {
+      [Console]::Error.WriteLine(
+        "sqlite-vec capability preflight failed for $python. The resolved interpreter may be " +
+        "built without SQLite extension loading support. Rebuild or replace the interpreter or " +
+        "$App\.venv, then rerun. No project or agent configuration was written; no app files were removed."
+      )
+      return $false
+    }
+    return $true
   } finally {
     $env:UV_NO_CONFIG = $previousNoConfig
   }
@@ -317,7 +346,7 @@ try {
   $env:LATCH_PYTHON = $PythonPath
   $effectiveQuickstartArgs = @()
   $effectiveQuickstartArgs += $QuickstartArgs
-  & $PythonPath (Join-Path $InstallDir "src\quickstart.py") --project $Project @effectiveQuickstartArgs
+  & $PythonPath (Join-Path $InstallDir "src\latch\install\quickstart.py") --project $Project @effectiveQuickstartArgs
   $quickstartRc = $LASTEXITCODE
 } finally {
   if ($hadLatchHome) {

@@ -20,5 +20,5 @@ if ($env:LATCH_PYTHON) {
   $Py = "python"
 }
 
-& $Py (Join-Path $KbHome "src/install_vscode.py") @args
+& $Py (Join-Path $KbHome "src/latch/install/install_vscode.py") @args
 exit $LASTEXITCODE

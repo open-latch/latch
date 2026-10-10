@@ -25,7 +25,7 @@ RELEASE_WORKFLOW = ROOT / ".github" / "workflows" / "public-release-hygiene.yml"
 
 sys.path.insert(0, str(ROOT / "src"))
 
-from versioning import LATCH_VERSION  # noqa: E402
+from latch.install.versioning import LATCH_VERSION  # noqa: E402
 
 
 def run(*args: str, cwd: Path | None = None, env: dict[str, str] | None = None):
@@ -54,8 +54,9 @@ def make_origin(tmp_path: Path) -> Path:
         assert run("git", "-C", str(origin), "checkout", "-b", "main").returncode == 0
     git(origin, "config", "user.email", "latch-tests@example.invalid")
     git(origin, "config", "user.name", "Latch Tests")
-    (origin / "src").mkdir()
-    (origin / "src" / "quickstart.py").write_text(
+    install_src = origin / "src" / "latch" / "install"
+    install_src.mkdir(parents=True)
+    (install_src / "quickstart.py").write_text(
         """#!/usr/bin/env python3
 import json
 import os
@@ -67,9 +68,38 @@ payload = {
     "latch_home": os.environ.get("LATCH_HOME"),
     "latch_python": os.environ.get("LATCH_PYTHON"),
 }
+config_file = os.environ.get("FAKE_CONFIG_FILE")
+if config_file:
+    path = Path(config_file)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("configured\\n", encoding="utf-8")
 with Path(os.environ["FAKE_QUICKSTART_LOG"]).open("a", encoding="utf-8") as fh:
     fh.write(json.dumps(payload) + "\\n")
 raise SystemExit(int(os.environ.get("FAKE_QUICKSTART_FAIL", "0")))
+""",
+        encoding="utf-8",
+    )
+    (install_src / "doctor.py").write_text(
+        """import os
+from pathlib import Path
+
+OK = "OK"
+_VEC_PROBE = "existing sqlite-vec probe"
+
+
+def _run_probe(code, ok_token, timeout, arch_hint):
+    assert code == _VEC_PROBE
+    assert ok_token == "VEC_OK"
+    assert timeout == 30
+    assert arch_hint is True
+    root = next(p for p in Path(__file__).resolve().parents if p.name == "src").parent
+    installed_version = (root / "VERSION").read_text().strip()
+    if (
+        os.environ.get("FAKE_VEC_PROBE_FAIL")
+        or os.environ.get("FAKE_VEC_PROBE_FAIL_VERSION") == installed_version
+    ):
+        return "FAIL", "RuntimeError: SQLite extension loading is disabled"
+    return OK, ""
 """,
         encoding="utf-8",
     )
@@ -268,6 +298,42 @@ def test_posix_bootstrap_runtime_failure_is_recoverable_without_config_writes(tm
     assert Path(env["FAKE_QUICKSTART_LOG"]).is_file()
 
 
+def test_posix_sqlite_vec_preflight_blocks_before_configuration_writes(tmp_path: Path):
+    origin = make_origin(tmp_path)
+    fake_uv = make_fake_uv(tmp_path)
+    config_file = tmp_path / "home" / ".codex" / "config.toml"
+    failed, app, _, env = invoke_installer(
+        tmp_path=tmp_path,
+        origin=origin,
+        fake_uv=fake_uv,
+        extra=("--agents", "codex", "--no-seed"),
+        env_extra={
+            "FAKE_CONFIG_FILE": str(config_file),
+            "FAKE_VEC_PROBE_FAIL": "1",
+        },
+    )
+
+    assert failed.returncode != 0
+    assert "sqlite-vec capability preflight failed" in failed.stderr
+    assert "without SQLite extension loading support" in failed.stderr
+    assert str(app / ".venv" / "bin" / "python") in failed.stderr
+    assert "No project or agent configuration was written" in failed.stderr
+    assert (app / ".git").is_dir()
+    assert not (app / "src" / "__pycache__").exists()
+    assert not config_file.exists()
+    assert not Path(env["FAKE_QUICKSTART_LOG"]).exists()
+
+    repaired, _, _, _ = invoke_installer(
+        tmp_path=tmp_path,
+        origin=origin,
+        fake_uv=fake_uv,
+        extra=("--agents", "codex", "--no-seed"),
+        env_extra={"FAKE_CONFIG_FILE": str(config_file)},
+    )
+    assert repaired.returncode == 0, repaired.stdout + repaired.stderr
+    assert config_file.read_text(encoding="utf-8") == "configured\n"
+
+
 def test_posix_uv_bootstrap_noise_does_not_pollute_executable_path(tmp_path: Path):
     origin = make_origin(tmp_path)
     fake_uv = make_fake_uv(tmp_path)
@@ -366,6 +432,44 @@ def test_posix_bootstrap_upgrade_is_explicit_and_dirty_safe(tmp_path: Path):
     assert upgraded.returncode == 0, upgraded.stdout + upgraded.stderr
     assert git(app, "rev-parse", "HEAD") == new_commit
     assert (app / "VERSION").read_text(encoding="utf-8") == "0.2.0\n"
+
+
+def test_posix_failed_upgrade_vec_preflight_restores_checkout_and_runtime(tmp_path: Path):
+    origin = make_origin(tmp_path)
+    fake_uv = make_fake_uv(tmp_path)
+    first, app, _, env = invoke_installer(
+        tmp_path=tmp_path,
+        origin=origin,
+        fake_uv=fake_uv,
+        extra=("--agents", "codex", "--no-seed"),
+    )
+    assert first.returncode == 0, first.stdout + first.stderr
+    old_commit = git(app, "rev-parse", "HEAD")
+
+    (origin / "VERSION").write_text("0.2.0\n", encoding="utf-8")
+    git(origin, "add", "VERSION")
+    git(origin, "commit", "-m", "fixture v2")
+    new_commit = git(origin, "rev-parse", "HEAD")
+    assert new_commit != old_commit
+
+    failed, _, _, failed_env = invoke_installer(
+        tmp_path=tmp_path,
+        origin=origin,
+        fake_uv=fake_uv,
+        extra=("--upgrade", "--ref", "main", "--agents", "codex", "--no-seed"),
+        env_extra={"FAKE_VEC_PROBE_FAIL_VERSION": "0.2.0"},
+    )
+
+    assert failed.returncode != 0
+    assert "sqlite-vec capability preflight failed" in failed.stderr
+    assert "upgrade rolled back; the previous checkout remains installed" in failed.stderr
+    assert git(app, "rev-parse", "HEAD") == old_commit
+    assert (app / "VERSION").read_text(encoding="utf-8") == "0.1.0\n"
+    quickstart_log = Path(env["FAKE_QUICKSTART_LOG"])
+    assert len(quickstart_log.read_text(encoding="utf-8").splitlines()) == 1
+    uv_log = Path(failed_env["FAKE_UV_LOG"])
+    uv_calls = uv_log.read_text(encoding="utf-8").splitlines()
+    assert sum(call.startswith("pip install ") for call in uv_calls) == 3
 
 
 def test_posix_fresh_install_honors_immutable_release_ref(tmp_path: Path):
@@ -529,6 +633,7 @@ def test_bootstrap_script_contracts_and_syntax():
         assert "https://astral.sh/uv/" in text
         assert "0.11.28" in text
         assert "quickstart.py" in text
+        assert "from latch.install.doctor import OK, _VEC_PROBE, _run_probe" in text
         assert "upgrade refused because the install checkout is dirty" in text
         assert "production KB" in text
         assert "requirements.lock" in text
@@ -540,6 +645,15 @@ def test_bootstrap_script_contracts_and_syntax():
     assert "UV_UNMANAGED_INSTALL" in powershell
     assert "LOCALAPPDATA" in shell
     assert "LOCALAPPDATA" in powershell
+    # Windows PowerShell 5.1 predates $PSNativeCommandArgumentPassing: it
+    # rebuilds a command line for native calls and leaves embedded double
+    # quotes unescaped, so CommandLineToArgvW strips them back out. A probe
+    # carrying "VEC_OK" arrives at python.exe as a bare VEC_OK and exits with
+    # NameError, which Prepare-Runtime then reports as a failed sqlite-vec
+    # capability. Keep the PowerShell here-string free of double quotes.
+    ps_probe = powershell.split("$probe = @'", 1)[1].split("'@", 1)[0]
+    assert "_run_probe" in ps_probe
+    assert '"' not in ps_probe, f"double quote in PowerShell probe breaks PS 5.1: {ps_probe!r}"
     workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
     assert "one-command-bootstrap-windows:" in workflow
     assert "runs-on: windows-latest" in workflow
@@ -555,11 +669,19 @@ def test_bootstrap_script_contracts_and_syntax():
         "tests/test_bootstrap_install.py::"
         "test_powershell_iex_failure_preserves_session_and_environment"
     ) in workflow
+    assert (
+        "tests/test_bootstrap_install.py::"
+        "test_windows_powershell_51_bootstrap_probes_real_argument_passing"
+    ) in workflow
     assert "one-command-bootstrap-macos:" in workflow
     assert "one-command-bootstrap (macos-latest Bash 3.2)" in workflow
     assert (
         "tests/test_bootstrap_install.py::"
         "test_posix_bootstrap_zero_quickstart_args_on_stock_macos_bash"
+    ) in workflow
+    assert (
+        "tests/test_bootstrap_install.py::"
+        "test_posix_sqlite_vec_preflight_blocks_before_configuration_writes"
     ) in workflow
     assert "uv==0.11.28" in workflow
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
@@ -712,6 +834,19 @@ exit /b 43
     assert sum(line.startswith("venv ") for line in uv_calls) == 1
     assert sum(line.startswith("pip install ") for line in uv_calls) == 2
 
+    blocked_config = tmp_path / "blocked-config.json"
+    env["FAKE_CONFIG_FILE"] = str(blocked_config)
+    env["FAKE_VEC_PROBE_FAIL"] = "1"
+    blocked = invoke_powershell()
+    blocked_output = blocked.stdout + blocked.stderr
+    assert blocked.returncode != 0
+    assert "sqlite-vec capability preflight failed" in blocked_output
+    assert "without SQLite extension loading support" in blocked_output
+    assert not blocked_config.exists()
+    assert len(read_json_lines(Path(env["FAKE_QUICKSTART_LOG"]))) == 2
+    env.pop("FAKE_CONFIG_FILE")
+    env.pop("FAKE_VEC_PROBE_FAIL")
+
     refused = invoke_powershell(ref="different-ref")
     assert refused.returncode != 0
     assert "does not change an existing install" in refused.stdout + refused.stderr
@@ -783,6 +918,100 @@ exit /b 43
     assert "SESSION_CONTINUED" in result.stdout
     assert "LATCH_HOME_AFTER=before-home" in result.stdout
     assert "LATCH_PYTHON_AFTER=before-python" in result.stdout
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows PowerShell 5.1 acceptance path")
+def test_windows_powershell_51_bootstrap_probes_real_argument_passing(tmp_path: Path):
+    """Run install.ps1 under the shell README.md actually tells users to use.
+
+    The other PowerShell tests resolve `pwsh` first, and every runner has it,
+    so they only ever exercise PowerShell 7's Standard native-argument
+    passing. Windows PowerShell 5.1 rebuilds a command line instead and drops
+    unescaped embedded double quotes, which silently corrupted the sqlite-vec
+    probe's Python source for every stock-Windows install. This is the only
+    test that runs the installer on 5.1.
+    """
+    shell = shutil.which("powershell")
+    assert shell, "Windows runner has no Windows PowerShell (powershell.exe)"
+
+    origin = make_origin(tmp_path)
+    project = tmp_path / "project"
+    project.mkdir()
+    app = tmp_path / "managed root" / "Latch app"
+    fake_uv = tmp_path / "fake-uv.cmd"
+    fake_uv.write_text(
+        """@echo off
+echo %*>>"%FAKE_UV_LOG%"
+if "%1"=="venv" (
+  "%FAKE_SYSTEM_PYTHON%" -m venv "%~4"
+  exit /b %ERRORLEVEL%
+)
+if "%1"=="pip" exit /b 0
+exit /b 43
+""",
+        encoding="utf-8",
+    )
+    env = installer_env(tmp_path, origin, fake_uv)
+    env["FAKE_SYSTEM_PYTHON"] = sys.executable
+    env["LOCALAPPDATA"] = str(tmp_path / "local-app-data")
+
+    def ps_quote(value: str | Path) -> str:
+        return "'" + str(value).replace("'", "''") + "'"
+
+    def invoke_windows_powershell(command: str):
+        return run(
+            shell,
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            command,
+            cwd=project,
+            env=env,
+        )
+
+    # Guard the coverage claim itself: if powershell.exe ever stops being 5.1,
+    # this test silently reverts to duplicating the pwsh path (see id=1775 —
+    # a Windows job that reported green while its real check was not running).
+    version = invoke_windows_powershell(
+        "Write-Host ('PSMAJOR=' + $PSVersionTable.PSVersion.Major)"
+    )
+    assert "PSMAJOR=5" in version.stdout, (
+        f"expected Windows PowerShell 5.x, got: {version.stdout + version.stderr}"
+    )
+
+    install = (
+        f"try {{ & {ps_quote(INSTALL_PS1)} -InstallDir {ps_quote(app)} "
+        f"-Project {ps_quote(project)} "
+        "-QuickstartArgs @('--agents','codex','--no-seed') } "
+        "catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }"
+    )
+
+    first = invoke_windows_powershell(install)
+    output = first.stdout + first.stderr
+    # A probe whose quoting was eaten by 5.1 reaches python.exe as a bare
+    # VEC_OK and exits NameError, so the install fails here with the generic
+    # runtime wrapper and no interpreter is ever actually tested.
+    assert "NameError" not in output, output
+    assert first.returncode == 0, output
+    assert "Latch activation complete" in first.stdout
+    calls = read_json_lines(Path(env["FAKE_QUICKSTART_LOG"]))
+    assert calls[0]["argv"] == [
+        "--project", str(project), "--agents", "codex", "--no-seed",
+    ]
+
+    # The probe must also deliver a real capability verdict on 5.1, not just
+    # survive parsing: a genuine FAIL has to stop the install before any
+    # configuration write and surface the remediation text.
+    blocked_config = tmp_path / "blocked-config.json"
+    env["FAKE_CONFIG_FILE"] = str(blocked_config)
+    env["FAKE_VEC_PROBE_FAIL"] = "1"
+    blocked = invoke_windows_powershell(install)
+    blocked_output = blocked.stdout + blocked.stderr
+    assert blocked.returncode != 0
+    assert "sqlite-vec capability preflight failed" in blocked_output
+    assert not blocked_config.exists()
+    assert len(read_json_lines(Path(env["FAKE_QUICKSTART_LOG"]))) == 1
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows Git Bash acceptance path")

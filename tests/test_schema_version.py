@@ -10,11 +10,11 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
-import db  # noqa: E402
-import paths  # noqa: E402
-import schema_version  # noqa: E402
-import vault_backup  # noqa: E402
-import vault_identity  # noqa: E402
+from latch.store import db  # noqa: E402
+from latch.store import paths  # noqa: E402
+from latch.store import schema_version  # noqa: E402
+from latch.store import vault_backup  # noqa: E402
+from latch.store import vault_identity  # noqa: E402
 
 
 def test_fresh_db_is_stamped_without_backup(tmp_path):
@@ -36,7 +36,7 @@ def test_legacy_db_backs_up_once_before_stamp(tmp_path):
     path = paths.db_path(str(tmp_path))
     path.parent.mkdir(parents=True, exist_ok=True)
     legacy = sqlite3.connect(path)
-    legacy.executescript((ROOT / "src" / "schema.sql").read_text(encoding="utf-8"))
+    legacy.executescript((ROOT / "src" / "latch" / "store" / "schema.sql").read_text(encoding="utf-8"))
     legacy.execute(
         "INSERT INTO nodes(kind,title,body,status) VALUES('decision','keep me','durable','canonical')"
     )
@@ -64,7 +64,7 @@ def test_current_unidentified_db_is_backed_up_before_production_adoption(tmp_pat
     path.parent.mkdir(parents=True, exist_ok=True)
     legacy = sqlite3.connect(path)
     try:
-        legacy.executescript((ROOT / "src" / "schema.sql").read_text(encoding="utf-8"))
+        legacy.executescript((ROOT / "src" / "latch" / "store" / "schema.sql").read_text(encoding="utf-8"))
         legacy.execute(
             "INSERT INTO nodes(kind,title,body,status) "
             "VALUES('decision','pre-adoption','must survive','canonical')"
@@ -99,7 +99,7 @@ def test_schema_three_is_fenced_before_first_identity_commit(
         path.parent.mkdir(parents=True, exist_ok=True)
         legacy = sqlite3.connect(path)
         legacy.executescript(
-            (ROOT / "src" / "schema.sql").read_text(encoding="utf-8")
+            (ROOT / "src" / "latch" / "store" / "schema.sql").read_text(encoding="utf-8")
         )
         legacy.execute(
             "INSERT INTO nodes(kind,title,body,status) "
@@ -236,7 +236,7 @@ def test_connect_readonly_does_not_create_or_migrate(tmp_path):
 
     missing.parent.mkdir(parents=True, exist_ok=True)
     legacy = sqlite3.connect(missing)
-    legacy.executescript((ROOT / "src" / "schema.sql").read_text(encoding="utf-8"))
+    legacy.executescript((ROOT / "src" / "latch" / "store" / "schema.sql").read_text(encoding="utf-8"))
     legacy.commit()
     legacy.close()
     with pytest.raises(schema_version.SchemaMigrationRequiredError):

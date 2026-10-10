@@ -19,4 +19,4 @@ else
   echo "latch_seed: no Python found (set LATCH_PYTHON (legacy: CLAUDE_KB_PYTHON) to your interpreter)." >&2
   exit 2
 fi
-exec "$PY" "${KB_HOME}/src/seed.py" "$@"
+exec "$PY" "${KB_HOME}/src/latch/pipeline/seed.py" "$@"

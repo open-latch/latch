@@ -17,7 +17,7 @@ def test_non_windows_bootstrap_is_noop():
         pytest.skip("non-Windows contract")
     sys.path.insert(0, str(SRC))
     try:
-        from windows_stdio import ensure_windows_standard_streams
+        from latch.mcp.windows_stdio import ensure_windows_standard_streams
 
         before = (sys.stdin, sys.stdout, sys.stderr)
         ensure_windows_standard_streams()
@@ -35,7 +35,7 @@ def test_pythonw_recovers_redirected_pipe_streams():
         f"sys.path.insert(0, {str(SRC)!r}); "
         "sys.stdin = sys.stdout = sys.stderr = None; "
         "sys.__stdin__ = sys.__stdout__ = sys.__stderr__ = None; "
-        "from windows_stdio import ensure_windows_standard_streams; "
+        "from latch.mcp.windows_stdio import ensure_windows_standard_streams; "
         "ensure_windows_standard_streams(); "
         "data = sys.stdin.buffer.readline(); "
         "sys.stdout.buffer.write(data); sys.stdout.buffer.flush(); "

@@ -15,4 +15,4 @@ else
     exit 2
 fi
 
-"${PY}" "${ROOT}/src/public_release_check.py" --repo "${ROOT}"
+"${PY}" "${ROOT}/src/latch/proof/public_release_check.py" --repo "${ROOT}"

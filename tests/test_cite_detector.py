@@ -13,7 +13,7 @@ from pathlib import Path
 _SRC = Path(__file__).resolve().parent.parent / "src"
 sys.path.insert(0, str(_SRC))
 
-import cite_detector  # noqa: E402
+from latch.proof import cite_detector  # noqa: E402
 
 
 def _assert(cond, msg):

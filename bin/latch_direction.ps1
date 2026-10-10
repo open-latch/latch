@@ -20,5 +20,5 @@ if ($env:LATCH_PYTHON) {
   exit 2
 }
 
-& $Py (Join-Path $KBHome "src/project_direction.py") --project (Get-Location).Path @args
+& $Py (Join-Path $KBHome "src/latch/retrieval/project_direction.py") --project (Get-Location).Path @args
 exit $LASTEXITCODE

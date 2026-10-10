@@ -20,5 +20,5 @@ if ($env:LATCH_PYTHON) {
   $Py = "python"
 }
 
-& $Py (Join-Path $KbHome "src/agents_md_sync.py") @args
+& $Py (Join-Path $KbHome "src/latch/hosts/agents_md_sync.py") @args
 exit $LASTEXITCODE

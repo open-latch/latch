@@ -17,4 +17,4 @@ else
   echo "latch_seed_report_eval: no Python found (set LATCH_PYTHON (legacy: CLAUDE_KB_PYTHON) to your interpreter)." >&2
   exit 2
 fi
-exec "$PY" "${KB_HOME}/src/seed_report_evals.py" "$@"
+exec "$PY" "${KB_HOME}/src/latch/evals/seed_report_evals.py" "$@"

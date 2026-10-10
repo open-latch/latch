@@ -13,7 +13,7 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
-import paths  # noqa: E402
+from latch.store import paths  # noqa: E402
 
 
 def _fake_executable(directory: Path, name: str = "codex") -> Path:

@@ -20,5 +20,5 @@ if ($env:LATCH_PYTHON) {
   $Py = "python"
 }
 
-& $Py (Join-Path $KbHome "src/install_claude_desktop.py") @args
+& $Py (Join-Path $KbHome "src/latch/install/install_claude_desktop.py") @args
 exit $LASTEXITCODE

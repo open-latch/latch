@@ -16,7 +16,7 @@
 
 ## Backups
 
-`src/vault_backup.py` uses SQLite's online backup API and publishes a verified
+`src/latch/store/vault_backup.py` uses SQLite's online backup API and publishes a verified
 database/manifest pair atomically in the independent durability root:
 
 - macOS: `~/Library/Application Support/LatchBackups`
@@ -36,8 +36,8 @@ unknown, incomplete, or still-protected artifacts are retained.
 Create and verify a snapshot:
 
 ```bash
-.venv/bin/python src/vault_backup.py create
-.venv/bin/python src/vault_backup.py verify-restore /absolute/path/to/snapshot.json
+.venv/bin/python src/latch/store/vault_backup.py create
+.venv/bin/python src/latch/store/vault_backup.py verify-restore /absolute/path/to/snapshot.json
 ```
 
 Recover a verified production snapshot into a new vault outside the source
@@ -47,7 +47,7 @@ restored database passes hash, identity, integrity, foreign-key, and count
 checks:
 
 ```bash
-.venv/bin/python src/vault_backup.py restore \
+.venv/bin/python src/latch/store/vault_backup.py restore \
   /absolute/path/to/snapshot.json \
   --target /absolute/path/to/new-production-vault
 ```
@@ -56,7 +56,7 @@ If a verified database was already restored but registry creation was
 interrupted, resume only the missing registry step:
 
 ```bash
-.venv/bin/python src/vault_backup.py register-restored \
+.venv/bin/python src/latch/store/vault_backup.py register-restored \
   /absolute/path/to/new-production-vault
 ```
 

@@ -21,11 +21,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _isolation  # noqa: E402,F401
 sys.path.insert(0, str(_SRC))
 
-import db  # noqa: E402
-import embeddings  # noqa: E402
-import log_utils  # noqa: E402
-import mcp_broker  # noqa: E402
-import paths  # noqa: E402
+from latch.store import db  # noqa: E402
+from latch.retrieval import embeddings  # noqa: E402
+from latch.common import log_utils  # noqa: E402
+from latch.mcp import mcp_broker  # noqa: E402
+from latch.store import paths  # noqa: E402
 
 
 def main() -> int:
@@ -59,7 +59,7 @@ def main() -> int:
         os.kill(int(owner["pid"]), signal.SIGTERM)
         return 1
 
-    hook_path = _SRC / "hooks" / "user_prompt_submit.py"
+    hook_path = _SRC / "latch" / "hooks" / "user_prompt_submit.py"
     py = sys.executable
     payloads = [
         {"session_id": "perf-1", "cwd": tmp, "prompt": "what do we know about thing 2"},

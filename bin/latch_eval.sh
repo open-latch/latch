@@ -17,4 +17,4 @@ else
   echo "latch_eval: no Python found (set LATCH_PYTHON (legacy: CLAUDE_KB_PYTHON) to your interpreter)." >&2
   exit 2
 fi
-exec "$PY" "${KB_HOME}/src/evals.py" "$@"
+exec "$PY" "${KB_HOME}/src/latch/evals/evals.py" "$@"

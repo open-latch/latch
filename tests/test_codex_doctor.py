@@ -10,9 +10,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-import agents_md_sync  # noqa: E402
-import codex_doctor as cd  # noqa: E402
-import install_codex as ic  # noqa: E402
+from latch.hosts import agents_md_sync  # noqa: E402
+from latch.hosts import codex_doctor as cd  # noqa: E402
+from latch.install import install_codex as ic  # noqa: E402
 
 SID = "019ed000-0000-7000-8000-000000000001"
 
@@ -47,15 +47,66 @@ def test_check_codex_config_ok_and_missing():
     d = _tmp()
     try:
         config = d / "config.toml"
-        body, _changes = ic.merge_config("", "/py", "/repo/src/mcp_server.py")
+        body, _changes = ic.merge_config("", "/py", "/repo/src/latch/mcp/mcp_server.py")
         config.write_text(body, encoding="utf-8")
-        ok = cd.check_codex_config(config, "/py", "/repo/src/mcp_server.py")
+        ok = cd.check_codex_config(config, "/py", "/repo/src/latch/mcp/mcp_server.py")
         _assert(ok.level == cd.OK, ok)
-        missing = cd.check_codex_config(d / "missing.toml", "/py", "/repo/src/mcp_server.py")
+        missing = cd.check_codex_config(d / "missing.toml", "/py", "/repo/src/latch/mcp/mcp_server.py")
         _assert(missing.level == cd.FAIL, missing)
     finally:
         shutil.rmtree(d, ignore_errors=True)
     print("PASS check_codex_config_ok_and_missing")
+
+
+def test_run_all_uses_canonical_windows_mcp_launch_pair():
+    d = _tmp()
+    original_system = cd.install_engine.platform.system
+    original_kb_access = cd.check_kb_access
+    try:
+        scripts = d / "venv" / "Scripts"
+        scripts.mkdir(parents=True)
+        python = scripts / "python.exe"
+        pythonw = scripts / "pythonw.exe"
+        python.write_text("", encoding="utf-8")
+        pythonw.write_text("", encoding="utf-8")
+
+        src = d / "repo" / "src"
+        src.mkdir(parents=True)
+        server = src / "mcp_server.py"
+        launcher = src / "mcp_launcher_win.py"
+        server.write_text("", encoding="utf-8")
+        launcher.write_text("", encoding="utf-8")
+
+        config = d / "config.toml"
+        body, _changes = ic.merge_config("", str(pythonw), str(launcher))
+        config.write_text(body, encoding="utf-8")
+
+        cd.install_engine.platform.system = lambda: "Windows"
+        cd.check_kb_access = lambda: cd.Check("Latch KB access", cd.OK, "ok")
+        checks = cd.run_all(
+            config_path=config,
+            hooks_path=d / "hooks.json",
+            agents_path=d / "AGENTS.md",
+            python_path=str(python),
+            server_py=str(server),
+            hook_py=str(src / "hooks" / "codex_session_start.py"),
+            session_id=None,
+            skip_agents=True,
+            skip_hooks=True,
+            skip_compact=True,
+            skip_summarizer=True,
+        )
+        config_check = next(c for c in checks if c.name == "Codex config.toml MCP block")
+        launch_check = next(c for c in checks if c.name == "Codex MCP launch target")
+        _assert(config_check.level == cd.OK, config_check)
+        _assert(launch_check.level == cd.OK, launch_check)
+        _assert(str(pythonw) in launch_check.detail, launch_check)
+        _assert(str(launcher) in launch_check.detail, launch_check)
+    finally:
+        cd.install_engine.platform.system = original_system
+        cd.check_kb_access = original_kb_access
+        shutil.rmtree(d, ignore_errors=True)
+    print("PASS run_all_uses_canonical_windows_mcp_launch_pair")
 
 
 def test_check_agents_md_status():
@@ -163,7 +214,7 @@ def test_check_kb_access_missing_db_preserves_quickstart_seed_order():
             agents_path=d / "AGENTS.md",
             python_path=sys.executable,
             server_py=str(Path(__file__)),
-            hook_py="/repo/src/hooks/codex_session_start.py",
+            hook_py="/repo/src/latch/hooks/codex_session_start.py",
             session_id=None,
             skip_agents=True,
             skip_hooks=True,
@@ -313,7 +364,7 @@ def test_run_all_includes_kb_access_check():
             agents_path=d / "missing-AGENTS.md",
             python_path=sys.executable,
             server_py=str(Path(__file__)),
-            hook_py="/repo/src/hooks/codex_session_start.py",
+            hook_py="/repo/src/latch/hooks/codex_session_start.py",
             session_id=None,
             skip_agents=True,
             skip_hooks=True,
@@ -333,7 +384,7 @@ def test_check_codex_hooks():
     try:
         hooks = d / "hooks.json"
         config = d / "config.toml"
-        hook_py = "/repo/src/hooks/codex_session_start.py"
+        hook_py = "/repo/src/latch/hooks/codex_session_start.py"
         body, _ = cd.codex_hooks.merge_hooks("", "/py", hook_py)
         hooks.write_text(body, encoding="utf-8")
         config.write_text(
@@ -431,8 +482,34 @@ def test_check_summarizer_backend():
     print("PASS check_summarizer_backend")
 
 
+def test_check_summarizer_backend_permission_error_is_structured_failure():
+    original_run = cd.compactor.subprocess.run
+
+    def deny_launch(*_args, **_kwargs):
+        raise PermissionError(
+            5,
+            "Access is denied",
+            "C:/Program Files/WindowsApps/codex.exe",
+        )
+
+    try:
+        cd.compactor.subprocess.run = deny_launch
+        result = cd.check_summarizer_backend(
+            backend="codex", codex_bin=sys.executable, timeout_s=1,
+        )
+        _assert(result.level == cd.FAIL, result)
+        _assert("PermissionError" in result.detail, result)
+        _assert("Access is denied" in result.detail, result)
+        payload = json.dumps({"ok": False, "checks": [result.__dict__]})
+        _assert('"level": "FAIL"' in payload, payload)
+    finally:
+        cd.compactor.subprocess.run = original_run
+    print("PASS check_summarizer_backend_permission_error_is_structured_failure")
+
+
 if __name__ == "__main__":
     test_check_codex_config_ok_and_missing()
+    test_run_all_uses_canonical_windows_mcp_launch_pair()
     test_check_agents_md_status()
     test_check_mcp_launch_target()
     test_check_kb_access_readable_fails_without_writes()
@@ -444,4 +521,5 @@ if __name__ == "__main__":
     test_check_codex_hooks()
     test_check_compact_resolution()
     test_check_summarizer_backend()
+    test_check_summarizer_backend_permission_error_is_structured_failure()
     print("\nAll codex_doctor tests pass.")

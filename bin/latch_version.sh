@@ -12,4 +12,4 @@ if [[ -z "$PY" ]]; then
   echo "latch_version: no Python found (set LATCH_PYTHON)." >&2
   exit 1
 fi
-exec "$PY" "$LATCH_HOME/src/versioning.py" "$@"
+exec "$PY" "$LATCH_HOME/src/latch/install/versioning.py" "$@"

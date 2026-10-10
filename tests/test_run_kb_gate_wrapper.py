@@ -36,7 +36,7 @@ def test_gate_wrappers_honor_configured_python():
             cwd=str(KB_HOME),
         )
         _assert(r.returncode == 0, f"{script.name} exit {r.returncode}: {r.stderr}")
-        _assert(str(KB_HOME / "src" / "kb_gate_cli.py") in r.stdout,
+        _assert(str(KB_HOME / "src" / "latch" / "gate" / "kb_gate_cli.py") in r.stdout,
                 f"{script.name} should exec kb_gate_cli.py, got: {r.stdout}")
         _assert(str(KB_HOME) in r.stdout,
                 f"{script.name} should pass the current project dir, got: {r.stdout}")
@@ -65,7 +65,7 @@ def test_legacy_wrapper_does_not_require_latch_wrapper_executable_bit():
     finally:
         target.chmod(original_mode)
     _assert(r.returncode == 0, f"{legacy.name} exit {r.returncode}: {r.stderr}")
-    _assert(str(KB_HOME / "src" / "kb_gate_cli.py") in r.stdout,
+    _assert(str(KB_HOME / "src" / "latch" / "gate" / "kb_gate_cli.py") in r.stdout,
             f"{legacy.name} should still delegate through bash: {r.stdout}")
     print("PASS legacy_wrapper_does_not_require_latch_wrapper_executable_bit")
 

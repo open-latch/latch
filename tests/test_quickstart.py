@@ -12,7 +12,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-import quickstart as qs  # noqa: E402
+from latch.install import quickstart as qs  # noqa: E402
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -172,7 +172,7 @@ def test_seed_command_includes_project_source_sessions_and_apply():
         backend="codex",
         last_sessions=50,
     )
-    _assert(args[:2] == ["/py", str(qs.KB_HOME / "src" / "seed.py")], args)
+    _assert(args[:2] == ["/py", str(qs.KB_HOME / "src" / "latch" / "pipeline" / "seed.py")], args)
     _assert("--project" in args and str(project) in args, args)
     _assert("--source" in args and "both" in args, args)
     _assert(args.count("--backend") == 1 and "codex" in args, args)
@@ -315,6 +315,7 @@ def test_agent_preflight_reports_every_missing_selected_cli():
     errors = qs.agent_preflight_errors(
         ("claude", "codex", "cursor"),
         which=lambda command: available.get(command),
+        run=lambda *_args, **_kwargs: subprocess.CompletedProcess([], 0),
     )
     _assert(len(errors) == 2, f"expected Claude and Cursor errors, got {errors}")
     _assert(any("Claude Code CLI" in error for error in errors), errors)
@@ -338,16 +339,108 @@ def test_cursor_compatibility_backend_is_preflighted():
         ("cursor",),
         cursor_model_backend="codex",
         which=lambda command: available.get(command),
+        run=lambda *_args, **_kwargs: subprocess.CompletedProcess([], 0),
     )
     _assert(any("Codex CLI" in error for error in errors), errors)
+    _assert(
+        any("Cursor model backend" in error for error in errors),
+        f"missing Codex should name why Cursor needs it: {errors}",
+    )
     available["codex"] = "/bin/codex"
     _assert(qs.agent_preflight_errors(
                 ("cursor",),
                 cursor_model_backend="codex",
                 which=lambda command: available.get(command),
+                run=lambda *_args, **_kwargs: subprocess.CompletedProcess([], 0),
             ) == [],
             "available Cursor and compatibility CLIs should pass preflight")
     print("PASS cursor_compatibility_backend_is_preflighted")
+
+
+def test_codex_preflight_runs_absolute_version_probe():
+    root = Path(tempfile.mkdtemp(prefix="latch-codex-preflight-"))
+    candidate = root / "bin" / ".." / "codex.exe"
+    calls: list[tuple[list[str], dict[str, object]]] = []
+
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs))
+        return subprocess.CompletedProcess(command, 0, stdout="codex-cli 1.0\n")
+
+    try:
+        errors = qs.agent_preflight_errors(
+            ("codex",),
+            which=lambda _command: str(candidate),
+            run=fake_run,
+            platform_name="posix",
+        )
+        _assert(errors == [], errors)
+        _assert(len(calls) == 1, calls)
+        command, kwargs = calls[0]
+        _assert(command == [str(candidate.resolve()), "--version"], command)
+        _assert(kwargs["timeout"] == qs.CODEX_VERSION_PROBE_TIMEOUT_SECONDS, kwargs)
+        _assert(kwargs["capture_output"] is True and kwargs["text"] is True, kwargs)
+        _assert(kwargs["check"] is False, kwargs)
+        _assert("creationflags" not in kwargs, kwargs)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+    print("PASS codex_preflight_runs_absolute_version_probe")
+
+
+def test_codex_preflight_rejects_windows_access_denied_with_install_guidance():
+    candidate = str(Path(tempfile.gettempdir()) / "WindowsApps" / "codex.exe")
+    calls: list[tuple[list[str], dict[str, object]]] = []
+
+    def access_denied(command, **kwargs):
+        calls.append((command, kwargs))
+        raise PermissionError(5, "Access is denied")
+
+    errors = qs.agent_preflight_errors(
+        ("codex",),
+        which=lambda _command: candidate,
+        run=access_denied,
+        platform_name="nt",
+    )
+
+    _assert(len(errors) == 1, errors)
+    _assert("access denied" in errors[0].lower(), errors)
+    _assert("standalone Codex CLI" in errors[0], errors)
+    _assert("https://chatgpt.com/codex/install.ps1" in errors[0], errors)
+    _assert(calls[0][0] == [str(Path(candidate).resolve()), "--version"], calls)
+    _assert(
+        calls[0][1]["creationflags"] == qs.WINDOWS_CREATE_NO_WINDOW,
+        calls,
+    )
+    print("PASS codex_preflight_rejects_windows_access_denied_with_install_guidance")
+
+
+def test_codex_preflight_reports_timeout_oserror_and_nonzero():
+    candidate = str(Path(tempfile.gettempdir()) / "codex")
+
+    def timeout(command, **kwargs):
+        raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+
+    cases = [
+        (timeout, "timed out"),
+        (
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                OSError("launch failed")
+            ),
+            "could not be launched",
+        ),
+        (
+            lambda command, **_kwargs: subprocess.CompletedProcess(command, 23),
+            "status 23",
+        ),
+    ]
+    for fake_run, expected in cases:
+        errors = qs.agent_preflight_errors(
+            ("codex",),
+            which=lambda _command: candidate,
+            run=fake_run,
+            platform_name="posix",
+        )
+        _assert(len(errors) == 1 and expected in errors[0], errors)
+    print("PASS codex_preflight_reports_timeout_oserror_and_nonzero")
 
 
 def test_resolve_agents_requires_choice_without_prompt_or_context():
@@ -456,12 +549,12 @@ def test_quickstart_persists_transient_env_pin_for_later_processes():
         env.update({
             "LATCH_HOME": str(root),
             "LATCH_KB_DIR": str(target),
-            "PYTHONPATH": str(Path(qs.__file__).resolve().parent),
+            "PYTHONPATH": str(next(p for p in Path(qs.__file__).resolve().parents if p.name == "src")),
         })
         env.pop("CLAUDE_KB_DIR", None)
         pin = subprocess.run(
             [sys.executable, "-c", (
-                "import quickstart; "
+                "from latch.install import quickstart; "
                 "level, message = quickstart.pin_kb_for_quickstart(None, dry_run=False); "
                 "print(level, message)"
             )],
@@ -478,7 +571,7 @@ def test_quickstart_persists_transient_env_pin_for_later_processes():
         env.pop(qs.paths.TEST_ROOT_ENV, None)
         env.pop(qs.paths.TEST_CAPABILITY_ENV, None)
         later_db = subprocess.check_output(
-            [sys.executable, "-c", "import paths; print(paths.db_path())"],
+            [sys.executable, "-c", "from latch.store import paths; print(paths.db_path())"],
             cwd=mcp_cwd,
             env=env,
             text=True,
@@ -644,6 +737,9 @@ if __name__ == "__main__":
     test_agent_preflight_reports_every_missing_selected_cli()
     test_agent_preflight_accepts_cursor_agent_alias()
     test_cursor_compatibility_backend_is_preflighted()
+    test_codex_preflight_runs_absolute_version_probe()
+    test_codex_preflight_rejects_windows_access_denied_with_install_guidance()
+    test_codex_preflight_reports_timeout_oserror_and_nonzero()
     test_resolve_agents_requires_choice_without_prompt_or_context()
     test_run_steps_stops_before_later_steps_on_failure()
     test_quickstart_seed_handoff_prints_once_noninteractive()

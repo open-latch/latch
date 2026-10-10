@@ -23,4 +23,4 @@ else
   exit 2
 fi
 
-exec "${PY}" "${KB_HOME}/src/cursor_compact.py" "$@"
+exec "${PY}" "${KB_HOME}/src/latch/hosts/cursor_compact.py" "$@"

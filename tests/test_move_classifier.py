@@ -7,7 +7,7 @@ from pathlib import Path
 _SRC = Path(__file__).resolve().parent.parent / "src"
 sys.path.insert(0, str(_SRC))
 
-import move_classifier  # noqa: E402
+from latch.gate import move_classifier  # noqa: E402
 
 
 def _assert(cond, msg):

@@ -25,9 +25,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-import db  # noqa: E402
-import search  # noqa: E402
-import mcp_server  # noqa: E402
+from latch.store import db  # noqa: E402
+from latch.retrieval import search  # noqa: E402
+from latch.mcp import mcp_server  # noqa: E402
 
 
 def _assert(cond, msg):
@@ -551,7 +551,7 @@ def test_log_compact_writes_jsonl_with_documented_schema():
             mcp_server.PROJECT_CWD = original
 
         # Locate the log file under projects/<sanitized-cwd>/compact_excerpt.log.
-        import paths as paths_mod
+        from latch.store import paths as paths_mod
         log_path = paths_mod.project_dir(tmp) / mcp_server.COMPACT_LOG_FILE_NAME
         _assert(log_path.exists(), f"log file not written at {log_path}")
 

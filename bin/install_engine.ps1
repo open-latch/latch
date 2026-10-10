@@ -5,7 +5,7 @@
 
 .DESCRIPTION
   The engine half of the latch install. All logic lives in
-  src/install_engine.py (stdlib-only, shared with the bash wrapper). It:
+  src/latch/install/install_engine.py (stdlib-only, shared with the bash wrapper). It:
     1. registers the MCP server via `claude mcp add --scope user` — the store
        Claude Code actually reads; it does NOT read mcpServers from
        settings.json;
@@ -32,5 +32,5 @@ $KbHome = if ($env:LATCH_HOME) { $env:LATCH_HOME } `
           elseif ($env:CLAUDE_KB_HOME) { $env:CLAUDE_KB_HOME } `
           else { (Resolve-Path (Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) "..")).Path }
 $Py = if ($env:LATCH_PYTHON) { $env:LATCH_PYTHON } elseif ($env:CLAUDE_KB_PYTHON) { $env:CLAUDE_KB_PYTHON } else { "python" }
-& $Py (Join-Path $KbHome "src/install_engine.py") @args
+& $Py (Join-Path $KbHome "src/latch/install/install_engine.py") @args
 exit $LASTEXITCODE

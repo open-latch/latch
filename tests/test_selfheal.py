@@ -23,10 +23,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-import lockfile  # noqa: E402
-import mcp_runtime  # noqa: E402
-import paths  # noqa: E402
-import selfheal  # noqa: E402
+from latch.common import lockfile  # noqa: E402
+from latch.mcp import mcp_runtime  # noqa: E402
+from latch.store import paths  # noqa: E402
+from latch.pipeline import selfheal  # noqa: E402
 
 
 def _assert(cond, msg):
@@ -299,7 +299,7 @@ def test_run_selfheal_skips_when_locked():
 
 def _seed_db(proj):
     """Create a minimal kb.db so _backup_db has something to copy."""
-    import db
+    from latch.store import db
     db.connect(proj).close()
 
 
@@ -619,6 +619,57 @@ def test_spawn_builds_correct_command():
     finally:
         selfheal.subprocess.Popen = orig_popen
         selfheal.paths.configured_maintenance_runner = orig_runner
+        shutil.rmtree(proj, ignore_errors=True)
+
+
+def test_claude_model_override_crosses_autonomous_boundary_without_credentials(monkeypatch):
+    proj = _fresh_project()
+    captured = {}
+
+    class _FakePopen:
+        def __init__(self, _args, **kwargs):
+            captured.update(kwargs)
+
+    context = mcp_runtime.ConnectionContext(
+        connection_id="claude-maintenance-model",
+        project_cwd=proj,
+        session_id=None,
+        session_source="test",
+        proxy_pid=123,
+        proxy_started_at="now",
+        runtime_key="test",
+        gate_backend="claude",
+        maintenance_backend="claude",
+    )
+    private = mcp_runtime.validate_child_environment({
+        "PATH": os.environ.get("PATH", ""),
+        "CLAUDE_BIN": sys.executable,
+        "ANTHROPIC_API_KEY": "claude-secret",
+        "LATCH_CLAUDE_MODEL": "opus",
+        "LATCH_HEAL_CLAUDE_MODEL": "heal-opus",
+        "LATCH_TREE_CLAUDE_MODEL": "tree-opus",
+    })
+    try:
+        monkeypatch.setattr(selfheal.subprocess, "Popen", _FakePopen)
+        monkeypatch.setattr(
+            selfheal.paths,
+            "configured_maintenance_runner",
+            lambda **_kwargs: (
+                "claude",
+                sys.executable,
+                str(Path(proj).parent),
+                os.pathsep.join(("/vault/bin", "/usr/bin")),
+            ),
+        )
+        with mcp_runtime.bind_connection(context, child_environment=private):
+            selfheal.spawn_detached(proj)
+
+        env = captured["env"]
+        _assert(env["LATCH_CLAUDE_MODEL"] == "opus", env)
+        _assert(env["LATCH_HEAL_CLAUDE_MODEL"] == "heal-opus", env)
+        _assert(env["LATCH_TREE_CLAUDE_MODEL"] == "tree-opus", env)
+        _assert("ANTHROPIC_API_KEY" not in env, env)
+    finally:
         shutil.rmtree(proj, ignore_errors=True)
 
 

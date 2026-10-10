@@ -6,7 +6,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-import public_release_check as prc  # noqa: E402
+from latch.proof import public_release_check as prc  # noqa: E402
 
 
 def _assert(cond, msg):

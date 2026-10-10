@@ -38,7 +38,7 @@ restore_unlatched_instructions() {
     echo "set LATCH_PYTHON (legacy: CLAUDE_KB_PYTHON), then run: bash ${KB_HOME}/bin/unlatch.sh --confirm latch" >&2
     exit 1
   fi
-  "$py" "${KB_HOME}/src/unlatch.py" on --project "$PROJECT_DIR"
+  "$py" "${KB_HOME}/src/latch/install/unlatch.py" on --project "$PROJECT_DIR"
 }
 
 if [ -e "${KB_HOME}/UNLATCHED" ] || [ -e "${KB_HOME}/UNLATCH_STATE.json" ]; then

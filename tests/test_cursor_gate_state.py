@@ -13,8 +13,8 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "src" / "hooks"))
 
-import cursor_gate_state as cgs  # noqa: E402
-import paths  # noqa: E402
+from latch.hosts import cursor_gate_state as cgs  # noqa: E402
+from latch.store import paths  # noqa: E402
 
 
 def _tmp():
@@ -259,7 +259,7 @@ def _shell(command: str, root: str, sid: str) -> dict:
 
 
 def test_managed_operation_receipts_are_exact_and_single_use():
-    import cursor_pre_tool_use as cpre
+    from latch.hooks import cursor_pre_tool_use as cpre
 
     root, project_dir = _tmp()
     sid = "operation-session"
@@ -289,11 +289,11 @@ def test_managed_operation_receipts_are_exact_and_single_use():
 
 
 def test_managed_operations_reject_attacker_interpreter_paths(monkeypatch):
-    import cursor_pre_tool_use as cpre
+    from latch.hooks import cursor_pre_tool_use as cpre
 
     root, project_dir = _tmp()
     sid = "trusted-launcher-session"
-    maintenance = paths.KB_ROOT / "src" / "maintenance.py"
+    maintenance = paths.KB_ROOT / "src" / "latch" / "pipeline" / "maintenance.py"
     compact = paths.KB_ROOT / "bin" / "run_cursor_compact_now.sh"
     compact_ps1 = paths.KB_ROOT / "bin" / "run_cursor_compact_now.ps1"
     try:
@@ -325,8 +325,8 @@ def test_managed_operations_reject_attacker_interpreter_paths(monkeypatch):
 
 
 def test_seed_operation_requires_preview_then_explicit_apply():
-    import cursor_post_tool_use as cpost
-    import cursor_pre_tool_use as cpre
+    from latch.hooks import cursor_post_tool_use as cpost
+    from latch.hooks import cursor_pre_tool_use as cpre
 
     root, project_dir = _tmp()
     sid = "seed-session"
@@ -419,8 +419,8 @@ def test_seed_operation_requires_preview_then_explicit_apply():
 
 
 def test_seed_operation_binds_scoped_apply_ids_to_preview():
-    import cursor_post_tool_use as cpost
-    import cursor_pre_tool_use as cpre
+    from latch.hooks import cursor_post_tool_use as cpost
+    from latch.hooks import cursor_pre_tool_use as cpre
 
     root, project_dir = _tmp()
     seed_script = paths.KB_ROOT / "bin" / "latch_seed.sh"
@@ -685,8 +685,8 @@ def test_seed_operation_binds_scoped_apply_ids_to_preview():
 
 
 def test_seed_operation_binds_reject_all_to_nonempty_preview():
-    import cursor_post_tool_use as cpost
-    import cursor_pre_tool_use as cpre
+    from latch.hooks import cursor_post_tool_use as cpost
+    from latch.hooks import cursor_pre_tool_use as cpre
 
     root, project_dir = _tmp()
     seed_script = paths.KB_ROOT / "bin" / "latch_seed.sh"
@@ -778,8 +778,8 @@ def test_seed_operation_binds_reject_all_to_nonempty_preview():
 
 
 def test_pm_operation_receipt_binds_exact_previewed_content():
-    import cursor_post_tool_use as cpost
-    import cursor_pre_tool_use as cpre
+    from latch.hooks import cursor_post_tool_use as cpost
+    from latch.hooks import cursor_pre_tool_use as cpre
 
     root, project_dir = _tmp()
     sid = "pm-session"
@@ -869,8 +869,8 @@ def test_pm_operation_receipt_binds_exact_previewed_content():
 
 
 def test_managed_operation_intent_never_falls_through_to_general_gate():
-    import cursor_post_tool_use as cpost
-    import cursor_pre_tool_use as cpre
+    from latch.hooks import cursor_post_tool_use as cpost
+    from latch.hooks import cursor_pre_tool_use as cpre
 
     root, project_dir = _tmp()
     sid = "exclusive-operation-session"
@@ -928,7 +928,7 @@ def test_managed_operation_intent_never_falls_through_to_general_gate():
         }
         assert cpre.decision(changed)["permission"] == "deny"
 
-        maintenance = paths.KB_ROOT / "src" / "maintenance.py"
+        maintenance = paths.KB_ROOT / "src" / "latch" / "pipeline" / "maintenance.py"
         prompt = "/latch-heal"
         for command in (
             f"/tmp/python {maintenance} nightly {root}",
@@ -951,24 +951,34 @@ def test_managed_operation_intent_never_falls_through_to_general_gate():
 
 
 def test_other_managed_operations_match_only_expected_wrappers():
-    import cursor_pre_tool_use as cpre
+    from latch.hooks import cursor_pre_tool_use as cpre
 
     root, project_dir = _tmp()
     sid = "managed-operation-session"
     python = shlex.quote(sys.executable)
     cases = [
         ("/latch-gate-report", f"bash {paths.KB_ROOT / 'bin' / 'latch_gate_report.sh'}"),
-        ("/latch-budget-approve", f"{python} {paths.KB_ROOT / 'src' / 'budget.py'} approve {root}"),
-        ("/latch-decay", f"{python} {paths.KB_ROOT / 'src' / 'maintenance.py'} weekly {root}"),
-        ("/latch-heal", f"{python} {paths.KB_ROOT / 'src' / 'maintenance.py'} nightly {root}"),
-        ("/latch-tree", f"{python} {paths.KB_ROOT / 'src' / 'maintenance.py'} tree {root}"),
+        ("/latch-budget-approve", f"{python} {paths.KB_ROOT / 'src' / 'latch' / 'gate' / 'budget.py'} approve {root}"),
+        ("/latch-decay", f"{python} {paths.KB_ROOT / 'src' / 'latch' / 'pipeline' / 'maintenance.py'} weekly {root}"),
+        ("/latch-heal", f"{python} {paths.KB_ROOT / 'src' / 'latch' / 'pipeline' / 'maintenance.py'} nightly {root}"),
+        ("/latch-tree", f"{python} {paths.KB_ROOT / 'src' / 'latch' / 'pipeline' / 'maintenance.py'} tree {root}"),
     ]
     try:
         for prompt, command in cases:
             cgs.begin_prompt(root, sid, prompt)
             assert cpre.decision(_shell(command, root, sid)) == {}, prompt
 
-        maintenance = paths.KB_ROOT / "src" / "maintenance.py"
+        legacy_cases = [
+            ("/latch-budget-approve", f"{python} {paths.KB_ROOT / 'src' / 'budget.py'} approve {root}"),
+            ("/latch-decay", f"{python} {paths.KB_ROOT / 'src' / 'maintenance.py'} weekly {root}"),
+            ("/latch-heal", f"{python} {paths.KB_ROOT / 'src' / 'maintenance.py'} nightly {root}"),
+            ("/latch-tree", f"{python} {paths.KB_ROOT / 'src' / 'maintenance.py'} tree {root}"),
+        ]
+        for prompt, command in legacy_cases:
+            cgs.begin_prompt(root, sid, prompt)
+            assert cpre.decision(_shell(command, root, sid)) == {}, prompt
+
+        maintenance = paths.KB_ROOT / "src" / "latch" / "pipeline" / "maintenance.py"
         cgs.begin_prompt(root, sid, "/latch-heal")
         assert cpre.decision(_shell(
             f'{python} {maintenance} nightly "$PWD"', root, sid,
@@ -991,14 +1001,14 @@ def test_other_managed_operations_match_only_expected_wrappers():
 
 
 def test_managed_maintenance_receipt_rejects_wrong_project_and_script_path():
-    import cursor_pre_tool_use as cpre
+    from latch.hooks import cursor_pre_tool_use as cpre
 
     root, project_dir = _tmp()
     other_root = tempfile.mkdtemp()
     sid = "managed-operation-project-binding"
     attacker_dir = paths.KB_ROOT / "attacker"
     attacker_script = attacker_dir / "maintenance.py"
-    official_script = paths.KB_ROOT / "src" / "maintenance.py"
+    official_script = paths.KB_ROOT / "src" / "latch" / "pipeline" / "maintenance.py"
     python = shlex.quote(sys.executable)
     try:
         cgs.begin_prompt(root, sid, "/latch-heal")
@@ -1029,14 +1039,14 @@ def test_managed_maintenance_receipt_rejects_wrong_project_and_script_path():
 
 
 def test_managed_budget_receipt_rejects_wrong_project_and_script_path():
-    import cursor_pre_tool_use as cpre
+    from latch.hooks import cursor_pre_tool_use as cpre
 
     root, project_dir = _tmp()
     other_root = tempfile.mkdtemp()
     sid = "managed-budget-project-binding"
     attacker_dir = paths.KB_ROOT / "attacker"
     attacker_script = attacker_dir / "budget.py"
-    official_script = paths.KB_ROOT / "src" / "budget.py"
+    official_script = paths.KB_ROOT / "src" / "latch" / "gate" / "budget.py"
     python = shlex.quote(sys.executable)
     try:
         cgs.begin_prompt(root, sid, "/latch-budget-approve")

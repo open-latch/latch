@@ -9,8 +9,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import _isolation  # noqa: F401,E402  (hermetic on a pinned KB for direct runs; see conftest)
-import mcp_runtime  # noqa: E402
-import paths  # noqa: E402
+from latch.mcp import mcp_runtime  # noqa: E402
+from latch.store import paths  # noqa: E402
 
 
 def _assert(cond, msg):

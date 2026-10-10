@@ -20,5 +20,5 @@ if ($env:LATCH_PYTHON) {
   $Py = "python"
 }
 
-& $Py (Join-Path $KbHome "src/install_cursor.py") @args
+& $Py (Join-Path $KbHome "src/latch/install/install_cursor.py") @args
 exit $LASTEXITCODE

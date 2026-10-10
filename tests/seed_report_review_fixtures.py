@@ -21,7 +21,7 @@ ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "src"
 sys.path.insert(0, str(SRC))
 
-import seed  # noqa: E402
+from latch.pipeline import seed  # noqa: E402
 
 
 @dataclass(frozen=True)
@@ -74,7 +74,7 @@ def main(argv: list[str] | None = None) -> int:
 
     common = [
         sys.executable,
-        str(SRC / "seed.py"),
+        str(SRC / "latch" / "pipeline" / "seed.py"),
         "--project",
         str(project),
         "--source",

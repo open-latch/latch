@@ -15,5 +15,5 @@ $Py = if ($env:LATCH_PYTHON) { $env:LATCH_PYTHON } `
       elseif ($env:CLAUDE_KB_PYTHON) { $env:CLAUDE_KB_PYTHON } `
       elseif (Test-Path $VenvPy) { $VenvPy } `
       else { "python" }
-& $Py (Join-Path $KbHome "src\quickstart.py") @args
+& $Py (Join-Path $KbHome "src\latch\install\quickstart.py") @args
 exit $LASTEXITCODE

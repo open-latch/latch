@@ -238,7 +238,7 @@ private project contents:
 
 ```powershell
 $Vault = (& .\.venv\Scripts\python.exe -c `
-  "import sys; sys.path.insert(0, 'src'); import paths; print(paths.project_dir())").Trim()
+  "import sys; sys.path.insert(0, 'src'); from latch.store import paths; print(paths.project_dir())").Trim()
 $Vault | Set-Content (Join-Path $Evidence "vault-path.txt")
 Get-ChildItem $Vault -Filter "mcp_lifecycle-*.log" -ErrorAction SilentlyContinue |
   ForEach-Object {

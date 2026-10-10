@@ -30,7 +30,7 @@ cycle — report that via `budget_blocked`.
 Run with the Bash tool:
 
 ```bash
-python "<KB_HOME>/src/maintenance.py" tree "$(pwd)"
+python "<KB_HOME>/src/latch/pipeline/maintenance.py" tree "$(pwd)"
 ```
 
 Report the JSON summary: `linkage`, `leaves`, `landmarks`, `clusters`,

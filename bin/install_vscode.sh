@@ -17,4 +17,4 @@ else
   PY="python"
 fi
 
-exec "${PY}" "${KB_HOME}/src/install_vscode.py" "$@"
+exec "${PY}" "${KB_HOME}/src/latch/install/install_vscode.py" "$@"

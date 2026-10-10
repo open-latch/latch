@@ -29,8 +29,8 @@ _SRC = Path(__file__).resolve().parent.parent / "src"
 sys.path.insert(0, str(_SRC))
 sys.path.insert(0, str(_SRC / "hooks"))
 
-import db  # noqa: E402
-import kb_focus_cli  # noqa: E402
+from latch.store import db  # noqa: E402
+from latch.store import kb_focus_cli  # noqa: E402
 
 
 def _assert(cond, msg):

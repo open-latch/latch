@@ -17,7 +17,7 @@ else
     exit 2
 fi
 
-"${PY}" "${ROOT}/src/public_release_check.py" --repo "${ROOT}"
+"${PY}" "${ROOT}/src/latch/proof/public_release_check.py" --repo "${ROOT}"
 
 if [ ! -f "$DENY_FILE" ]; then
     exit 0    # no denylist == nothing to enforce
@@ -33,7 +33,7 @@ fi
 # via git's text-detection. Use -P (PCRE) for proper alternation handling.
 HITS="$(git diff --cached --no-ext-diff -U0 -- \
         ':!.githooks/denylist.txt' \
-        ':!src/public_release_check.py' \
+        ':!src/latch/proof/public_release_check.py' \
         ':!tests/test_public_release_check.py' \
         | grep -nE "^\+.*($PATTERNS)" || true)"
 

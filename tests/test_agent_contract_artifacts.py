@@ -11,9 +11,9 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
-import agents_md_sync  # noqa: E402
-import claude_md_sync  # noqa: E402
-import cursor_rules_sync  # noqa: E402
+from latch.hosts import agents_md_sync  # noqa: E402
+from latch.hosts import claude_md_sync  # noqa: E402
+from latch.hosts import cursor_rules_sync  # noqa: E402
 
 FIXTURES = ROOT / "tests" / "fixtures"
 

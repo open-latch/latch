@@ -11,12 +11,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
-import install_engine as ie  # noqa: E402
-import agents_md_sync  # noqa: E402
-import cursor_hooks  # noqa: E402
-import cursor_rules_sync  # noqa: E402
-import install_cursor as ic  # noqa: E402
-import uninstall_engine as ue  # noqa: E402
+from latch.install import install_engine as ie  # noqa: E402
+from latch.hosts import agents_md_sync  # noqa: E402
+from latch.hosts import cursor_hooks  # noqa: E402
+from latch.hosts import cursor_rules_sync  # noqa: E402
+from latch.install import install_cursor as ic  # noqa: E402
+from latch.install import uninstall_engine as ue  # noqa: E402
 
 
 def _assert(cond, msg):
@@ -127,10 +127,10 @@ def test_strip_cursor_project_removes_latch_owned_wiring_only():
                 "hooks": {"stop": [{"command": "user-stop"}]},
             }),
             "/py",
-            "/repo/src/hooks/cursor_session_start.py",
-            "/repo/src/hooks/cursor_before_submit.py",
-            "/repo/src/hooks/cursor_pre_tool_use.py",
-            "/repo/src/hooks/cursor_post_tool_use.py",
+        "/repo/src/latch/hooks/cursor_session_start.py",
+        "/repo/src/latch/hooks/cursor_before_submit.py",
+        "/repo/src/latch/hooks/cursor_pre_tool_use.py",
+        "/repo/src/latch/hooks/cursor_post_tool_use.py",
             path=hooks_path,
         )
         cursor_hooks.write_hooks(hooks_path, hooks_body)

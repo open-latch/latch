@@ -37,10 +37,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import numpy as np  # noqa: E402
 
-import embeddings  # noqa: E402
-import log_utils  # noqa: E402
-import paths  # noqa: E402
-import verify  # noqa: E402
+from latch.retrieval import embeddings  # noqa: E402
+from latch.common import log_utils  # noqa: E402
+from latch.store import paths  # noqa: E402
+from latch.gate import verify  # noqa: E402
 
 
 def _assert(cond, msg):

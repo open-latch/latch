@@ -8,7 +8,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-import agents_md_sync as ams  # noqa: E402
+from latch.hosts import agents_md_sync as ams  # noqa: E402
 
 
 def _assert(cond, msg):

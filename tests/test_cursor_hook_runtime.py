@@ -11,13 +11,13 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "src" / "hooks"))
 
-import cursor_post_tool_use as cptu  # noqa: E402
-import cursor_pre_tool_use as cpre  # noqa: E402
-import cursor_before_submit as cbs  # noqa: E402
-import cursor_session_start as css  # noqa: E402
-import cursor_gate_state as cgs  # noqa: E402
-import cursor_session  # noqa: E402
-import paths  # noqa: E402
+from latch.hooks import cursor_post_tool_use as cptu  # noqa: E402
+from latch.hooks import cursor_pre_tool_use as cpre  # noqa: E402
+from latch.hooks import cursor_before_submit as cbs  # noqa: E402
+from latch.hooks import cursor_session_start as css  # noqa: E402
+from latch.hosts import cursor_gate_state as cgs  # noqa: E402
+from latch.hosts import cursor_session  # noqa: E402
+from latch.store import paths  # noqa: E402
 import shutil  # noqa: E402
 import tempfile  # noqa: E402
 

@@ -29,5 +29,5 @@ $Py = if ($env:LATCH_PYTHON) {
   "python"
 }
 
-& $Py (Join-Path $KbHome "src/cursor_doctor.py") @args
+& $Py (Join-Path $KbHome "src/latch/hosts/cursor_doctor.py") @args
 exit $LASTEXITCODE

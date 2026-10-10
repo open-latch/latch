@@ -10,7 +10,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-import codex_compact as cc  # noqa: E402
+from latch.hosts import codex_compact as cc  # noqa: E402
 
 
 def _assert(cond, msg):

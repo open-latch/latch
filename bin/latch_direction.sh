@@ -23,5 +23,5 @@ fi
 
 PROJECT_DIR=$(pwd -W 2>/dev/null || pwd)
 
-exec "$PY" "${KB_HOME}/src/project_direction.py" \
+exec "$PY" "${KB_HOME}/src/latch/retrieval/project_direction.py" \
   --project "${PROJECT_DIR}" "$@"

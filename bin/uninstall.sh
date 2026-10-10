@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# uninstall.sh — thin wrapper around src/uninstall_engine.py, the strict inverse
+# uninstall.sh — thin wrapper around src/latch/install/uninstall_engine.py, the strict inverse
 # of bin/install_engine.sh. Removes latch's wiring from Claude Code:
 #   1. deregisters latch-owned MCP servers via `claude mcp remove`;
 #   2. removes the SessionStart/UserPromptSubmit/Stop/SessionEnd hooks + the
@@ -20,7 +20,7 @@
 #                         production KB data and protected backups are retained
 #   --yes / -y            skip the confirmation prompt
 #
-# All logic lives in src/uninstall_engine.py (stdlib-only; shared with the
+# All logic lives in src/latch/install/uninstall_engine.py (stdlib-only; shared with the
 # PowerShell wrapper). settings.json is backed up to a timestamped
 # settings.json.latchbak-<UTC> before any write.
 #
@@ -40,4 +40,4 @@ else
   echo "uninstall: no Python found (set LATCH_PYTHON (legacy: CLAUDE_KB_PYTHON) to your interpreter)." >&2
   exit 2
 fi
-exec "$PY" "${KB_HOME}/src/uninstall_engine.py" "$@"
+exec "$PY" "${KB_HOME}/src/latch/install/uninstall_engine.py" "$@"

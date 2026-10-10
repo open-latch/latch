@@ -8,14 +8,14 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
-import agents_md_sync  # noqa: E402
-import claude_md_sync  # noqa: E402
-import cursor_hooks  # noqa: E402
-import cursor_rules_sync  # noqa: E402
-import cursor_wiring  # noqa: E402
-import install_cursor  # noqa: E402
-import managed_doc_sync as mds  # noqa: E402
-import versioning  # noqa: E402
+from latch.hosts import agents_md_sync  # noqa: E402
+from latch.hosts import claude_md_sync  # noqa: E402
+from latch.hosts import cursor_hooks  # noqa: E402
+from latch.hosts import cursor_rules_sync  # noqa: E402
+from latch.hosts import cursor_wiring  # noqa: E402
+from latch.install import install_cursor  # noqa: E402
+from latch.hosts import managed_doc_sync as mds  # noqa: E402
+from latch.install import versioning  # noqa: E402
 
 
 def _marker(value: int) -> str:
@@ -86,7 +86,7 @@ def _install_cursor_bundle(
     mcp = root / ".cursor" / "mcp.json"
     existing = json.dumps({"setting": "keep", "mcpServers": {"other": {"command": "node"}}}) + "\n"
     rendered, _ = install_cursor.merge_mcp_config(
-        existing, python_path, str(ROOT / "src" / "mcp_server.py"), path=mcp
+        existing, python_path, str(ROOT / "src" / "latch" / "mcp" / "mcp_server.py"), path=mcp
     )
     install_cursor.write_config(mcp, rendered)
     agents = root / "AGENTS.md"
@@ -104,10 +104,10 @@ def _install_cursor_bundle(
         rendered_hooks, _ = cursor_hooks.merge_hooks(
             existing_hooks,
             python_path,
-            str(ROOT / "src" / "hooks" / "cursor_session_start.py"),
-            str(ROOT / "src" / "hooks" / "cursor_before_submit.py"),
-            str(ROOT / "src" / "hooks" / "cursor_pre_tool_use.py"),
-            str(ROOT / "src" / "hooks" / "cursor_post_tool_use.py"),
+            str(ROOT / "src" / "latch" / "hooks" / "cursor_session_start.py"),
+            str(ROOT / "src" / "latch" / "hooks" / "cursor_before_submit.py"),
+            str(ROOT / "src" / "latch" / "hooks" / "cursor_pre_tool_use.py"),
+            str(ROOT / "src" / "latch" / "hooks" / "cursor_post_tool_use.py"),
             path=hooks,
         )
         cursor_hooks.write_hooks(hooks, rendered_hooks)
@@ -176,7 +176,7 @@ def test_windows_cursor_bundle_repair_preserves_console_interpreter(
     )["mcpServers"]["latch"]
     assert initial["command"] == str(pythonw).replace("\\", "/")
     assert initial["args"] == [
-        str(ROOT / "src" / "mcp_launcher_win.py").replace("\\", "/")
+        str(ROOT / "src" / "latch" / "mcp" / "mcp_launcher_win.py").replace("\\", "/")
     ]
     assert initial["env"]["LATCH_PYTHON"] == str(python).replace("\\", "/")
 

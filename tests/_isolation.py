@@ -36,6 +36,6 @@ os.environ.pop("CLAUDE_KB_DIR", None)
 os.environ["LATCH_TEST_ROOT"] = str(_TEST_ROOT)
 os.environ["LATCH_TEST_CAPABILITY"] = _CAPABILITY
 
-import paths  # noqa: E402
+from latch.store import paths  # noqa: E402
 
 paths._PINNED_DIR = None

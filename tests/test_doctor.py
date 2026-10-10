@@ -15,7 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-import doctor  # noqa: E402
+from latch.install import doctor  # noqa: E402
 
 
 def _assert(cond, msg):
@@ -282,7 +282,7 @@ def test_powershell_example_uses_kebab_flag():
 
 
 def test_mcp_lifecycle_warns_on_recent_pressure(monkeypatch):
-    import mcp_broker
+    from latch.mcp import mcp_broker
 
     monkeypatch.setattr(mcp_broker, "lifecycle_summary", lambda **_kwargs: {
         "warning_count": 3,
@@ -302,7 +302,7 @@ def test_mcp_lifecycle_warns_on_recent_pressure(monkeypatch):
 
 
 def test_mcp_lifecycle_ok_names_operational_contract(monkeypatch):
-    import mcp_broker
+    from latch.mcp import mcp_broker
 
     monkeypatch.delenv("LATCH_MCP_ALLOW_LEGACY_FALLBACK", raising=False)
     monkeypatch.setattr(mcp_broker, "lifecycle_summary", lambda **_kwargs: {
@@ -332,7 +332,7 @@ def test_mcp_lifecycle_ok_names_operational_contract(monkeypatch):
 def test_mcp_lifecycle_warns_when_autonomous_maintenance_is_unconfigured(
     monkeypatch,
 ):
-    import mcp_broker
+    from latch.mcp import mcp_broker
 
     monkeypatch.setattr(mcp_broker, "lifecycle_summary", lambda **_kwargs: {
         "warning_count": 0, "counts": {},
@@ -359,7 +359,7 @@ def test_mcp_lifecycle_warns_when_autonomous_maintenance_is_unconfigured(
 
 
 def test_mcp_lifecycle_warns_at_configured_75_percent_high_water(monkeypatch):
-    import mcp_broker
+    from latch.mcp import mcp_broker
 
     monkeypatch.delenv("LATCH_MCP_ALLOW_LEGACY_FALLBACK", raising=False)
     monkeypatch.delenv("LATCH_MCP_FORCE_LEGACY", raising=False)
@@ -384,7 +384,7 @@ def test_mcp_lifecycle_warns_at_configured_75_percent_high_water(monkeypatch):
 
 
 def test_mcp_lifecycle_warns_while_over_cap(monkeypatch):
-    import mcp_broker
+    from latch.mcp import mcp_broker
 
     monkeypatch.setattr(mcp_broker, "lifecycle_summary", lambda **_kwargs: {
         "warning_count": 0,
@@ -406,7 +406,7 @@ def test_mcp_lifecycle_warns_while_over_cap(monkeypatch):
 
 
 def test_mcp_lifecycle_retirement_warning_names_host_boundary(monkeypatch):
-    import mcp_broker
+    from latch.mcp import mcp_broker
 
     monkeypatch.setattr(mcp_broker, "lifecycle_summary", lambda **_kwargs: {
         "warning_count": 1,
@@ -428,7 +428,7 @@ def test_mcp_lifecycle_retirement_warning_names_host_boundary(monkeypatch):
 
 
 def test_mcp_lifecycle_warns_on_dead_discovery(monkeypatch):
-    import mcp_broker
+    from latch.mcp import mcp_broker
 
     monkeypatch.setattr(mcp_broker, "lifecycle_summary", lambda **_kwargs: {
         "warning_count": 0,
@@ -449,7 +449,7 @@ def test_mcp_lifecycle_warns_on_dead_discovery(monkeypatch):
 
 
 def test_mcp_lifecycle_warns_on_current_stale_leases(monkeypatch):
-    import mcp_broker
+    from latch.mcp import mcp_broker
 
     monkeypatch.setattr(mcp_broker, "lifecycle_summary", lambda **_kwargs: {
         "warning_count": 0,
@@ -472,7 +472,7 @@ def test_mcp_lifecycle_warns_on_current_stale_leases(monkeypatch):
 
 
 def test_mcp_lifecycle_warns_on_registry_wide_historical_pools(monkeypatch):
-    import mcp_broker
+    from latch.mcp import mcp_broker
 
     monkeypatch.setattr(mcp_broker, "lifecycle_summary", lambda **_kwargs: {
         "warning_count": 0,

@@ -10,9 +10,9 @@ sys.path.insert(0, str(ROOT / ".github" / "scripts"))
 sys.path.insert(0, str(ROOT / "src"))
 
 import agent_contract_footprint as footprint  # noqa: E402
-import agents_md_sync  # noqa: E402
-import claude_md_sync  # noqa: E402
-import cursor_rules_sync  # noqa: E402
+from latch.hosts import agents_md_sync  # noqa: E402
+from latch.hosts import claude_md_sync  # noqa: E402
+from latch.hosts import cursor_rules_sync  # noqa: E402
 
 
 def _measure(*, lines: int = 10, words: int = 20, bytes_: int = 100) -> dict:

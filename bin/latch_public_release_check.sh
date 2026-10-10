@@ -17,4 +17,4 @@ else
   echo "latch_public_release_check: no Python found (set LATCH_PYTHON (legacy: CLAUDE_KB_PYTHON) to your interpreter)." >&2
   exit 2
 fi
-exec "$PY" "${KB_HOME}/src/public_release_check.py" "$@"
+exec "$PY" "${KB_HOME}/src/latch/proof/public_release_check.py" "$@"

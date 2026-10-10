@@ -21,10 +21,10 @@ import numpy as np
 _SRC = Path(__file__).resolve().parent.parent / "src"
 sys.path.insert(0, str(_SRC))
 
-import embeddings  # noqa: E402
-import mcp_broker  # noqa: E402
-import mcp_server  # noqa: E402
-import paths  # noqa: E402
+from latch.retrieval import embeddings  # noqa: E402
+from latch.mcp import mcp_broker  # noqa: E402
+from latch.mcp import mcp_server  # noqa: E402
+from latch.store import paths  # noqa: E402
 
 
 def _assert(cond, msg):

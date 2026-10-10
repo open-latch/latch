@@ -1,0 +1,32 @@
+{
+  "fixtures": {
+    "claude-transcript-2026-07-22.sanitized.jsonl": {
+      "sha256": "cf0869e2af7380cac8d6803a1a9d5c76f3fd3f7d6b4079969c1277e96b866f43",
+      "source_category": "Claude Code project transcript",
+      "source_date": "2026-07-22",
+      "source_records": [21, 22],
+      "sanitizations": ["request", "cwd", "session/tool/message ids", "tool-result prose"]
+    },
+    "codex-rollout-2026-07-29.sanitized.jsonl": {
+      "sha256": "f3c1eb261ab5890a9e2d0e9b3174ffe99fbedf57a9cc67d5e516974ed8501ec8",
+      "source_category": "Codex rollout transcript",
+      "source_date": "2026-07-29",
+      "source_records": [1, 416, 418],
+      "sanitizations": ["request", "cwd", "session/call ids", "tool-result content"]
+    },
+    "gate-2026-08-03.sanitized.jsonl": {
+      "sha256": "187e1d48697a676db383068642d2f6d1dde44ed885b56f6c5ba75117cc6a8903",
+      "source_category": "Latch gate JSONL",
+      "source_date": "2026-08-03",
+      "source_records": [1],
+      "sanitizations": ["query hash", "project", "evidence identifiers/content"]
+    },
+    "golden-report-v2.6.json": {
+      "sha256": "0c221bc5af5f31732160645534f78de458d92d465db786a817e4c949bf2db619",
+      "source_category": "deterministic derived artifact",
+      "source_date": "2026-08-04",
+      "source_records": [],
+      "sanitizations": ["source roots/files/hashes", "session ids", "loss-marker detail"]
+    }
+  }
+}

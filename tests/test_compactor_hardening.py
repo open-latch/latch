@@ -12,9 +12,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-import compactor as c
-import db
-import paths
+from latch.pipeline import compactor as c
+from latch.store import db
+from latch.store import paths
 
 
 def _assert(cond, msg):

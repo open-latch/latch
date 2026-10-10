@@ -194,7 +194,7 @@ validate_checkout() {
   [ "$actual" = "$expected" ] \
     || die "existing checkout origin is $actual, expected $expected; refusing overwrite"
   [ -f "$app/VERSION" ] && [ -f "$app/requirements.txt" ] \
-    && [ -f "$app/src/quickstart.py" ] \
+    && [ -f "$app/src/latch/install/quickstart.py" ] \
     || die "checkout is missing required Latch files: $app"
 }
 
@@ -286,6 +286,22 @@ runtime_python() {
   fi
 }
 
+sqlite_vec_preflight() {
+  local app="$1" python_path="$2"
+  if ! "$python_path" -B -c '
+import sys
+sys.path.insert(0, sys.argv[1])
+from latch.install.doctor import OK, _VEC_PROBE, _run_probe
+level, _ = _run_probe(_VEC_PROBE, "VEC_OK", 30, arch_hint=True)
+if level != OK:
+    raise SystemExit(1)
+' "$app/src"; then
+    printf 'sqlite-vec capability preflight failed for %s. The resolved interpreter may be built without SQLite extension loading support. Rebuild or replace the interpreter or %s/.venv, then rerun. No project or agent configuration was written; no app files were removed.\n' \
+      "$python_path" "$app" >&2
+    return 1
+  fi
+}
+
 prepare_runtime() {
   local app="$1" python_path requirements
   python_path="$(runtime_python "$app" 2>/dev/null || true)"
@@ -306,6 +322,7 @@ prepare_runtime() {
     UV_NO_CONFIG=1 "$UV" pip install --python "$python_path" -r "$requirements" \
       || return
   fi
+  sqlite_vec_preflight "$app" "$python_path"
 }
 
 mkdir -p "$INSTALL_PARENT"
@@ -355,7 +372,7 @@ VERSION="$(tr -d '\r\n' < "$INSTALL_DIR/VERSION")"
 note 'Running the guided Latch activation'
 run_quickstart() {
   env LATCH_HOME="$INSTALL_DIR" LATCH_PYTHON="$PYTHON_PATH" \
-    "$PYTHON_PATH" "$INSTALL_DIR/src/quickstart.py" \
+    "$PYTHON_PATH" "$INSTALL_DIR/src/latch/install/quickstart.py" \
     --project "$PROJECT" ${QUICKSTART_ARGS[@]+"${QUICKSTART_ARGS[@]}"}
 }
 

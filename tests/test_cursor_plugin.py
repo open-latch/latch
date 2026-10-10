@@ -9,7 +9,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
-import install_cursor as ic  # noqa: E402
+from latch.install import install_cursor as ic  # noqa: E402
 
 
 OFFICIAL_MANIFEST_KEYS = {

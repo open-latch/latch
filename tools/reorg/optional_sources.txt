@@ -1,0 +1,15 @@
+# Modules present only on next/phase-a or currently open PR branches.
+src/predicate.py
+src/predicate_consumer.py
+src/predicate_coverage.py
+src/predicate_policy.py
+src/predicate_snapshot.py
+src/project_config.py
+src/project_mode.py
+src/maintenance_receipts.py
+src/local_review.py
+src/detector_snapshot.py
+src/detector_trace.py
+src/detector_trace_cli.py
+src/detector_trigger.py
+src/detector_worker.py
