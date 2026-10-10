@@ -160,7 +160,34 @@ class _WindowsCPython311Os:
         return getattr(os, attribute)
 
 
-def _simulate_windows_cpython311(monkeypatch) -> None:
+class _WindowsCPython313Os:
+    """The real ``os`` module as vault_backup sees it on Windows CPython 3.13+.
+
+    3.13 adds ``os.fchmod`` and ``follow_symlinks`` for ``os.chmod``.  Its
+    fchmod sets the attribute through the handle, which needs
+    FILE_WRITE_ATTRIBUTES, so an ``O_RDONLY`` descriptor is access denied.
+    """
+
+    name = "nt"
+
+    def __init__(self) -> None:
+        self.supports_follow_symlinks = os.supports_follow_symlinks | {self.chmod}
+
+    def fchmod(self, descriptor, mode):
+        raise PermissionError(13, "Access is denied")
+
+    def chmod(self, path, mode, *, follow_symlinks=True):
+        # Without following, Windows sets a symlink's own attribute.
+        if follow_symlinks or not os.path.islink(path):
+            os.chmod(path, mode)
+
+    def __getattr__(self, attribute: str):
+        if attribute == "O_NOFOLLOW":
+            raise AttributeError(attribute)
+        return getattr(os, attribute)
+
+
+def _simulate_windows(monkeypatch, windows_os) -> None:
     real_unlink = Path.unlink
 
     def unlink(self, missing_ok=False):
@@ -169,13 +196,16 @@ def _simulate_windows_cpython311(monkeypatch) -> None:
             raise PermissionError(13, "Access is denied", str(self))
         return real_unlink(self, missing_ok=missing_ok)
 
-    monkeypatch.setattr(vault_backup, "os", _WindowsCPython311Os())
+    monkeypatch.setattr(vault_backup, "os", windows_os)
     monkeypatch.setattr(Path, "unlink", unlink)
 
 
-def test_windows_prune_clears_read_only_snapshots_without_fchmod(
-    tmp_path, monkeypatch
-):
+@pytest.mark.parametrize(
+    "windows_os",
+    [_WindowsCPython311Os, _WindowsCPython313Os],
+    ids=["cpython311", "cpython313"],
+)
+def test_windows_prune_clears_read_only_snapshots(tmp_path, monkeypatch, windows_os):
     _seed(tmp_path)
     start = datetime(2026, 5, 1, 0, 0, tzinfo=UTC)
     old_daily = vault_backup.create_snapshot(str(tmp_path), reason="old", now=start)
@@ -185,7 +215,7 @@ def test_windows_prune_clears_read_only_snapshots_without_fchmod(
     newest = vault_backup.create_snapshot(
         str(tmp_path), reason="new", now=start + timedelta(days=1)
     )
-    _simulate_windows_cpython311(monkeypatch)
+    _simulate_windows(monkeypatch, windows_os())
 
     result = vault_backup.prune_expired(
         str(tmp_path), now=start + timedelta(days=40)
@@ -199,44 +229,66 @@ def test_windows_prune_clears_read_only_snapshots_without_fchmod(
     assert Path(newest["manifest"]).exists()
 
 
-def test_windows_prune_never_clears_read_only_through_a_symlink(
-    tmp_path, monkeypatch
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Windows refuses to rename a file that prune holds open, so this "
+    "swap cannot be staged there",
+)
+@pytest.mark.parametrize("swap_in", ["file", "symlink"])
+def test_windows_prune_refuses_a_snapshot_swapped_before_the_by_name_chmod(
+    tmp_path, monkeypatch, swap_in
 ):
     _seed(tmp_path)
     start = datetime(2026, 5, 1, 0, 0, tzinfo=UTC)
-    malicious = vault_backup.create_snapshot(
-        str(tmp_path), reason="symlink", now=start
-    )
+    raced = vault_backup.create_snapshot(str(tmp_path), reason="raced", now=start)
     vault_backup.create_snapshot(
         str(tmp_path), reason="newer", now=start + timedelta(days=1)
     )
-    victim = tmp_path / "read-only-symlink-target.txt"
+    database = Path(raced["database"])
+    manifest = Path(raced["manifest"])
+    aside = database.with_name(database.name + ".aside")
+    victim = tmp_path / "read-only-swap-target.txt"
     victim.write_bytes(b"must survive")
     victim.chmod(stat.S_IREAD)
-    database = Path(malicious["database"])
-    link = database.with_name(database.name + ".candidate-link")
-    try:
-        link.symlink_to(victim)
-    except OSError as exc:
-        pytest.skip(f"symlink creation unavailable: {exc}")
-    database.chmod(0o600)
-    database.unlink()
-    link.rename(database)
-    manifest_path = Path(malicious["manifest"])
-    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
-    payload["sha256"] = hashlib.sha256(victim.read_bytes()).hexdigest()
-    payload["bytes"] = victim.stat().st_size
-    manifest_path.chmod(0o600)
-    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
-    _simulate_windows_cpython311(monkeypatch)
+    if swap_in == "symlink":
+        probe = tmp_path / "symlink-probe"
+        try:
+            probe.symlink_to(victim)
+        except OSError as exc:
+            pytest.skip(f"symlink creation unavailable: {exc}")
+        probe.unlink()
+    chmods: list[Path] = []
+
+    class _SwapBeforeChmod(_WindowsCPython311Os):
+        def chmod(self, path, mode, **kwargs):
+            # Swap the validated snapshot out between prune's identity check
+            # and its by-name chmod.
+            chmods.append(Path(path))
+            if Path(path) == database and not os.path.lexists(aside):
+                os.replace(database, aside)
+                if swap_in == "symlink":
+                    database.symlink_to(victim)
+                else:
+                    database.write_bytes(b"swapped in")
+                    database.chmod(stat.S_IREAD)
+            os.chmod(path, mode, **kwargs)
+
+    _simulate_windows(monkeypatch, _SwapBeforeChmod())
 
     result = vault_backup.prune_expired(
         str(tmp_path), now=start + timedelta(days=40)
     )
 
+    assert chmods == [database]
     assert result == {"deleted": 0, "protected": 1, "skipped": 1}
+    assert os.path.lexists(database)
+    assert aside.exists()
+    assert manifest.exists()
+    # The by-name chmod may clear the swapped-in target's read-only bit, but
+    # the identity recheck refuses the pair, so nothing is deleted.
     assert victim.read_bytes() == b"must survive"
-    assert not victim.stat().st_mode & stat.S_IWRITE
+    if swap_in == "file":
+        assert database.read_bytes() == b"swapped in"
 
 
 def test_orphan_daily_manifest_cannot_suppress_required_daily_snapshot(tmp_path):

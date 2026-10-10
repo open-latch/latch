@@ -165,8 +165,9 @@ def _direct_snapshot_pair(
 def _make_opened_file_writable(path: Path) -> bool:
     """Best-effort chmod of the validated inode, never a followed symlink.
 
-    Windows CPython before 3.13 can only clear the read-only attribute by
-    name; a path swapped after the identity check is refused afterwards.
+    Windows clears the read-only attribute by name, because this read-only
+    descriptor cannot carry os.fchmod there; a path swapped after the
+    identity check is refused afterwards.
     """
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
     flags |= getattr(os, "O_NOFOLLOW", 0)
@@ -190,7 +191,10 @@ def _make_opened_file_writable(path: Path) -> bool:
         if opened.st_mode & stat.S_IWUSR:
             return True
         fchmod = getattr(os, "fchmod", None)
-        if callable(fchmod):
+        # Windows os.fchmod (CPython 3.13+) sets the attribute through the
+        # handle, which needs FILE_WRITE_ATTRIBUTES; an O_RDONLY descriptor
+        # lacks it, so Windows always takes the by-name branches below.
+        if callable(fchmod) and os.name != "nt":
             try:
                 fchmod(descriptor, 0o600)
             except OSError:
