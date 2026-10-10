@@ -21,6 +21,8 @@ import tempfile
 import time
 from pathlib import Path
 
+from _win_gitbash import bash
+
 KB_HOME = Path(__file__).resolve().parent.parent
 SCRIPT = KB_HOME / "bin" / "run_compact_now.sh"
 
@@ -65,7 +67,7 @@ def _run(home: Path, *, session_env: str | None, args: list[str] = []):
     if session_env is not None:
         env["CLAUDE_CODE_SESSION_ID"] = session_env
     return subprocess.run(
-        ["bash", _to_bash_path(SCRIPT), *args],
+        [bash(), _to_bash_path(SCRIPT), *args],
         env=env, capture_output=True, text=True, timeout=60,
     )
 

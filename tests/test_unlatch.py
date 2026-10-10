@@ -15,6 +15,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from latch.hosts import agents_md_sync as ams  # noqa: E402
 from latch.hosts import claude_md_sync as cms  # noqa: E402
 from latch.install import unlatch  # noqa: E402
+from _win_gitbash import bash  # noqa: E402
 
 
 def _assert(cond, msg):
@@ -31,7 +32,7 @@ def _run_unlatch(home: Path, cwd: Path, *args: str) -> str:
     env.pop("LATCH_DISABLE", None)
     env.pop("CLAUDE_KB_DISABLE", None)
     proc = subprocess.run(
-        ["bash", str(ROOT / "bin" / "unlatch.sh"), *args],
+        [bash(), str(ROOT / "bin" / "unlatch.sh"), *args],
         cwd=cwd,
         env=env,
         text=True,
@@ -54,7 +55,7 @@ def _run_enable(home: Path, cwd: Path) -> str:
     env.pop("LATCH_DISABLE", None)
     env.pop("CLAUDE_KB_DISABLE", None)
     proc = subprocess.run(
-        ["bash", str(ROOT / "bin" / "latch_enable.sh")],
+        [bash(), str(ROOT / "bin" / "latch_enable.sh")],
         cwd=cwd,
         env=env,
         text=True,
@@ -228,7 +229,7 @@ def test_unlatch_confirmation_contract_is_strict():
         env.pop("LATCH_UNLATCHED", None)
 
         extra = subprocess.run(
-            ["bash", str(ROOT / "bin" / "unlatch.sh"), "--confirm", "unlatch", "extra"],
+            [bash(), str(ROOT / "bin" / "unlatch.sh"), "--confirm", "unlatch", "extra"],
             cwd=project,
             env=env,
             text=True,
@@ -239,7 +240,7 @@ def test_unlatch_confirmation_contract_is_strict():
                 "extra confirmation args must not change state")
 
         upper = subprocess.run(
-            ["bash", str(ROOT / "bin" / "unlatch.sh"), "--confirm", "UNLATCH"],
+            [bash(), str(ROOT / "bin" / "unlatch.sh"), "--confirm", "UNLATCH"],
             cwd=project,
             env=env,
             text=True,
@@ -496,7 +497,7 @@ def test_latch_confirm_warns_when_env_still_forces_unlatched():
         env["LATCH_UNLATCHED"] = "1"
         env.pop("CLAUDE_KB_HOME", None)
         status = subprocess.run(
-            ["bash", str(ROOT / "bin" / "unlatch.sh")],
+            [bash(), str(ROOT / "bin" / "unlatch.sh")],
             cwd=project,
             env=env,
             text=True,
@@ -506,7 +507,7 @@ def test_latch_confirm_warns_when_env_still_forces_unlatched():
         _assert("hooks stay off until LATCH_UNLATCHED is unset" in status.stdout,
                 status.stdout)
         proc = subprocess.run(
-            ["bash", str(ROOT / "bin" / "unlatch.sh"), "--confirm", "latch"],
+            [bash(), str(ROOT / "bin" / "unlatch.sh"), "--confirm", "latch"],
             cwd=project,
             env=env,
             text=True,
@@ -529,7 +530,7 @@ def test_status_prompt_does_not_fail_when_python_missing():
         env["LATCH_PYTHON"] = str(tmp / "missing-python")
         env.pop("CLAUDE_KB_HOME", None)
         proc = subprocess.run(
-            ["bash", str(ROOT / "bin" / "unlatch.sh")],
+            [bash(), str(ROOT / "bin" / "unlatch.sh")],
             cwd=project,
             env=env,
             text=True,
@@ -672,7 +673,7 @@ def test_latch_enable_warns_when_env_still_forces_unlatched():
         env["LATCH_UNLATCHED"] = "1"
         env.pop("CLAUDE_KB_HOME", None)
         proc = subprocess.run(
-            ["bash", str(ROOT / "bin" / "latch_enable.sh")],
+            [bash(), str(ROOT / "bin" / "latch_enable.sh")],
             cwd=project,
             env=env,
             text=True,

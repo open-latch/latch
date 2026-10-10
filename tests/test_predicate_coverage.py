@@ -7,12 +7,15 @@ from __future__ import annotations
 
 import importlib
 import json
+import os
 import sqlite3
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
+
+from _win_gitbash import bash
 
 
 _ROOT = Path(__file__).resolve().parent.parent
@@ -145,7 +148,8 @@ def test_aggregates_only_and_total_accounting(tmp_path):
     assert report["read_only_verified"] is True
 
     proc = subprocess.run(
-        ["bash", str(_ROOT / "bin" / "predicate_coverage.sh"), str(vault_path)],
+        [bash(), str(_ROOT / "bin" / "predicate_coverage.sh"), str(vault_path)],
+        env={**os.environ, "LATCH_PYTHON": sys.executable},
         check=True,
         capture_output=True,
         text=True,
@@ -168,3 +172,40 @@ def test_aggregates_only_and_total_accounting(tmp_path):
         '"predicate":',
     ):
         assert forbidden_row_field not in serialized
+
+
+def test_wrapper_runs_configured_python_not_path_python3(tmp_path):
+    vault_path = tmp_path / "synthetic-vault.sqlite3"
+    _synthetic_vault(vault_path)
+    report = _coverage_module().coverage_report(vault_path)
+    # PATH python3 is not latch's interpreter: Git Bash on Windows usually
+    # has none (python.org installs ship python.exe) or only the Microsoft
+    # Store alias, and on macOS it is often a system Python without latch's
+    # dependencies.  Like its sibling wrappers, this one must run the
+    # configured interpreter.
+    fake_bin = tmp_path / "fake-bin"
+    fake_bin.mkdir()
+    fake_python3 = fake_bin / "python3"
+    fake_python3.write_text(
+        "#!/bin/sh\n"
+        "echo 'PATH python3 ran instead of LATCH_PYTHON' >&2\n"
+        "exit 97\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    fake_python3.chmod(0o755)
+    env = dict(os.environ)
+    env["LATCH_PYTHON"] = sys.executable
+    env.pop("CLAUDE_KB_PYTHON", None)
+    env["PATH"] = str(fake_bin) + os.pathsep + env["PATH"]
+
+    proc = subprocess.run(
+        [bash(), str(_ROOT / "bin" / "predicate_coverage.sh"), str(vault_path)],
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout) == report
+    assert proc.stderr == ""

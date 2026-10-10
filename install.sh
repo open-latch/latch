@@ -122,6 +122,9 @@ done
 [ -d "$PROJECT" ] || die "project directory does not exist: $PROJECT"
 PROJECT="$(cd "$PROJECT" && pwd -P)"
 case "$INSTALL_DIR" in
+  # A native Windows path from PowerShell, cmd, or an agent: keep it absolute
+  # and use the C:/... spelling that Git Bash tools and git both accept.
+  [A-Za-z]:\\*) INSTALL_DIR="${INSTALL_DIR//\\//}" ;;
   /*|[A-Za-z]:/*) ;;
   *) INSTALL_DIR="$(pwd -P)/$INSTALL_DIR" ;;
 esac
