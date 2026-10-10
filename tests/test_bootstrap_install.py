@@ -17,6 +17,8 @@ import sys
 
 import pytest
 
+from _win_gitbash import bash
+
 
 ROOT = Path(__file__).resolve().parent.parent
 INSTALL_SH = ROOT / "install.sh"
@@ -572,6 +574,28 @@ def test_git_bash_drive_letter_install_dir_stays_absolute(tmp_path: Path):
     assert result.returncode == 0, result.stderr
     assert "install dir: C:/tools/latch" in result.stdout
     assert f"{project}/C:/tools/latch" not in result.stdout
+
+
+def test_git_bash_backslash_drive_letter_install_dir_stays_absolute(tmp_path: Path):
+    # PowerShell, cmd, and agents on Windows pass native C:\ paths to bash;
+    # prefixing the caller's directory would install inside the project and
+    # skip the ownership check on the directory the caller actually named.
+    project = tmp_path / "project"
+    project.mkdir()
+    result = run(
+        bash(),
+        str(INSTALL_SH),
+        "--dry-run",
+        "--project",
+        str(project),
+        "--install-dir",
+        "C:\\tools\\latch",
+        cwd=project,
+        env=os.environ.copy(),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "install dir: C:/tools/latch\n" in result.stdout
 
 
 def test_posix_bootstrap_canonicalizes_equivalent_git_bash_local_origins(
