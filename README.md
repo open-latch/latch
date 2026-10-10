@@ -507,7 +507,7 @@ The public-release-hygiene workflow runs the full cumulative test suite — 2,30
 at the time of writing (2026-08) — plus contract jobs on macOS, Ubuntu, and Windows, and a
 proof-packet consistency check that fails any PR whose README claims drift from the captured
 receipt. Stable builds ship as tagged [releases](https://github.com/open-latch/latch/releases)
-(latest: `v2.0.0`).
+(latest: `v2.0.1`).
 
 ### The proof packet
 
@@ -558,14 +558,14 @@ curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/open-lat
 
 **Inspect or pin before you run.** To inspect either installer first, download the script and read it
 locally. The piped command follows `main`; for a stable build, pin both the script and the checkout
-ref to the latest tagged release (currently `v2.0.0`) so the install cannot drift back to `main`:
+ref to the latest tagged release (currently `v2.0.1`) so the install cannot drift back to `main`:
 
 ```bash
-curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/open-latch/latch/v2.0.0/install.sh | LATCH_INSTALL_REF=v2.0.0 bash
+curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/open-latch/latch/v2.0.1/install.sh | LATCH_INSTALL_REF=v2.0.1 bash
 ```
 
 ```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/open-latch/latch/v2.0.0/install.ps1))) -Ref v2.0.0
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/open-latch/latch/v2.0.1/install.ps1))) -Ref v2.0.1
 ```
 
 ### Automatic retrieval and catch-up
