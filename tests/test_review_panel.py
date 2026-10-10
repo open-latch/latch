@@ -344,6 +344,27 @@ def test_claude_prompt_is_utf8_bounded_and_collision_framed(
     assert "trusted control plane truncated the evidence" in match.group(3)
 
 
+def test_claude_prompt_file_stays_bounded_under_windows_text_mode(
+    tmp_path: Path,
+    monkeypatch,
+):
+    # On Windows, CPython's text-mode writer turns every "\n" into
+    # os.linesep ("\r\n") when newline is None. That writer cannot run here,
+    # so reproduce its translation in Path.write_text.
+    write_text = Path.write_text
+
+    def windows_write_text(self, data, encoding=None, errors=None, newline=None):
+        if newline is None:
+            data, newline = data.replace("\n", "\r\n"), ""
+        return write_text(
+            self, data, encoding=encoding, errors=errors, newline=newline
+        )
+
+    monkeypatch.setattr(Path, "write_text", windows_write_text)
+    test_claude_prompt_is_utf8_bounded_and_collision_framed(tmp_path, monkeypatch)
+    assert b"\r" not in (tmp_path / "prompt.md").read_bytes()
+
+
 def test_repository_and_artifact_evidence_share_one_outer_frame(
     tmp_path: Path,
     monkeypatch,
