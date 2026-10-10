@@ -332,12 +332,28 @@ def _valid_nonempty_text(value: object) -> bool:
     )
 
 
-def _malformed_sequence(values: object) -> bool:
+def _valid_path_text(value: object) -> bool:
+    """Accept any non-NUL text a POSIX filename or Git tree entry can hold.
+
+    Tabs, newlines, other control characters, and whitespace-only segments are
+    legitimate path names, so path evidence must not use the strict text check.
+    Traversal, foreign-root, containment, and Windows alias checks still run in
+    ``_canonicalize_candidate``.
+    """
+    return (
+        isinstance(value, str)
+        and bool(value)
+        and "\x00" not in value
+        and len(value) <= _MAX_PATH_CHARS
+    )
+
+
+def _malformed_sequence(values: object, *, valid=_valid_nonempty_text) -> bool:
     if values is None:
         return False
     if isinstance(values, str) or not isinstance(values, Sequence):
         return True
-    return any(not _valid_nonempty_text(value) for value in values)
+    return any(not valid(value) for value in values)
 
 
 def _valid_provenance(value: object) -> bool:
@@ -379,16 +395,16 @@ def context_evidence_issues(context: ToolCallContext) -> tuple[str, ...]:
         issues.append("cwd_missing")
 
     required_sequences = (
-        ("proposed_file_paths", context.proposed_file_paths),
-        ("diff_paths", context.diff_paths),
-        ("staged_paths", context.staged_paths),
-        ("import_names", context.import_names),
-        ("api_names", context.api_names),
+        ("proposed_file_paths", context.proposed_file_paths, _valid_path_text),
+        ("diff_paths", context.diff_paths, _valid_path_text),
+        ("staged_paths", context.staged_paths, _valid_path_text),
+        ("import_names", context.import_names, _valid_nonempty_text),
+        ("api_names", context.api_names, _valid_nonempty_text),
     )
-    for field_name, values in required_sequences:
+    for field_name, values, valid in required_sequences:
         if values is None:
             issues.append(f"{field_name}_missing")
-        elif _malformed_sequence(values):
+        elif _malformed_sequence(values, valid=valid):
             issues.append(f"malformed_{field_name}")
 
     if (
@@ -593,9 +609,7 @@ def _canonicalize_candidate(
     field_name: str,
     model: _PathModel,
 ) -> tuple[_CanonicalPath | None, str | None]:
-    if not _valid_nonempty_text(raw):
-        return None, f"malformed_path:{field_name}"
-    if len(raw) > _MAX_PATH_CHARS:
+    if not _valid_path_text(raw):
         return None, f"malformed_path:{field_name}"
     if _contains_traversal(raw, windows=model.windows):
         return None, f"path_traversal:{field_name}"
