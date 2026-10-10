@@ -1,0 +1,45 @@
+<svg width="640" height="320" viewBox="0 0 1280 640" role="img" aria-labelledby="og-title og-desc" xmlns="http://www.w3.org/2000/svg">
+  <title id="og-title">latch</title>
+  <desc id="og-desc">latch — run more agents with less babysitting. Social preview card.</desc>
+  <defs>
+    <linearGradient id="og-bolt" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#f97316"/>
+      <stop offset="0.52" stop-color="#14b8a6"/>
+      <stop offset="1" stop-color="#2563eb"/>
+    </linearGradient>
+    <linearGradient id="og-rule" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#f97316"/>
+      <stop offset="0.5" stop-color="#14b8a6"/>
+      <stop offset="1" stop-color="#2563eb"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1280" height="640" fill="#0b1120"/>
+
+  <!-- crossed-path mark -->
+  <g transform="translate(96 96)">
+    <rect width="156" height="156" rx="34" fill="#0f172a" stroke="#1e293b" stroke-width="2"/>
+    <path d="M38 40l80 78" stroke="#f8fafc" stroke-width="26" stroke-linecap="round"/>
+    <path d="M118 40L38 118" stroke="#334155" stroke-width="26" stroke-linecap="round"/>
+    <path d="M39 41l79 77" stroke="url(#og-bolt)" stroke-width="14" stroke-linecap="round"/>
+    <path d="M117 41L39 118" stroke="#f8fafc" stroke-width="14" stroke-linecap="round"/>
+  </g>
+
+  <text x="288" y="196" font-family="ui-sans-serif, -apple-system, 'Helvetica Neue', Arial, sans-serif"
+        font-size="104" font-weight="700" fill="#f8fafc" letter-spacing="-3">latch</text>
+
+  <text x="96" y="352" font-family="ui-sans-serif, -apple-system, 'Helvetica Neue', Arial, sans-serif"
+        font-size="60" font-weight="700" fill="#f8fafc" letter-spacing="-1.5">Run more agents with less babysitting.</text>
+
+  <text x="96" y="424" font-family="ui-sans-serif, -apple-system, 'Helvetica Neue', Arial, sans-serif"
+        font-size="35" font-weight="400" fill="#94a3b8">latch holds every agent to your own ratified decisions —</text>
+  <text x="96" y="472" font-family="ui-sans-serif, -apple-system, 'Helvetica Neue', Arial, sans-serif"
+        font-size="35" font-weight="400" fill="#94a3b8">and the paths you've ruled out.</text>
+
+  <rect x="96" y="524" width="1088" height="3" rx="1.5" fill="url(#og-rule)"/>
+
+  <text x="96" y="580" font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
+        font-size="27" fill="#64748b">Claude Code &#183; Codex &#183; Cursor</text>
+  <text x="1184" y="580" text-anchor="end" font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
+        font-size="27" fill="#64748b">local-first &#183; reversible &#183; cited</text>
+</svg>
