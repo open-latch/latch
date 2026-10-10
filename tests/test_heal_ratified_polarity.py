@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from latch.store import db  # noqa: E402
+from latch.gate import predicate_policy  # noqa: E402
 from latch.pipeline import drift  # noqa: E402
 from latch.pipeline import heal  # noqa: E402
 
@@ -144,6 +145,48 @@ def _referral_events(
         if event_type == "heal_human_referral"
         and [row.get("node_a_id"), row.get("node_b_id")] == pair
     ]
+
+
+def _reconciled_by_edges(
+    conn, left_id: int, right_id: int
+) -> list[tuple[int, int]]:
+    rows = conn.execute(
+        "SELECT src, dst FROM edges "
+        "WHERE relation = 'reconciled_by' AND status = 'active' "
+        "AND ((src = ? AND dst = ?) OR (src = ? AND dst = ?))",
+        (left_id, right_id, right_id, left_id),
+    ).fetchall()
+    return [(int(row["src"]), int(row["dst"])) for row in rows]
+
+
+def _grant_llm_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        heal.budget,
+        "reserve_available",
+        lambda *_args, requested, **_kwargs: (
+            requested,
+            {
+                "date": heal.budget.current_date(),
+                "approved_dates": [],
+            },
+        ),
+    )
+
+
+def _stub_nightly_decision(
+    monkeypatch: pytest.MonkeyPatch, decision: str
+) -> list[tuple[int, int]]:
+    calls: list[tuple[int, int]] = []
+
+    def arbitrate(older, newer, _similarity, **_kwargs):
+        calls.append((int(older["id"]), int(newer["id"])))
+        return {"decision": decision, "reason": "fixture verdict"}
+
+    monkeypatch.setattr(heal, "_arbitrate_nightly", arbitrate)
+    return calls
+
+
+_TIER_SIMILARITY = {"high": 0.99, "low": 0.60}
 
 
 def test_ratified_referral_failure_leaves_pair_retryable(
@@ -465,5 +508,182 @@ def test_g1_criterion4_ratified_survives_100_of_100(
             and ratified in {row.get("src_id"), row.get("dst_id")}
             for event_type, row in events
         )
+    finally:
+        conn.close()
+
+
+def _reconcile_fixture(
+    conn,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    tier: str,
+    ratified_side: str | None,
+) -> tuple[int, int, list[tuple[int, int]], list[tuple[str, dict]]]:
+    """Two judgments whose only live verdict is the LLM's reconciled_by.
+
+    Ages differ by less than the recency window and neither node is
+    referenced, so the deterministic passes stay silent on both tiers and the
+    pair reaches the nightly LLM arbitrator. Returns (older, newer, llm_calls,
+    events); `ratified_side` names which of the two is founder-ratified.
+    """
+    older = _decision(conn, "Older framing of the retention ruling")
+    newer = _decision(conn, "Newer framing that narrows the ruling")
+    if ratified_side == "older":
+        _ratify(conn, older)
+    elif ratified_side == "newer":
+        _ratify(conn, newer)
+    _set_resolution_inputs(conn, older, updated_at=_days_ago(10))
+    _set_resolution_inputs(conn, newer, updated_at=_days_ago(5))
+    _force_pair(monkeypatch, older, newer, similarity=_TIER_SIMILARITY[tier])
+    _quiet_nightly(monkeypatch)
+    _grant_llm_budget(monkeypatch)
+    llm_calls = _stub_nightly_decision(monkeypatch, "reconciled_by")
+    events = _capture_events(monkeypatch)
+    return older, newer, llm_calls, events
+
+
+@pytest.mark.parametrize("ratified_side", ["older", "newer"])
+@pytest.mark.parametrize("tier", ["high", "low"])
+def test_llm_reconciled_by_against_ratified_routes_to_human(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tier: str,
+    ratified_side: str,
+) -> None:
+    conn = db.connect(str(tmp_path / "vault"))
+    try:
+        older, newer, llm_calls, events = _reconcile_fixture(
+            conn, monkeypatch, tier=tier, ratified_side=ratified_side,
+        )
+        ratified = older if ratified_side == "older" else newer
+
+        first = heal.nightly_heal(
+            conn,
+            project_path=str(tmp_path),
+            use_llm=True,
+            integrity=False,
+        )
+        referrals_after_first = _referral_ids(conn, older, newer)
+        second = heal.nightly_heal(
+            conn,
+            project_path=str(tmp_path),
+            use_llm=True,
+            integrity=False,
+        )
+
+        assert first["by_tier"][tier] == 1
+        assert llm_calls == [(older, newer)]
+        assert _reconciled_by_edges(conn, older, newer) == []
+        assert first["reconciled"] == 0
+        assert first["human_referrals"] == 1
+        assert first["kept_both"] == 1
+        assert len(referrals_after_first) == 1
+        referral = db.get_node(conn, referrals_after_first[0])
+        assert referral["title"].startswith("Human review required")
+        assert _referral_ids(conn, older, newer) == referrals_after_first
+        assert second["human_referrals"] == 0
+        assert second["reconciled"] == 0
+        assert second["skipped_edge_exists"] == 1
+        assert db.get_node(conn, ratified)["status"] == "canonical"
+        assert db.reconciliation_banner(conn, older) == []
+        assert db.reconciliation_banner(conn, newer) == []
+        referral_events = _referral_events(events, older, newer)
+        assert len(referral_events) == 1
+        assert referral_events[0]["trigger"] == "llm_reconciled_by"
+        assert referral_events[0]["ratified_node_ids"] == [ratified]
+        assert not any(
+            event_type == "reconciliation"
+            and row.get("relation") == "reconciled_by"
+            for event_type, row in events
+        )
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("tier", ["high", "low"])
+def test_llm_reconciled_by_on_unratified_pair_still_writes_edge(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tier: str
+) -> None:
+    conn = db.connect(str(tmp_path / "vault"))
+    try:
+        older, newer, llm_calls, events = _reconcile_fixture(
+            conn, monkeypatch, tier=tier, ratified_side=None,
+        )
+
+        result = heal.nightly_heal(
+            conn,
+            project_path=str(tmp_path),
+            use_llm=True,
+            integrity=False,
+        )
+
+        assert result["by_tier"][tier] == 1
+        assert llm_calls == [(older, newer)]
+        assert _reconciled_by_edges(conn, older, newer) == [(older, newer)]
+        assert result["reconciled"] == 1
+        assert result["human_referrals"] == 0
+        assert result["kept_both"] == 0
+        assert [
+            banner["linked_id"]
+            for banner in db.reconciliation_banner(conn, older)
+        ] == [newer]
+        assert db.get_node(conn, older)["status"] == "staging"
+        assert db.get_node(conn, newer)["status"] == "staging"
+        assert conn.execute(
+            "SELECT COUNT(*) FROM nodes WHERE kind = 'open_question'"
+        ).fetchone()[0] == 0
+        assert _referral_events(events, older, newer) == []
+        assert [
+            (row.get("src_id"), row.get("dst_id"))
+            for event_type, row in events
+            if event_type == "reconciliation"
+            and row.get("relation") == "reconciled_by"
+        ] == [(older, newer)]
+    finally:
+        conn.close()
+
+
+def test_ratified_reconcile_referral_keeps_banner_empty_and_rows_binding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    domain = "domain:synthetic-heal-guard"
+    conn = db.connect(str(tmp_path / "vault"))
+    try:
+        ratified, challenger, _llm_calls, _events = _reconcile_fixture(
+            conn, monkeypatch, tier="low", ratified_side="older",
+        )
+        rejected_path_id = db.insert_rejected_path_nc(
+            conn,
+            ratified,
+            option="synthetic revived option",
+            reason="synthetic ratified rejection",
+            ratifier="session:founder",
+            decided_at="2026-09-01 08:00:00",
+            scope_predicate="file:synthetic/heal-guard.txt",
+            source="declared",
+            policy_domain_id=domain,
+        )
+        conn.commit()
+        before = predicate_policy.project_policy_domain(conn, domain)
+        assert [row.rejected_path_id for row in before.binding_rows] == [
+            rejected_path_id
+        ]
+
+        heal.nightly_heal(
+            conn,
+            project_path=str(tmp_path),
+            use_llm=True,
+            integrity=False,
+        )
+
+        after = predicate_policy.project_policy_domain(conn, domain)
+        assert "owner_unresolved_reconciliation" not in after.reason_counts
+        assert after.advisory_rows == ()
+        assert [row.rejected_path_id for row in after.binding_rows] == [
+            rejected_path_id
+        ]
+        assert after.binding_rows[0].reconciler_ids == ()
+        assert db.reconciliation_banner(conn, ratified) == []
+        assert len(_referral_ids(conn, ratified, challenger)) == 1
     finally:
         conn.close()
