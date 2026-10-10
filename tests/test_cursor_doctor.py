@@ -173,6 +173,23 @@ def test_check_cursor_cli_mcp_warns_when_missing():
     print("PASS check_cursor_cli_mcp_warns_when_missing")
 
 
+def test_check_cursor_cli_mcp_warns_when_agent_cannot_launch():
+    # An agent path that exists but cannot be executed (PermissionError on
+    # POSIX, WinError 193 on Windows for a non-PE file) must degrade to a
+    # WARN like a missing CLI, not crash the doctor.
+    d = _tmp()
+    try:
+        agent = d / "agent-not-executable"
+        agent.write_text("not a program\n", encoding="utf-8")
+        agent.chmod(0o644)
+        check = cd.check_cursor_cli_mcp(agent_bin=str(agent), timeout_s=1)
+        _assert(check.level == cd.WARN, check)
+        _assert(check.detail.startswith("subprocess failed: "), check)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+    print("PASS check_cursor_cli_mcp_warns_when_agent_cannot_launch")
+
+
 def test_check_cursor_cli_mcp_ok_and_failure():
     d = _tmp()
     old_args = os.environ.get("FAKE_CURSOR_AGENT_ARGS")
@@ -374,6 +391,7 @@ if __name__ == "__main__":
     test_check_cursor_skills_status()
     test_check_mcp_launch_target()
     test_check_cursor_cli_mcp_warns_when_missing()
+    test_check_cursor_cli_mcp_warns_when_agent_cannot_launch()
     test_check_cursor_cli_mcp_ok_and_failure()
     test_check_cursor_cli_mcp_fails_when_critical_tools_missing()
     test_run_all_static_and_cli_checks()
