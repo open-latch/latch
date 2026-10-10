@@ -193,7 +193,9 @@ irm https://chatgpt.com/codex/install.ps1 | iex
 Latch's local MCP search/get/insert server is Python-based; this CLI check is for the model-backed
 operations that Latch runs as subprocesses.
 
-**Install in one command.** Open a terminal in the repo you want latch to protect.
+**Install in one command.** In an interactive terminal, the installer offers the current directory
+as the project to protect; press Enter to accept it or enter another directory before anything is
+wired.
 
 macOS, Linux, or Windows Git Bash:
 
