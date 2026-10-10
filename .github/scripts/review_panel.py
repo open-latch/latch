@@ -844,7 +844,7 @@ include a `.review-target/` checkout prefix.
         raise AssertionError("review prompt exceeded its UTF-8 transport limit")
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(prompt, encoding="utf-8")
+    output.write_text(prompt, encoding="utf-8", newline="\n")
     if args.github_output:
         _append_multiline_github_output(
             Path(args.github_output),
