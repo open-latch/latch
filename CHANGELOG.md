@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.0.1 - Unreleased
+
+- Correct the 2.0.0 note on turning off request-text capture: the two
+  controls are not interchangeable. The shared MCP runtime, which runs
+  `latch_gate` for MCP hosts, is governed only by
+  `"request_text_capture": false` in the vault `runtime_settings.json`;
+  `LATCH_REQUEST_TEXT_CAPTURE=0`, like `LATCH_OUTCOME_EVENTS=0`, reaches only
+  direct CLI processes and never the shared MCP runtime. The MCP server now
+  says so once on stderr, and doctor warns, when either variable is set.
+
 ## 2.0.0 - 2026-10-09
 
 - Move the Python sources into an importable `latch` package under

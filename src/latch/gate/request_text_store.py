@@ -168,6 +168,74 @@ def notice_retired_capture_flag(stream=None) -> bool:
     except Exception:
         return False
 
+
+# Opt-out variables the shared MCP runtime never receives, each paired with the
+# vault runtime_settings.json key that does reach it. On the standard MCP path
+# `latch_gate` runs inside the long-lived daemon, and
+# `mcp_broker._daemon_environment` builds that daemon's environment from an
+# allowlist carrying neither variable, so a daemon-side `capture_enabled` or
+# `capture_streams.outcome_events_enabled` falls through to the vault policy
+# (default ON) whatever the operator exported. Forwarding them would let the
+# first proxy to win daemon election set capture policy for every other
+# client; the vault key is the shared control, and these notices say so where
+# the operator's own environment is still visible (`mcp_proxy.main`, doctor).
+SHARED_RUNTIME_IGNORED_ENV = (
+    (CAPTURE_ENV, SETTINGS_KEY),
+    ("LATCH_OUTCOME_EVENTS", "outcome_events"),
+)
+
+_shared_runtime_env_notice_emitted = False
+
+
+def shared_runtime_ignored_env() -> list[tuple[str, str]]:
+    """Return the (variable, vault key) pairs whose variable is set here."""
+    return [
+        (name, key)
+        for name, key in SHARED_RUNTIME_IGNORED_ENV
+        if os.environ.get(name) is not None
+    ]
+
+
+def shared_runtime_ignored_env_message(name: str, key: str) -> str:
+    """One operator-facing sentence pair for a variable the daemon ignores."""
+    return (
+        f"{name} is set, but the shared MCP runtime never receives it, so it "
+        "has no effect on the MCP tool calls that runtime serves; control "
+        f'those with "{key}" in the vault runtime_settings.json. {name} '
+        "reaches only processes that inherit it, such as direct CLI runs."
+    )
+
+
+def notice_shared_runtime_ignored_env(stream=None) -> bool:
+    """Warn once per process, on stderr, for each set variable the daemon ignores.
+
+    Same contract as `notice_retired_capture_flag`: returns whether it wrote,
+    never raises, and never touches stdout (the MCP JSON-RPC channel). Call it
+    only on a path whose tool calls the shared daemon will serve; a forced
+    legacy server inherits the full environment, where the variables work.
+    """
+    global _shared_runtime_env_notice_emitted
+    if _shared_runtime_env_notice_emitted:
+        return False
+    flagged = shared_runtime_ignored_env()
+    if not flagged:
+        return False
+    _shared_runtime_env_notice_emitted = True
+    try:
+        target = sys.stderr if stream is None else stream
+        if target is None:
+            return False
+        for name, key in flagged:
+            target.write(
+                f"[latch] {shared_runtime_ignored_env_message(name, key)}\n"
+            )
+        flush = getattr(target, "flush", None)
+        if callable(flush):
+            flush()
+        return True
+    except Exception:
+        return False
+
 # Structural suppression signal (Latch 5300 item 4). A refused write emits one
 # row on this stream: a closed-set reason, a count, and the (gate_call_id,
 # query_hash, ts) join keys its gate.log row already carries — never a path,
