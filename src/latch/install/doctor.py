@@ -505,6 +505,27 @@ def check_retired_env_flags() -> tuple[str, str, str]:
     )
 
 
+def check_shared_runtime_env_flags() -> tuple[str, str, str]:
+    """Surface capture opt-out variables the shared MCP runtime never receives.
+
+    ``LATCH_REQUEST_TEXT_CAPTURE`` and ``LATCH_OUTCOME_EVENTS`` govern the
+    process they are set in, but the shared daemon that serves MCP tool calls
+    is started from an allowlisted environment that carries neither, so only
+    the vault ``runtime_settings.json`` keys reach it. Doctor runs in the
+    operator's own environment, which is the one these variables were set in.
+
+    WARN, never FAIL: the variables still work for direct CLI runs.
+    """
+    name = "shared MCP runtime opt-outs"
+    flagged = request_text_store.shared_runtime_ignored_env()
+    if not flagged:
+        return name, OK, "no opt-out variable set"
+    return name, WARN, "\n".join(
+        request_text_store.shared_runtime_ignored_env_message(variable, key)
+        for variable, key in flagged
+    )
+
+
 def _kb_home() -> Path:
     """The latch install root (holds projects/ and kb_location.json).
 
@@ -840,6 +861,7 @@ def run_all(skip_embed: bool, no_arch: bool, allow_old_py: bool,
         results.append(check_commands_installed())
     results.append(check_claude_md_contract())
     results.append(check_retired_env_flags())
+    results.append(check_shared_runtime_env_flags())
     if no_pin:
         results.append(("KB directory pin", SKIP, "skipped (--no-pin)"))
     else:

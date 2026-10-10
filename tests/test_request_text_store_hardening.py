@@ -949,3 +949,160 @@ def test_readme_states_env_precedence_over_the_vault_key():
     _assert("symbolic links" in window or "symlink" in window,
             "the README must state that the store is opened without following links")
     print("PASS readme_states_env_precedence_over_the_vault_key")
+
+
+# ---------- 2.0.0 release review: opt-out variables the daemon never sees ----------
+
+def test_the_shared_daemon_never_receives_the_capture_opt_out_variables():
+    """The 2.0.0 release note offered LATCH_REQUEST_TEXT_CAPTURE=0 as a peer of
+    the vault key. On the standard MCP path `latch_gate` runs inside the shared
+    daemon, whose environment `mcp_broker._daemon_environment` builds from an
+    allowlist that carries neither capture variable, so a daemon-side
+    `capture_enabled` falls through to the vault policy (default ON). This pin
+    is the boundary the notices below exist to explain."""
+    from latch.mcp import mcp_broker      # noqa: PLC0415
+
+    source = {CAPTURE_ENV: "0", OUTCOME_ENV: "0", "PATH": os.environ.get("PATH", "")}
+    for for_helper in (False, True):
+        built = mcp_broker._daemon_environment(source=source, for_helper=for_helper)
+        _assert(CAPTURE_ENV not in built and OUTCOME_ENV not in built,
+                f"the daemon environment must not carry either variable: {sorted(built)}")
+    print("PASS the_shared_daemon_never_receives_the_capture_opt_out_variables")
+
+
+def test_the_mcp_proxy_says_the_shared_runtime_ignores_the_opt_out_variables(monkeypatch):
+    """The proxy is the last process on the standard MCP path that holds the
+    operator's environment. When either opt-out variable is set there, it says
+    once, on stderr only, that the shared runtime never receives it and names
+    the vault key that does reach it. A forced legacy server inherits the whole
+    environment, so the variable works there and the proxy stays quiet."""
+    from latch.mcp import mcp_broker      # noqa: PLC0415
+    from latch.mcp import mcp_proxy       # noqa: PLC0415
+
+    def _refuse():
+        raise ValueError("probe: no daemon in this test")
+
+    def _main_output():
+        err, out = io.StringIO(), io.StringIO()
+        real_stderr, real_stdout = sys.stderr, sys.stdout
+        sys.stderr, sys.stdout = err, out
+        try:
+            code = mcp_proxy.main()
+        finally:
+            sys.stderr, sys.stdout = real_stderr, real_stdout
+        return code, err.getvalue(), out.getvalue()
+
+    monkeypatch.setattr(mcp_proxy, "connection_metadata", _refuse)
+    monkeypatch.delenv("LATCH_MCP_FORCE_LEGACY", raising=False)
+    monkeypatch.delenv(RETIRED_ENV, raising=False)
+    monkeypatch.setattr(request_text_store, "_retired_notice_emitted", False)
+    monkeypatch.setattr(
+        request_text_store, "_shared_runtime_env_notice_emitted", False,
+        raising=False,
+    )
+
+    # Unset: nothing to say.
+    monkeypatch.delenv(CAPTURE_ENV, raising=False)
+    monkeypatch.delenv(OUTCOME_ENV, raising=False)
+    code, err, out = _main_output()
+    _assert(code == 2, f"the probe must short-circuit main(), got {code}")
+    _assert(CAPTURE_ENV not in err and OUTCOME_ENV not in err,
+            f"no notice when neither variable is set: {err!r}")
+
+    monkeypatch.setenv(CAPTURE_ENV, "0")
+    monkeypatch.setenv(OUTCOME_ENV, "0")
+    code, err, out = _main_output()
+    code_again, err_again, out_again = _main_output()
+    _assert(code == 2 and code_again == 2, f"main() must still return 2: {code} {code_again}")
+    notice = " ".join(err.split())
+    _assert(err.startswith("[latch] "), f"stderr diagnostics carry the [latch] prefix: {err!r}")
+    _assert(CAPTURE_ENV in notice and request_text_store.SETTINGS_KEY in notice,
+            f"the notice must name the variable and the vault key: {err!r}")
+    _assert(OUTCOME_ENV in notice and '"outcome_events"' in notice,
+            f"the outcome-events variable gets the same notice: {err!r}")
+    _assert("runtime_settings.json" in notice and "shared MCP runtime" in notice,
+            f"the notice must say which runtime ignores it and where to look: {err!r}")
+    _assert("direct CLI" in notice,
+            f"the notice must say where the variable does apply: {err!r}")
+    _assert(CAPTURE_ENV not in err_again and OUTCOME_ENV not in err_again,
+            f"the notice fires once per process: {err_again!r}")
+    _assert(out == "" and out_again == "",
+            "stdout is the JSON-RPC channel and must stay clean")
+
+    # Forced legacy: the server is exec'd with the full environment, so the
+    # variable governs it and a "no effect" notice would be wrong.
+    monkeypatch.setattr(request_text_store, "_shared_runtime_env_notice_emitted", False)
+    monkeypatch.setenv("LATCH_MCP_FORCE_LEGACY", "1")
+    monkeypatch.setattr(mcp_broker, "emit_lifecycle", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        mcp_proxy, "_exec_legacy_server",
+        lambda: mcp_proxy.ProxyResult.RUN_LEGACY_IN_PROCESS,
+    )
+    code, err, out = _main_output()
+    _assert(code is mcp_proxy.ProxyResult.RUN_LEGACY_IN_PROCESS,
+            f"the legacy branch must be taken: {code}")
+    _assert(CAPTURE_ENV not in err and OUTCOME_ENV not in err,
+            f"no notice on the forced legacy path: {err!r}")
+    print("PASS the_mcp_proxy_says_the_shared_runtime_ignores_the_opt_out_variables")
+
+
+def test_doctor_warns_when_an_opt_out_variable_cannot_reach_the_shared_runtime(monkeypatch):
+    """Stderr is only operator-visible if the host shows it, so doctor carries
+    the same message as a WARN row (never FAIL), in its own run_all list."""
+    from latch.install import doctor          # noqa: PLC0415
+
+    check = getattr(doctor, "check_shared_runtime_env_flags", None)
+    _assert(check is not None,
+            "doctor must report opt-out variables the shared MCP runtime never receives")
+
+    monkeypatch.delenv(CAPTURE_ENV, raising=False)
+    monkeypatch.delenv(OUTCOME_ENV, raising=False)
+    name, level, detail = check()
+    _assert(level == doctor.OK, f"unset variables must be clean: {level} {detail}")
+
+    monkeypatch.setenv(CAPTURE_ENV, "0")
+    name, level, detail = check()
+    flat = " ".join(detail.split())
+    _assert(level == doctor.WARN, f"a set variable must WARN, not FAIL: {level}")
+    _assert(CAPTURE_ENV in flat and request_text_store.SETTINGS_KEY in flat
+            and "runtime_settings.json" in flat,
+            f"the row must name the variable and the vault key: {detail!r}")
+    _assert("shared MCP runtime" in flat and "direct CLI" in flat,
+            f"the row must say where the variable does and does not apply: {detail!r}")
+    _assert(OUTCOME_ENV not in flat, f"only set variables are listed: {detail!r}")
+
+    monkeypatch.setenv(OUTCOME_ENV, "1")
+    name, level, detail = check()
+    flat = " ".join(detail.split())
+    _assert(level == doctor.WARN and OUTCOME_ENV in flat and '"outcome_events"' in flat,
+            f"the outcome-events variable is reported the same way: {detail!r}")
+
+    monkeypatch.setattr(doctor, "check_latch_version", lambda: ("latch version", doctor.OK, ""))
+    monkeypatch.setattr(doctor, "check_python_version", lambda _allow: ("python", doctor.OK, ""))
+    monkeypatch.setattr(doctor, "check_imports", lambda: [])
+    monkeypatch.setattr(doctor, "_run_probe", lambda *_a, **_k: (doctor.OK, ""))
+    monkeypatch.setattr(doctor, "check_claude_md_contract", lambda: ("CLAUDE.md", doctor.OK, ""))
+    rows = doctor.run_all(
+        skip_embed=True, no_arch=True, allow_old_py=True,
+        no_mcp=True, no_commands=True, no_pin=True,
+    )
+    _assert(any(row[0] == name and row[1] == doctor.WARN for row in rows),
+            f"run_all must include the row: {[row[0] for row in rows]}")
+    print("PASS doctor_warns_when_an_opt_out_variable_cannot_reach_the_shared_runtime")
+
+
+def test_changelog_corrects_the_2_0_0_opt_out_wording():
+    """The 2.0.0 entry offered the vault key and the environment variable as
+    interchangeable opt-outs. The next entry must say which runtime each one
+    reaches: only the vault key governs the shared MCP runtime."""
+    changelog = (_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+    start = changelog.find("\n## 2.0.1")
+    _assert(start != -1, "a 2.0.1 entry must correct the 2.0.0 opt-out wording")
+    end = changelog.find("\n## ", start + 1)
+    entry = " ".join(changelog[start:end].split())
+    _assert('"request_text_capture": false' in entry and "runtime_settings.json" in entry,
+            f"the entry must name the vault key: {entry!r}")
+    _assert("shared MCP runtime" in entry and "direct CLI" in entry
+            and "LATCH_REQUEST_TEXT_CAPTURE" in entry,
+            f"the entry must say the variable reaches only direct CLI processes: {entry!r}")
+    print("PASS changelog_corrects_the_2_0_0_opt_out_wording")

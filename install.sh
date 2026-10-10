@@ -15,6 +15,11 @@ readonly DEFAULT_REPOSITORY="https://github.com/open-latch/latch.git"
 readonly DEFAULT_REF="main"
 readonly UV_VERSION="0.11.28"
 readonly UV_INSTALLER_URL_DEFAULT="https://astral.sh/uv/${UV_VERSION}/install.sh"
+# Latch 2.0.0 moved the Python sources from a flat src/ into the src/latch
+# package. Only the package layout can be prepared and activated here, but an
+# existing 1.x checkout keeps the flat one until --upgrade moves it forward.
+readonly PACKAGE_QUICKSTART="src/latch/install/quickstart.py"
+readonly FLAT_QUICKSTART="src/quickstart.py"
 
 main() {
 die() {
@@ -181,8 +186,14 @@ normalize_repository() {
   printf '%s\n' "$value"
 }
 
+has_package_layout() {
+  [ -f "$1/$PACKAGE_QUICKSTART" ]
+}
+
+# validate_checkout APP [any]: "any" also accepts the flat 1.x layout, for an
+# existing checkout that an explicit upgrade may still move forward.
 validate_checkout() {
-  local app="$1" top actual expected
+  local app="$1" layouts="${2:-package}" top actual expected
   [ ! -L "$app" ] || die "refusing symlink install directory: $app"
   [ -d "$app/.git" ] || die "existing install path is not a Latch Git checkout: $app"
   top="$(git -C "$app" rev-parse --show-toplevel 2>/dev/null)" \
@@ -197,7 +208,8 @@ validate_checkout() {
   [ "$actual" = "$expected" ] \
     || die "existing checkout origin is $actual, expected $expected; refusing overwrite"
   [ -f "$app/VERSION" ] && [ -f "$app/requirements.txt" ] \
-    && [ -f "$app/src/latch/install/quickstart.py" ] \
+    && { has_package_layout "$app" \
+      || { [ "$layouts" = any ] && [ -f "$app/$FLAT_QUICKSTART" ]; }; } \
     || die "checkout is missing required Latch files: $app"
 }
 
@@ -332,7 +344,7 @@ mkdir -p "$INSTALL_PARENT"
 UV="$(resolve_uv)"
 
 if [ -e "$INSTALL_DIR" ]; then
-  validate_checkout "$INSTALL_DIR"
+  validate_checkout "$INSTALL_DIR" any
   if [ "$UPGRADE" -eq 1 ]; then
     dirty="$(git -C "$INSTALL_DIR" status --porcelain --untracked-files=normal)"
     [ -z "$dirty" ] \
@@ -342,6 +354,12 @@ if [ -e "$INSTALL_DIR" ]; then
     git -C "$INSTALL_DIR" fetch --quiet --depth 1 origin "$REF"
     NEW_COMMIT="$(git -C "$INSTALL_DIR" rev-parse FETCH_HEAD)"
     git -C "$INSTALL_DIR" checkout --quiet --detach "$NEW_COMMIT"
+    if ! has_package_layout "$INSTALL_DIR"; then
+      printf 'Upgrade ref %s has no %s, which this installer activates; restoring %s.\n' \
+        "$REF" "$PACKAGE_QUICKSTART" "$OLD_COMMIT" >&2
+      git -C "$INSTALL_DIR" checkout --quiet --detach "$OLD_COMMIT"
+      die 'upgrade rolled back; the previous checkout remains installed'
+    fi
     if ! prepare_runtime "$INSTALL_DIR"; then
       printf 'Runtime setup failed after source update; restoring %s.\n' "$OLD_COMMIT" >&2
       git -C "$INSTALL_DIR" checkout --quiet --detach "$OLD_COMMIT"
@@ -349,6 +367,8 @@ if [ -e "$INSTALL_DIR" ]; then
       die 'upgrade rolled back; the previous checkout remains installed'
     fi
   else
+    has_package_layout "$INSTALL_DIR" \
+      || die "existing checkout predates the Latch 2.0 package layout, so it cannot be activated without updating its source; rerun with --upgrade to move it to $REF: $INSTALL_DIR"
     note 'Existing Latch checkout found; keeping its source revision'
     prepare_runtime "$INSTALL_DIR" \
       || die "runtime reconciliation failed; the checkout remains at $INSTALL_DIR"
@@ -375,7 +395,7 @@ VERSION="$(tr -d '\r\n' < "$INSTALL_DIR/VERSION")"
 note 'Running the guided Latch activation'
 run_quickstart() {
   env LATCH_HOME="$INSTALL_DIR" LATCH_PYTHON="$PYTHON_PATH" \
-    "$PYTHON_PATH" "$INSTALL_DIR/src/latch/install/quickstart.py" \
+    "$PYTHON_PATH" "$INSTALL_DIR/$PACKAGE_QUICKSTART" \
     --project "$PROJECT" ${QUICKSTART_ARGS[@]+"${QUICKSTART_ARGS[@]}"}
 }
 

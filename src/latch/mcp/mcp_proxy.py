@@ -853,6 +853,11 @@ def main() -> int | ProxyResult:
         if outcome is ProxyResult.RUN_LEGACY_IN_PROCESS:
             return outcome
         return 0
+    # From here MCP tool calls run in the shared daemon, which never receives
+    # the capture opt-out variables (see
+    # `request_text_store.SHARED_RUNTIME_IGNORED_ENV`). The forced legacy
+    # server above inherits this whole environment, so it is not warned.
+    request_text_store.notice_shared_runtime_ignored_env()
     try:
         metadata = connection_metadata()
     except (ValueError, mcp_broker.BrokerError) as exc:

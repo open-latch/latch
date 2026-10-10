@@ -37,6 +37,11 @@ $UvInstallerUrl = if ($env:LATCH_UV_INSTALLER_URL) {
 } else {
   "https://astral.sh/uv/0.11.28/install.ps1"
 }
+# Latch 2.0.0 moved the Python sources from a flat src\ into the src\latch
+# package. Only the package layout can be prepared and activated here, but an
+# existing 1.x checkout keeps the flat one until -Upgrade moves it forward.
+$PackageQuickstart = "src\latch\install\quickstart.py"
+$FlatQuickstart = "src\quickstart.py"
 
 function Fail([string]$Message) {
   throw "latch install: $Message"
@@ -84,7 +89,13 @@ function Set-InstalledRef([string]$App, [string]$Value) {
   Invoke-Git -Arguments @("-C", $App, "config", "--local", "latch.installRef", $Value) | Out-Null
 }
 
-function Validate-Checkout([string]$App) {
+function Test-PackageLayout([string]$App) {
+  return (Test-Path -LiteralPath (Join-Path $App $PackageQuickstart) -PathType Leaf)
+}
+
+# -AnyLayout also accepts the flat 1.x layout, for an existing checkout that an
+# explicit upgrade may still move forward.
+function Validate-Checkout([string]$App, [switch]$AnyLayout) {
   if ((Get-Item -LiteralPath $App -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) {
     Fail("refusing symlink/reparse-point install directory: $App")
   }
@@ -99,11 +110,16 @@ function Validate-Checkout([string]$App) {
   if ((Normalize-Repository $actual) -ne (Normalize-Repository $Repository)) {
     Fail("existing checkout origin is $actual, expected $Repository; refusing overwrite")
   }
-  foreach ($relative in @("VERSION", "requirements.txt", "src\latch\install\quickstart.py")) {
+  foreach ($relative in @("VERSION", "requirements.txt")) {
     if (-not (Test-Path -LiteralPath (Join-Path $App $relative) -PathType Leaf)) {
       Fail("checkout is missing required Latch file: $relative")
     }
   }
+  if (Test-PackageLayout $App) { return }
+  if ($AnyLayout -and (Test-Path -LiteralPath (Join-Path $App $FlatQuickstart) -PathType Leaf)) {
+    return
+  }
+  Fail("checkout is missing required Latch file: $PackageQuickstart")
 }
 
 function Resolve-Uv {
@@ -271,7 +287,7 @@ if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
 }
 if ($RefWasExplicit -and -not $Upgrade -and
     (Test-Path -LiteralPath (Join-Path $InstallDir ".git") -PathType Container)) {
-  Validate-Checkout $InstallDir
+  Validate-Checkout $InstallDir -AnyLayout
   $installedRef = Get-InstalledRef $InstallDir
   if (-not $installedRef) {
     Fail("-Ref cannot verify this existing install because it has no recorded source ref; rerun without -Ref to reconcile or add -Upgrade explicitly")
@@ -286,7 +302,7 @@ $Uv = Resolve-Uv
 $stageRoot = $null
 try {
   if (Test-Path -LiteralPath $InstallDir) {
-    Validate-Checkout $InstallDir
+    Validate-Checkout $InstallDir -AnyLayout
     if ($Upgrade) {
       $dirty = @(Invoke-Git -Arguments @("-C", $InstallDir, "status", "--porcelain", "--untracked-files=normal"))
       if ($dirty.Count -gt 0) {
@@ -297,6 +313,11 @@ try {
       Invoke-Git -Arguments @("-C", $InstallDir, "fetch", "--quiet", "--depth", "1", "origin", $Ref) | Out-Null
       $newCommit = (Invoke-Git -Arguments @("-C", $InstallDir, "rev-parse", "FETCH_HEAD") | Select-Object -Last 1).Trim()
       Invoke-Git -Arguments @("-C", $InstallDir, "checkout", "--quiet", "--detach", $newCommit) | Out-Null
+      if (-not (Test-PackageLayout $InstallDir)) {
+        Write-Warning "Upgrade ref $Ref has no $PackageQuickstart, which this installer activates; restoring $oldCommit."
+        Invoke-Git -Arguments @("-C", $InstallDir, "checkout", "--quiet", "--detach", $oldCommit) | Out-Null
+        Fail("upgrade rolled back; the previous checkout remains installed")
+      }
       if (-not (Prepare-Runtime $InstallDir $Uv)) {
         Write-Warning "Runtime setup failed after source update; restoring $oldCommit."
         Invoke-Git -Arguments @("-C", $InstallDir, "checkout", "--quiet", "--detach", $oldCommit) | Out-Null
@@ -305,6 +326,9 @@ try {
       }
       Set-InstalledRef $InstallDir $Ref
     } else {
+      if (-not (Test-PackageLayout $InstallDir)) {
+        Fail("existing checkout predates the Latch 2.0 package layout, so it cannot be activated without updating its source; rerun with -Upgrade to move it to $Ref ($InstallDir)")
+      }
       Note "Existing Latch checkout found; keeping its source revision"
       if (-not (Prepare-Runtime $InstallDir $Uv)) {
         Fail("runtime reconciliation failed; the checkout remains at $InstallDir")
@@ -346,7 +370,7 @@ try {
   $env:LATCH_PYTHON = $PythonPath
   $effectiveQuickstartArgs = @()
   $effectiveQuickstartArgs += $QuickstartArgs
-  & $PythonPath (Join-Path $InstallDir "src\latch\install\quickstart.py") --project $Project @effectiveQuickstartArgs
+  & $PythonPath (Join-Path $InstallDir $PackageQuickstart) --project $Project @effectiveQuickstartArgs
   $quickstartRc = $LASTEXITCODE
 } finally {
   if ($hadLatchHome) {
