@@ -31,6 +31,36 @@ FIXTURES = Path(__file__).parent / "fixtures" / "outcome_measurement"
 EPOCH = "outcome-v2.6-key-test"
 RUNTIME = "runtime-test"
 COMMIT = "a" * 40
+# Whether st_mode bits are a permission model here. On Windows CPython reports
+# 0o666 for any writable file and 0o777 for any directory, so no value can mean
+# owner-only; the checkpoint's privacy there rests on the vault's ACLs (the
+# WINDOWS GAP stated in ``latch.gate.request_text_store``).
+POSIX_MODES = os.name == "posix"
+
+
+def _bash() -> str:
+    """The bash that runs the ``bin/*.sh`` entrypoint on this host.
+
+    POSIX keeps plain ``bash``. On Windows ``CreateProcess`` searches System32
+    before PATH, so a bare ``bash`` reaches the WSL launcher stub, which runs
+    nothing without an installed distribution. Resolve Git Bash explicitly:
+    from PATH, else beside the Git for Windows ``git`` this suite already
+    requires (``<root>\\cmd`` or ``<root>\\bin``, with bash in ``<root>\\bin``),
+    and never anything under %SystemRoot%.
+    """
+
+    if os.name != "nt":
+        return "bash"
+    system_root = Path(os.environ.get("SystemRoot", r"C:\Windows")).resolve()
+    git = shutil.which("git")
+    for candidate in (
+        shutil.which("bash"),
+        git and str(Path(git).parent.parent / "bin" / "bash.exe"),
+    ):
+        if candidate and Path(candidate).is_file():
+            if not Path(candidate).resolve().is_relative_to(system_root):
+                return candidate
+    pytest.skip("no Git Bash on this Windows host (only the WSL stub, or none)")
 
 
 def _fixture_bytes() -> dict[str, bytes]:
@@ -207,7 +237,8 @@ def test_lineage_checkpoint_round_trips_structural_authority_exactly(
     assert "tool_output" not in encoded
     assert "database_rows" not in encoded
     assert "implementation_commit" not in encoded
-    assert checkpoint.stat().st_mode & 0o777 == 0o600
+    if POSIX_MODES:
+        assert checkpoint.stat().st_mode & 0o777 == 0o600
     loaded = runner.load_lineage_checkpoint(
         checkpoint, coordinate_sha256=coordinate, mac_key=mac_key
     )
@@ -801,7 +832,7 @@ def test_omitting_contract_uses_packaged_default_end_to_end(
     report = tmp_path / "report.json"
     completed = subprocess.run(
         [
-            "bash",
+            _bash(),
             str(deployed / "bin" / "run_latch_outcome_audit.sh"),
             "--project", str(built["project"]),
             "--envelope", str(built["envelope"]),
@@ -875,7 +906,7 @@ def test_three_consecutive_real_entrypoint_runs_with_finalized_prior_stay_clean(
         "LATCH_PYTHON": sys.executable,
     }
     base_argv = [
-        "bash",
+        _bash(),
         str(deployed / "bin" / "run_latch_outcome_audit.sh"),
         "--project", str(project),
         "--envelope", str(built["envelope"]),
@@ -1197,7 +1228,8 @@ def test_omitted_lineage_defaults_to_a_private_vault_local_checkpoint(
     default_lineage = cli.default_lineage_path(str(built["project"]))
     assert default_lineage.parent == paths.project_dir(str(built["project"]))
     assert default_lineage.is_file()
-    assert default_lineage.stat().st_mode & 0o777 == 0o600
+    if POSIX_MODES:
+        assert default_lineage.stat().st_mode & 0o777 == 0o600
 
     # Any other vault-internal spelling keeps the blanket refusal.
     inside = paths.project_dir(str(built["project"])) / "elsewhere.json"
@@ -1432,6 +1464,11 @@ def test_private_checkpoint_parents_are_created_at_0o700(tmp_path: Path) -> None
     runner.write_lineage_checkpoint(
         nested, state, coordinate_sha256="b" * 64, mac_key=b"\x55" * 32
     )
+    if not POSIX_MODES:
+        # What survives without mode bits: every missing ancestor is created.
+        assert (tmp_path / "outer" / "inner").is_dir()
+        assert nested.is_file()
+        return
     assert (tmp_path / "outer").stat().st_mode & 0o777 == 0o700
     assert (tmp_path / "outer" / "inner").stat().st_mode & 0o777 == 0o700
     assert nested.stat().st_mode & 0o777 == 0o600
