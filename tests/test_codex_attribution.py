@@ -285,8 +285,10 @@ def test_current_mcp_end_preserves_active_session_identity_conflict():
         resumed_meta["payload"]["id"] = THREAD_B
         resumed_meta["payload"]["session_id"] = THREAD_B
         rollout = day / "rollout-current-identity-conflict.jsonl"
+        # Codex writes LF JSONL; keep the asserted byte offsets platform-free.
         rollout.write_text(
-            "\n".join((*rows[:-1], json.dumps(resumed_meta), rows[-1])) + "\n"
+            "\n".join((*rows[:-1], json.dumps(resumed_meta), rows[-1])) + "\n",
+            newline="\n",
         )
 
         idx = codex_attribution.build_index(Path(home))
@@ -601,7 +603,10 @@ def test_historical_supported_gate_error_is_not_a_malformed_nonce_candidate():
         rows = [json.loads(line) for line in fixture.read_text().splitlines()]
         rows[-1]["payload"]["result"] = {"Err": "SANITIZED"}
         rollout = day / "rollout-historical-gate-error.jsonl"
-        rollout.write_text("".join(json.dumps(row) + "\n" for row in rows))
+        # Codex writes LF JSONL; keep the asserted byte offsets platform-free.
+        rollout.write_text(
+            "".join(json.dumps(row) + "\n" for row in rows), newline="\n"
+        )
 
         idx = codex_attribution.build_index(Path(home))
         receipt = idx["candidate_completeness"]
