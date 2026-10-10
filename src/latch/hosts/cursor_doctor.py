@@ -137,7 +137,7 @@ def _run_agent_mcp(agent_bin: str, args: list[str], timeout_s: float) -> subproc
         )
     except subprocess.TimeoutExpired:
         return f"{agent_bin} {' '.join(args)} timed out after {timeout_s:g}s"
-    except FileNotFoundError as e:
+    except OSError as e:
         return f"subprocess failed: {type(e).__name__}: {e}"
 
 

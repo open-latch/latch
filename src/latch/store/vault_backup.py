@@ -163,7 +163,12 @@ def _direct_snapshot_pair(
 
 
 def _make_opened_file_writable(path: Path) -> bool:
-    """Best-effort chmod of the validated inode, never a followed symlink."""
+    """Best-effort chmod of the validated inode, never a followed symlink.
+
+    Windows clears the read-only attribute by name, because this read-only
+    descriptor cannot carry os.fchmod there; a path swapped after the
+    identity check is refused afterwards.
+    """
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
     flags |= getattr(os, "O_NOFOLLOW", 0)
     try:
@@ -186,17 +191,31 @@ def _make_opened_file_writable(path: Path) -> bool:
         if opened.st_mode & stat.S_IWUSR:
             return True
         fchmod = getattr(os, "fchmod", None)
-        if callable(fchmod):
+        # Windows os.fchmod (CPython 3.13+) sets the attribute through the
+        # handle, which needs FILE_WRITE_ATTRIBUTES; an O_RDONLY descriptor
+        # lacks it, so Windows always takes the by-name branches below.
+        if callable(fchmod) and os.name != "nt":
             try:
                 fchmod(descriptor, 0o600)
             except OSError:
                 return False
             return True
-        if os.chmod not in os.supports_follow_symlinks:
-            return False
-        try:
-            os.chmod(path, 0o600, follow_symlinks=False)
-        except (NotImplementedError, OSError):
+        if os.chmod in os.supports_follow_symlinks:
+            try:
+                os.chmod(path, 0o600, follow_symlinks=False)
+            except (NotImplementedError, OSError):
+                return False
+        elif os.name == "nt":
+            # Windows CPython before 3.13 has neither os.fchmod nor
+            # follow_symlinks for os.chmod, so clear the read-only attribute
+            # by name.  A Windows mode is only that attribute: a path swapped
+            # in after the identity check can at worst lose it, and the
+            # recheck below refuses the swap.
+            try:
+                os.chmod(path, stat.S_IREAD | stat.S_IWRITE)
+            except OSError:
+                return False
+        else:
             return False
         try:
             after = path.lstat()

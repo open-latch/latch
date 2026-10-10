@@ -744,7 +744,7 @@ def test_windows_workflow_propagates_proof_command_failures():
         ROOT / ".github" / "workflows" / "public-release-hygiene.yml"
     ).read_text(encoding="utf-8")
     proof_job = workflow.split("  proof-packet-windows:", 1)[1].split(
-        "\n  cursor-cumulative-full-suite:", 1,
+        "\n  full-suite:", 1,
     )[0]
     # Everyday CI runs the drift-independent proof tests plus a `--help` smoke
     # of the PowerShell wrapper; the packet-currency `--check` moved to the

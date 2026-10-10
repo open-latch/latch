@@ -366,6 +366,12 @@ CREATE TABLE IF NOT EXISTS rejected_path (
     ratifier        TEXT,
     decided_at      TEXT,
     scope_predicate TEXT,
+    -- Explicit opaque project-policy boundary. NULL is deliberately advisory:
+    -- the pinned vault can contain rows from more than one repository, so cwd
+    -- or artifact text must never be used to infer this value.
+    policy_domain_id TEXT CHECK (
+        policy_domain_id IS NULL OR length(trim(policy_domain_id)) > 0
+    ),
     -- Provenance. 'declared' = written at capture time; 'backfill' = recovered
     -- from an existing body. Kept distinct so a backfilled row is never
     -- presented with the authority of one a human declared.
@@ -377,6 +383,8 @@ CREATE TABLE IF NOT EXISTS rejected_path (
 
 CREATE INDEX IF NOT EXISTS idx_rejected_path_node ON rejected_path(node_id);
 CREATE INDEX IF NOT EXISTS idx_rejected_path_source ON rejected_path(source);
+CREATE INDEX IF NOT EXISTS idx_rejected_path_policy_domain
+    ON rejected_path(policy_domain_id, id);
 
 -- FTS5 virtual table mirrors nodes(title, body). Kept in sync via triggers.
 CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts USING fts5(

@@ -20,6 +20,9 @@ def test_path_policy_blocks_strategy_docs():
         "docs/agent-contract-reference.md",
         "docs/first_run_mission.md",
         "docs/mcp_resource_architecture.md",
+        "docs/policy_enforcement_reference.md",
+        "docs/predicate_policy_snapshot_v1.md",
+        "docs/predicate_verdict_v1.md",
         "docs/launch_strategy.md",
     ])
     _assert(any(f.path == "docs/launch_strategy.md" for f in findings), findings)
@@ -29,6 +32,18 @@ def test_path_policy_blocks_strategy_docs():
     )
     _assert(
         not any(f.path == "docs/mcp_resource_architecture.md" for f in findings),
+        findings,
+    )
+    _assert(
+        not any(f.path == "docs/policy_enforcement_reference.md" for f in findings),
+        findings,
+    )
+    _assert(
+        not any(f.path == "docs/predicate_policy_snapshot_v1.md" for f in findings),
+        findings,
+    )
+    _assert(
+        not any(f.path == "docs/predicate_verdict_v1.md" for f in findings),
         findings,
     )
     print("PASS path_policy_blocks_strategy_docs")

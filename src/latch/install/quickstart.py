@@ -14,7 +14,6 @@ import argparse
 from dataclasses import dataclass
 import os
 from pathlib import Path
-import shlex
 import shutil
 import subprocess
 import sys
@@ -499,7 +498,7 @@ def seed_command_args(
 
 
 def format_command(command: Sequence[str]) -> str:
-    return " ".join(shlex.quote(str(part)) for part in command)
+    return install_engine.format_command([str(part) for part in command])
 
 
 def print_plan(steps: Sequence[Step], seed_command: Sequence[str] | None) -> None:

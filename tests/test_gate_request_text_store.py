@@ -175,8 +175,15 @@ def test_store_is_vault_local_and_mode_0600():
         _assert(path.exists(), f"store should exist at {path}")
         _assert(path.resolve().parent == vault,
                 f"store must live under the vault dir {vault}: {path}")
-        mode = stat.S_IMODE(path.stat().st_mode)
-        _assert(mode == 0o600, f"store must be 0600, got {oct(mode)}")
+        if os.name == "posix":
+            mode = stat.S_IMODE(path.stat().st_mode)
+            _assert(mode == 0o600, f"store must be 0600, got {oct(mode)}")
+        else:
+            # Windows reports 0o666 for any writable file, so no mode can mean
+            # owner-only there (the module's WINDOWS GAP); what still holds on
+            # every platform is that the store is a regular file.
+            _assert(stat.S_ISREG(path.lstat().st_mode),
+                    f"store must be a regular file: {path}")
         print("PASS store_is_vault_local_and_mode_0600")
     finally:
         _cleanup(tmp, conn)
@@ -431,8 +438,9 @@ def test_write_repairs_a_permissive_store_before_writing():
         path.touch()
         os.chmod(path, 0o644)
         _run(conn, tmp, SENTINEL)
-        _assert(stat.S_IMODE(path.stat().st_mode) == 0o600,
-                f"permissive store must be repaired: {oct(stat.S_IMODE(path.stat().st_mode))}")
+        if os.name == "posix":   # no owner-only mode exists to repair to on Windows
+            _assert(stat.S_IMODE(path.stat().st_mode) == 0o600,
+                    f"permissive store must be repaired: {oct(stat.S_IMODE(path.stat().st_mode))}")
         _assert(_records(tmp)[-1]["request_text"] == SENTINEL,
                 "and the record is written once it is private")
         print("PASS write_repairs_a_permissive_store_before_writing")
@@ -487,8 +495,9 @@ def test_write_succeeds_when_an_existing_store_is_already_private():
         _run(conn, tmp, SENTINEL + " second")
         records = _records(tmp)
         _assert(len(records) == 2, f"append to an existing 0600 store: {records}")
-        mode = stat.S_IMODE(request_text_store.store_path(tmp).stat().st_mode)
-        _assert(mode == 0o600, f"store must stay 0600 across appends: {oct(mode)}")
+        if os.name == "posix":   # Windows reports 0o666; see the WINDOWS GAP
+            mode = stat.S_IMODE(request_text_store.store_path(tmp).stat().st_mode)
+            _assert(mode == 0o600, f"store must stay 0600 across appends: {oct(mode)}")
         print("PASS write_succeeds_when_an_existing_store_is_already_private")
     finally:
         _cleanup(tmp, conn)

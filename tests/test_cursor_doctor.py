@@ -18,6 +18,8 @@ from latch.hosts import cursor_hooks  # noqa: E402
 from latch.hosts import cursor_doctor as cd  # noqa: E402
 from latch.install import install_cursor as ic  # noqa: E402
 
+import _win_fakeexe  # noqa: E402
+
 
 def _assert(cond, msg):
     if not cond:
@@ -28,7 +30,9 @@ def _tmp() -> Path:
     return Path(tempfile.mkdtemp(prefix="latch-cursor-doctor-"))
 
 
-def _fake_exe(path: Path, body: str) -> Path:
+def _fake_exe(path: Path, body: str, win_source: str) -> Path:
+    if os.name == "nt":
+        return _win_fakeexe.write_cmd_fake(path, win_source)
     path.write_text("#!/usr/bin/env bash\n" + body, encoding="utf-8")
     path.chmod(0o755)
     return path
@@ -173,6 +177,23 @@ def test_check_cursor_cli_mcp_warns_when_missing():
     print("PASS check_cursor_cli_mcp_warns_when_missing")
 
 
+def test_check_cursor_cli_mcp_warns_when_agent_cannot_launch():
+    # An agent path that exists but cannot be executed (PermissionError on
+    # POSIX, WinError 193 on Windows for a non-PE file) must degrade to a
+    # WARN like a missing CLI, not crash the doctor.
+    d = _tmp()
+    try:
+        agent = d / "agent-not-executable"
+        agent.write_text("not a program\n", encoding="utf-8")
+        agent.chmod(0o644)
+        check = cd.check_cursor_cli_mcp(agent_bin=str(agent), timeout_s=1)
+        _assert(check.level == cd.WARN, check)
+        _assert(check.detail.startswith("subprocess failed: "), check)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+    print("PASS check_cursor_cli_mcp_warns_when_agent_cannot_launch")
+
+
 def test_check_cursor_cli_mcp_ok_and_failure():
     d = _tmp()
     old_args = os.environ.get("FAKE_CURSOR_AGENT_ARGS")
@@ -183,6 +204,10 @@ def test_check_cursor_cli_mcp_ok_and_failure():
             d / "agent-ok",
             "printf '%s\\n' \"$@\" >> \"$FAKE_CURSOR_AGENT_ARGS\"\n"
             "printf '%s\\n' 'latch_search latch_get latch_recent latch_gate'\n",
+            win_source=(
+                'record_args("FAKE_CURSOR_AGENT_ARGS", mode="a")\n'
+                'emit("latch_search latch_get latch_recent latch_gate")\n'
+            ),
         )
         ok = cd.check_cursor_cli_mcp(agent_bin=str(ok_agent), timeout_s=1)
         _assert(ok.level == cd.OK, ok)
@@ -196,6 +221,10 @@ def test_check_cursor_cli_mcp_ok_and_failure():
             d / "agent-fail",
             "printf '%s\\n' 'nope' >&2\n"
             "exit 2\n",
+            win_source=(
+                'emit("nope", sys.stderr)\n'
+                "sys.exit(2)\n"
+            ),
         )
         warn = cd.check_cursor_cli_mcp(agent_bin=str(fail_agent), timeout_s=1)
         _assert(warn.level == cd.WARN and "exit 2" in warn.detail, warn)
@@ -208,6 +237,13 @@ def test_check_cursor_cli_mcp_ok_and_failure():
             "fi\n"
             "printf '%s\\n' 'MCP server latch has not been approved' >&2\n"
             "exit 1\n",
+            win_source=(
+                'if ARGS[:2] == ["mcp", "list"]:\n'
+                '    emit("latch: not loaded (needs approval)")\n'
+                "    sys.exit(0)\n"
+                'emit("MCP server latch has not been approved", sys.stderr)\n'
+                "sys.exit(1)\n"
+            ),
         )
         approval = cd.check_cursor_cli_mcp(agent_bin=str(approval_agent), timeout_s=1)
         _assert(approval.level == cd.WARN, approval)
@@ -227,6 +263,7 @@ def test_check_cursor_cli_mcp_fails_when_critical_tools_missing():
         agent = _fake_exe(
             d / "agent-missing-tools",
             "printf '%s\\n' 'latch_search latch_gate'\n",
+            win_source='emit("latch_search latch_gate")\n',
         )
         check = cd.check_cursor_cli_mcp(agent_bin=str(agent), timeout_s=1)
         _assert(check.level == cd.FAIL, check)
@@ -257,6 +294,7 @@ def test_run_all_static_and_cli_checks():
         agent = _fake_exe(
             d / "agent",
             "printf '%s\\n' 'latch_search latch_get latch_recent latch_gate'\n",
+            win_source='emit("latch_search latch_get latch_recent latch_gate")\n',
         )
 
         checks = cd.run_all(
@@ -334,6 +372,10 @@ def test_cursor_native_backend_probe_ok_and_auth_failure():
             d / "agent-ok",
             "cat >/dev/null\n"
             "printf '%s\\n' \"$FAKE_CURSOR_RESPONSE\"\n",
+            win_source=(
+                "drain_stdin()\n"
+                'emit(os.environ["FAKE_CURSOR_RESPONSE"])\n'
+            ),
         )
         os.environ["FAKE_CURSOR_RESPONSE"] = json.dumps({
             "type": "result", "subtype": "success", "is_error": False,
@@ -347,6 +389,11 @@ def test_cursor_native_backend_probe_ok_and_auth_failure():
         fail_agent = _fake_exe(
             d / "agent-fail",
             "cat >/dev/null\necho 'Authentication required. Please run agent login.' >&2\nexit 1\n",
+            win_source=(
+                "drain_stdin()\n"
+                'emit("Authentication required. Please run agent login.", sys.stderr)\n'
+                "sys.exit(1)\n"
+            ),
         )
         failed = cd.check_cursor_model_backend(
             backend="cursor", agent_bin=str(fail_agent), timeout_s=2,
@@ -374,6 +421,7 @@ if __name__ == "__main__":
     test_check_cursor_skills_status()
     test_check_mcp_launch_target()
     test_check_cursor_cli_mcp_warns_when_missing()
+    test_check_cursor_cli_mcp_warns_when_agent_cannot_launch()
     test_check_cursor_cli_mcp_ok_and_failure()
     test_check_cursor_cli_mcp_fails_when_critical_tools_missing()
     test_run_all_static_and_cli_checks()

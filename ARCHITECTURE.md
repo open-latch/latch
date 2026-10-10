@@ -32,6 +32,7 @@ ${LATCH_HOME}/
 │       ├── store/            # schema, SQLite, vaults, lifecycle, workstreams
 │       ├── retrieval/        # embeddings, search, feeders, tree, authority
 │       ├── gate/             # decision gate, reports, budget, verification
+│       ├── enforcement/      # capability, timeout, policy, Git-range checks
 │       ├── pipeline/         # compaction, heal, maintenance, seed, backends
 │       ├── mcp/              # server, proxy, daemon, broker, runtime, stdio
 │       ├── hosts/            # Claude/Codex/Cursor sync, hooks, sessions, wiring
@@ -89,6 +90,11 @@ ${LATCH_HOME}/
   request, then classifies the request as `PROCEED` / `MODIFY` /
   `DO_NOT_PROCEED` / `NEEDS_HUMAN_JUDGMENT`. (Renamed from `kb_preflight`
   2026-05-19.)
+- **Deterministic policy enforcement seam.** `latch.enforcement` wraps the
+  private predicate snapshot evaluator with capability-readiness checks,
+  shared outcome and receipt semantics, and a committed Git-range consumer.
+  These are reference components rather than installed host or CI wiring; see
+  [Policy enforcement reference](./docs/policy_enforcement_reference.md).
 - **Bounded MCP runtime.** Host-created stdio processes enter a lightweight
   proxy before importing FastMCP/ONNX. One lazily elected daemon per pinned
   vault/runtime key owns the warm model and serves multiple logical MCP

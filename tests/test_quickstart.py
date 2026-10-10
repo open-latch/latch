@@ -180,9 +180,37 @@ def test_seed_command_includes_project_source_sessions_and_apply():
     _assert("--last-sessions" in args and "50" in args, args)
     _assert("--apply" in args, args)
     formatted = qs.format_command(args)
-    _assert("'/tmp/example project'" in formatted,
+    _assert(f"'{project}'" in formatted,
             f"formatted command should quote project paths with spaces: {formatted}")
     print("PASS seed_command_includes_project_source_sessions_and_apply")
+
+
+def test_format_command_renders_powershell_call_on_windows():
+    # Simulates native Windows (PowerShell, no Git Bash MSYSTEM) on any host by
+    # patching the platform probe; the rendering is pure string work.
+    command = [
+        r"C:\Users\Example User\latch\.venv\Scripts\python.exe",
+        r"C:\Users\Example User\latch\src\latch\pipeline\seed.py",
+        "--project",
+        r"C:\work\example project",
+        "--source",
+        "both",
+    ]
+    original_system = qs.install_engine.platform.system
+    saved_msystem = os.environ.pop("MSYSTEM", None)
+    try:
+        qs.install_engine.platform.system = lambda: "Windows"
+        formatted = qs.format_command(command)
+    finally:
+        qs.install_engine.platform.system = original_system
+        if saved_msystem is not None:
+            os.environ["MSYSTEM"] = saved_msystem
+    _assert(formatted == (
+        r"& 'C:\Users\Example User\latch\.venv\Scripts\python.exe' "
+        r"'C:\Users\Example User\latch\src\latch\pipeline\seed.py' "
+        r"--project 'C:\work\example project' --source both"
+    ), f"Windows quickstart commands must be PowerShell-runnable: {formatted}")
+    print("PASS format_command_renders_powershell_call_on_windows")
 
 
 def test_seed_command_propagates_cursor_history_only_when_opted_in():
@@ -729,6 +757,7 @@ if __name__ == "__main__":
     test_seed_source_follows_agents_by_default()
     test_seed_backend_follows_selected_agent_surface()
     test_seed_command_includes_project_source_sessions_and_apply()
+    test_format_command_renders_powershell_call_on_windows()
     test_seed_command_propagates_cursor_history_only_when_opted_in()
     test_initial_kb_defaults_and_dry_run_plan_are_explicit()
     test_resolve_agents_requires_choice_noninteractive_even_with_context()

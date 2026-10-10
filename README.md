@@ -507,7 +507,7 @@ The public-release-hygiene workflow runs the full cumulative test suite — 2,30
 at the time of writing (2026-08) — plus contract jobs on macOS, Ubuntu, and Windows, and a
 proof-packet consistency check that fails any PR whose README claims drift from the captured
 receipt. Stable builds ship as tagged [releases](https://github.com/open-latch/latch/releases)
-(latest: `v1.1.0`).
+(latest: `v2.0.0`).
 
 ### The proof packet
 
@@ -558,14 +558,14 @@ curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/open-lat
 
 **Inspect or pin before you run.** To inspect either installer first, download the script and read it
 locally. The piped command follows `main`; for a stable build, pin both the script and the checkout
-ref to the latest tagged release (currently `v1.1.0`) so the install cannot drift back to `main`:
+ref to the latest tagged release (currently `v2.0.0`) so the install cannot drift back to `main`:
 
 ```bash
-curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/open-latch/latch/v1.1.0/install.sh | LATCH_INSTALL_REF=v1.1.0 bash
+curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/open-latch/latch/v2.0.0/install.sh | LATCH_INSTALL_REF=v2.0.0 bash
 ```
 
 ```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/open-latch/latch/v1.1.0/install.ps1))) -Ref v1.1.0
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/open-latch/latch/v2.0.0/install.ps1))) -Ref v2.0.0
 ```
 
 ### Automatic retrieval and catch-up
@@ -650,6 +650,7 @@ licensed under Apache 2.0; see [TRADEMARK.md](./TRADEMARK.md) and [CONTRIBUTING.
 | [Public proof packet](./proof/README.md) | [Benchmarks](./benchmarks/README.md) |
 | [Cursor reference](./runbooks/cursor.md) | [Cursor gate smoke](./runbooks/cursor_gate_smoke.md) |
 | [Architecture](./ARCHITECTURE.md) | [Shared MCP runtime](./docs/mcp_resource_architecture.md) |
+| [Policy enforcement reference](./docs/policy_enforcement_reference.md) | [Predicate policy snapshot](./docs/predicate_policy_snapshot_v1.md) |
 | [Outcome audit](./runbooks/outcome_audit.md) | [KB durability](./runbooks/kb_durability.md) |
 
 Install internals, per-surface manual install, and maintenance machinery live in

@@ -547,7 +547,10 @@ def test_pin_kb_dir_persists_nonexistent_relative_target_as_absolute():
         os.chdir(launch_dir)
         level, _message = ie.pin_kb_dir("relative vault", False)
         recorded = json.loads(ie.KB_LOCATION_PATH.read_text(encoding="utf-8"))["kb_dir"]
-        expected = str(Path("relative vault").absolute()).replace("\\", "/")
+        # resolve(), not absolute(): the pin is persisted resolved, and on
+        # Windows getcwd() keeps mkdtemp's 8.3 spelling (C:\Users\RUNNER~1)
+        # that resolve() expands to the long name.
+        expected = str(Path("relative vault").resolve()).replace("\\", "/")
         _assert(level == "OK" and recorded == expected,
                 f"relative KB targets must be persisted absolutely: {recorded!r}")
     finally:
@@ -688,9 +691,49 @@ def test_seed_command_args_use_llm_apply_and_project():
     _assert("--apply" in args,
             f"install-time seed should preview then offer staging writes: {args}")
     formatted = ie.format_command(args)
-    _assert("'/tmp/example project'" in formatted,
+    _assert(f"'{project}'" in formatted,
             f"formatted command should quote paths with spaces: {formatted}")
     print("PASS seed_command_args_use_llm_apply_and_project")
+
+
+def test_format_command_renders_powershell_call_on_windows():
+    # Simulates native Windows on any host by patching the platform probe; the
+    # rendering is pure string work, so no Windows filesystem is needed.
+    # PowerShell (install.ps1, bin/*.ps1) needs `&` before a quoted program and
+    # doubles every quote it treats as single, typographic ones included.
+    args = [
+        r"C:\Users\Example User\latch\.venv\Scripts\python.exe",
+        r"C:\Users\Example User\latch\src\latch\pipeline\seed.py",
+        "--project",
+        "C:\\work\\O'Brien\u2019s project",
+        "--lookback-days",
+        "90",
+        "--apply",
+    ]
+    original_system = ie.platform.system
+    saved_msystem = os.environ.pop("MSYSTEM", None)
+    try:
+        ie.platform.system = lambda: "Windows"
+        formatted = ie.format_command(args)
+        _assert(formatted == (
+            r"& 'C:\Users\Example User\latch\.venv\Scripts\python.exe' "
+            r"'C:\Users\Example User\latch\src\latch\pipeline\seed.py' "
+            "--project 'C:\\work\\O''Brien\u2019\u2019s project' --lookback-days 90 --apply"
+        ), f"Windows copy-paste command must be PowerShell-runnable: {formatted}")
+
+        os.environ["MSYSTEM"] = "MINGW64"
+        formatted = ie.format_command(args)
+        _assert(formatted == (
+            r"'C:\Users\Example User\latch\.venv\Scripts\python.exe' "
+            r"'C:\Users\Example User\latch\src\latch\pipeline\seed.py' "
+            "--project 'C:\\work\\O'\"'\"'Brien\u2019s project' --lookback-days 90 --apply"
+        ), f"Git Bash on Windows must keep POSIX shell quoting: {formatted}")
+    finally:
+        ie.platform.system = original_system
+        os.environ.pop("MSYSTEM", None)
+        if saved_msystem is not None:
+            os.environ["MSYSTEM"] = saved_msystem
+    print("PASS format_command_renders_powershell_call_on_windows")
 
 
 def test_offer_seed_after_install_noninteractive_does_not_run():
@@ -885,6 +928,7 @@ if __name__ == "__main__":
     test_absolute_kb_dir_normalizes_git_bash_path_on_windows()
     test_seed_next_step_message_names_immediate_value_and_preview()
     test_seed_command_args_use_llm_apply_and_project()
+    test_format_command_renders_powershell_call_on_windows()
     test_offer_seed_after_install_noninteractive_does_not_run()
     test_no_seed_prompt_prints_seed_handoff_unless_suppressed()
     test_apply_preflight_blocks_without_claude_cli()
