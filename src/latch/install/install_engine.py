@@ -69,6 +69,7 @@ import argparse
 import json
 import os
 import platform
+import re
 import shlex
 import shutil
 import subprocess
@@ -200,7 +201,26 @@ def seed_command_args(
     ]
 
 
+# PowerShell closes a single-quoted string on any of these, so each is doubled.
+_POWERSHELL_SINGLE_QUOTES = frozenset("'\u2018\u2019\u201a\u201b")
+
+
+def _powershell_quote(part: str) -> str:
+    if re.fullmatch(r"-*\w[\w-]*", part):
+        return part
+    return "'" + "".join(c * 2 if c in _POWERSHELL_SINGLE_QUOTES else c for c in part) + "'"
+
+
 def format_command(args: list[str]) -> str:
+    """Render a copy-paste command for the shell the user is running.
+
+    Native Windows users run latch from PowerShell (install.ps1, bin/*.ps1),
+    which needs the ``&`` call operator before a quoted program path and
+    cannot parse the POSIX ``'"'"'`` escape. Git Bash (``MSYSTEM`` set) and
+    POSIX shells keep ``shlex`` quoting.
+    """
+    if platform.system() == "Windows" and not os.environ.get("MSYSTEM"):
+        return "& " + " ".join(_powershell_quote(part) for part in args)
     return " ".join(shlex.quote(part) for part in args)
 
 
