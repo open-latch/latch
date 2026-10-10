@@ -19,6 +19,7 @@ import sqlite3
 import uuid
 
 from latch.hosts import cursor_session
+from latch.store import paths
 
 
 class CursorTranscriptError(RuntimeError):
@@ -41,6 +42,9 @@ def _project_path_spellings(project_path: str) -> tuple[str, ...]:
     if _is_windows_path(raw):
         normalized = ntpath.normpath(raw)
         spellings = [normalized]
+        resolved = paths.windows_resolved_spelling(normalized)
+        if resolved not in spellings:
+            spellings.append(resolved)
     else:
         absolute = os.path.abspath(raw)
         spellings = [absolute]

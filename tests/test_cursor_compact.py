@@ -14,6 +14,7 @@ from latch.hosts import cursor_compact  # noqa: E402
 from latch.hosts import cursor_session  # noqa: E402
 from latch.hosts import cursor_transcript  # noqa: E402
 from latch.store import paths  # noqa: E402
+import _win_pathspell  # noqa: E402
 
 
 def _tmp():
@@ -118,6 +119,20 @@ def test_cursor_compact_main_passes_current_pair_to_shared_compactor(capsys):
     finally:
         cursor_compact.compactor.run_compaction = original
         shutil.rmtree(root, ignore_errors=True)
+
+
+def test_cursor_marker_survives_windows_main_resolution():
+    # Simulated Windows host (see tests/_win_pathspell.py): the hook writes the
+    # marker under Cursor's raw 8.3 spelling; main() resolve()s --project.
+    suffix = "\\AppData\\Local\\Temp\\cursor-compact\\repo"
+    short = _win_pathspell.SHORT_PROFILE + suffix
+    long = _win_pathspell.LONG_PROFILE + suffix
+    with _win_pathspell.windows_short_name_host():
+        assert paths.sanitize_cwd(short) == paths.sanitize_cwd(long) \
+            == "c--Users-latchtester-AppData-Local-Temp-cursor-compact-repo"
+        cursor_session.write_marker(short, "cursor-session", transcript_path="t.jsonl")
+        marker = cursor_session.read_marker(long, session_id="cursor-session")
+    assert marker is not None and marker["session_id"] == "cursor-session"
 
 
 def test_shared_compactor_flattens_hook_provided_cursor_jsonl():
