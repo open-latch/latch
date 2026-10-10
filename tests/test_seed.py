@@ -14,6 +14,7 @@ from latch.pipeline import seed  # noqa: E402
 from latch.hosts import cursor_session  # noqa: E402
 from latch.hosts import cursor_transcript  # noqa: E402
 from latch.store import paths  # noqa: E402
+import _win_pathspell  # noqa: E402
 
 
 def _assert(cond, msg):
@@ -693,6 +694,72 @@ def test_cursor_history_recovers_workspace_spelling_after_main_resolution():
     finally:
         import shutil
         shutil.rmtree(root, ignore_errors=True)
+
+
+def test_cursor_history_recovers_windows_short_name_after_main_resolution():
+    # Simulated Windows host (see tests/_win_pathspell.py): Cursor stored the
+    # 8.3 short spelling; seed.main resolve()d --project to the long one.
+    root = Path(tempfile.mkdtemp(prefix="latch-seed-cursor-short-name-"))
+    suffix = "\\AppData\\Local\\Temp\\latch-seed-cursor\\repo"
+    stored_project = _win_pathspell.SHORT_PROFILE + suffix
+    requested_project = _win_pathspell.LONG_PROFILE + suffix
+    cursor_home = root / ".cursor"
+    state_db = root / "Cursor" / "User" / "globalStorage" / "state.vscdb"
+    session_id = "6c1f3a52-8f0e-4d7b-9a3e-2b5d7c9e1f04"
+    try:
+        with _win_pathspell.windows_short_name_host():
+            keys = cursor_transcript.cursor_project_storage_keys(stored_project)
+            _assert(
+                keys[0] == cursor_transcript._cursor_project_storage_key(
+                    stored_project,
+                )
+                and cursor_transcript._cursor_project_storage_key(
+                    requested_project,
+                ) in keys,
+                keys,
+            )
+            transcript = (
+                cursor_home / "projects" / keys[0] / "agent-transcripts"
+                / session_id / f"{session_id}.jsonl"
+            )
+            _write_jsonl(
+                transcript,
+                [{"role": "user", "content": "Keep Cursor's 8.3 spelling."}],
+            )
+            _write_cursor_state_db(
+                state_db,
+                projects=[
+                    _cursor_project_row(
+                        "project-repo", "workspace-repo", stored_project,
+                    ),
+                ],
+                memberships={session_id: "project-repo"},
+                headers=[(session_id, "workspace-repo", 0)],
+            )
+            found = cursor_transcript.discover_project_history(
+                requested_project,
+                cursor_home=str(cursor_home),
+                state_db=str(state_db),
+            )
+            _assert(found == [(session_id, transcript.resolve())], found)
+    finally:
+        import shutil
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_cursor_seed_preview_cache_survives_windows_main_resolution():
+    # Simulated Windows host (see tests/_win_pathspell.py): the preview is
+    # written under the caller's spelling; seed.main resolve()s --project
+    # before loading it, so both spellings must name one project vault.
+    suffix = "\\AppData\\Local\\Temp\\latch-seed-preview\\repo"
+    with _win_pathspell.windows_short_name_host():
+        written = seed._cursor_seed_preview_path(
+            _win_pathspell.SHORT_PROFILE + suffix, "session",
+        )
+        loaded = seed._cursor_seed_preview_path(
+            _win_pathspell.LONG_PROFILE + suffix, "session",
+        )
+    _assert(loaded == written, (written, loaded))
 
 
 def test_both_source_selection_uses_global_recency_split():
@@ -1629,6 +1696,8 @@ if __name__ == "__main__":
     test_cursor_project_storage_keys_keep_exact_path_spellings()
     test_cursor_history_uses_workspace_path_spelling_from_metadata()
     test_cursor_history_recovers_workspace_spelling_after_main_resolution()
+    test_cursor_history_recovers_windows_short_name_after_main_resolution()
+    test_cursor_seed_preview_cache_survives_windows_main_resolution()
     test_both_source_selection_uses_global_recency_split()
     test_auto_source_noninteractive_requires_explicit_choice_when_ambiguous()
     test_auto_source_noninteractive_uses_only_available_source()

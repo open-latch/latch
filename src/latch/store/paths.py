@@ -31,6 +31,7 @@ import json
 import hashlib
 import hmac
 import math
+import ntpath
 import os
 import re
 import sys
@@ -658,6 +659,26 @@ _LEADING_SLASH_DRIVE_RE = re.compile(r"^/([a-zA-Z]:[\\/])")
 # would sanitize differently on macOS/Linux than on Windows. Matching this lets
 # sanitize_cwd transform the raw string instead of the mangled resolved path.
 _WINDOWS_DRIVE_RE = re.compile(r"^[a-zA-Z]:[\\/]")
+# Only a Windows host can canonicalize a drive path; elsewhere ``C:/...`` is a
+# simulated spelling and stays lexical (see above).
+_WINDOWS_HOST = os.name == "nt"
+
+
+def windows_resolved_spelling(path: str) -> str:
+    """Return a Windows drive path's resolved spelling on a Windows host.
+
+    There ``ntpath.realpath`` is what ``Path.resolve()`` runs: it expands 8.3
+    short names (``C:\\Users\\RUNNER~1``), junctions and symlinks, so the raw
+    spelling a hook or Cursor reports and a CLI's resolved ``--project`` name
+    one project, as they already do on POSIX. Off Windows, for non-drive
+    input, or if resolution fails, ``path`` is returned unchanged.
+    """
+    if not _WINDOWS_HOST or not _WINDOWS_DRIVE_RE.match(path):
+        return path
+    try:
+        return ntpath.realpath(path)
+    except (OSError, ValueError):
+        return path
 
 
 def _normalize_input_path(cwd: str) -> str:
@@ -702,8 +723,10 @@ def sanitize_cwd(cwd: str | os.PathLike) -> str:
     # For a Windows drive path, transform the LEXICAL `normalized` string — on
     # POSIX `Path(...).resolve()` mangles `C:/x` into a relative path, so using
     # `str(resolved)` would sanitize differently per-OS. The drive-letter regex
-    # below is unchanged; only the source string differs.
-    base = normalized if is_windows_abs else str(resolved)
+    # below is unchanged; only the source string differs. On a Windows host the
+    # drive path is resolved first, like POSIX's `resolved`, so `RUNNER~1` and
+    # `runneradmin` spellings share one vault.
+    base = windows_resolved_spelling(normalized) if is_windows_abs else str(resolved)
     p = base.replace("\\", "/")
     p = re.sub(r"^([a-zA-Z]):/", lambda m: m.group(1).lower() + "--", p)
     p = p.replace("/", "-")
