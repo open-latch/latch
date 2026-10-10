@@ -197,6 +197,10 @@ class UnsafeTestExecutionError(RuntimeError):
     """Raised before a directly-run test can resolve the production KB pin."""
 
 
+class LegacyVaultConflictError(RuntimeError):
+    """Two legacy per-cwd KBs exist for one Windows working directory."""
+
+
 def _is_relative_to(path: Path, parent: Path) -> bool:
     try:
         path.relative_to(parent)
@@ -700,6 +704,41 @@ def _normalize_input_path(cwd: str) -> str:
     return cwd
 
 
+def _sanitize_spelling(base: str) -> str:
+    p = base.replace("\\", "/")
+    p = re.sub(r"^([a-zA-Z]):/", lambda m: m.group(1).lower() + "--", p)
+    return p.replace("/", "-")
+
+
+def _sanitized_keys(cwd: str | os.PathLike) -> tuple[str, str]:
+    """Return ``(key, lexical_key)`` for ``cwd``; see ``sanitize_cwd``.
+
+    ``lexical_key`` is the key releases before v2.0.0 used for a Windows drive
+    path on a Windows host (the raw spelling); everywhere else it is ``key``.
+    """
+    normalized = _normalize_input_path(str(cwd))
+    is_windows_abs = bool(_WINDOWS_DRIVE_RE.match(normalized))
+    resolved = Path(normalized).resolve()
+    test_root = validated_test_root()
+    if test_root is not None and resolved.parent == (test_root / "vaults").resolve():
+        return resolved.name, resolved.name
+    if resolved.parent == PROJECTS_ROOT.resolve():
+        return resolved.name, resolved.name
+    # For a Windows drive path, transform the LEXICAL `normalized` string — on
+    # POSIX `Path(...).resolve()` mangles `C:/x` into a relative path, so using
+    # `str(resolved)` would sanitize differently per-OS. The drive-letter regex
+    # is unchanged; only the source string differs. On a Windows host the
+    # drive path is resolved first, like POSIX's `resolved`, so `RUNNER~1` and
+    # `runneradmin` spellings share one vault.
+    if not is_windows_abs:
+        key = _sanitize_spelling(str(resolved))
+        return key, key
+    return (
+        _sanitize_spelling(windows_resolved_spelling(normalized)),
+        _sanitize_spelling(normalized),
+    )
+
+
 def sanitize_cwd(cwd: str | os.PathLike) -> str:
     """Convert a Windows path into a safe directory name.
 
@@ -712,25 +751,42 @@ def sanitize_cwd(cwd: str | os.PathLike) -> str:
     of PROJECTS_ROOT (i.e. an existing project KB dir), return its folder name
     unchanged. Prevents `connect(project_dir(x))` from creating a ghost dir.
     """
-    normalized = _normalize_input_path(str(cwd))
-    is_windows_abs = bool(_WINDOWS_DRIVE_RE.match(normalized))
-    resolved = Path(normalized).resolve()
-    test_root = validated_test_root()
-    if test_root is not None and resolved.parent == (test_root / "vaults").resolve():
-        return resolved.name
-    if resolved.parent == PROJECTS_ROOT.resolve():
-        return resolved.name
-    # For a Windows drive path, transform the LEXICAL `normalized` string — on
-    # POSIX `Path(...).resolve()` mangles `C:/x` into a relative path, so using
-    # `str(resolved)` would sanitize differently per-OS. The drive-letter regex
-    # below is unchanged; only the source string differs. On a Windows host the
-    # drive path is resolved first, like POSIX's `resolved`, so `RUNNER~1` and
-    # `runneradmin` spellings share one vault.
-    base = windows_resolved_spelling(normalized) if is_windows_abs else str(resolved)
-    p = base.replace("\\", "/")
-    p = re.sub(r"^([a-zA-Z]):/", lambda m: m.group(1).lower() + "--", p)
-    p = p.replace("/", "-")
-    return p
+    return _sanitized_keys(cwd)[0]
+
+
+def _same_file(left: Path, right: Path) -> bool:
+    try:
+        return os.path.samefile(left, right)
+    except OSError:
+        return False
+
+
+def _legacy_project_dir(cwd: str | os.PathLike) -> Path:
+    """Unpinned per-cwd KB dir that keeps a pre-v2.0.0 Windows vault.
+
+    Releases before v2.0.0 keyed a Windows drive path by its raw spelling; a
+    junction, symlink, subst or mapped drive, or 8.3 name now resolves to a
+    different key. A populated vault under the old key stays selected, and
+    two populated vaults for one directory are refused rather than guessed.
+    """
+    key, lexical_key = _sanitized_keys(cwd)
+    resolved_dir = PROJECTS_ROOT / key
+    if lexical_key == key:
+        return resolved_dir
+    lexical_dir = PROJECTS_ROOT / lexical_key
+    lexical_db = lexical_dir / "kb.db"
+    if not lexical_db.is_file():
+        return resolved_dir
+    resolved_db = resolved_dir / "kb.db"
+    if not resolved_db.is_file() or _same_file(lexical_db, resolved_db):
+        return lexical_dir
+    raise LegacyVaultConflictError(
+        f"two legacy per-cwd KBs exist for {cwd}: {lexical_dir} (the spelling "
+        f"used before v2.0.0) and {resolved_dir} (its resolved spelling); "
+        "refusing to pick one. Set LATCH_KB_DIR to the directory to keep, or "
+        "move it outside the source checkout and pin it with "
+        "bin\\install_engine.ps1 --kb-dir <dir>."
+    )
 
 
 def project_dir(cwd: str | os.PathLike | None = None) -> Path:
@@ -762,7 +818,7 @@ def project_dir(cwd: str | os.PathLike | None = None) -> Path:
     if pinned is not None:
         return pinned
     cwd = cwd or os.getcwd()
-    return PROJECTS_ROOT / sanitize_cwd(cwd)
+    return _legacy_project_dir(cwd)
 
 
 def db_path(cwd: str | os.PathLike | None = None) -> Path:

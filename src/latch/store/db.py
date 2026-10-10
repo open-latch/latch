@@ -179,9 +179,31 @@ def _parse_ts(s: str | None) -> datetime | None:
     return None
 
 
+def _is_new_database(path: Path) -> bool:
+    """True when ``connect`` would treat ``path`` as a new vault (no nodes)."""
+    if not path.exists():
+        return True
+    try:
+        conn = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
+    except sqlite3.Error:
+        return False
+    try:
+        return conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='nodes'"
+        ).fetchone() is None
+    except sqlite3.Error:
+        return False
+    finally:
+        conn.close()
+
+
 def connect(cwd: str | None = None) -> sqlite3.Connection:
-    ensure_project_dir(cwd)
     path = db_path(cwd)
+    if _is_new_database(path):
+        # Refuse an unsafe new vault before the directory, file or schema
+        # exists; otherwise the next connect would adopt the empty database.
+        vault_identity.new_vault_classification(path.parent)
+    ensure_project_dir(cwd)
     conn = sqlite3.connect(str(path), factory=_Connection)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")

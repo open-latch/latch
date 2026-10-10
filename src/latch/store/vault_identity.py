@@ -240,6 +240,24 @@ def validate_existing_identity(
     return _validate_identity_for_path(_row_identity(rows[0]), vault_dir)
 
 
+def new_vault_classification(vault_dir: Path) -> str:
+    """Classify a vault about to be created, refusing an unsafe location.
+
+    Callers check this before writing anything, so a refused first open never
+    leaves a database that a later open would adopt as pre-existing.
+    """
+    classification = _classification_for_path(vault_dir)
+    if classification == CLASS_PRODUCTION:
+        source_root = paths.KB_ROOT.resolve()
+        resolved_vault = vault_dir.resolve()
+        if resolved_vault == source_root or _is_relative_to(resolved_vault, source_root):
+            raise VaultSafetyError(
+                f"refusing to create a production vault inside the source checkout: "
+                f"{resolved_vault}"
+            )
+    return classification
+
+
 def ensure_identity(
     conn: sqlite3.Connection,
     vault_dir: Path,
@@ -263,16 +281,8 @@ def ensure_identity(
         return _validate_identity_for_path(_row_identity(rows[0]), vault_dir)
 
     classification = (
-        _classification_for_path(vault_dir) if new_vault else CLASS_PRODUCTION
+        new_vault_classification(vault_dir) if new_vault else CLASS_PRODUCTION
     )
-    if classification == CLASS_PRODUCTION and new_vault:
-        source_root = paths.KB_ROOT.resolve()
-        resolved_vault = vault_dir.resolve()
-        if resolved_vault == source_root or _is_relative_to(resolved_vault, source_root):
-            raise VaultSafetyError(
-                f"refusing to create a production vault inside the source checkout: "
-                f"{resolved_vault}"
-            )
     identity = VaultIdentity(
         vault_uuid=str(uuid.uuid4()),
         classification=classification,
