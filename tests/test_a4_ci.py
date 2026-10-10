@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import hashlib
 import importlib
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -138,7 +139,10 @@ def _repo_history(tmp_path: Path, *, corpus: bool = False):
         (repo / "src" / "private-policy-target.py").write_text(
             "blocked = True\n", encoding="utf-8"
         )
-        (repo / "tab\tname.txt").write_text("tab\n", encoding="utf-8")
+        if os.name != "nt":
+            # NTFS forbids a tab in a file name.  The corpus test swaps in the
+            # committed git-diff-tree fixture, which still carries this path.
+            (repo / "tab\tname.txt").write_text("tab\n", encoding="utf-8")
     head_sha = _commit(repo, "head")
     return repo, base_sha, head_sha
 
