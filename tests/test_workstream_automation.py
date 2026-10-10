@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import sqlite3
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -20,6 +21,10 @@ from latch.store import workstreams  # noqa: E402
 
 
 NOW = "2026-07-22 12:00:00"
+
+
+def _stamp(value: datetime) -> str:
+    return value.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _connect(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> sqlite3.Connection:
@@ -554,6 +559,11 @@ def test_probation_abandonment_requires_active_auto_open_and_release_only(
 def test_probation_close_uses_auto_preflight_and_production_release_service(
     tmp_path, monkeypatch,
 ):
+    # The production close service recomputes probation against the wall clock
+    # (it is not handed run_governed's ``now``), so every date here is anchored
+    # on that clock, with the open comfortably inside the 90-day window.
+    anchor = datetime.now(timezone.utc).replace(microsecond=0)
+    opened = anchor - timedelta(days=30)
     conn = _connect(tmp_path, monkeypatch)
     lane = _lane(conn)
     assigned = [
@@ -574,7 +584,7 @@ def test_probation_close_uses_auto_preflight_and_production_release_service(
             "watch_pair": None,
             "probation": {
                 "active": True,
-                "opened_at": "2026-07-01 00:00:00",
+                "opened_at": _stamp(opened),
                 "eligible_session_target": 10,
             },
         },
@@ -591,7 +601,7 @@ def test_probation_close_uses_auto_preflight_and_production_release_service(
             session_id=f"eligible-{index}",
             turn=1,
             items=[(unrelated, None)],
-            ts=f"2026-07-{2 + index:02d} 12:00:00",
+            ts=_stamp(opened + timedelta(days=1 + index, hours=12)),
         )
     key = lifecycle_signals.make_candidate_key("CLOSE", [lane])
     signal = {
@@ -621,7 +631,7 @@ def test_probation_close_uses_auto_preflight_and_production_release_service(
     )
     result = automation.run_governed(
         conn,
-        now=NOW,
+        now=_stamp(anchor),
         receipts_live=True,
         project_path=str(tmp_path),
         workstreams_module=workstreams,
