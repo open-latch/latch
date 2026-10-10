@@ -9,6 +9,11 @@
   `LATCH_REQUEST_TEXT_CAPTURE=0`, like `LATCH_OUTCOME_EVENTS=0`, reaches only
   direct CLI processes and never the shared MCP runtime. The MCP server now
   says so once on stderr, and doctor warns, when either variable is set.
+- Let `install.sh --upgrade` and `install.ps1 -Upgrade` update a 1.x checkout,
+  whose sources still use the flat `src/` layout, instead of rejecting it as
+  missing files before fetching. An upgrade ref without the `src/latch`
+  package layout is rolled back before the runtime is touched, and a rerun
+  without the upgrade flag on a 1.x checkout now says to add it.
 
 ## 2.0.0 - 2026-10-09
 

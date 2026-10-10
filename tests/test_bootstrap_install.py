@@ -502,6 +502,130 @@ def test_posix_failed_upgrade_vec_preflight_restores_checkout_and_runtime(tmp_pa
     assert sum(call.startswith("pip install ") for call in uv_calls) == 3
 
 
+# A 1.x quickstart: the flat src/ layout that Latch 2.0.0 moved into the
+# src/latch package. It logs a marker so a test can tell which one ran.
+FLAT_QUICKSTART_SOURCE = """import json
+import os
+from pathlib import Path
+import sys
+
+with Path(os.environ["FAKE_QUICKSTART_LOG"]).open("a", encoding="utf-8") as fh:
+    fh.write(json.dumps({"layout": "flat", "argv": sys.argv[1:]}) + "\\n")
+"""
+
+
+def make_layout_releases(tmp_path: Path) -> tuple[Path, str, str]:
+    """An origin carrying both release layouts, tagged like the real releases.
+
+    v1.1.0 has the flat 1.x `src/quickstart.py`; v2.0.0 (also `main`) has the
+    package `src/latch/install/quickstart.py` this installer activates.
+    """
+    origin = make_origin(tmp_path)
+    package_fixture = git(origin, "rev-parse", "HEAD")
+    git(origin, "rm", "-r", "-q", "src/latch")
+    (origin / "src").mkdir(exist_ok=True)
+    (origin / "src" / "quickstart.py").write_text(
+        FLAT_QUICKSTART_SOURCE, encoding="utf-8",
+    )
+    (origin / "VERSION").write_text("1.1.0\n", encoding="utf-8")
+    git(origin, "add", ".")
+    git(origin, "commit", "-m", "fixture flat 1.x layout")
+    git(origin, "tag", "v1.1.0")
+    flat_commit = git(origin, "rev-parse", "HEAD")
+    git(origin, "rm", "-q", "src/quickstart.py")
+    git(origin, "checkout", package_fixture, "--", "src")
+    (origin / "VERSION").write_text("2.0.0\n", encoding="utf-8")
+    git(origin, "add", ".")
+    git(origin, "commit", "-m", "fixture package layout")
+    git(origin, "tag", "v2.0.0")
+    return origin, flat_commit, git(origin, "rev-parse", "HEAD")
+
+
+def place_existing_checkout(app: Path, origin: Path, ref: str) -> str:
+    """Leave a checkout the way an earlier bootstrap's staged clone did."""
+    app.mkdir(parents=True)
+    git(app, "init", "--quiet")
+    git(app, "remote", "add", "origin", origin.as_uri())
+    git(app, "fetch", "--quiet", "--depth", "1", "origin", ref)
+    git(app, "checkout", "--quiet", "--detach", "FETCH_HEAD")
+    return git(app, "rev-parse", "HEAD")
+
+
+def test_posix_upgrade_from_flat_1x_checkout_activates_package_layout(tmp_path: Path):
+    origin, flat_commit, package_commit = make_layout_releases(tmp_path)
+    fake_uv = make_fake_uv(tmp_path)
+    app = tmp_path / "managed root" / "Latch app"
+    assert place_existing_checkout(app, origin, "v1.1.0") == flat_commit
+
+    upgraded, _, project, env = invoke_installer(
+        tmp_path=tmp_path,
+        origin=origin,
+        fake_uv=fake_uv,
+        extra=("--upgrade", "--ref", "v2.0.0", "--agents", "codex", "--no-seed"),
+    )
+
+    assert upgraded.returncode == 0, upgraded.stdout + upgraded.stderr
+    assert "Fetching explicit Latch upgrade ref v2.0.0" in upgraded.stdout
+    assert git(app, "rev-parse", "HEAD") == package_commit
+    calls = read_json_lines(Path(env["FAKE_QUICKSTART_LOG"]))
+    assert len(calls) == 1
+    assert "layout" not in calls[0], "the flat 1.x quickstart must not run"
+    assert Path(calls[0]["argv"][1]).resolve() == project.resolve()
+    assert calls[0]["argv"][2:] == ["--agents", "codex", "--no-seed"]
+    assert calls[0]["latch_home"] == installed_path(app)
+
+
+def test_posix_rerun_without_upgrade_on_flat_1x_checkout_points_at_upgrade(tmp_path: Path):
+    origin, flat_commit, _ = make_layout_releases(tmp_path)
+    fake_uv = make_fake_uv(tmp_path)
+    app = tmp_path / "managed root" / "Latch app"
+    assert place_existing_checkout(app, origin, "v1.1.0") == flat_commit
+
+    kept, _, _, env = invoke_installer(
+        tmp_path=tmp_path,
+        origin=origin,
+        fake_uv=fake_uv,
+        extra=("--agents", "codex", "--no-seed"),
+    )
+
+    assert kept.returncode != 0
+    assert "missing required Latch files" not in kept.stderr
+    assert "rerun with --upgrade" in kept.stderr
+    assert git(app, "rev-parse", "HEAD") == flat_commit
+    assert not Path(env["FAKE_UV_LOG"]).exists(), "the runtime must not be touched"
+    assert not Path(env["FAKE_QUICKSTART_LOG"]).exists()
+
+
+def test_posix_upgrade_to_flat_layout_ref_rolls_back_before_runtime(tmp_path: Path):
+    origin, _, package_commit = make_layout_releases(tmp_path)
+    fake_uv = make_fake_uv(tmp_path)
+    first, app, _, env = invoke_installer(
+        tmp_path=tmp_path,
+        origin=origin,
+        fake_uv=fake_uv,
+        extra=("--agents", "codex", "--no-seed"),
+    )
+    assert first.returncode == 0, first.stdout + first.stderr
+    assert git(app, "rev-parse", "HEAD") == package_commit
+    uv_log = Path(env["FAKE_UV_LOG"])
+    uv_before = uv_log.read_text(encoding="utf-8")
+
+    downgraded, _, _, _ = invoke_installer(
+        tmp_path=tmp_path,
+        origin=origin,
+        fake_uv=fake_uv,
+        extra=("--upgrade", "--ref", "v1.1.0", "--agents", "codex", "--no-seed"),
+    )
+
+    assert downgraded.returncode != 0
+    assert "src/latch/install/quickstart.py" in downgraded.stderr
+    assert "upgrade rolled back; the previous checkout remains installed" in downgraded.stderr
+    assert "sqlite-vec" not in downgraded.stderr
+    assert git(app, "rev-parse", "HEAD") == package_commit
+    assert uv_log.read_text(encoding="utf-8") == uv_before, "the runtime must not be touched"
+    assert len(read_json_lines(Path(env["FAKE_QUICKSTART_LOG"]))) == 1
+
+
 def test_posix_fresh_install_honors_immutable_release_ref(tmp_path: Path):
     origin = make_origin(tmp_path)
     release_commit = git(origin, "rev-parse", "HEAD")
@@ -914,6 +1038,91 @@ exit /b 43
     assert "no recorded source ref" in unrecorded.stdout + unrecorded.stderr
     assert git(app, "rev-parse", "HEAD") == git(origin, "rev-parse", "HEAD")
     assert len(read_json_lines(Path(env["FAKE_QUICKSTART_LOG"]))) == 2
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows PowerShell upgrade path")
+def test_powershell_upgrade_from_flat_1x_checkout_on_windows(tmp_path: Path):
+    origin, flat_commit, package_commit = make_layout_releases(tmp_path)
+    project = tmp_path / "project"
+    project.mkdir()
+    app = tmp_path / "managed root" / "Latch app"
+    assert place_existing_checkout(app, origin, "v1.1.0") == flat_commit
+    fake_uv = tmp_path / "fake-uv.cmd"
+    fake_uv.write_text(
+        """@echo off
+echo %*>>"%FAKE_UV_LOG%"
+if "%1"=="venv" (
+  "%FAKE_SYSTEM_PYTHON%" -m venv "%~4"
+  exit /b %ERRORLEVEL%
+)
+if "%1"=="pip" exit /b 0
+exit /b 43
+""",
+        encoding="utf-8",
+    )
+    env = installer_env(tmp_path, origin, fake_uv)
+    env["FAKE_SYSTEM_PYTHON"] = sys.executable
+    env["LOCALAPPDATA"] = str(tmp_path / "local-app-data")
+    shell = shutil.which("pwsh") or shutil.which("powershell")
+    assert shell, "Windows runner has no PowerShell executable"
+    uv_log = Path(env["FAKE_UV_LOG"])
+    quickstart_log = Path(env["FAKE_QUICKSTART_LOG"])
+
+    def ps_quote(value: str | Path) -> str:
+        return "'" + str(value).replace("'", "''") + "'"
+
+    def invoke_powershell(*options: str):
+        command = (
+            f"try {{ & {ps_quote(INSTALL_PS1)} -InstallDir {ps_quote(app)} "
+            f"-Project {ps_quote(project)} {' '.join(options)} "
+            "-QuickstartArgs @('--agents','codex','--no-seed') } "
+            "catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }"
+        )
+        return run(
+            shell,
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            command,
+            cwd=project,
+            env=env,
+        )
+
+    # Without -Upgrade the 1.x source revision would be kept, and this
+    # installer cannot activate it: refuse before the runtime is touched.
+    kept = invoke_powershell()
+    kept_output = kept.stdout + kept.stderr
+    assert kept.returncode != 0
+    assert "missing required Latch file" not in kept_output
+    assert "rerun with -Upgrade" in kept_output
+    assert git(app, "rev-parse", "HEAD") == flat_commit
+    assert not uv_log.exists()
+    assert not quickstart_log.exists()
+
+    upgraded = invoke_powershell("-Upgrade", "-Ref", ps_quote("v2.0.0"))
+    assert upgraded.returncode == 0, upgraded.stdout + upgraded.stderr
+    assert "Fetching explicit Latch upgrade ref v2.0.0" in upgraded.stdout
+    assert git(app, "rev-parse", "HEAD") == package_commit
+    assert git(app, "config", "--local", "--get", "latch.installRef") == "v2.0.0"
+    calls = read_json_lines(quickstart_log)
+    assert len(calls) == 1
+    assert "layout" not in calls[0], "the flat 1.x quickstart must not run"
+    assert calls[0]["argv"] == [
+        "--project", str(project), "--agents", "codex", "--no-seed",
+    ]
+
+    uv_before = uv_log.read_text(encoding="utf-8")
+    downgraded = invoke_powershell("-Upgrade", "-Ref", ps_quote("v1.1.0"))
+    downgraded_output = downgraded.stdout + downgraded.stderr
+    assert downgraded.returncode != 0
+    assert "src\\latch\\install\\quickstart.py" in downgraded_output
+    assert "upgrade rolled back; the previous checkout remains installed" in downgraded_output
+    assert "sqlite-vec" not in downgraded_output
+    assert git(app, "rev-parse", "HEAD") == package_commit
+    assert git(app, "config", "--local", "--get", "latch.installRef") == "v2.0.0"
+    assert uv_log.read_text(encoding="utf-8") == uv_before
+    assert len(read_json_lines(quickstart_log)) == 1
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows PowerShell iex failure path")
