@@ -2227,6 +2227,28 @@ def _apply_verdict(
                f"winner={verdict['winner_id']} loser={verdict['loser_id']} "
                f"reason={verdict.get('reason','')!r}")
     elif verdict["decision"] == "reconciled_by":
+        # A reconciled_by edge demotes the older node's compiled rejection rows
+        # to advisory (predicate_policy owner_unresolved_reconciliation), so a
+        # ratified judgment gets the same human referral as a supersede.
+        if _ratified_judgment_ids(
+            conn, verdict["older_id"], verdict["newer_id"]
+        ):
+            referral_id, _created = _route_ratified_pair_to_human(
+                conn,
+                a_id,
+                b_id,
+                trigger=f"{verdict['path']}_reconciled_by",
+                project_path=project_path,
+            )
+            summary["kept_both"] += 1
+            summary["human_referrals"] = summary.get("human_referrals", 0) + 1
+            _debug(
+                f"    -> human referral via {verdict['path']} "
+                f"(tier={verdict.get('tier')}): referral={referral_id} "
+                f"pair=({min(a_id, b_id)},{max(a_id, b_id)}) "
+                f"proposed=reconciled_by"
+            )
+            return
         apply_nightly_reconciled_by(
             conn, verdict["older_id"], verdict["newer_id"],
             project_path=project_path,
