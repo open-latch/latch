@@ -17,6 +17,8 @@ from latch.common import log_utils  # noqa: E402
 from latch.mcp import mcp_runtime  # noqa: E402
 from latch.store import paths  # noqa: E402
 
+import _win_fakeexe  # noqa: E402
+
 
 CLASSIFIER_JSON = (
     '{"recommendation":"PROCEED","summary":"ok","decision_chain":[],'
@@ -40,7 +42,9 @@ def _tmp() -> Path:
     return Path(tempfile.mkdtemp(prefix="latch-gate-backends-"))
 
 
-def _fake_exe(path: Path, body: str) -> Path:
+def _fake_exe(path: Path, body: str, win_source: str) -> Path:
+    if os.name == "nt":
+        return _win_fakeexe.write_cmd_fake(path, win_source)
     path.write_text("#!/usr/bin/env bash\n" + body, encoding="utf-8")
     path.chmod(0o755)
     return path
@@ -52,6 +56,11 @@ def _fake_claude(path: Path) -> Path:
         "printf '%s\\n' \"$@\" > \"$FAKE_GATE_ARGS\"\n"
         "cat >/dev/null\n"
         "printf '%s\\n' \"$FAKE_GATE_RESPONSE\"\n",
+        win_source=(
+            'record_args("FAKE_GATE_ARGS")\n'
+            "drain_stdin()\n"
+            'emit(os.environ["FAKE_GATE_RESPONSE"])\n'
+        ),
     )
 
 
@@ -67,6 +76,12 @@ def _fake_codex(path: Path) -> Path:
         "cat >/dev/null\n"
         "printf '%s\\n' \"$FAKE_GATE_RESPONSE\" > \"$out\"\n"
         "printf '%s\\n' \"$FAKE_GATE_RESPONSE\"\n",
+        win_source=(
+            'record_args("FAKE_GATE_ARGS")\n'
+            "drain_stdin()\n"
+            'write_last_message(os.environ["FAKE_GATE_RESPONSE"])\n'
+            'emit(os.environ["FAKE_GATE_RESPONSE"])\n'
+        ),
     )
 
 
@@ -198,6 +213,11 @@ def test_cursor_backend_does_not_call_claude_or_codex_classifier():
             "printf '%s\\n' \"$@\" > \"$FAKE_CURSOR_ARGS\"\n"
             "cat > \"$FAKE_CURSOR_STDIN\"\n"
             "printf '%s\\n' \"$FAKE_CURSOR_RESPONSE\"\n",
+            win_source=(
+                'record_args("FAKE_CURSOR_ARGS")\n'
+                'save_stdin("FAKE_CURSOR_STDIN")\n'
+                'emit(os.environ["FAKE_CURSOR_RESPONSE"])\n'
+            ),
         )
         os.environ["FAKE_CURSOR_RESPONSE"] = json.dumps({
             "type": "result", "subtype": "success", "is_error": False,

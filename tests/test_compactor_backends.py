@@ -12,6 +12,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from latch.pipeline import compactor  # noqa: E402
 
+import _win_fakeexe  # noqa: E402
+
 
 COMPACTION_JSON = (
     '{"session_summary":{"title":"Codex compact","body":"Summary body"},'
@@ -28,7 +30,9 @@ def _tmp() -> Path:
     return Path(tempfile.mkdtemp(prefix="latch-compactor-backend-"))
 
 
-def _fake_exe(path: Path, body: str) -> Path:
+def _fake_exe(path: Path, body: str, win_source: str) -> Path:
+    if os.name == "nt":
+        return _win_fakeexe.write_cmd_fake(path, win_source)
     path.write_text("#!/usr/bin/env bash\n" + body, encoding="utf-8")
     path.chmod(0o755)
     return path
@@ -46,6 +50,12 @@ def _fake_codex(path: Path) -> Path:
         "cat >/dev/null\n"
         "printf '%s\\n' \"$FAKE_CODEX_RESPONSE\" > \"$out\"\n"
         "printf '%s\\n' \"$FAKE_CODEX_RESPONSE\"\n",
+        win_source=(
+            'record_args("FAKE_CODEX_ARGS")\n'
+            "drain_stdin()\n"
+            'write_last_message(os.environ["FAKE_CODEX_RESPONSE"])\n'
+            'emit(os.environ["FAKE_CODEX_RESPONSE"])\n'
+        ),
     )
 
 
@@ -55,6 +65,11 @@ def _fake_claude(path: Path) -> Path:
         "printf '%s\\n' \"$@\" > \"$FAKE_CLAUDE_ARGS\"\n"
         "cat >/dev/null\n"
         "printf '%s\\n' \"$FAKE_CLAUDE_RESPONSE\"\n",
+        win_source=(
+            'record_args("FAKE_CLAUDE_ARGS")\n'
+            "drain_stdin()\n"
+            'emit(os.environ["FAKE_CLAUDE_RESPONSE"])\n'
+        ),
     )
 
 
@@ -172,6 +187,11 @@ def test_invoke_cursor_once_uses_isolated_ask_shape():
             "printf '%s\\n' \"$@\" > \"$FAKE_CURSOR_ARGS\"\n"
             "cat > \"$FAKE_CURSOR_STDIN\"\n"
             "printf '%s\\n' \"$FAKE_CURSOR_RESPONSE\"\n",
+            win_source=(
+                'record_args("FAKE_CURSOR_ARGS")\n'
+                'save_stdin("FAKE_CURSOR_STDIN")\n'
+                'emit(os.environ["FAKE_CURSOR_RESPONSE"])\n'
+            ),
         )
         os.environ["FAKE_CURSOR_RESPONSE"] = (
             '{"type":"result","subtype":"success","is_error":false,'

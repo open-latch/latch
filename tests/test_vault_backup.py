@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import sqlite3
+import stat
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -141,6 +142,153 @@ def test_invalid_manifest_timestamp_does_not_block_other_expired_pruning(tmp_pat
     assert Path(invalid["database"]).exists()
     assert not Path(expired["database"]).exists()
     assert Path(newest["database"]).exists()
+
+
+class _WindowsCPython311Os:
+    """The real ``os`` module as vault_backup sees it on Windows CPython 3.11.
+
+    Windows has no ``O_NOFOLLOW``, and before 3.13 it also has no
+    ``os.fchmod`` and no ``follow_symlinks`` support in ``os.chmod``.
+    """
+
+    name = "nt"
+    supports_follow_symlinks = os.supports_follow_symlinks - {os.chmod}
+
+    def __getattr__(self, attribute: str):
+        if attribute in {"fchmod", "lchmod", "O_NOFOLLOW"}:
+            raise AttributeError(attribute)
+        return getattr(os, attribute)
+
+
+class _WindowsCPython313Os:
+    """The real ``os`` module as vault_backup sees it on Windows CPython 3.13+.
+
+    3.13 adds ``os.fchmod`` and ``follow_symlinks`` for ``os.chmod``.  Its
+    fchmod sets the attribute through the handle, which needs
+    FILE_WRITE_ATTRIBUTES, so an ``O_RDONLY`` descriptor is access denied.
+    """
+
+    name = "nt"
+
+    def __init__(self) -> None:
+        self.supports_follow_symlinks = os.supports_follow_symlinks | {self.chmod}
+
+    def fchmod(self, descriptor, mode):
+        raise PermissionError(13, "Access is denied")
+
+    def chmod(self, path, mode, *, follow_symlinks=True):
+        # Without following, Windows sets a symlink's own attribute.
+        if follow_symlinks or not os.path.islink(path):
+            os.chmod(path, mode)
+
+    def __getattr__(self, attribute: str):
+        if attribute == "O_NOFOLLOW":
+            raise AttributeError(attribute)
+        return getattr(os, attribute)
+
+
+def _simulate_windows(monkeypatch, windows_os) -> None:
+    real_unlink = Path.unlink
+
+    def unlink(self, missing_ok=False):
+        # DeleteFileW refuses a file that still has the read-only attribute.
+        if os.path.lexists(self) and not self.lstat().st_mode & stat.S_IWRITE:
+            raise PermissionError(13, "Access is denied", str(self))
+        return real_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(vault_backup, "os", windows_os)
+    monkeypatch.setattr(Path, "unlink", unlink)
+
+
+@pytest.mark.parametrize(
+    "windows_os",
+    [_WindowsCPython311Os, _WindowsCPython313Os],
+    ids=["cpython311", "cpython313"],
+)
+def test_windows_prune_clears_read_only_snapshots(tmp_path, monkeypatch, windows_os):
+    _seed(tmp_path)
+    start = datetime(2026, 5, 1, 0, 0, tzinfo=UTC)
+    old_daily = vault_backup.create_snapshot(str(tmp_path), reason="old", now=start)
+    old_frequent = vault_backup.create_snapshot(
+        str(tmp_path), reason="old", now=start + timedelta(hours=6)
+    )
+    newest = vault_backup.create_snapshot(
+        str(tmp_path), reason="new", now=start + timedelta(days=1)
+    )
+    _simulate_windows(monkeypatch, windows_os())
+
+    result = vault_backup.prune_expired(
+        str(tmp_path), now=start + timedelta(days=40)
+    )
+
+    assert result == {"deleted": 2, "protected": 1, "skipped": 0}
+    for receipt in (old_daily, old_frequent):
+        assert not Path(receipt["database"]).exists()
+        assert not Path(receipt["manifest"]).exists()
+    assert Path(newest["database"]).exists()
+    assert Path(newest["manifest"]).exists()
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Windows refuses to rename a file that prune holds open, so this "
+    "swap cannot be staged there",
+)
+@pytest.mark.parametrize("swap_in", ["file", "symlink"])
+def test_windows_prune_refuses_a_snapshot_swapped_before_the_by_name_chmod(
+    tmp_path, monkeypatch, swap_in
+):
+    _seed(tmp_path)
+    start = datetime(2026, 5, 1, 0, 0, tzinfo=UTC)
+    raced = vault_backup.create_snapshot(str(tmp_path), reason="raced", now=start)
+    vault_backup.create_snapshot(
+        str(tmp_path), reason="newer", now=start + timedelta(days=1)
+    )
+    database = Path(raced["database"])
+    manifest = Path(raced["manifest"])
+    aside = database.with_name(database.name + ".aside")
+    victim = tmp_path / "read-only-swap-target.txt"
+    victim.write_bytes(b"must survive")
+    victim.chmod(stat.S_IREAD)
+    if swap_in == "symlink":
+        probe = tmp_path / "symlink-probe"
+        try:
+            probe.symlink_to(victim)
+        except OSError as exc:
+            pytest.skip(f"symlink creation unavailable: {exc}")
+        probe.unlink()
+    chmods: list[Path] = []
+
+    class _SwapBeforeChmod(_WindowsCPython311Os):
+        def chmod(self, path, mode, **kwargs):
+            # Swap the validated snapshot out between prune's identity check
+            # and its by-name chmod.
+            chmods.append(Path(path))
+            if Path(path) == database and not os.path.lexists(aside):
+                os.replace(database, aside)
+                if swap_in == "symlink":
+                    database.symlink_to(victim)
+                else:
+                    database.write_bytes(b"swapped in")
+                    database.chmod(stat.S_IREAD)
+            os.chmod(path, mode, **kwargs)
+
+    _simulate_windows(monkeypatch, _SwapBeforeChmod())
+
+    result = vault_backup.prune_expired(
+        str(tmp_path), now=start + timedelta(days=40)
+    )
+
+    assert chmods == [database]
+    assert result == {"deleted": 0, "protected": 1, "skipped": 1}
+    assert os.path.lexists(database)
+    assert aside.exists()
+    assert manifest.exists()
+    # The by-name chmod may clear the swapped-in target's read-only bit, but
+    # the identity recheck refuses the pair, so nothing is deleted.
+    assert victim.read_bytes() == b"must survive"
+    if swap_in == "file":
+        assert database.read_bytes() == b"swapped in"
 
 
 def test_orphan_daily_manifest_cannot_suppress_required_daily_snapshot(tmp_path):

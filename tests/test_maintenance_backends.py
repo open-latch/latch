@@ -16,6 +16,8 @@ from latch.mcp import mcp_runtime  # noqa: E402
 from latch.pipeline import model_backends  # noqa: E402
 from latch.retrieval import tree  # noqa: E402
 
+import _win_fakeexe  # noqa: E402
+
 
 HEAL_JSON = '{"decision":"keep_both","reason":"distinct enough"}'
 TREE_JSON = '{"title":"deployment notes","body":"summarizes deployment decisions"}'
@@ -44,7 +46,9 @@ def _tmp() -> Path:
     return Path(tempfile.mkdtemp(prefix="latch-maint-backends-"))
 
 
-def _fake_exe(path: Path, body: str) -> Path:
+def _fake_exe(path: Path, body: str, win_source: str) -> Path:
+    if os.name == "nt":
+        return _win_fakeexe.write_cmd_fake(path, win_source)
     path.write_text("#!/usr/bin/env bash\n" + body, encoding="utf-8")
     path.chmod(0o755)
     return path
@@ -56,6 +60,11 @@ def _fake_claude(path: Path) -> Path:
         "printf '%s\\n' \"$@\" > \"$FAKE_MODEL_ARGS\"\n"
         "cat >/dev/null\n"
         "printf '%s\\n' \"$FAKE_MODEL_RESPONSE\"\n",
+        win_source=(
+            'record_args("FAKE_MODEL_ARGS")\n'
+            "drain_stdin()\n"
+            'emit(os.environ["FAKE_MODEL_RESPONSE"])\n'
+        ),
     )
 
 
@@ -71,6 +80,12 @@ def _fake_codex(path: Path) -> Path:
         "cat >/dev/null\n"
         "if [ -n \"$out\" ]; then printf '%s\\n' \"$FAKE_MODEL_RESPONSE\" > \"$out\"; fi\n"
         "printf '%s\\n' \"$FAKE_MODEL_RESPONSE\"\n",
+        win_source=(
+            'record_args("FAKE_MODEL_ARGS")\n'
+            "drain_stdin()\n"
+            'write_last_message(os.environ["FAKE_MODEL_RESPONSE"])\n'
+            'emit(os.environ["FAKE_MODEL_RESPONSE"])\n'
+        ),
     )
 
 

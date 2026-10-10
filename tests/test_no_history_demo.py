@@ -10,6 +10,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from latch.proof import no_history_demo as demo  # noqa: E402
+from _win_gitbash import bash, output_mentions_path  # noqa: E402
 
 
 KB_HOME = Path(__file__).resolve().parent.parent
@@ -61,7 +62,7 @@ def test_no_history_demo_wrapper_uses_configured_python():
     env["LATCH_PYTHON"] = "echo"
     env.pop("CLAUDE_KB_PYTHON", None)
     r = subprocess.run(
-        ["bash", str(SCRIPT), "--no-llm"],
+        [bash(), str(SCRIPT), "--no-llm"],
         env=env,
         capture_output=True,
         text=True,
@@ -69,7 +70,7 @@ def test_no_history_demo_wrapper_uses_configured_python():
         cwd=str(KB_HOME),
     )
     _assert(r.returncode == 0, f"exit {r.returncode}: {r.stderr}")
-    _assert(str(KB_HOME / "src" / "latch" / "proof" / "no_history_demo.py") in r.stdout,
+    _assert(output_mentions_path(r.stdout, KB_HOME / "src" / "latch" / "proof" / "no_history_demo.py"),
             f"wrapper should exec no_history_demo.py, got: {r.stdout}")
     _assert("--no-llm" in r.stdout,
             f"wrapper should preserve args, got: {r.stdout}")

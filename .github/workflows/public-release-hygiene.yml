@@ -158,10 +158,16 @@ jobs:
           & .\bin\latch_proof_packet.ps1 --help
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-  cursor-cumulative-full-suite:
-    name: cursor-cumulative-full-suite
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+  full-suite:
+    name: full-suite (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    # Windows runners take ~2.7x as long as Ubuntu on the lifecycle matrix in
+    # mcp-runtime-lifecycle.yml, so the Windows leg gets ~2.7x the budget.
+    timeout-minutes: ${{ matrix.os == 'windows-latest' && 80 || 30 }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
     steps:
       - name: Check out cumulative PR head
         uses: actions/checkout@v4
@@ -178,10 +184,43 @@ jobs:
           cache-dependency-path: requirements-ci.lock
 
       - name: Install hashed merge-trust dependency lock
+        # Both legs install the same hashed lock. It is a uv --universal
+        # compile: every pin has a pure-Python or cp311/abi3 win_amd64 wheel
+        # hash, and the Windows-only pins (colorama, pyreadline3, pywin32)
+        # carry sys_platform markers, as proof-packet-contract already relies on.
         run: python -m pip install --require-hashes -r requirements-ci.lock
 
+      - name: Install pinned bootstrap runtime manager
+        if: matrix.os == 'windows-latest'
+        # The hashed lock has no uv, but the Windows-only Git Bash bootstrap
+        # test asserts uv is on PATH. Pin the version that
+        # one-command-bootstrap-windows installs. No Ubuntu test needs uv.
+        run: python -m pip install uv==0.11.28
+
+      - name: Put Git Bash first on PATH
+        if: matrix.os == 'windows-latest'
+        # Tests run the repo's bash scripts with the first bash.exe in PATH
+        # order, never C:\Windows\System32\bash.exe (the WSL launcher), so pin
+        # that to Git Bash, the bash GitHub's own `shell: bash` steps use.
+        # Only Git\bin: Git\usr\bin would also shadow Windows tools.
+        shell: pwsh
+        run: Add-Content -Path $env:GITHUB_PATH -Value 'C:\Program Files\Git\bin'
+
       - name: Run dependency-complete offline-fixture suite
+        if: matrix.os != 'windows-latest'
         env:
           HF_HUB_OFFLINE: "1"
           TRANSFORMERS_OFFLINE: "1"
         run: python -m pytest -q
+
+      - name: Run dependency-complete offline-fixture suite through PowerShell
+        if: matrix.os == 'windows-latest'
+        # The explicit exit propagation is required: a Windows job here has
+        # previously reported green while pytest failed.
+        shell: pwsh
+        env:
+          HF_HUB_OFFLINE: "1"
+          TRANSFORMERS_OFFLINE: "1"
+        run: |
+          python -m pytest -q
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
