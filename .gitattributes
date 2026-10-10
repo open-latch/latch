@@ -1,1 +1,10 @@
+# Every text file is LF in every checkout, whatever core.autocrlf says: pinned artifacts, fixtures and ledgers are hashed as raw bytes.
+* text=auto eol=lf
+# Bash rejects CRLF line endings, so .sh files are always treated as text and checked out as LF, without relying on auto-detection.
 *.sh text eol=lf
+# docs/assets/latch-hero.gif is image data: never convert its line endings or diff or merge it as text.
+*.gif binary
+# tests/fixtures/embedder_parity_reference.npy holds raw float32 reference vectors: never convert its line endings or diff or merge it as text.
+*.npy binary
+# vendor/model.onnx holds embedder weights pinned by blob id in the proof packet: never convert its line endings or diff or merge it as text.
+*.onnx binary
