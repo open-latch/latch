@@ -260,8 +260,8 @@ visible rather than silently misattributed.
   lease moves into the owner's pool. A pre-capability or pre-registry proxy is
   rejected with a bounded fresh-task message; it never degrades into a generic
   readiness timeout or silently joins semantics it cannot enforce.
-- The prompt hook requests a single-flight background wake within its 250 ms
-  wall. If the owner is not ready, it emits an explicit "not similarity-scored"
+- The prompt hook requests a single-flight background wake using its configured
+  cooperative budget. If the owner is not ready, it emits an explicit "not similarity-scored"
   receipt instead of falsely reporting a below-floor result.
 - If the owner dies during a tool call, the proxy reports an unknown outcome
   and directs the caller to inspect current state before deciding on a new
@@ -478,6 +478,66 @@ Commands:
 .venv/bin/python tests/measure_mcp_resource_scaling.py --sessions 8 --requests 100 --compare-legacy
 .venv/bin/python tests/measure_hook_latency.py
 ```
+
+## Prompt-hook deadlines and measurement
+
+The prompt hook defaults to **750 ms on Windows** and **250 ms elsewhere**.
+Its clock starts before hook imports and covers imports, input parsing, safety
+nudges, discovery, embedding, database setup, retrieval, and session bookkeeping.
+Ten milliseconds are reserved for formatting/output. The budget is cooperative:
+native imports, filesystem calls, output and final logging cannot be preempted.
+Interpreter startup and shutdown are outside this clock. There is no estimated
+interpreter allowance subtracted from the retrieval deadline, and no claim that
+this value bounds total subprocess latency.
+
+Configure integer milliseconds from **100 to 2000**, with this precedence:
+
+1. `LATCH_PROMPT_BUDGET_MS` in the hook's inherited environment.
+2. `"prompt_hook_budget_ms": 750` in the selected vault's
+   `runtime_settings.json`, preserving its other keys.
+3. The platform default. Invalid settings fall back to this default and are
+   recorded as `budget_source="default_invalid_setting"`.
+
+The vault setting survives source upgrades and takes effect on the next hook
+launch. It does not change the background daemon's startup timeout or restart
+an already-running MCP session. Windows retains more headroom because measured
+fresh-process import work alone can exhaust 250 ms; raising this setting does
+not remove that startup cost.
+
+The hook uses a single elapsed deadline for discovery and embedding I/O, then
+checks that deadline before subsequent retrieval stages. SQLite has a bounded
+busy wait and a progress handler. A lock wait already in progress can finish
+up to 50 ms beyond the deadline. A current-schema connection validates the
+vault's immutable identity and registry but performs no migration, adoption,
+schema repair or metadata setup. Normal MCP initialization retains those tasks
+and their backup safeguards. The hook retains sqlite-vec, candidate selection,
+similarity thresholds, excluded kinds, session dedupe and account isolation.
+
+`retrieve*.log` distinguishes `local_budget_exhausted`, `discovery_missing`,
+`owner_starting`, `owner_start_failed`, `discovery_rejected`, `context_rejected`,
+`authentication_rejected`, `rpc_failed`, and `sqlite_busy`. A local deadline
+failure does not request a daemon restart. Failed discovery may request a
+background wake; the context message states that only when requested. A live
+embedding listener is not readiness proof: the hook waits for the owner's MCP
+readiness record before loading retrieval libraries, then revalidates discovery
+immediately before the embedding RPC. The early readiness check is not reused
+as authority to send a prompt after potentially slow imports.
+
+Timing fields separate `imports_ms`, `pre_retrieval_ms`, `runtime_imports_ms`,
+`embedding_rpc_ms`, `sqlite_initialization_ms`, `session_update_ms`,
+`vector_retrieval_ms`, `output_ms`, and `hook_elapsed_ms`. Some fields are
+inclusive: do not add them all together. `hook_elapsed_ms` stops before final
+log writing; full subprocess measurements remain the total-latency evidence.
+Completed hits are still emitted if a non-preemptible operation overruns.
+
+Run `python scripts/profile_prompt_hook.py --source CHECKOUT --output-dir
+PRIVATE_DIRECTORY` with the installed dependency interpreter to compare fresh
+warm, owner-cold, and concurrent processes in a disposable authenticated vault.
+The harness uses the real local embedding model and checks the injected fixture
+title, not just process exit. It reports instrumented stage samples separately
+from uninstrumented process latency and retrieval success. Cold means a fresh
+owner process, not an empty OS file cache. One-account concurrency does not
+replace a simultaneous two-account Windows canary.
 
 ## Rollout and reversal
 

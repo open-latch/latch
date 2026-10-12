@@ -20,6 +20,7 @@ import subprocess
 import sys
 import time
 from collections import Counter
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, BinaryIO
@@ -1553,32 +1554,96 @@ def remove_discovery_aliases_if_owner(*, pid: int, token: str) -> None:
                 pass
 
 
-def read_live_embed_discovery(
+@dataclass(frozen=True)
+class EmbedDiscoveryResult:
+    status: str
+    metadata: dict[str, Any] | None = None
+
+
+def _missing_embed_status(runtime_key: str, owner: dict[str, Any] | None) -> str:
+    """Report startup only when a current record proves it is in progress."""
+    if owner is not None and isinstance(owner.get("error"), str):
+        return "owner_start_failed"
+    lock_path = start_lock_path(runtime_key)
+    try:
+        lock = json.loads(lock_path.read_text(encoding="utf-8"))
+        modified = lock_path.stat().st_mtime
+        age = time.time() - modified
+    except (OSError, ValueError):
+        return "discovery_missing"
+    if not isinstance(lock, dict):
+        return "discovery_missing"
+    pid = lock.get("pid")
+    if (
+        lock.get("runtime_key") == runtime_key
+        and isinstance(pid, int)
+        and not isinstance(pid, bool)
+        # Windows can round a fresh filesystem timestamp slightly ahead of
+        # time.time() (observed one float ULP). Allow at most 1 ms of skew,
+        # still requiring a matching live owner and the unchanged stale bound.
+        and -0.001 <= age <= 2 * _start_timeout()
+        and _pid_alive(pid)
+    ):
+        return "owner_starting"
+    return "discovery_missing"
+
+
+def inspect_live_embed_discovery(
     *,
     runtime_key: str | None = None,
     owner_payload: dict[str, Any] | None = None,
-) -> dict[str, Any] | None:
-    """Return validated embed discovery for one runtime key.
+    require_owner_ready: bool = False,
+) -> EmbedDiscoveryResult:
+    """Inspect embed discovery without hiding the observed failure category.
 
     ``owner_payload`` must be the MCP discovery record already selected by the
     caller.  When supplied, the embed endpoint must belong to that exact live
     process and, for aliases, declare the same blue/green owner.  Centralizing
     this check keeps hook clients and alias publication from independently
     trusting a stale ``embed.sock.json``.
+
+    Hooks use ``require_owner_ready`` because the embed socket is published
+    before model warmup and full MCP initialization finish. Standalone embed
+    listener clients retain their existing compatibility path by default.
     """
     try:
-        _authority_context_payload(strict=True)
+        context_digest = vault_context_digest()
     except BrokerError:
-        return None
+        return EmbedDiscoveryResult("context_rejected")
     key = runtime_key or RUNTIME_KEY
+    recorded_owner = owner_payload if owner_payload is not None else read_discovery(key)
+    if recorded_owner is not None:
+        owner_digest = recorded_owner.get("vault_context_digest")
+        if isinstance(owner_digest, str):
+            if not owner_digest.isascii() or not secrets.compare_digest(owner_digest, context_digest):
+                return EmbedDiscoveryResult("context_rejected")
+    if require_owner_ready:
+        if recorded_owner is None:
+            # read_discovery's legacy API collapses malformed/incompatible
+            # records and absence. Keep those outcomes distinct for hooks;
+            # an invalid readiness record is not evidence to start an owner.
+            try:
+                discovery_path(key).stat()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                return EmbedDiscoveryResult("discovery_rejected")
+            else:
+                return EmbedDiscoveryResult("discovery_rejected")
+            return EmbedDiscoveryResult(_missing_embed_status(key, None))
+        if isinstance(recorded_owner.get("error"), str):
+            return EmbedDiscoveryResult("owner_start_failed")
+        owner_payload = recorded_owner
     try:
         payload = json.loads(
             embed_discovery_path(key).read_text(encoding="utf-8")
         )
+    except FileNotFoundError:
+        return EmbedDiscoveryResult(_missing_embed_status(key, recorded_owner))
     except (OSError, ValueError):
-        return None
+        return EmbedDiscoveryResult("discovery_rejected")
     if not isinstance(payload, dict) or payload.get("runtime_key") != key:
-        return None
+        return EmbedDiscoveryResult("discovery_rejected")
     host = payload.get("host")
     port = payload.get("port")
     token = payload.get("token")
@@ -1592,9 +1657,11 @@ def read_live_embed_discovery(
         or not token
         or not isinstance(pid, int)
         or isinstance(pid, bool)
-        or not _pid_alive(pid)
+        or pid <= 0
     ):
-        return None
+        return EmbedDiscoveryResult("discovery_rejected")
+    if not _pid_alive(pid):
+        return EmbedDiscoveryResult(_missing_embed_status(key, recorded_owner))
     if owner_payload is not None:
         owner_pid = owner_payload.get("pid")
         owner_key = owner_payload.get("owner_runtime_key")
@@ -1609,11 +1676,22 @@ def read_live_embed_discovery(
             or not isinstance(owner_key, str)
             or not owner_key
         ):
-            return None
+            return EmbedDiscoveryResult("discovery_rejected")
         declared_owner = payload.get("owner_runtime_key")
         if declared_owner is not None and declared_owner != owner_key:
-            return None
-    return payload
+            return EmbedDiscoveryResult("discovery_rejected")
+    return EmbedDiscoveryResult("ready", payload)
+
+
+def read_live_embed_discovery(
+    *,
+    runtime_key: str | None = None,
+    owner_payload: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Return validated discovery, preserving the legacy optional-dict API."""
+    return inspect_live_embed_discovery(
+        runtime_key=runtime_key, owner_payload=owner_payload
+    ).metadata
 
 
 def remove_embed_discovery_if_owner(*, pid: int, token: str) -> None:
