@@ -224,3 +224,23 @@ jobs:
         run: |
           python -m pytest -q
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Run S1a adherence harness smoke tier
+        # Synthetic fixtures, scripted elicitation, zero model calls. Also part
+        # of the full suite above; rerun as its own step, even when the suite
+        # fails, so the smoke tier reads green or red on its own.
+        if: ${{ !cancelled() && matrix.os != 'windows-latest' }}
+        env:
+          HF_HUB_OFFLINE: "1"
+          TRANSFORMERS_OFFLINE: "1"
+        run: python -m pytest -q -m s1a_smoke
+
+      - name: Run S1a adherence harness smoke tier through PowerShell
+        if: ${{ !cancelled() && matrix.os == 'windows-latest' }}
+        shell: pwsh
+        env:
+          HF_HUB_OFFLINE: "1"
+          TRANSFORMERS_OFFLINE: "1"
+        run: |
+          python -m pytest -q -m s1a_smoke
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
