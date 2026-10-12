@@ -11,6 +11,8 @@ from pathlib import Path
 import subprocess
 import sys
 
+import pytest
+
 
 _ROOT = Path(__file__).resolve().parent.parent
 _SRC = _ROOT / "src"
@@ -268,6 +270,115 @@ def test_supported_class_incomplete_evidence_still_flags(tmp_path, monkeypatch):
     complete = _check(ci, target, repo, base_sha, head_sha)
     assert complete.outcome == "block"
     assert complete.denied is True
+    # The corpus is complete, legitimate Git evidence (its tab-named path
+    # included), so the block must come from the match alone.
+    assert not any(
+        code.startswith("malformed") for code in complete.receipt["reason_codes"]
+    )
+    assert complete.receipt["reason_codes"] == []
+    assert complete.receipt["matched_rejected_path_ids"] == [1]
+
+
+# Git tree entries may carry any byte except NUL and "/" inside a segment.
+# Each case pairs a legitimate committed name with a binding rule that names
+# it.  parse_scope_predicate strips the predicate value, so a whitespace-only
+# name is addressed by a single-character glob.
+_LEGITIMATE_GIT_NAMES = (
+    pytest.param("tab\tname.txt", "file:tab\tname.txt", id="tab"),
+    pytest.param("new\nline.txt", "file:new\nline.txt", id="newline"),
+    pytest.param("esc\x1bname.txt", "file:esc\x1bname.txt", id="escape"),
+    pytest.param(" ", "glob:?", id="single-space"),
+)
+
+
+def _range_adding(tmp_path: Path, name: str, ci, monkeypatch):
+    """Return a base..head range whose only change adds ``name``."""
+    repo = tmp_path / "synthetic-ci-repository"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.name", "Synthetic Test")
+    _git(repo, "config", "user.email", "synthetic@example.invalid")
+    (repo / "README.md").write_text("base\n", encoding="utf-8")
+    base_sha = _commit(repo, "base")
+    expected_raw = name.encode("utf-8") + b"\0"
+    if os.name != "nt":
+        (repo / name).write_text("legitimate\n", encoding="utf-8")
+        head_sha = _commit(repo, "head")
+        # Real Git output, not a fixture: the range changes only this name.
+        assert ci._git_diff_tree_bytes(repo.resolve(), base_sha, head_sha) == (
+            expected_raw
+        )
+    else:
+        # NTFS cannot hold these names, but a committed tree can.  Feed the
+        # exact diff-tree bytes such a tree produces.
+        (repo / "placeholder.txt").write_text("placeholder\n", encoding="utf-8")
+        head_sha = _commit(repo, "head")
+        monkeypatch.setattr(
+            ci,
+            "_git_diff_tree_bytes",
+            lambda *_args, **_kwargs: expected_raw,
+        )
+    return repo, base_sha, head_sha
+
+
+def _windows_alias_segment(name: str) -> bool:
+    # On a Windows runner the repository root is a Windows path, so the
+    # retained Windows filename-alias guard flags a trailing space or dot.
+    return os.name == "nt" and name.endswith((" ", "."))
+
+
+@pytest.mark.parametrize(("name", "naming_predicate"), _LEGITIMATE_GIT_NAMES)
+def test_legitimate_control_or_whitespace_git_name_passes_unrelated_policy(
+    tmp_path, monkeypatch, name, naming_predicate
+):
+    del naming_predicate
+    ci = _module("latch.enforcement.ci")
+    target, _ = _publish(tmp_path, ("file:src/private-policy-target.py",))
+    repo, base_sha, head_sha = _range_adding(tmp_path, name, ci, monkeypatch)
+
+    result = _check(ci, target, repo, base_sha, head_sha)
+
+    assert not any(
+        code.startswith("malformed") for code in result.receipt["reason_codes"]
+    )
+    assert result.receipt["matched_rejected_path_ids"] == []
+    if _windows_alias_segment(name):
+        assert result.outcome == "flag"
+        assert result.receipt["reason_codes"] == [
+            "noncanonical_windows_path:diff_paths"
+        ]
+        return
+    assert result.outcome == "pass"
+    assert result.exit_code == 0
+    assert result.denied is False
+    assert result.receipt["reason_codes"] == []
+
+
+@pytest.mark.parametrize(("name", "naming_predicate"), _LEGITIMATE_GIT_NAMES)
+def test_legitimate_control_or_whitespace_git_name_blocks_naming_policy(
+    tmp_path, monkeypatch, name, naming_predicate
+):
+    ci = _module("latch.enforcement.ci")
+    target, _ = _publish(
+        tmp_path,
+        ("file:src/private-policy-target.py", naming_predicate),
+    )
+    repo, base_sha, head_sha = _range_adding(tmp_path, name, ci, monkeypatch)
+
+    result = _check(ci, target, repo, base_sha, head_sha)
+
+    assert not any(
+        code.startswith("malformed") for code in result.receipt["reason_codes"]
+    )
+    if _windows_alias_segment(name):
+        assert result.outcome == "flag"
+        assert result.receipt["matched_rejected_path_ids"] == []
+        return
+    assert result.outcome == "block"
+    assert result.exit_code == 10
+    assert result.denied is True
+    assert result.receipt["matched_rejected_path_ids"] == [2]
+    assert result.receipt["reason_codes"] == []
 
 
 def test_private_snapshot_never_leaves_runner_and_hosted_ci_is_synthetic_only(

@@ -1,5 +1,42 @@
 # Changelog
 
+## 2.0.1 - 2026-10-10
+
+- Correct the 2.0.0 note on turning off request-text capture: the two
+  controls are not interchangeable. The shared MCP runtime, which runs
+  `latch_gate` for MCP hosts, is governed only by
+  `"request_text_capture": false` in the vault `runtime_settings.json`;
+  `LATCH_REQUEST_TEXT_CAPTURE=0`, like `LATCH_OUTCOME_EVENTS=0`, reaches only
+  direct CLI processes and never the shared MCP runtime. The MCP server now
+  says so once on stderr, and doctor warns, when either variable is set.
+- Let `install.sh --upgrade` and `install.ps1 -Upgrade` update a 1.x checkout,
+  whose sources still use the flat `src/` layout, instead of rejecting it as
+  missing files before fetching. An upgrade ref without the `src/latch`
+  package layout is rolled back before the runtime is touched, and a rerun
+  without the upgrade flag on a 1.x checkout now says to add it.
+- Keep the existing per-project vault on Windows when an unpinned install's
+  working directory resolves to a different spelling (an 8.3 short name, a
+  junction or symlink, or a subst or mapped drive). 2.0.0 keyed such a
+  directory by its resolved path and could open a new, empty vault; latch now
+  keeps the vault it used before, and when both spellings hold different
+  vaults it stops and names both, with how to pin the one to keep. Pinned
+  installs were never affected. Opening a vault also no longer creates an empty
+  database at a location it then refuses, which a later start could have
+  adopted as a real vault.
+- Stop session compaction from writing a superseding, replacing or reconciling
+  link onto a ratified decision or preference. Like nightly heal, it now files
+  one "Human review required" question for the pair instead, so compaction can
+  no longer turn a ratified ruling's checks advisory.
+- Withdraw the Claude Code marketplace plugin added in 2.0.0: it exposed
+  latch's slash commands with unfilled installer placeholders. The
+  `open-latch` marketplace now lists no plugin until plugin-ready commands
+  exist; install with the installer. If you added the plugin, remove it with
+  `/plugin uninstall latch@open-latch`.
+- Accept legitimate Git file names that contain tabs, other control characters
+  or whitespace-only path segments in the opt-in policy checks
+  (`bin/latch_policy_check.py` and `bin/latch_ci_check.py`), which reported
+  them as malformed and failed.
+
 ## 2.0.0 - 2026-10-09
 
 - Move the Python sources into an importable `latch` package under

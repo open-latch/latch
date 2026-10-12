@@ -1679,6 +1679,7 @@ def _apply_compaction(
         inserted_nodes += 1
 
     linked_edges = 0
+    human_referrals = 0
     for link in result.get("links", []) or []:
         src_title = link.get("src_title")
         dst_id = link.get("dst_id")
@@ -1691,6 +1692,34 @@ def _apply_compaction(
         src_id = title_to_id.get(src_title)
         if src_id is None:
             continue
+        if canonical_relation in db.RECONCILIATION_RELATIONS:
+            # supersedes/replaces/reconciled_by demote compiled rejection rows
+            # (predicate_policy) and, once active, park the pair from nightly
+            # heal, so a model-authored one never touches a ratified judgment:
+            # the pair is referred to a human instead, as nightly heal does.
+            try:
+                ratified = heal._ratified_judgment_ids(
+                    conn, int(src_id), int(dst_id),
+                )
+            except Exception as e:
+                _log(f"edge insert skipped: ratification check failed: {e}")
+                continue
+            if ratified:
+                _log(
+                    f"edge insert skipped: {canonical_relation} "
+                    f"{src_id}->{dst_id} touches ratified judgment(s) "
+                    f"{ratified}; routing to human review"
+                )
+                try:
+                    heal._route_ratified_pair_to_human(
+                        conn, int(src_id), int(dst_id),
+                        trigger=f"compactor_{canonical_relation}",
+                        project_path=project_path, session_id=session_id,
+                    )
+                    human_referrals += 1
+                except Exception as e:
+                    _log(f"human referral failed: {e}")
+                continue
         try:
             db.add_edge(
                 conn, src=int(src_id), dst=int(dst_id), relation=str(relation),
@@ -1720,6 +1749,7 @@ def _apply_compaction(
         "summary_written": summary_written,
         "inserted_nodes": inserted_nodes,
         "linked_edges": linked_edges,
+        "human_referrals": human_referrals,
         **lifecycle,
     }
 

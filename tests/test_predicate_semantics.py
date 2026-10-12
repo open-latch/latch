@@ -523,3 +523,137 @@ def test_dot_prefixed_path_segments_remain_canonical():
 
     assert check.compilable
     assert verdict["decision"] == "block"
+
+
+# POSIX filenames and Git tree entries may hold any character except NUL and
+# "/".  Each case pairs such a name with a predicate that names it;
+# parse_scope_predicate strips the value, so a whitespace-only segment is
+# addressed by a single-character glob.
+@pytest.mark.parametrize(
+    ("raw_path", "naming_predicate"),
+    (
+        ("tab\tname.txt", "file:tab\tname.txt"),
+        ("new\nline.txt", "file:new\nline.txt"),
+        ("esc\x1bname.txt", "file:esc\x1bname.txt"),
+        (" ", "glob:?"),
+        ("dir/ /nested.txt", "glob:dir/?/nested.txt"),
+    ),
+    ids=("tab", "newline", "escape", "single-space", "space-segment"),
+)
+@pytest.mark.parametrize(
+    "field_name",
+    ("proposed_file_paths", "diff_paths", "staged_paths"),
+)
+def test_control_and_whitespace_names_are_valid_path_evidence(
+    raw_path,
+    naming_predicate,
+    field_name,
+):
+    predicate = _predicate_module()
+    context = _context(predicate, **{field_name: (raw_path,)})
+
+    assert predicate.context_evidence_issues(context) == ()
+
+    unrelated = predicate.compile_predicate(_row("file:src/blocked.py", row_id=61))
+    assert predicate.evaluate((unrelated,), context) == {
+        "engine": predicate.ENGINE,
+        "decision": "pass",
+        "llm_calls": 0,
+        "matches": [],
+    }
+
+    naming = predicate.compile_predicate(_row(naming_predicate, row_id=62))
+    assert naming.compilable
+    verdict = predicate.evaluate((unrelated, naming), context)
+    assert verdict["decision"] == "block"
+    assert [match["rejected_path_id"] for match in verdict["matches"]] == [62]
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    ("proposed_file_paths", "diff_paths", "staged_paths"),
+)
+def test_path_evidence_still_rejects_nul_empty_overlong_and_traversal(field_name):
+    predicate = _predicate_module()
+    unrelated = predicate.compile_predicate(_row("file:src/blocked.py", row_id=63))
+
+    for raw_path in ("nul\x00name.txt", "", "a" * 4097):
+        context = _context(predicate, **{field_name: (raw_path,)})
+        issues = predicate.context_evidence_issues(context)
+        assert f"malformed_path:{field_name}" in issues
+        if len(raw_path) <= 4096:
+            assert f"malformed_{field_name}" in issues
+        assert predicate.evaluate((unrelated,), context)["decision"] == "flag"
+
+    traversal_context = _context(
+        predicate,
+        **{field_name: ("tab\tdir/../../project-b/escape.txt",)},
+    )
+    assert predicate.context_evidence_issues(traversal_context) == (
+        f"path_traversal:{field_name}",
+    )
+    assert predicate.evaluate((unrelated,), traversal_context)["decision"] == "flag"
+
+    foreign_context = _context(
+        predicate,
+        **{field_name: ("/workspace/project-b/tab\tname.txt",)},
+    )
+    assert predicate.context_evidence_issues(foreign_context) == (
+        f"foreign_path:{field_name}",
+    )
+
+
+def test_non_path_fields_keep_strict_text_validation():
+    predicate = _predicate_module()
+    unrelated = predicate.compile_predicate(_row("file:src/blocked.py", row_id=64))
+
+    for overrides, reason_code in (
+        ({"project_root": "/workspace/project\ta"}, "project_root_missing"),
+        ({"cwd": "/workspace/project-a/\ttools"}, "cwd_missing"),
+        ({"tool_name": "synthetic\nmutation"}, "tool_name_missing"),
+        ({"tool_name": " "}, "tool_name_missing"),
+        (
+            {"evidence_provenance": {"adapter": "synthetic\tv1"}},
+            "evidence_provenance_missing",
+        ),
+        ({"import_names": ("synthetic\twidgets",)}, "malformed_import_names"),
+        ({"api_names": ("Synthetic\nClient",)}, "malformed_api_names"),
+    ):
+        context = _context(
+            predicate,
+            proposed_file_paths=("src/unrelated.py",),
+            **overrides,
+        )
+        assert reason_code in predicate.context_evidence_issues(context)
+        assert predicate.evaluate((unrelated,), context)["decision"] == "flag"
+
+
+def test_windows_root_control_names_are_evidence_and_aliases_still_flag():
+    predicate = _predicate_module()
+    unrelated = predicate.compile_predicate(_row("file:src/blocked.py", row_id=65))
+    naming = predicate.compile_predicate(_row("file:tab\tname.txt", row_id=66))
+
+    # A Windows CI runner evaluates committed tree names under a Windows root.
+    tab_context = _context(
+        predicate,
+        project_root=r"C:\repo",
+        cwd=r"C:\repo",
+        diff_paths=("tab\tname.txt", "new\nline.txt"),
+    )
+    assert predicate.context_evidence_issues(tab_context) == ()
+    assert predicate.evaluate((unrelated,), tab_context)["decision"] == "pass"
+    assert predicate.evaluate((unrelated, naming), tab_context)["decision"] == (
+        "block"
+    )
+
+    # The Windows filename-alias guard is retained for trailing spaces.
+    space_context = _context(
+        predicate,
+        project_root=r"C:\repo",
+        cwd=r"C:\repo",
+        diff_paths=(" ",),
+    )
+    assert predicate.context_evidence_issues(space_context) == (
+        "noncanonical_windows_path:diff_paths",
+    )
+    assert predicate.evaluate((unrelated,), space_context)["decision"] == "flag"
