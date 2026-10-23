@@ -163,6 +163,46 @@ def test_codex_bundle_does_not_touch_unmanaged_or_newer_project(tmp_path: Path):
     assert {path: path.read_bytes() for path in before} == before
 
 
+def test_codex_bundle_repair_preserves_storage_roots_across_host_environments(
+    tmp_path: Path, monkeypatch,
+):
+    project, config, hooks, skills = _install_older_bundle(tmp_path)
+    roots = {
+        "LATCH_PRODUCTION_DATA_ROOT": str(tmp_path / "installed-data"),
+        "LATCH_VAULT_REGISTRY_ROOT": str(tmp_path / "installed-registry"),
+        "LATCH_DURABILITY_ROOT": str(tmp_path / "installed-backups"),
+    }
+    lines = config.read_text(encoding="utf-8").splitlines()
+    text = "\n".join(
+        line for line in lines if not any(line.startswith(name + " =") for name in roots)
+    ) + "\n"
+    text = text.replace(
+        "[mcp_servers.latch.env]\n",
+        "[mcp_servers.latch.env]\n" + "".join(
+            f"{name} = {install_codex._toml_string(value)}\n"
+            for name, value in roots.items()
+        ),
+    )
+    config.write_text(text, encoding="utf-8")
+    for name in roots:
+        monkeypatch.setenv(name, str(tmp_path / "different-host" / name))
+
+    result = _repair(project, config, hooks, skills)
+    assert result.action == "synced"
+    installed = tomllib.loads(config.read_text(encoding="utf-8"))["mcp_servers"]["latch"]
+    assert {name: installed["env"].get(name) for name in roots} == roots
+    assert installed["required"] is True
+    assert config.with_name("config.toml.latchbak").read_text(encoding="utf-8") == text
+
+    command, server = install_engine.mcp_launch_command(
+        sys.executable, str(ROOT / "src" / "latch" / "mcp" / "mcp_server.py")
+    )
+    assert install_codex.config_status(config, command, server)[0]
+    before = config.read_bytes()
+    assert _repair(project, config, hooks, skills).action == "unchanged"
+    assert config.read_bytes() == before
+
+
 def test_codex_bundle_malformed_config_fails_open_without_advancing_marker(
     tmp_path: Path,
 ):
