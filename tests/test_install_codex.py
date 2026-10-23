@@ -199,9 +199,21 @@ def test_codex_merge_rejects_invalid_storage_root_without_writes(tmp_path, monke
     assert not config.with_suffix(".toml.latchbak").exists()
 
 
-@pytest.mark.parametrize("value", ["relative/root", "~latch-nonexistent-test-user/root", "bad\nroot"])
+@pytest.mark.parametrize("value", ["relative/root", "bad\nroot"])
 def test_codex_render_rejects_invalid_ambient_storage_root(monkeypatch, value):
     monkeypatch.setenv("LATCH_PRODUCTION_DATA_ROOT", value)
+    with pytest.raises(ic.CodexConfigMergeError, match="absolute directory"):
+        ic.render_mcp_block("/PY", "/srv.py")
+
+
+def test_codex_render_reports_home_expansion_failure(monkeypatch):
+    # Windows can expand ~otheruser without an account lookup. Exercise an
+    # actual expansion failure rather than assuming a username is invalid.
+    def unavailable_home(_path):
+        raise RuntimeError("home directory is unavailable")
+
+    monkeypatch.setenv("LATCH_PRODUCTION_DATA_ROOT", "~/Latch")
+    monkeypatch.setattr(Path, "expanduser", unavailable_home)
     with pytest.raises(ic.CodexConfigMergeError, match="absolute directory"):
         ic.render_mcp_block("/PY", "/srv.py")
 
