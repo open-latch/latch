@@ -18,13 +18,14 @@ import os
 import re
 import sys
 import tomllib
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 
 from latch.hosts import agents_md_sync
 from latch.hosts import codex_hooks
 from latch.install import install_engine
 from latch.install import versioning
+from latch.store import paths
 
 SERVER_NAME = "latch"
 LEGACY_SERVER_NAMES = ("claude-kb",)
@@ -32,6 +33,11 @@ ALL_SERVER_NAMES = (SERVER_NAME, *LEGACY_SERVER_NAMES)
 BEGIN_MARK = "# BEGIN LATCH CODEX MCP : managed region, do not hand-edit; re-run bin/install_codex"
 END_MARK = "# END LATCH CODEX MCP"
 CODEX_TOOL_TIMEOUT_SEC = 300
+STORAGE_ROOT_ENV_VARS = (
+    "LATCH_PRODUCTION_DATA_ROOT",
+    "LATCH_VAULT_REGISTRY_ROOT",
+    "LATCH_DURABILITY_ROOT",
+)
 
 KB_HOME = Path(
     os.environ.get("LATCH_HOME")
@@ -227,9 +233,93 @@ def _validate_merged_config(
         )
 
 
-def render_mcp_block(python_path: str, server_py: str) -> str:
+def _absolute_storage_root(name: str, value: object) -> str:
+    if (
+        not isinstance(value, str)
+        or not value.strip()
+        or any(ord(char) < 32 or ord(char) == 127 for char in value)
+    ):
+        raise CodexConfigMergeError(
+            f"{name} must name a non-empty absolute directory; no changes were written"
+        )
+    try:
+        root = Path(value).expanduser()
+        if not root.is_absolute():
+            raise ValueError("relative storage root")
+        return str(root.resolve())
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise CodexConfigMergeError(
+            f"{name} must name an accessible absolute directory; no changes were written"
+        ) from exc
+
+
+def _existing_storage_roots(parsed: dict) -> dict[str, str]:
+    """Keep explicit storage identity when replacing either owned server name."""
+    roots: dict[str, str] = {}
+    servers = parsed.get("mcp_servers", {})
+    if not isinstance(servers, dict):
+        return roots  # The existing config-shape validation reports this.
+    for server_name in ALL_SERVER_NAMES:
+        server = servers.get(server_name)
+        env = server.get("env") if isinstance(server, dict) else None
+        if not isinstance(env, dict):
+            continue
+        for key, value in env.items():
+            name = key.upper() if os.name == "nt" else key
+            if name not in STORAGE_ROOT_ENV_VARS:
+                continue
+            selected = _absolute_storage_root(name, value)
+            if name in roots and roots[name] != selected:
+                raise CodexConfigMergeError(
+                    f"conflicting {name} pins in Codex Latch configuration; "
+                    "no changes were written"
+                )
+            roots[name] = selected
+    return roots
+
+
+def _storage_roots(overrides: Mapping[str, str] | None = None) -> dict[str, str]:
+    """Pin effective roots once; retained pins win over the current host env."""
+    retained = {
+        name: _absolute_storage_root(name, value)
+        for name, value in (overrides or {}).items()
+        if name in STORAGE_ROOT_ENV_VARS
+    }
+    source = {
+        (key.upper() if os.name == "nt" else key): value
+        for key, value in os.environ.items()
+    }
+    source.update(retained)
+    if (
+        "LATCH_PRODUCTION_DATA_ROOT" in retained
+        and "LATCH_VAULT_REGISTRY_ROOT" not in retained
+    ):
+        # A manually pinned production root owns its default registry. A later
+        # packaged-app environment must not donate a different registry root.
+        source.pop("LATCH_VAULT_REGISTRY_ROOT", None)
+    for name in STORAGE_ROOT_ENV_VARS:
+        if source.get(name):
+            source[name] = _absolute_storage_root(name, source[name])
+    resolved = {
+        "LATCH_PRODUCTION_DATA_ROOT": paths.platform_production_root(source),
+        "LATCH_VAULT_REGISTRY_ROOT": paths.platform_vault_registry_root(source),
+        "LATCH_DURABILITY_ROOT": paths.platform_durability_root(source),
+    }
+    return {
+        name: _absolute_storage_root(name, str(value))
+        for name, value in resolved.items()
+    }
+
+
+def render_mcp_block(
+    python_path: str,
+    server_py: str,
+    *,
+    vault_roots: Mapping[str, str] | None = None,
+) -> str:
     py = python_path.replace("\\", "/")
     server = server_py.replace("\\", "/")
+    roots = _storage_roots(vault_roots)
     return "\n".join([
         BEGIN_MARK,
         f"[mcp_servers.{SERVER_NAME}]",
@@ -245,6 +335,7 @@ def render_mcp_block(python_path: str, server_py: str) -> str:
         'LATCH_ADAPTER = "codex"',
         'LATCH_TOOL_SURFACE = "latch"',
         f'LATCH_WIRING_VERSION = "{versioning.WIRING_VERSION}"',
+        *(f"{name} = {_toml_string(roots[name])}" for name in STORAGE_ROOT_ENV_VARS),
         END_MARK,
     ])
 
@@ -409,6 +500,7 @@ def merge_config(
 ) -> tuple[str, list[str]]:
     parsed = _parse_config(existing, stage="before the proposed merge")
     _validate_supported_config_shape(existing, parsed, manage_hooks=enable_hooks)
+    vault_roots = _existing_storage_roots(parsed)
     changes: list[str] = []
     text, removed_block = _strip_managed_block(existing)
     if removed_block:
@@ -420,7 +512,7 @@ def merge_config(
         text, feature_changed = _merge_hooks_feature(text)
         if feature_changed:
             changes.append("enabled Codex lifecycle hooks feature")
-    block = render_mcp_block(python_path, server_py)
+    block = render_mcp_block(python_path, server_py, vault_roots=vault_roots)
     new = (text.rstrip("\n") + "\n\n" + block + "\n") if text.strip() else block + "\n"
     _validate_merged_config(
         new, before=parsed, mcp_block=block, manage_hooks=enable_hooks
