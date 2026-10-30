@@ -3,11 +3,16 @@ from __future__ import annotations
 
 import contextlib
 import io
+import json
+import os
 import shutil
 import sys
 import tempfile
 import tomllib
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
@@ -67,6 +72,150 @@ enabled = true
     _assert(new.count("[mcp_servers.latch]") == 1,
             "managed server table should appear once")
     print("PASS merge_config_preserves_unrelated_tables")
+
+
+STORAGE_ROOT_NAMES = (
+    "LATCH_PRODUCTION_DATA_ROOT",
+    "LATCH_VAULT_REGISTRY_ROOT",
+    "LATCH_DURABILITY_ROOT",
+)
+
+
+def _storage_env(root: Path) -> dict[str, str]:
+    return {
+        name: str(root / name.lower())
+        for name in STORAGE_ROOT_NAMES
+    }
+
+
+def _config_with_roots(roots: dict, *, server: str = "latch") -> str:
+    return (
+        f'[mcp_servers.{server}]\ncommand = "/PY"\nargs = ["/srv.py"]\n'
+        f'[mcp_servers.{server}.env]\n'
+        + "".join(f"{name} = {json.dumps(value)}\n" for name, value in roots.items())
+    )
+
+
+def test_fresh_codex_config_pins_effective_storage_roots(tmp_path, monkeypatch):
+    roots = _storage_env(tmp_path / "original-profile")
+    for name, value in roots.items():
+        monkeypatch.setenv(name, value)
+    rendered, _ = ic.merge_config("", "/PY", "/srv.py")
+    server = tomllib.loads(rendered)["mcp_servers"]["latch"]
+    assert {name: server["env"].get(name) for name in roots} == roots
+    assert server["required"] is True
+
+    # The next desktop process may inherit packaged-app storage defaults.
+    for name, value in _storage_env(tmp_path / "packaged-profile").items():
+        monkeypatch.setenv(name, value)
+    assert ic.merge_config(rendered, "/PY", "/srv.py") == (rendered, [])
+    config = tmp_path / "config.toml"
+    config.write_text(rendered, encoding="utf-8")
+    assert ic.config_status(config, "/PY", "/srv.py")[0]
+
+
+def test_fresh_codex_config_pins_platform_default_roots(tmp_path, monkeypatch):
+    for name in STORAGE_ROOT_NAMES:
+        monkeypatch.delenv(name, raising=False)
+    for name in ("HOME", "USERPROFILE", "LOCALAPPDATA", "APPDATA", "XDG_DATA_HOME", "XDG_STATE_HOME"):
+        monkeypatch.setenv(name, str(tmp_path / name.lower()))
+    expected = {
+        "LATCH_PRODUCTION_DATA_ROOT": str(ic.paths.platform_production_root().resolve()),
+        "LATCH_VAULT_REGISTRY_ROOT": str(ic.paths.platform_vault_registry_root().resolve()),
+        "LATCH_DURABILITY_ROOT": str(ic.paths.platform_durability_root().resolve()),
+    }
+    env = tomllib.loads(ic.render_mcp_block("/PY", "/srv.py"))["mcp_servers"]["latch"]["env"]
+    assert {name: env.get(name) for name in expected} == expected
+
+
+def test_codex_renderer_does_not_mutate_supplied_storage_roots(tmp_path):
+    roots = _storage_env(tmp_path)
+    original = dict(roots)
+    env = tomllib.loads(ic.render_mcp_block(
+        "/PY", "/srv.py", vault_roots=roots,
+    ))["mcp_servers"]["latch"]["env"]
+    assert roots == original
+    assert {name: env.get(name) for name in roots} == roots
+
+
+@pytest.mark.parametrize("server", ["latch", "claude-kb"])
+def test_codex_merge_preserves_explicit_storage_roots(tmp_path, monkeypatch, server):
+    roots = _storage_env(tmp_path / "original-profile")
+    for name, value in _storage_env(tmp_path / "packaged-profile").items():
+        monkeypatch.setenv(name, value)
+    merged, _ = ic.merge_config(_config_with_roots(roots, server=server), "/PY", "/srv.py")
+    env = tomllib.loads(merged)["mcp_servers"]["latch"]["env"]
+    assert {name: env.get(name) for name in roots} == roots
+    assert ic.merge_config(merged, "/PY", "/srv.py") == (merged, [])
+
+
+def test_codex_partial_production_pin_keeps_registry_with_that_root(tmp_path, monkeypatch):
+    ambient = _storage_env(tmp_path / "packaged-profile")
+    for name, value in ambient.items():
+        monkeypatch.setenv(name, value)
+    production = tmp_path / "original-profile" / "Latch"
+    merged, _ = ic.merge_config(
+        _config_with_roots({"LATCH_PRODUCTION_DATA_ROOT": str(production)}),
+        "/PY", "/srv.py",
+    )
+    env = tomllib.loads(merged)["mcp_servers"]["latch"]["env"]
+    assert env.get("LATCH_PRODUCTION_DATA_ROOT") == str(production)
+    assert env.get("LATCH_VAULT_REGISTRY_ROOT") == str(production / "registry")
+    assert env.get("LATCH_DURABILITY_ROOT") == ambient["LATCH_DURABILITY_ROOT"]
+
+
+def test_codex_merge_rejects_conflicting_legacy_storage_roots(tmp_path):
+    existing = _config_with_roots(_storage_env(tmp_path / "one"))
+    existing += _config_with_roots(_storage_env(tmp_path / "two"), server="claude-kb")
+    with pytest.raises(ic.CodexConfigMergeError, match="conflicting.*LATCH_PRODUCTION_DATA_ROOT"):
+        ic.merge_config(existing, "/PY", "/srv.py")
+
+
+def test_codex_windows_storage_env_names_are_case_insensitive(tmp_path, monkeypatch):
+    # Exercise Windows key matching without replacing the host's pathlib class.
+    monkeypatch.setattr(ic, "os", SimpleNamespace(name="nt", environ=os.environ))
+    roots = _storage_env(tmp_path)
+    mixed = {name.lower(): value for name, value in roots.items()}
+    rendered, _ = ic.merge_config(_config_with_roots(mixed), "/PY", "/srv.py")
+    env = tomllib.loads(rendered)["mcp_servers"]["latch"]["env"]
+    assert {name: env.get(name) for name in roots} == roots
+    mixed["LATCH_PRODUCTION_DATA_ROOT"] = str(tmp_path / "different")
+    with pytest.raises(ic.CodexConfigMergeError, match="conflicting.*LATCH_PRODUCTION_DATA_ROOT"):
+        ic.merge_config(_config_with_roots(mixed), "/PY", "/srv.py")
+
+
+@pytest.mark.parametrize("value", [123, "", "  ", "relative/root", "bad\nroot", "bad\x00root"])
+def test_codex_merge_rejects_invalid_storage_root_without_writes(tmp_path, monkeypatch, value):
+    config = tmp_path / "config.toml"
+    original = _config_with_roots({"LATCH_PRODUCTION_DATA_ROOT": value})
+    config.write_text(original, encoding="utf-8")
+    monkeypatch.setattr(ic.install_engine, "pin_kb_dir", lambda *_: ("OK", "test pin"))
+    rc = ic.main([
+        "--python", sys.executable, "--config", str(config),
+        "--skip-agents", "--skip-hooks", "--skip-skills", "--suppress-seed-output",
+    ])
+    assert rc == 2
+    assert config.read_text(encoding="utf-8") == original
+    assert not config.with_suffix(".toml.latchbak").exists()
+
+
+@pytest.mark.parametrize("value", ["relative/root", "bad\nroot"])
+def test_codex_render_rejects_invalid_ambient_storage_root(monkeypatch, value):
+    monkeypatch.setenv("LATCH_PRODUCTION_DATA_ROOT", value)
+    with pytest.raises(ic.CodexConfigMergeError, match="absolute directory"):
+        ic.render_mcp_block("/PY", "/srv.py")
+
+
+def test_codex_render_reports_home_expansion_failure(monkeypatch):
+    # Windows can expand ~otheruser without an account lookup. Exercise an
+    # actual expansion failure rather than assuming a username is invalid.
+    def unavailable_home(_path):
+        raise RuntimeError("home directory is unavailable")
+
+    monkeypatch.setenv("LATCH_PRODUCTION_DATA_ROOT", "~/Latch")
+    monkeypatch.setattr(Path, "expanduser", unavailable_home)
+    with pytest.raises(ic.CodexConfigMergeError, match="absolute directory"):
+        ic.render_mcp_block("/PY", "/srv.py")
 
 
 def test_merge_config_canonicalizes_lifecycle_hook_features():
@@ -176,7 +325,7 @@ def test_merge_config_rejects_unsupported_valid_feature_forms_and_multiline():
 def test_merge_config_validates_generated_toml():
     original = ic.render_mcp_block
     try:
-        ic.render_mcp_block = lambda _python, _server: "[invalid"
+        ic.render_mcp_block = lambda _python, _server, **_kwargs: "[invalid"
         try:
             ic.merge_config("[features]\nhooks = true\n", "/PY", "/srv.py")
         except ic.CodexConfigMergeError as exc:
