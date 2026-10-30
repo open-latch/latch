@@ -429,6 +429,10 @@ def compact_mode(mode: dict[str, Any]) -> dict[str, Any]:
             "pass_rate",
             "required_retrieval_rate",
             "supporting_phrase_rate",
+            "required_retrieval_found",
+            "required_retrieval_total",
+            "supporting_phrase_found",
+            "supporting_phrase_total",
         )
     }
 
@@ -548,10 +552,6 @@ def build_public_results(
     return results
 
 
-def pct(value: float) -> str:
-    return f"{value:.0%}"
-
-
 def render_readme(results: dict[str, Any]) -> str:
     live = results["live_demo"]
     wedge = results["wedge_v1"]
@@ -617,8 +617,8 @@ def render_readme(results: dict[str, Any]) -> str:
         mode = wedge["modes"][name]
         lines.append(
             f"| `{name}` | {mode['passed']}/{mode['cases']} | "
-            f"{pct(mode['required_retrieval_rate'])} | "
-            f"{pct(mode['supporting_phrase_rate'])} |"
+            f"{mode['required_retrieval_found']}/{mode['required_retrieval_total']} | "
+            f"{mode['supporting_phrase_found']}/{mode['supporting_phrase_total']} |"
         )
     lines.extend([
         "",

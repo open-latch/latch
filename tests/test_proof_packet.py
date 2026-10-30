@@ -545,6 +545,29 @@ def test_readme_derives_fixture_count():
     print("PASS readme_derives_fixture_count")
 
 
+def test_readme_reports_counts_with_denominators_never_percentages():
+    """The public packet states every measured value as a count over its
+    denominator. The decision-evidence table used to render the retrieval and
+    rationale columns as rounded percentages, which hid that ``stale_search``'s
+    88% was 15 of 17 required references (BL0's renderer fix)."""
+    receipt = proof_packet.load_live_receipt()
+    results = proof_packet.build_public_results(receipt, verify_runtime=False)
+    rendered = proof_packet.render_readme(results)
+    _assert("%" not in rendered, rendered)
+    for name, mode in results["wedge_v1"]["modes"].items():
+        retrieval = (mode["required_retrieval_found"], mode["required_retrieval_total"])
+        phrases = (mode["supporting_phrase_found"], mode["supporting_phrase_total"])
+        _assert(retrieval[1] > 0 and phrases[1] > 0, mode)
+        _assert(abs(retrieval[0] / retrieval[1] - mode["required_retrieval_rate"]) < 1e-12, mode)
+        _assert(abs(phrases[0] / phrases[1] - mode["supporting_phrase_rate"]) < 1e-12, mode)
+        row = (
+            f"| `{name}` | {mode['passed']}/{mode['cases']} | "
+            f"{retrieval[0]}/{retrieval[1]} | {phrases[0]}/{phrases[1]} |"
+        )
+        _assert(row in rendered, rendered)
+    print("PASS readme_reports_counts_with_denominators_never_percentages")
+
+
 def test_root_readme_gate_receipt_matches_proof_packet():
     """Cross-surface guard (PR #37 review, node 2553).
 
@@ -818,6 +841,7 @@ if __name__ == "__main__":
     test_depth_one_merge_ref_requires_two_history_levels()
     test_readme_selects_seeded_canonical_evidence()
     test_readme_derives_fixture_count()
+    test_readme_reports_counts_with_denominators_never_percentages()
     test_root_readme_gate_receipt_matches_proof_packet()
     test_failed_publication_preserves_last_good_packet()
     test_failed_directory_swap_restores_last_good_packet()

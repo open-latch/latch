@@ -539,6 +539,12 @@ def _summarize_mode(
             (phrase_total - phrase_missing) / phrase_total
             if phrase_total else 1.0
         ),
+        # The counts behind the two rates, so a report can state each one
+        # with its denominator instead of a rounded percentage.
+        "required_retrieval_found": required_total - required_missing,
+        "required_retrieval_total": required_total,
+        "supporting_phrase_found": phrase_total - phrase_missing,
+        "supporting_phrase_total": phrase_total,
         "missing_supporting_phrase_count": phrase_missing,
         "by_difficulty": by_difficulty,
     }
