@@ -233,6 +233,12 @@ _CLASSIFIED_CANONICAL_SURFACES: dict[tuple[str, str, str, str], str] = {
         "node.get('status', 'canonical')",
     ): "fixture:offline-eval",
     (
+        "src/latch/evals/adherence.py",
+        "seed_fixture_vault",
+        "db.insert_node",
+        "node.get('status', 'canonical')",
+    ): "fixture:offline-eval",
+    (
         "src/latch/pipeline/heal.py", "prepare_insert_with_heal", "db.insert_node_nc", "status",
     ): "unattended:judgment-birth-refusal",
     (
